@@ -1,0 +1,10 @@
+[mcp_servers.crossage-fr]
+command = "/Users/harshbishnoi/face/.venv/bin/python"
+args = ["-m", "crossage_fr.mcp_server", "--workspace", "/Users/harshbishnoi/face/crossage_project"]
+cwd = "/Users/harshbishnoi/face"
+startup_timeout_sec = 20
+tool_timeout_sec = 600
+
+[mcp_servers.crossage-fr.env]
+PYTHONPATH = "/Users/harshbishnoi/face"
+CROSSAGE_WORKSPACE = "/Users/harshbishnoi/face/crossage_project"

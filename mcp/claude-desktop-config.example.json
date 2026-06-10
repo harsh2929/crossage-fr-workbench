@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "crossage-fr": {
+      "type": "stdio",
+      "command": "/Users/harshbishnoi/face/.venv/bin/python",
+      "args": [
+        "-m",
+        "crossage_fr.mcp_server",
+        "--workspace",
+        "/Users/harshbishnoi/face/crossage_project"
+      ],
+      "env": {
+        "PYTHONPATH": "/Users/harshbishnoi/face",
+        "CROSSAGE_WORKSPACE": "/Users/harshbishnoi/face/crossage_project"
+      }
+    }
+  }
+}

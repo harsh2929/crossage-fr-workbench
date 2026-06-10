@@ -1,0 +1,36 @@
+# Dependencies and local environments
+node_modules/
+.venv/
+__pycache__/
+*.py[cod]
+
+# Build output
+dist/
+backend-dist/
+build/
+pyinstaller/
+*.dmg
+*.exe
+*.blockmap
+latest*.yml
+
+# Test output
+test-results/
+playwright-report/
+.pytest_cache/
+
+# Local workspace/runtime state
+crossage_project/
+.crossage-workspace.json
+folder-watch.json
+
+# OS/editor noise
+.DS_Store
+*.log
+
+# Local personal test imports
+Photo on*.jpg
+
+# Downloaded model cache; keep the tracked placeholder.
+models/insightface/*
+!models/insightface/.gitkeep

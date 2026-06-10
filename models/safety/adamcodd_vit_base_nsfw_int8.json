@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "modelName": "AdamCodd/vit-base-nsfw-detector int8 ONNX",
+  "source": "https://huggingface.co/AdamCodd/vit-base-nsfw-detector",
+  "license": "Apache-2.0",
+  "modelFile": "adamcodd_vit_base_nsfw_int8.onnx",
+  "inputSize": 384,
+  "labels": ["sfw", "nsfw"],
+  "nsfwLabel": "nsfw",
+  "mean": [0.5, 0.5, 0.5],
+  "std": [0.5, 0.5, 0.5],
+  "interpolation": "bilinear",
+  "thresholdHint": "Ready-made ONNX fallback. The research-preferred Marqo model can be dropped in as marqo_nsfw_384.onnx with its own manifest.",
+  "notes": [
+    "Use privacy-first thresholds for Safe Mode.",
+    "Calibrate on local user-owned labels before relying on precision-sensitive decisions.",
+    "Protected images are excluded before thumbnails, matching, clustering, MCP responses, and exports."
+  ]
+}

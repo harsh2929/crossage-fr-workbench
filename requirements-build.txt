@@ -1,0 +1,3 @@
+-r requirements-production.txt
+pyinstaller>=6.0
+

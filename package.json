@@ -1,0 +1,224 @@
+{
+  "name": "crossage-fr-workbench",
+  "version": "0.1.0",
+  "description": "Cross-age face recognition review workbench",
+  "author": "CrossAge FR Workbench",
+  "license": "UNLICENSED",
+  "main": "desktop/main.cjs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "electron:dev": "cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 node desktop/scripts/run-electron.cjs .",
+    "start": "npm-run-all --parallel dev electron:dev",
+    "desktop": "npm run build && node desktop/scripts/run-electron.cjs .",
+    "build": "tsc --noEmit && vite build",
+    "backend:check": ".venv/bin/python -m crossage_fr.api_server < /dev/null",
+    "mcp": "node desktop/scripts/run-mcp.cjs",
+    "mcp:http": "node desktop/scripts/run-mcp.cjs --transport streamable-http",
+    "mcp:bundle": "npm run build:backend && node desktop/scripts/build-mcp-bundle.cjs",
+    "build:backend": "node desktop/scripts/build-backend.cjs",
+    "pack": "npm run build && npm run build:backend && electron-builder --dir",
+    "pack:unsigned": "npm run build && npm run build:backend && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir",
+    "dist:mac": "node desktop/scripts/require-platform.cjs darwin && npm run build && npm run build:backend && electron-builder --mac dmg zip",
+    "dist:mac:unsigned": "node desktop/scripts/require-platform.cjs darwin && npm run build && npm run build:backend && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dmg zip",
+    "dist:win": "node desktop/scripts/require-platform.cjs win32 && npm run build && npm run build:backend && electron-builder --win nsis",
+    "dist:all": "npm run dist:mac && npm run dist:win",
+    "test:pipeline": "PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/pipeline_smoke.py",
+    "test:edge": "PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/edge_cases.py",
+    "test:mcp": ".venv/bin/python tests/mcp_smoke.py",
+    "test:e2e": "playwright test",
+    "test": "npm run build && npm run test:pipeline && npm run test:edge && npm run test:mcp && npm run test:e2e"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "cross-env": "^10.0.0",
+    "electron": "^39.0.0",
+    "electron-builder": "^26.0.0",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0"
+  },
+  "build": {
+    "appId": "com.crossagefr.workbench",
+    "productName": "CrossAge FR Workbench",
+    "files": [
+      "dist/index.html",
+      "dist/assets/**/*",
+      "desktop/**/*",
+      "package.json"
+    ],
+    "protocols": [
+      {
+        "name": "CrossAge FR Link",
+        "schemes": [
+          "crossage"
+        ]
+      }
+    ],
+    "fileAssociations": [
+      {
+        "name": "Image files",
+        "ext": [
+          "jpg",
+          "jpeg",
+          "jpe",
+          "jfif",
+          "png",
+          "apng",
+          "gif",
+          "webp",
+          "avif",
+          "heic",
+          "heif",
+          "hif",
+          "heics",
+          "heifs",
+          "bmp",
+          "dib",
+          "tif",
+          "tiff",
+          "ico",
+          "icns",
+          "jp2",
+          "j2k",
+          "jpc",
+          "jpf",
+          "jpx",
+          "ppm",
+          "pgm",
+          "pbm",
+          "pnm",
+          "tga",
+          "dds",
+          "psd",
+          "dng",
+          "raw",
+          "arw",
+          "cr2",
+          "cr3",
+          "nef",
+          "nrw",
+          "orf",
+          "raf",
+          "rw2",
+          "pef",
+          "srw",
+          "x3f",
+          "3fr",
+          "erf",
+          "kdc",
+          "mos",
+          "mrw"
+        ],
+        "role": "Viewer"
+      },
+      {
+        "name": "Video files",
+        "ext": [
+          "mov",
+          "mp4",
+          "m4v",
+          "avi",
+          "mkv",
+          "webm",
+          "hevc",
+          "3gp",
+          "3g2",
+          "mts",
+          "m2ts",
+          "qt",
+          "mpeg",
+          "mpg",
+          "wmv",
+          "flv",
+          "asf",
+          "ogv",
+          "ts",
+          "dv"
+        ],
+        "role": "Viewer"
+      }
+    ],
+    "extraResources": [
+      {
+        "from": "backend-dist",
+        "to": "backend",
+        "filter": [
+          "crossage-backend*"
+        ]
+      },
+      {
+        "from": "crossage_fr",
+        "to": "crossage_fr",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**"
+        ]
+      },
+      {
+        "from": "requirements-production.txt",
+        "to": "requirements-production.txt"
+      },
+      {
+        "from": "requirements.txt",
+        "to": "requirements.txt"
+      },
+      {
+        "from": "mcp",
+        "to": "mcp",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "models/safety",
+        "to": "models/safety",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "models/insightface",
+        "to": "models/insightface",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "report.md",
+        "to": "report.md"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.photography",
+      "icon": "desktop/assets/icon.icns",
+      "extendInfo": {
+        "NSCameraUsageDescription": "CrossAge FR Workbench uses the camera to capture local review photos for face matching."
+      },
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "icon": "desktop/assets/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

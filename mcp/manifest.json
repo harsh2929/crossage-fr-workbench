@@ -1,0 +1,177 @@
+{
+  "manifest_version": "0.3",
+  "name": "crossage-fr-workbench",
+  "display_name": "CrossAge FR Workbench",
+  "version": "0.1.0",
+  "description": "Consent-gated local MCP access to CrossAge FR enrollment, scanning, Safe Mode, review queues, metrics, and audit context.",
+  "long_description": "CrossAge FR Workbench exposes a local, review-first face-recognition workbench to MCP clients. Agents can read project state, enroll consented references, scan image and video folders, inspect Safe Mode assessments, triage review candidates, export reports, audit workspace health, and update review decisions only with explicit confirmation for destructive or decision-changing actions.",
+  "author": {
+    "name": "CrossAge FR Workbench"
+  },
+  "server": {
+    "type": "binary",
+    "entry_point": "server/crossage-backend",
+    "mcp_config": {
+      "command": "${__dirname}${/}server${/}crossage-backend",
+      "args": ["--mcp", "--workspace", "${user_config.workspace}"],
+      "env": {
+        "CROSSAGE_WORKSPACE": "${user_config.workspace}"
+      },
+      "platform_overrides": {
+        "win32": {
+          "command": "${__dirname}${/}server${/}crossage-backend.exe"
+        }
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "get_project_state",
+      "description": "Read a compact workspace summary with consent, counts, engine, Safe Mode, and thresholds."
+    },
+    {
+      "name": "set_workspace",
+      "description": "Switch the active CrossAge FR workspace directory."
+    },
+    {
+      "name": "mark_consent",
+      "description": "Record whether the operator has consent before image or video processing."
+    },
+    {
+      "name": "enroll_reference_folder",
+      "description": "Enroll reference images for one person and one age bucket."
+    },
+    {
+      "name": "enroll_age_reference_set",
+      "description": "Enroll child, adolescent, adult, or unknown reference folders for the same person."
+    },
+    {
+      "name": "scan_folder",
+      "description": "Scan an image/video folder, emit progress, and queue matched or clustered review candidates."
+    },
+    {
+      "name": "scan_media_paths",
+      "description": "Scan explicit image or video paths, emit progress, and queue review candidates."
+    },
+    {
+      "name": "scan_image_paths",
+      "description": "Compatibility alias for scanning explicit media paths."
+    },
+    {
+      "name": "analyze_folder",
+      "description": "Preflight a folder before scanning with media counts, sample readability, and recommendations."
+    },
+    {
+      "name": "probe_video_file",
+      "description": "Probe one video file for decoder support, dimensions, frame count, and duration."
+    },
+    {
+      "name": "assess_image",
+      "description": "Assess whether one image is eligible and whether Safe Mode would protect it."
+    },
+    {
+      "name": "review_candidate",
+      "description": "Set a review candidate status after human review, requiring confirm=true."
+    },
+    {
+      "name": "bulk_review_candidates",
+      "description": "Set the same human-reviewed status on multiple candidates, requiring confirm=true."
+    },
+    {
+      "name": "set_candidate_note",
+      "description": "Save an operator note on a review candidate."
+    },
+    {
+      "name": "clear_review_queue",
+      "description": "Clear queued candidates, requiring confirm=true."
+    },
+    {
+      "name": "purge_reviewed_candidates",
+      "description": "Remove reviewed candidates from the active queue while preserving audit records, requiring confirm=true."
+    },
+    {
+      "name": "workspace_health",
+      "description": "Audit workspace health, missing files, duplicate rows, storage footprint, and cleanup recommendations."
+    },
+    {
+      "name": "read_audit_events",
+      "description": "Read recent audit events with pagination."
+    },
+    {
+      "name": "purge_duplicate_candidates",
+      "description": "Compact duplicate candidate rows while preserving the strongest candidate, requiring confirm=true."
+    },
+    {
+      "name": "purge_old_candidates",
+      "description": "Purge reviewed candidates older than a retention window while preserving audit records, requiring confirm=true."
+    },
+    {
+      "name": "delete_reference",
+      "description": "Delete one enrolled reference, requiring confirm=true."
+    },
+    {
+      "name": "delete_person",
+      "description": "Delete all references and queued candidates for one person, requiring confirm=true."
+    },
+    {
+      "name": "rename_person",
+      "description": "Rename or merge one person label into another person label, requiring confirm=true."
+    },
+    {
+      "name": "clear_references",
+      "description": "Delete all references, requiring confirm=true."
+    },
+    {
+      "name": "save_settings",
+      "description": "Update thresholds, clustering minimum, and Safe Mode settings."
+    },
+    {
+      "name": "export_review_report",
+      "description": "Export a JSON audit report and CSV candidate table into the workspace exports folder."
+    },
+    {
+      "name": "export_workspace_backup",
+      "description": "Export a ZIP backup of workspace metadata, audit logs, and generated workspace files."
+    },
+    {
+      "name": "export_selected_candidates",
+      "description": "Export selected candidate rows to JSON and CSV in the workspace exports folder."
+    },
+    {
+      "name": "runtime_self_test",
+      "description": "Run local diagnostics for workspace writeability, decoders, acceleration, Safe Mode, and workspace health."
+    }
+  ],
+  "prompts": [
+    {
+      "name": "triage_pending",
+      "description": "Guide a human-supervised triage pass through pending candidates.",
+      "arguments": ["max_items"],
+      "text": "Use the triage_pending MCP prompt from this server."
+    },
+    {
+      "name": "plan_multi_age_enrollment",
+      "description": "Create a consent-first multi-age enrollment plan.",
+      "arguments": ["person_name", "available_age_groups"],
+      "text": "Use the plan_multi_age_enrollment MCP prompt from this server."
+    },
+    {
+      "name": "safe_mode_policy",
+      "description": "Summarize the Safe Mode handling policy for sensitive images and videos.",
+      "text": "Use the safe_mode_policy MCP prompt from this server."
+    }
+  ],
+  "keywords": ["mcp", "face-recognition", "photo-review", "desktop", "safe-mode"],
+  "compatibility": {
+    "platforms": ["darwin", "win32"]
+  },
+  "user_config": {
+    "workspace": {
+      "type": "directory",
+      "title": "CrossAge workspace",
+      "description": "Directory where references, review candidates, settings, and audit logs are stored.",
+      "required": true,
+      "default": "${DOCUMENTS}${/}CrossAge FR Workspace"
+    }
+  }
+}
