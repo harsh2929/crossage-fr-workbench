@@ -75,11 +75,22 @@ Public macOS releases must be signed and notarized with the Apple Developer cred
 
 In-app updates are wired through `electron-updater`. Settings shows update status, release channels (Stable, Beta, Internal), checks for a release, downloads with progress, and restarts into the installer only after the user chooses it. Production builds use the packaged GitHub Releases feed for `harsh2929/vintrace`; for QA or private release channels, launch/build with `VINTRACE_UPDATE_URL=https://your-update-feed.example/releases/` so the app reads generic feed metadata instead. The current local `dist:*` scripts keep `--publish never`, so they create installers without uploading anything.
 
+Release checks:
+
+```bash
+npm run test:clean
+npm run update:dry-run
+npm run release:check
+```
+
+`release:check` aggregates runtime diagnostics, database integrity, storage I/O, model distribution metadata, clean-workspace boot, benchmark history, and update-feed dry-run validation into one JSON report. Use `docs/tester-checklist.md` for manual tester verification before broad sharing.
+
 Windows release artifact:
 
 - From a Windows machine: install Node 24 and Python 3.11, then run `npm ci`, `python -m pip install -r requirements-production.txt`, and `npm run dist:win`. Share the generated NSIS `.exe` from `dist/`.
 - From GitHub Actions: run the `Windows Release` workflow manually. It builds the Windows backend sidecar, runs backend smoke tests, packages the NSIS installer, smoke-tests the packaged backend, and uploads `Vintrace-Windows-Installer`. To make in-app updates work for testers, provide `release_tag` such as `v0.1.0`; the workflow will attach the `.exe`, `.blockmap`, and `latest*.yml` updater metadata to that GitHub Release.
 - The Windows installer is unsigned unless a code-signing certificate is configured, so Windows SmartScreen may warn first-time recipients.
+- Before sharing broad test builds, run Settings -> Release readiness, Settings -> Machine benchmark, `npm run release:check`, and the tester checklist. These checks now include model license/checksum manifest status, SQLite database integrity, writable local storage, update-feed setup, crash diagnostics, benchmark history, and signing-environment detection. The checks intentionally stay red for code signing and model redistribution until real certificates and final license approvals are configured.
 
 First-run face model setup is now handled inside the desktop app. The DMG/EXE can be shared without pre-installing Python, npm, or InsightFace models. On first launch, the app shows a Face model card that lets the user choose a writable download folder, pick the model package, download with progress, validate the pinned SHA-256 checksum, extract safely, and retry with clear offline messaging. Partial `.part` downloads are preserved and resumed with HTTP range requests when the server supports them. If the user is offline, the app opens in simple matching mode and keeps the download action available.
 
@@ -150,7 +161,7 @@ The MCP smoke test starts a real MCP stdio session, lists tools/resources/prompt
 
 The scan pipeline is designed to work toward 100k-1M file folders without building one giant in-memory path list. Folder scans stream media paths, write a SQLite/WAL scan manifest at `workspace.sqlite3`, and can be cancelled from the UI. A resumed scan skips files already completed in the previous manifest when their path, size, and mtime match.
 
-For local scale checks without using personal photos, run `npm run bench:scale`. It seeds a temporary synthetic 100k-row scan manifest, verifies low-spec Auto performance selection, runs the backend benchmark, and prints JSON with state serialization time, vector backend speed, effective performance mode, and memory-pressure status. Set `VINTRACE_SCALE_BENCH_FILES=1000000` to stress a million synthetic rows.
+For local scale checks without using personal photos, run `npm run bench:scale`. It seeds a temporary synthetic 100k-row scan manifest, verifies low-spec Auto performance selection, runs the backend benchmark, and prints JSON with state serialization time, vector backend speed, effective performance mode, memory-pressure status, and workspace I/O throughput. Set `VINTRACE_SCALE_BENCH_FILES=1000000` to stress a million synthetic rows. Run `npm run bench:accuracy` for a synthetic precision/recall harness that exercises calibration math without loading any image dataset.
 
 Safe Mode decisions are cached by file hash, model version, and threshold so repeated scans do not repeatedly score the same content. Accepted/rejected review decisions automatically build a local calibration label set, and Settings includes large-folder readiness, benchmark, and release-readiness panels.
 

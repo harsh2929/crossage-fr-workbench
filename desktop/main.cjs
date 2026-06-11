@@ -1,5 +1,5 @@
 const { app, BrowserWindow, dialog, ipcMain, session, Menu, Tray, nativeImage, shell, Notification, clipboard, protocol, net, safeStorage } = require("electron");
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const readline = require("readline");
@@ -381,6 +381,8 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "clear_references",
   "purge_old_candidates",
   "repair_workspace",
+  "database_integrity",
+  "repair_database_integrity",
   "relink_workspace_paths",
   "export_report",
   "export_workspace_inventory",
@@ -400,8 +402,11 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "workspace_health",
   "runtime_self_test",
   "runtime_benchmark",
+  "benchmark_history",
+  "storage_io_benchmark",
   "release_readiness",
   "model_integrity",
+  "model_distribution_audit",
   "export_support_bundle",
   "installer_self_diagnostics",
   "calibration_summary",
@@ -549,6 +554,37 @@ function safeAppVersion() {
   } catch {
     return "0.0.0";
   }
+}
+
+function gitValue(args) {
+  try {
+    const result = spawnSync("git", args, {
+      cwd: appRoot(),
+      encoding: "utf8",
+      timeout: 1500,
+      windowsHide: true
+    });
+    if (result.status === 0) {
+      return String(result.stdout || "").trim();
+    }
+  } catch {
+    return "";
+  }
+  return "";
+}
+
+function buildInfo() {
+  return {
+    name: app.getName(),
+    version: safeAppVersion(),
+    commit: process.env.VINTRACE_BUILD_SHA || process.env.GITHUB_SHA || gitValue(["rev-parse", "--short=12", "HEAD"]) || "local",
+    branch: process.env.VINTRACE_BUILD_REF || process.env.GITHUB_REF_NAME || gitValue(["rev-parse", "--abbrev-ref", "HEAD"]) || "",
+    buildDate: process.env.VINTRACE_BUILD_DATE || "",
+    channel: readUpdateChannel(),
+    packaged: app.isPackaged,
+    platform: process.platform,
+    arch: process.arch
+  };
 }
 
 function safeUserPath(name) {
@@ -1140,6 +1176,7 @@ function createDiagnosticsReport(options = {}) {
       sharing: "Exported locally only. Send it manually after reviewing the contents."
     },
     app: {
+      build: buildInfo(),
       name: app.getName(),
       version: safeAppVersion(),
       packaged: app.isPackaged,

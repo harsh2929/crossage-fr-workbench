@@ -14,6 +14,7 @@ import math
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import traceback
 import zipfile
@@ -27,7 +28,7 @@ from crossage_fr.enroll import ProjectState
 from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, image_decoder_report, load_image
 from crossage_fr.ingest.safety import safety_model_report
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, probe_video, video_decoder_report
-from crossage_fr.model_manager import download_model_pack, model_pack_ready, model_root_for_config, model_roots_for_engine, model_status, set_model_root
+from crossage_fr.model_manager import MODEL_PACKAGES, download_model_pack, model_pack_ready, model_root_for_config, model_roots_for_engine, model_status, set_model_root
 from crossage_fr.models import ReviewCandidate, new_id
 from crossage_fr.platform_detect import build_platform_report, memory_available_bytes, process_memory_bytes
 from crossage_fr.storage import inspect_storage_path, safe_resolve
@@ -89,6 +90,45 @@ class DesktopApi:
     def _reset_engine(self) -> None:
         self._engine = None
         self._engine_model_name = self._infer_engine_name()
+
+    def _build_info(self) -> dict[str, Any]:
+        commit = (
+            os.environ.get("VINTRACE_BUILD_SHA")
+            or os.environ.get("GITHUB_SHA")
+            or self._git_value(["rev-parse", "--short=12", "HEAD"])
+        )
+        branch = (
+            os.environ.get("VINTRACE_BUILD_REF")
+            or os.environ.get("GITHUB_REF_NAME")
+            or self._git_value(["rev-parse", "--abbrev-ref", "HEAD"])
+        )
+        return {
+            "name": "Vintrace",
+            "version": __version__,
+            "commit": commit or "local",
+            "branch": branch or "",
+            "buildDate": os.environ.get("VINTRACE_BUILD_DATE", ""),
+            "channel": os.environ.get("VINTRACE_UPDATE_CHANNEL", os.environ.get("CROSSAGE_UPDATE_CHANNEL", "stable")),
+            "packaged": bool(getattr(sys, "frozen", False) or os.environ.get("CROSSAGE_PACKAGED_BACKEND") == "1"),
+            "python": sys.version.split()[0],
+        }
+
+    def _git_value(self, args: list[str]) -> str:
+        try:
+            repo_root = Path(__file__).resolve().parents[1]
+            completed = subprocess.run(
+                ["git", *args],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+            )
+            if completed.returncode == 0:
+                return completed.stdout.strip()
+        except Exception:
+            pass
+        return ""
 
     def _infer_engine_name(self) -> str:
         if os.environ.get("CROSSAGE_FORCE_FALLBACK") == "1":
@@ -346,6 +386,11 @@ class DesktopApi:
         if command == "repair_workspace":
             result = self.project.repair_workspace(dry_run=bool(params.get("dryRun", True)), force=bool(params.get("force", False)))
             return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "database_integrity":
+            return self.project.database_integrity()
+        if command == "repair_database_integrity":
+            result = self.project.repair_database_integrity(confirm=bool(params.get("confirm", False)))
+            return {"value": result, "state": self.state(preview_create_budget=0)}
         if command == "relink_workspace_paths":
             result = self.project.relink_workspace_paths(
                 Path(str(params.get("oldRoot", ""))).expanduser(),
@@ -434,10 +479,16 @@ class DesktopApi:
             return self.runtime_self_test()
         if command == "runtime_benchmark":
             return self.runtime_benchmark()
+        if command == "benchmark_history":
+            return self.project.benchmark_history(limit=int(params.get("limit", 8) or 8))
+        if command == "storage_io_benchmark":
+            return self.storage_io_benchmark(params)
         if command == "release_readiness":
             return self.release_readiness()
         if command == "model_integrity":
             return self.model_integrity()
+        if command == "model_distribution_audit":
+            return self.model_distribution_audit()
         if command == "export_support_bundle":
             result = self.export_support_bundle(include_paths=bool(params.get("includePaths", False)))
             return {"value": result, "state": self.state(preview_create_budget=0)}
@@ -1061,6 +1112,9 @@ class DesktopApi:
         state = self.state(preview_create_budget=0)
         state_ms = max(0.0, (monotonic() - state_started) * 1000)
         scale = self.project.scale_summary()
+        storage_io = self.storage_io_benchmark({"path": str(self.project.root), "sizeMb": 8, "source": "runtime_benchmark"})
+        recommendations = self._benchmark_recommendations(state_ms, scale)
+        recommendations.extend(str(item) for item in storage_io.get("recommendations", []) if str(item) not in recommendations)
         result = {
             "runId": new_id("bench"),
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
@@ -1075,9 +1129,91 @@ class DesktopApi:
             "stateSerializeMs": round(state_ms, 2),
             "stateCandidateWindow": state.get("candidateWindow", {}),
             "scale": scale,
-            "recommendations": self._benchmark_recommendations(state_ms, scale),
+            "storageIo": storage_io,
+            "recommendations": recommendations,
         }
         self.project.db.add_benchmark_run(str(result["runId"]), result)
+        return result
+
+    def storage_io_benchmark(self, params: dict[str, Any]) -> dict[str, Any]:
+        path_param = str(params.get("path", "") or "").strip()
+        target = Path(path_param).expanduser() if path_param else self.project.root
+        if target.exists() and target.is_file():
+            target = target.parent
+        size_mb = max(1, min(128, int(params.get("sizeMb", 8) or 8)))
+        total_bytes = size_mb * 1024 * 1024
+        storage = inspect_storage_path(target, self.project.root)
+        result: dict[str, Any] = {
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "path": str(target),
+            "sizeBytes": total_bytes,
+            "ok": False,
+            "writeMs": 0.0,
+            "readMs": 0.0,
+            "writeMBps": 0.0,
+            "readMBps": 0.0,
+            "fsyncMs": 0.0,
+            "storage": storage,
+            "error": "",
+            "recommendations": [],
+        }
+        if not storage.get("exists") or not storage.get("isDirectory"):
+            result["error"] = "Target folder does not exist."
+            result["recommendations"] = ["Choose an existing writable folder for the I/O benchmark."]
+            return result
+        if not os.access(target, os.W_OK):
+            result["error"] = "Target folder is not writable."
+            result["recommendations"] = ["Choose a writable app folder or grant drive permissions before scanning."]
+            return result
+
+        chunk = b"vintrace-io-benchmark\n" * 32768
+        chunk = chunk[: min(len(chunk), 1024 * 1024)]
+        temp_path = target / f".vintrace-io-bench-{os.getpid()}-{new_id('io')}.bin"
+        try:
+            written = 0
+            write_started = monotonic()
+            with temp_path.open("wb") as handle:
+                while written < total_bytes:
+                    piece = chunk[: min(len(chunk), total_bytes - written)]
+                    handle.write(piece)
+                    written += len(piece)
+                fsync_started = monotonic()
+                handle.flush()
+                os.fsync(handle.fileno())
+                result["fsyncMs"] = round((monotonic() - fsync_started) * 1000, 2)
+            result["writeMs"] = round((monotonic() - write_started) * 1000, 2)
+            read_started = monotonic()
+            read_bytes = 0
+            with temp_path.open("rb") as handle:
+                for piece in iter(lambda: handle.read(1024 * 1024), b""):
+                    read_bytes += len(piece)
+            result["readMs"] = round((monotonic() - read_started) * 1000, 2)
+            if read_bytes != total_bytes:
+                raise OSError(f"Read {read_bytes} bytes after writing {total_bytes}.")
+            result["writeMBps"] = round((total_bytes / 1024 / 1024) / max(result["writeMs"] / 1000, 0.001), 2)
+            result["readMBps"] = round((total_bytes / 1024 / 1024) / max(result["readMs"] / 1000, 0.001), 2)
+            result["ok"] = True
+        except OSError as exc:
+            result["error"] = str(exc)
+        finally:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+        recommendations: list[str] = []
+        volume_kind = str(storage.get("volumeKind", "unknown"))
+        if storage.get("networkLikely"):
+            recommendations.append("Network drives can stall; keep scans resumable and expect lower throughput.")
+        if storage.get("externalLikely"):
+            recommendations.append("External/removable drives are supported; keep the drive connected until scan completion.")
+        if result["ok"] and (result["writeMBps"] < 20 or result["readMBps"] < 30):
+            recommendations.append("This drive is slow for large scans. Use Fast mode and keep the app folder on an internal SSD if possible.")
+        if result["ok"] and not recommendations:
+            recommendations.append(f"{volume_kind.title()} storage is responsive enough for resumable scan metadata.")
+        if not result["ok"] and not recommendations:
+            recommendations.append("I/O benchmark failed; choose another app folder or check permissions.")
+        result["recommendations"] = recommendations
         return result
 
     def _resource_status(self, force: bool = False) -> dict[str, Any]:
@@ -1133,9 +1269,81 @@ class DesktopApi:
             recommendations.append("Local benchmark is within the expected range for this workspace.")
         return recommendations
 
+    def model_distribution_audit(self) -> dict[str, Any]:
+        face_model = model_status(self.project.config, self.engine_name)
+        safe_model = safety_model_report()
+        items: list[dict[str, Any]] = []
+
+        def license_state(text: str) -> str:
+            value = text.strip().lower()
+            if not value:
+                return "missing"
+            if "confirm" in value or "suitability" in value or "unknown" in value:
+                return "needs-review"
+            return "declared"
+
+        for spec in MODEL_PACKAGES.values():
+            package = next((item for item in face_model.get("packages", []) if isinstance(item, dict) and item.get("pack") == spec.pack), {})
+            items.append(
+                {
+                    "kind": "face",
+                    "id": spec.pack,
+                    "name": spec.label,
+                    "source": spec.source,
+                    "url": spec.url,
+                    "filename": spec.filename,
+                    "sha256": spec.sha256,
+                    "sizeBytes": spec.size_bytes,
+                    "license": spec.license,
+                    "licenseState": license_state(spec.license),
+                    "installed": bool(package.get("available")),
+                    "archivePath": str(package.get("archivePath", "")),
+                    "installedPath": str(package.get("path", "")),
+                    "redistributionReady": license_state(spec.license) == "declared",
+                }
+            )
+        safe_license = str(safe_model.get("license") or "")
+        items.append(
+            {
+                "kind": "safety",
+                "id": "safe-mode",
+                "name": str(safe_model.get("modelName") or "exposed-skin-heuristic"),
+                "source": str(safe_model.get("source") or "local heuristic"),
+                "url": str(safe_model.get("source") or ""),
+                "filename": Path(str(safe_model.get("path") or "")).name,
+                "sha256": "",
+                "sizeBytes": 0,
+                "license": safe_license or "local heuristic",
+                "licenseState": license_state(safe_license) if safe_license else "declared",
+                "installed": bool(safe_model.get("available")),
+                "archivePath": "",
+                "installedPath": str(safe_model.get("path") or ""),
+                "redistributionReady": bool(safe_model.get("available")) and (not safe_license or license_state(safe_license) == "declared"),
+            }
+        )
+        blockers = [item for item in items if item["licenseState"] in {"missing", "needs-review"}]
+        recommendations = []
+        if blockers:
+            recommendations.append("Resolve model license/redistribution review before publishing public installers.")
+        if not face_model.get("ready"):
+            recommendations.append("Install at least one face model or rely on the in-app first-run downloader.")
+        if not safe_model.get("available"):
+            recommendations.append("Bundle or configure a Safe Mode ONNX model before broad distribution.")
+        if not recommendations:
+            recommendations.append("Model manifest is complete for the installed local models.")
+        return {
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "ok": not blockers and bool(safe_model.get("available")),
+            "items": items,
+            "blockers": blockers,
+            "recommendations": recommendations,
+        }
+
     def release_readiness(self) -> dict[str, Any]:
         face_model = model_status(self.project.config, self.engine_name)
         safe_model = safety_model_report()
+        distribution = self.model_distribution_audit()
+        db_integrity = self.project.database_integrity()
         update_feed_ready = bool(
             os.environ.get("VINTRACE_UPDATE_URL")
             or os.environ.get("CROSSAGE_UPDATE_URL")
@@ -1153,6 +1361,18 @@ class DesktopApi:
                 "name": "Safe Mode model",
                 "ok": bool(safe_model.get("available")),
                 "detail": str(safe_model.get("modelName") or safe_model.get("reason") or "Safe Mode model unavailable."),
+            },
+            {
+                "name": "Model license manifest",
+                "ok": bool(distribution.get("ok")),
+                "detail": "Model sources, checksums, and licenses are complete." if distribution.get("ok") else "; ".join(distribution.get("recommendations", [])[:2]),
+                "value": distribution,
+            },
+            {
+                "name": "Database integrity",
+                "ok": bool(db_integrity.get("ok")),
+                "detail": "SQLite workspace index passed integrity checks." if db_integrity.get("ok") else str(db_integrity.get("error") or "SQLite workspace index needs repair."),
+                "value": db_integrity,
             },
             {
                 "name": "Consent policy",
@@ -1192,6 +1412,8 @@ class DesktopApi:
         safe_model = safety_model_report()
         image_decoder = image_decoder_report()
         video_decoder = video_decoder_report()
+        distribution = self.model_distribution_audit()
+        db_integrity = self.project.database_integrity()
         checks: list[dict[str, Any]] = []
 
         def add(name: str, ok: bool, detail: str, value: Any | None = None) -> None:
@@ -1247,6 +1469,8 @@ class DesktopApi:
         archive_ok = all(bool(item.get("ok")) for item in archive_checks if item.get("status") != "missing")
         add("Downloaded archives", archive_ok, "Downloaded model archives pass checksum checks." if archive_ok else "One or more downloaded model archives failed checksum verification.", archive_checks)
         add("Safe Mode model", bool(safe_model.get("available")), str(safe_model.get("modelName") or safe_model.get("reason") or "Safe Mode model checked."), safe_model)
+        add("Model license manifest", bool(distribution.get("ok")), "Model manifest is ready for redistribution review." if distribution.get("ok") else "; ".join(distribution.get("recommendations", [])[:2]), distribution)
+        add("Workspace database", bool(db_integrity.get("ok")), "SQLite workspace index passed integrity checks." if db_integrity.get("ok") else str(db_integrity.get("error") or "SQLite workspace index needs repair."), db_integrity)
         add("Image decoder", bool(image_decoder.get("extensions")), f"{len(image_decoder.get('extensions', []))} image extension(s) supported.", image_decoder)
         add("Video decoder", bool(video_decoder.get("opencvAvailable")), str(video_decoder.get("backend") or "Video decoder unavailable."), video_decoder)
         recommendations = [check["detail"] for check in checks if not check["ok"]]
@@ -1436,6 +1660,9 @@ class DesktopApi:
         image_decoder = image_decoder_report()
         video_decoder = video_decoder_report()
         workspace_health = self.project.workspace_health()
+        distribution = self.model_distribution_audit()
+        db_integrity = self.project.database_integrity()
+        storage = inspect_storage_path(self.project.root, self.project.root)
         packaged = bool(getattr(sys, "frozen", False) or os.environ.get("CROSSAGE_PACKAGED_BACKEND") == "1")
         model_packages = face_model.get("packages", []) if isinstance(face_model.get("packages"), list) else []
         downloadable = any(str(package.get("url", "")).startswith(("http://", "https://")) and str(package.get("sha256", "")) for package in model_packages if isinstance(package, dict))
@@ -1456,6 +1683,11 @@ class DesktopApi:
                 "detail": "Download URL and checksum are configured." if downloadable else "Face model is already ready or no downloadable pack is configured.",
             },
             {
+                "name": "Model manifest",
+                "ok": bool(distribution.get("items")),
+                "detail": "Model package URLs, checksums, and license fields are visible for review.",
+            },
+            {
                 "name": "Safe Mode",
                 "ok": bool(self.project.config.safe_mode and safe_model.get("available")),
                 "detail": str(safe_model.get("modelName") or safe_model.get("reason") or "Safe Mode model checked."),
@@ -1474,6 +1706,16 @@ class DesktopApi:
                 "name": "Packaged backend",
                 "ok": packaged,
                 "detail": "Packaged backend detected." if packaged else "Running from source; installer builds should include the frozen backend.",
+            },
+            {
+                "name": "Database integrity",
+                "ok": bool(db_integrity.get("ok")),
+                "detail": "SQLite workspace index passed integrity checks." if db_integrity.get("ok") else str(db_integrity.get("error") or "SQLite workspace index needs repair."),
+            },
+            {
+                "name": "Storage location",
+                "ok": bool(storage.get("readable") and storage.get("traversable") and not storage.get("networkLikely")),
+                "detail": "App folder is on readable local storage." if not storage.get("warnings") else str(storage.get("warnings", ["Storage checked."])[0]),
             },
             {
                 "name": "Workspace health",
@@ -1743,6 +1985,7 @@ class DesktopApi:
 
         return {
             "version": __version__,
+            "buildInfo": self._build_info(),
             "workspace": str(self.project.root),
             "consentOnFile": self.consent_on_file,
             "consent": self.project.consent_summary(),
@@ -1758,6 +2001,7 @@ class DesktopApi:
             },
             "scanHistory": self.project.scan_history[:20],
             "scanTotals": self._scan_totals(),
+            "benchmarkHistory": self.project.benchmark_history(limit=8),
             "scale": scale,
             "calibration": self.project.calibration_summary(),
             "scanJob": self.project.scan_job_status(scale.get("latestScan") if isinstance(scale, dict) else None),

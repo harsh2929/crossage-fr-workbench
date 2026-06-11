@@ -515,6 +515,19 @@ def repair_workspace(confirm: bool = False) -> dict[str, Any]:
 
 
 @mcp.tool()
+def database_integrity() -> dict[str, Any]:
+    """Run SQLite integrity and foreign-key checks for the active workspace index."""
+    return _call("database_integrity")
+
+
+@mcp.tool()
+def repair_database_integrity(confirm: bool = False) -> dict[str, Any]:
+    """Snapshot and repair the local SQLite index. Without confirm=true this returns a dry run only."""
+    result = _call("repair_database_integrity", {"confirm": bool(confirm)})
+    return {"repair": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@mcp.tool()
 def relink_workspace_paths(old_root: str, new_root: str, confirm: bool = False) -> dict[str, Any]:
     """Relink saved photo/video paths after a library folder has moved. Without confirm=true this returns a dry run only."""
     result = _call("relink_workspace_paths", {"oldRoot": old_root, "newRoot": new_root, "dryRun": not confirm})
@@ -782,6 +795,18 @@ def runtime_benchmark() -> dict[str, Any]:
 
 
 @mcp.tool()
+def benchmark_history(limit: int = 8) -> dict[str, Any]:
+    """Return recent runtime benchmark runs without running a new benchmark."""
+    return {"benchmarks": _call("benchmark_history", {"limit": limit})}
+
+
+@mcp.tool()
+def storage_io_benchmark(path: str = "", size_mb: int = 8) -> dict[str, Any]:
+    """Benchmark metadata I/O in a folder without reading or training on any photos."""
+    return _call("storage_io_benchmark", {"path": path, "sizeMb": size_mb})
+
+
+@mcp.tool()
 def release_readiness() -> dict[str, Any]:
     """Return a local release checklist for models, Safe Mode, signing, updates, and crash reporting."""
     return _call("release_readiness")
@@ -791,6 +816,12 @@ def release_readiness() -> dict[str, Any]:
 def model_integrity() -> dict[str, Any]:
     """Verify model folder writability, downloaded archive checksums, Safe Mode model, and decoder readiness."""
     return _call("model_integrity")
+
+
+@mcp.tool()
+def model_distribution_audit() -> dict[str, Any]:
+    """Audit local/downloadable model sources, checksums, installed paths, and license review status."""
+    return _call("model_distribution_audit")
 
 
 @mcp.tool()

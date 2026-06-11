@@ -5,6 +5,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 import json
 import os
+import shutil
 import sqlite3
 from typing import Any, Iterable, Iterator
 
@@ -28,7 +29,25 @@ class WorkspaceDb:
     def __init__(self, path: Path):
         self.path = path.expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
+        try:
+            self._init_schema()
+        except sqlite3.DatabaseError as exc:
+            if not self._looks_corrupt(exc):
+                raise
+            self.snapshot_files("startup-corrupt")
+            self.rebuild_empty()
+
+    def _looks_corrupt(self, exc: sqlite3.DatabaseError) -> bool:
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "file is not a database",
+                "database disk image is malformed",
+                "malformed database",
+                "schema is corrupt",
+            )
+        )
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -150,6 +169,8 @@ class WorkspaceDb:
                     generated_at TEXT NOT NULL,
                     payload_json TEXT NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS idx_benchmark_runs_generated
+                    ON benchmark_runs(generated_at DESC);
                 CREATE TABLE IF NOT EXISTS review_candidates (
                     candidate_id TEXT PRIMARY KEY,
                     source_path TEXT NOT NULL,
@@ -1084,6 +1105,31 @@ class WorkspaceDb:
                 (run_id, now_iso(), json.dumps(payload, separators=(",", ":"))),
             )
 
+    def recent_benchmark_runs(self, limit: int = 8) -> list[dict[str, Any]]:
+        limit = max(1, min(50, int(limit)))
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT run_id, generated_at, payload_json
+                FROM benchmark_runs
+                ORDER BY generated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        history: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload_json"] or "{}"))
+            except json.JSONDecodeError:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            payload.setdefault("runId", row["run_id"])
+            payload.setdefault("generatedAt", row["generated_at"])
+            history.append(payload)
+        return history
+
     def clear_private_data(self, include_scan_history: bool = True) -> dict[str, int]:
         tables = ["safety_cache", "embedding_cache", "calibration_labels", "blocked_pairs", "review_candidates"]
         if include_scan_history:
@@ -1145,6 +1191,76 @@ class WorkspaceDb:
             "dbBytesAfter": after + after_wal + after_shm,
             "dbBytesReclaimed": max(0, before + before_wal + before_shm - after - after_wal - after_shm),
         }
+
+    def integrity_report(self) -> dict[str, Any]:
+        wal_path = Path(str(self.path) + "-wal")
+        shm_path = Path(str(self.path) + "-shm")
+        result: dict[str, Any] = {
+            "generatedAt": now_iso(),
+            "path": str(self.path),
+            "exists": self.path.exists(),
+            "ok": False,
+            "integrity": [],
+            "foreignKeyErrors": [],
+            "tableCounts": {},
+            "dbBytes": os.path.getsize(self.path) if self.path.exists() else 0,
+            "walBytes": os.path.getsize(wal_path) if wal_path.exists() else 0,
+            "shmBytes": os.path.getsize(shm_path) if shm_path.exists() else 0,
+            "error": "",
+        }
+        try:
+            with self.connect() as conn:
+                integrity_rows = [str(row[0]) for row in conn.execute("PRAGMA integrity_check").fetchall()]
+                fk_rows = [dict(row) for row in conn.execute("PRAGMA foreign_key_check").fetchall()]
+                counts: dict[str, int] = {}
+                for table in (
+                    "scan_runs",
+                    "scan_files",
+                    "safety_cache",
+                    "embedding_cache",
+                    "calibration_labels",
+                    "blocked_pairs",
+                    "benchmark_runs",
+                    "review_candidates",
+                ):
+                    try:
+                        counts[table] = int(conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"])
+                    except sqlite3.Error:
+                        counts[table] = -1
+                result["integrity"] = integrity_rows
+                result["foreignKeyErrors"] = fk_rows[:50]
+                result["tableCounts"] = counts
+                result["ok"] = integrity_rows == ["ok"] and not fk_rows and all(value >= 0 for value in counts.values())
+        except sqlite3.Error as exc:
+            result["error"] = str(exc)
+        return result
+
+    def snapshot_files(self, reason: str = "repair") -> dict[str, Any]:
+        stamp = now_iso().replace(":", "").replace("-", "").replace("Z", "")
+        safe_reason = "".join(character if character.isalnum() or character in {"-", "_"} else "-" for character in reason)[:48] or "snapshot"
+        backup_dir = self.path.parent / "db-backups" / f"{stamp}-{safe_reason}"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        copied: list[dict[str, Any]] = []
+        for source in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
+            if not source.exists():
+                continue
+            target = backup_dir / source.name
+            shutil.copy2(source, target)
+            copied.append({"from": str(source), "to": str(target), "bytes": target.stat().st_size})
+        return {
+            "generatedAt": now_iso(),
+            "backupDir": str(backup_dir),
+            "files": copied,
+            "bytes": sum(int(item["bytes"]) for item in copied),
+        }
+
+    def rebuild_empty(self) -> None:
+        for source in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
+            try:
+                source.unlink()
+            except OSError:
+                pass
+        self._init_schema()
 
     def scale_summary(self) -> dict[str, Any]:
         with self.connect() as conn:

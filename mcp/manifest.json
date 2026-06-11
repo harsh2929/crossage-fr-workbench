@@ -130,6 +130,14 @@
       "description": "Preview or repair missing saved-photo and match links; changes require confirm=true."
     },
     {
+      "name": "database_integrity",
+      "description": "Run SQLite integrity and foreign-key checks for the active workspace index."
+    },
+    {
+      "name": "repair_database_integrity",
+      "description": "Snapshot and repair the local SQLite index; changes require confirm=true."
+    },
+    {
       "name": "relink_workspace_paths",
       "description": "Relink saved photo/video paths after a library folder has moved; changes require confirm=true."
     },
@@ -290,8 +298,20 @@
       "description": "Run a local benchmark for vector search, state serialization, and scale database health."
     },
     {
+      "name": "benchmark_history",
+      "description": "Return recent runtime benchmark runs without running a new benchmark."
+    },
+    {
+      "name": "storage_io_benchmark",
+      "description": "Benchmark metadata I/O in a folder without reading or training on photos."
+    },
+    {
       "name": "release_readiness",
       "description": "Return a local release checklist for models, Safe Mode, signing, updates, and crash reporting."
+    },
+    {
+      "name": "model_distribution_audit",
+      "description": "Audit model sources, checksums, installed paths, and license review status."
     },
     {
       "name": "installer_self_diagnostics",

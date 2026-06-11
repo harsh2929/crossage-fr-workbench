@@ -1,0 +1,82 @@
+name: QA
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  qa:
+    name: Build and validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      CROSSAGE_FORCE_FALLBACK: "1"
+      PYTHONPATH: ${{ github.workspace }}
+      VINTRACE_BUILD_SHA: ${{ github.sha }}
+      VINTRACE_BUILD_REF: ${{ github.ref_name }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Install Python production dependencies
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install -r requirements-production.txt
+
+      - name: Install Playwright dependencies
+        run: npx playwright install --with-deps chromium
+
+      - name: Typecheck and build UI
+        run: npm run build
+
+      - name: Pipeline smoke
+        run: python tests/pipeline_smoke.py
+
+      - name: Edge-case suite
+        run: python tests/edge_cases.py
+
+      - name: MCP smoke
+        run: python tests/mcp_smoke.py
+
+      - name: Clean workspace simulation
+        run: npm run test:clean
+
+      - name: Accuracy benchmark
+        run: python tests/accuracy_benchmark.py
+
+      - name: Scale benchmark
+        env:
+          VINTRACE_SCALE_BENCH_FILES: "100000"
+        run: python tests/scale_benchmark.py
+
+      - name: Update feed dry run
+        run: npm run update:dry-run
+
+      - name: Release check
+        run: npm run release:check
+
+      - name: Playwright UI
+        run: npm run test:e2e

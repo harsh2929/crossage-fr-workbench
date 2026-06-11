@@ -25,6 +25,9 @@ jobs:
   build-windows-installer:
     name: Build Windows installer
     runs-on: windows-latest
+    env:
+      VINTRACE_BUILD_SHA: ${{ github.sha }}
+      VINTRACE_BUILD_REF: ${{ github.ref_name }}
 
     steps:
       - name: Check out repository
@@ -57,6 +60,16 @@ jobs:
         run: |
           python tests/pipeline_smoke.py
           python tests/edge_cases.py
+          python tests/clean_workspace_smoke.py
+          python tests/accuracy_benchmark.py
+
+      - name: Validate update feed and release checks
+        env:
+          CROSSAGE_FORCE_FALLBACK: "1"
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          npm run update:dry-run
+          npm run release:check
 
       - name: Build Windows installer
         env:

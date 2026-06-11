@@ -59,6 +59,7 @@ import type {
   AccuracyLabelsImportValue,
   AuditLogExportValue,
   ConsentReceiptExportValue,
+  DatabaseRepairResult,
   DeleteFaceDataResult,
   ExportReportValue,
   AppCommand,
@@ -1258,6 +1259,7 @@ export default function App() {
   const [workspaceHealth, setWorkspaceHealth] = useState<WorkspaceHealth | null>(null);
   const [workspaceOptimizeResult, setWorkspaceOptimizeResult] = useState<WorkspaceOptimizeResult | null>(null);
   const [workspaceRepairResult, setWorkspaceRepairResult] = useState<WorkspaceRepairResult | null>(null);
+  const [databaseRepairResult, setDatabaseRepairResult] = useState<DatabaseRepairResult | null>(null);
   const [workspaceRelinkResult, setWorkspaceRelinkResult] = useState<WorkspaceRelinkResult | null>(null);
   const [scanManifestPruneResult, setScanManifestPruneResult] = useState<ScanManifestPruneValue | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEventsResult | null>(null);
@@ -2547,6 +2549,41 @@ export default function App() {
     if (result.state) applyState(result.state);
   }
 
+  async function repairDatabaseIntegrity() {
+    const preview = await invoke<CommandResult<DatabaseRepairResult>>("Checking database", "repair_database_integrity", { confirm: false });
+    if (!preview.value) {
+      setNotice({ tone: "error", text: "Database repair preview did not return details." });
+      return;
+    }
+    setDatabaseRepairResult(preview.value);
+    if (preview.value.before.ok) {
+      if (!confirmUi("Database integrity is already healthy. Optimize the SQLite index now? A snapshot will be saved first.")) {
+        setNotice({ tone: "ok", text: "Database integrity passed. No repair needed." });
+        return;
+      }
+    } else if (!confirmUi("Database integrity needs repair. Vintrace will snapshot the current SQLite files, rebuild the local index from saved app state, and keep original photos untouched. Continue?")) {
+      setNotice({ tone: "warn", text: "Database repair cancelled. No app data changed." });
+      return;
+    }
+    const result = await invoke<CommandResult<DatabaseRepairResult>>("Repairing database", "repair_database_integrity", { confirm: true });
+    if (result.value) {
+      setDatabaseRepairResult(result.value);
+      if (workspaceHealth) {
+        setWorkspaceHealth({ ...workspaceHealth, databaseIntegrity: result.value.after });
+      }
+      setNotice({
+        tone: result.value.after.ok ? "ok" : "warn",
+        text: result.value.after.ok
+          ? result.value.rebuilt
+            ? "Database index rebuilt from saved app state."
+            : "Database index optimized."
+          : "Database repair finished but integrity still needs attention. Export diagnostics."
+      });
+    }
+    if (result.state) applyState(result.state);
+    await runWorkspaceHealth();
+  }
+
   async function relinkWorkspacePaths() {
     const oldRoot = promptUi("Old folder path to replace", "");
     if (!oldRoot?.trim()) {
@@ -3672,10 +3709,12 @@ export default function App() {
             watchStatus={watchStatus}
             latencySamples={latencySamples}
             latencySummary={latencySummary}
+            workspaceHealth={workspaceHealth}
             performanceChoice={performanceChoice}
             performanceProfile={performanceProfile}
             navigate={setActiveTab}
             chooseWorkspace={chooseWorkspace}
+            runWorkspaceHealth={runWorkspaceHealth}
             requestConsent={() => setConsent(true).catch(setErrorNotice)}
             chooseModelRoot={chooseModelRoot}
             downloadModel={downloadModel}
@@ -3832,6 +3871,8 @@ export default function App() {
             runWorkspaceHealth={runWorkspaceHealth}
             repairWorkspace={repairWorkspace}
             workspaceRepairResult={workspaceRepairResult}
+            repairDatabaseIntegrity={repairDatabaseIntegrity}
+            databaseRepairResult={databaseRepairResult}
             relinkWorkspacePaths={relinkWorkspacePaths}
             workspaceRelinkResult={workspaceRelinkResult}
             purgeDuplicateCandidates={purgeDuplicateCandidates}
@@ -4226,10 +4267,12 @@ function Dashboard({
   watchStatus,
   latencySamples,
   latencySummary,
+  workspaceHealth,
   performanceChoice,
   performanceProfile,
   navigate,
   chooseWorkspace,
+  runWorkspaceHealth,
   requestConsent,
   chooseModelRoot,
   downloadModel,
@@ -4246,10 +4289,12 @@ function Dashboard({
   watchStatus: FolderWatchStatus;
   latencySamples: LatencySample[];
   latencySummary: LatencySummary;
+  workspaceHealth: WorkspaceHealth | null;
   performanceChoice: PerformanceChoice;
   performanceProfile: PerformanceProfile;
   navigate(tab: TabKey): void;
   chooseWorkspace(): void;
+  runWorkspaceHealth(): void;
   requestConsent(): void;
   chooseModelRoot(): void | Promise<void>;
   downloadModel(pack: string, root?: string, force?: boolean): void | Promise<void>;
@@ -4281,6 +4326,42 @@ function Dashboard({
   const qualityItemCount = state.candidates.length + state.references.length;
   const averageQuality = qualityItemCount ? (candidateQualityTotal + referenceQualityTotal) / qualityItemCount : 0;
   const lastLatency = latencySamples[0];
+  const build = state.buildInfo;
+  const latestBenchmark = (state.benchmarkHistory && state.benchmarkHistory.length ? state.benchmarkHistory[0] : null) ?? null;
+  const dbIntegrity = workspaceHealth?.databaseIntegrity ?? null;
+  const buildLabel = build?.commit && build.commit !== "local" ? build.commit.slice(0, 12) : build?.packaged ? "packaged" : "local";
+  const healthSummary = [
+    {
+      label: "Face model",
+      value: state.modelSetup?.ready ? state.modelSetup.currentPack : "Needs setup",
+      detail: state.modelSetup?.fallbackActive ? "Simple matching active" : state.engine,
+      ok: Boolean(state.modelSetup?.ready) && !state.modelSetup?.fallbackActive
+    },
+    {
+      label: "Database",
+      value: dbIntegrity ? (dbIntegrity.ok ? "Healthy" : "Repair needed") : "Not checked",
+      detail: dbIntegrity ? formatBytes(dbIntegrity.dbBytes + dbIntegrity.walBytes + dbIntegrity.shmBytes) : "Run health check",
+      ok: dbIntegrity ? Boolean(dbIntegrity.ok) : null
+    },
+    {
+      label: "Storage",
+      value: latestBenchmark?.storageIo?.ok ? `${Math.round(latestBenchmark.storageIo.writeMBps)} MB/s write` : "Not measured",
+      detail: latestBenchmark?.storageIo?.ok ? `${Math.round(latestBenchmark.storageIo.readMBps)} MB/s read` : "Run benchmark",
+      ok: latestBenchmark?.storageIo ? Boolean(latestBenchmark.storageIo.ok) : null
+    },
+    {
+      label: "Review load",
+      value: `${formatNumber(state.counts.pending)} pending`,
+      detail: state.counts.candidates ? `${formatNumber(state.counts.candidates)} total matches` : "No queue yet",
+      ok: state.counts.pending === 0
+    },
+    {
+      label: "Build",
+      value: `${build?.version ?? state.version} ${buildLabel}`,
+      detail: build?.channel ? `${build.channel} channel` : "local channel",
+      ok: true
+    }
+  ];
   const allReferencesByPerson = Object.entries(
     state.references.reduce<Record<string, { count: number; buckets: Set<string>; quality: number }>>((people, ref) => {
       const current = people[ref.personName] ?? { count: 0, buckets: new Set<string>(), quality: 0 };
@@ -4432,6 +4513,29 @@ function Dashboard({
             <small>{metric.detail}</small>
           </div>
         ))}
+      </div>
+
+      <div className="panel dashboard-span">
+        <div className="panel-title"><Activity size={18} /> Health summary</div>
+        <div className="workspace-health-grid">
+          {healthSummary.map((item) => (
+            <span key={item.label} className={item.ok === false ? "warn" : item.ok === true ? "ok" : ""}>
+              <small>{item.label}</small>
+              <strong>{item.value}</strong>
+              <em>{item.detail}</em>
+            </span>
+          ))}
+        </div>
+        <div className="button-row">
+          <button className="secondary" onClick={runWorkspaceHealth} disabled={busy}>
+            <Database size={17} />
+            <span>Check health</span>
+          </button>
+          <button className="secondary" onClick={() => navigate("settings")}>
+            <Gauge size={17} />
+            <span>Open diagnostics</span>
+          </button>
+        </div>
       </div>
 
       <div className="panel dashboard-rankings">
@@ -6988,6 +7092,8 @@ function SettingsView(props: {
   runWorkspaceHealth(): void;
   repairWorkspace(): void;
   workspaceRepairResult: WorkspaceRepairResult | null;
+  repairDatabaseIntegrity(): void;
+  databaseRepairResult: DatabaseRepairResult | null;
   relinkWorkspacePaths(): void;
   workspaceRelinkResult: WorkspaceRelinkResult | null;
   purgeDuplicateCandidates(): void;
@@ -7104,6 +7210,8 @@ function SettingsView(props: {
     !props.settings.safeMode ||
     props.settings.safeModeThreshold > props.state.config.safeModeThreshold + 0.001
   );
+  const build = props.state.buildInfo;
+  const buildCommit = build?.commit && build.commit !== "local" ? build.commit.slice(0, 12) : build?.packaged ? "packaged" : "local";
   function requestSaveSettings() {
     if (validationMessages.length) return;
     if (safeModeRelaxed) {
@@ -7284,6 +7392,10 @@ function SettingsView(props: {
         <div className="panel-title"><HardDrive size={18} /> Local engine</div>
         <p className="compact">{props.platformSummary}</p>
         <dl className="mini-list">
+          <dt>App version</dt><dd>{build?.version ?? props.state.version}</dd>
+          <dt>Build</dt><dd title={build?.commit || ""}>{buildCommit}</dd>
+          <dt>Channel</dt><dd>{build?.channel ?? "stable"}</dd>
+          <dt>Runtime</dt><dd>{build?.packaged ? "Packaged app" : "Developer build"}</dd>
           <dt>Face model</dt><dd>{props.state.modelSetup?.ready ? props.state.modelSetup.currentPack : "Needs download"}</dd>
           <dt>Safe Mode engine</dt><dd>{safeModel?.available ? safeModel.engine.toUpperCase() : "Heuristic fallback"}</dd>
           <dt>Safety model</dt><dd>{safeModel?.modelName ?? "Exposed-skin heuristic"}</dd>
@@ -7327,7 +7439,7 @@ function SettingsView(props: {
         clearLatencySamples={props.clearLatencySamples}
       />
       <ScaleReadinessPanel state={props.state} pruneScanManifests={props.pruneScanManifests} pruneResult={props.scanManifestPruneResult} busy={props.busy} />
-      <BenchmarkPanel result={props.runtimeBenchmark} busy={props.busy} runBenchmark={props.runRuntimeBenchmark} />
+      <BenchmarkPanel result={props.runtimeBenchmark} history={props.state.benchmarkHistory ?? []} busy={props.busy} runBenchmark={props.runRuntimeBenchmark} />
       <AccuracyLabPanel
         result={props.accuracyEvaluation}
         calibration={props.state.calibration}
@@ -7397,6 +7509,8 @@ function SettingsView(props: {
         runWorkspaceHealth={props.runWorkspaceHealth}
         repairWorkspace={props.repairWorkspace}
         repairResult={props.workspaceRepairResult}
+        repairDatabaseIntegrity={props.repairDatabaseIntegrity}
+        databaseRepairResult={props.databaseRepairResult}
         relinkWorkspacePaths={props.relinkWorkspacePaths}
         relinkResult={props.workspaceRelinkResult}
         purgeDuplicateCandidates={props.purgeDuplicateCandidates}
@@ -7568,6 +7682,8 @@ function WorkspaceHealthPanel({
   runWorkspaceHealth,
   repairWorkspace,
   repairResult,
+  repairDatabaseIntegrity,
+  databaseRepairResult,
   relinkWorkspacePaths,
   relinkResult,
   purgeDuplicateCandidates,
@@ -7579,6 +7695,8 @@ function WorkspaceHealthPanel({
   runWorkspaceHealth(): void;
   repairWorkspace(): void;
   repairResult: WorkspaceRepairResult | null;
+  repairDatabaseIntegrity(): void;
+  databaseRepairResult: DatabaseRepairResult | null;
   relinkWorkspacePaths(): void;
   relinkResult: WorkspaceRelinkResult | null;
   purgeDuplicateCandidates(): void;
@@ -7586,6 +7704,7 @@ function WorkspaceHealthPanel({
 }) {
   const duplicateCount = health?.duplicateCandidateCount ?? 0;
   const brokenLinkCount = (health?.missingReferences ?? 0) + (health?.missingCandidates ?? 0) + (health?.missingMediaSources ?? 0);
+  const dbHealthy = health?.databaseIntegrity?.ok ?? true;
   const metrics = health ? [
     { label: "Storage", value: formatBytes(health.storageBytes) },
     { label: "Files", value: formatNumber(health.workspaceFileCount) },
@@ -7593,7 +7712,8 @@ function WorkspaceHealthPanel({
     { label: "Missing saved photos", value: formatNumber(health.missingReferences) },
     { label: "Missing matches", value: formatNumber(health.missingCandidates) },
     { label: "Missing media", value: formatNumber(health.missingMediaSources ?? 0) },
-    { label: "Duplicates", value: formatNumber(duplicateCount) }
+    { label: "Duplicates", value: formatNumber(duplicateCount) },
+    { label: "Database", value: dbHealthy ? "Healthy" : "Repair" }
   ] : [];
   return (
     <div className="panel settings-panel workspace-health-panel">
@@ -7652,6 +7772,13 @@ function WorkspaceHealthPanel({
           <span>Last repair removed {formatNumber(repairResult.removedReferences)} saved photo link(s) and {formatNumber(repairResult.removedCandidates)} match row(s).</span>
         </div>
       )}
+      {databaseRepairResult && (
+        <div className={databaseRepairResult.after.ok ? "health-list" : "health-list warn"}>
+          <span>{databaseRepairResult.rebuilt ? "Database index rebuilt" : databaseRepairResult.confirmed ? "Database index optimized" : "Database repair preview"}.</span>
+          {databaseRepairResult.snapshot?.backupDir && <span>Snapshot saved before repair.</span>}
+          {databaseRepairResult.recommendations.slice(0, 2).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+        </div>
+      )}
       {relinkResult && (
         <div className="health-list">
           <span>{relinkResult.dryRun ? "Relink preview" : "Last relink"} matched {formatNumber(relinkResult.relinkedFields)} saved path(s).</span>
@@ -7672,6 +7799,10 @@ function WorkspaceHealthPanel({
         <button className="secondary" onClick={optimizeWorkspace} disabled={busy}>
           <Database size={17} />
           <span>Optimize app folder</span>
+        </button>
+        <button className={dbHealthy ? "secondary" : "secondary danger"} onClick={repairDatabaseIntegrity} disabled={busy || !health}>
+          <Database size={17} />
+          <span>{dbHealthy ? "Optimize database" : "Repair database"}</span>
         </button>
         <button className="secondary danger" onClick={repairWorkspace} disabled={busy || !brokenLinkCount}>
           <Trash2 size={17} />
@@ -8216,7 +8347,8 @@ function ScaleReadinessPanel({
   );
 }
 
-function BenchmarkPanel({ result, busy, runBenchmark }: { result: RuntimeBenchmarkResult | null; busy: boolean; runBenchmark(): void }) {
+function BenchmarkPanel({ result, history, busy, runBenchmark }: { result: RuntimeBenchmarkResult | null; history: RuntimeBenchmarkResult[]; busy: boolean; runBenchmark(): void }) {
+  const visibleHistory = history.slice(0, 5);
   return (
     <div className="panel settings-panel benchmark-panel">
       <div className="panel-title"><Gauge size={18} /> Machine benchmark</div>
@@ -8229,6 +8361,8 @@ function BenchmarkPanel({ result, busy, runBenchmark }: { result: RuntimeBenchma
             <span><small>Backend</small><strong>{result.vectorBackend}</strong></span>
             <span><small>Mode</small><strong>{result.performanceMode === "auto" ? `Auto: ${result.effectivePerformanceMode ?? "balanced"}` : result.effectivePerformanceMode ?? result.performanceMode ?? "balanced"}</strong></span>
             <span><small>Memory</small><strong>{result.resourceStatus?.memoryPressure ?? "normal"}</strong></span>
+            <span><small>Storage write</small><strong>{result.storageIo?.ok ? `${Math.round(result.storageIo.writeMBps)} MB/s` : "Check"}</strong></span>
+            <span><small>Storage read</small><strong>{result.storageIo?.ok ? `${Math.round(result.storageIo.readMBps)} MB/s` : "Check"}</strong></span>
           </div>
           <div className="health-list">
             {result.recommendations.slice(0, 3).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
@@ -8237,6 +8371,17 @@ function BenchmarkPanel({ result, busy, runBenchmark }: { result: RuntimeBenchma
         </>
       ) : (
         <p className="compact">Run a local benchmark to check vector search speed, state serialization, and scale database health on this machine.</p>
+      )}
+      {visibleHistory.length > 0 && (
+        <div className="benchmark-history" aria-label="Recent benchmark history">
+          {visibleHistory.map((item) => (
+            <div key={item.runId}>
+              <span>{formatDateTime(item.generatedAt)}</span>
+              <strong>{formatNumber(Math.round(item.vectorAddPerSecond))}/s</strong>
+              <small>{item.storageIo?.ok ? `${Math.round(item.storageIo.writeMBps)} MB/s write` : "storage not measured"}</small>
+            </div>
+          ))}
+        </div>
       )}
       <button className="secondary" onClick={runBenchmark} disabled={busy}>
         <Activity size={17} />

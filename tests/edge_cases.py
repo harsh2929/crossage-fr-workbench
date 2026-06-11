@@ -81,6 +81,18 @@ def assert_corrupt_workspace_recovery() -> None:
     assert (workspace / "scan_history.corrupt.json").exists()
 
 
+def assert_corrupt_sqlite_startup_recovery() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-corrupt-db-"))
+    workspace = root / "workspace"
+    workspace.mkdir()
+    (workspace / "workspace.sqlite3").write_text("not a sqlite database", encoding="utf-8")
+    api = make_api(workspace)
+    database = api.handle("database_integrity", {})
+    assert database["ok"] is True
+    backups = list((workspace / "db-backups").glob("*-startup-corrupt/workspace.sqlite3"))
+    assert backups, "Corrupt startup DB should be snapshotted before rebuild."
+
+
 def assert_config_round_trip_and_invalid_shape() -> None:
     root = Path(tempfile.mkdtemp(prefix="crossage-edge-config-"))
     config_path = root / "config.json"
@@ -368,6 +380,7 @@ def assert_static_app_contracts() -> None:
 
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
     assert package["scripts"]["bench:scale"].endswith("tests/scale_benchmark.py")
+    assert package["scripts"]["bench:accuracy"].endswith("tests/accuracy_benchmark.py")
     resources = {entry["from"] for entry in package["build"]["extraResources"]}
     assert {"models/safety", "mcp", "report.md", "crossage_fr"} <= resources
     backend_resource = next(entry for entry in package["build"]["extraResources"] if entry["from"] == "backend-dist")
@@ -424,6 +437,8 @@ def assert_static_app_contracts() -> None:
         "rename_person",
         "clear_references",
         "purge_old_candidates",
+        "database_integrity",
+        "repair_database_integrity",
         "export_report",
         "export_workspace_backup",
         "export_candidates",
@@ -436,7 +451,9 @@ def assert_static_app_contracts() -> None:
         "workspace_health",
         "runtime_self_test",
         "runtime_benchmark",
+        "storage_io_benchmark",
         "release_readiness",
+        "model_distribution_audit",
         "installer_self_diagnostics",
         "calibration_summary",
         "accuracy_evaluation",
@@ -467,6 +484,8 @@ def assert_static_app_contracts() -> None:
     assert "saveSettingsDraftIfDirty" in app_tsx
     assert "memory-pressure-banner" in app_tsx
     assert "runtimePerformanceProfile" in app_tsx
+    assert "repairDatabaseIntegrity" in app_tsx
+    assert "Storage write" in app_tsx
     assert "Saving storage limit" in app_tsx
     assert "Saving review rules" in app_tsx
     assert "acceptedMediaAvailable" in app_tsx
@@ -1851,8 +1870,76 @@ def assert_structured_backend_error_codes() -> None:
     assert unknown["recoverable"] is False
 
 
+def assert_release_hardening_diagnostics() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-release-hardening-"))
+    api = make_api(root / "workspace")
+    database = api.handle("database_integrity", {})
+    assert database["ok"] is True
+    assert "review_candidates" in database["tableCounts"]
+
+    repair_preview = api.handle("repair_database_integrity", {"confirm": False})
+    assert repair_preview["value"]["dryRun"] is True
+    assert repair_preview["value"]["before"]["ok"] is True
+
+    storage = api.handle("storage_io_benchmark", {"path": str(root / "workspace"), "sizeMb": 1})
+    assert storage["sizeBytes"] == 1024 * 1024
+    assert "recommendations" in storage
+
+    distribution = api.handle("model_distribution_audit", {})
+    assert distribution["items"]
+    assert any(item["kind"] == "face" and item["sha256"] for item in distribution["items"])
+    assert any(item["kind"] == "safety" for item in distribution["items"])
+
+    readiness = api.handle("release_readiness", {})
+    check_names = {check["name"] for check in readiness["checks"]}
+    assert {"Model license manifest", "Database integrity", "Auto-update"} <= check_names
+
+    benchmark = api.handle("runtime_benchmark", {})
+    assert "storageIo" in benchmark
+    assert benchmark["storageIo"]["sizeBytes"] == 8 * 1024 * 1024
+    state = api.state(preview_create_budget=0)
+    assert state["buildInfo"]["version"]
+    assert state["benchmarkHistory"]
+    assert state["benchmarkHistory"][0]["runId"] == benchmark["runId"]
+
+
+def assert_support_bundle_redaction_is_strict() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-support-redaction-"))
+    workspace = root / "workspace"
+    private_media = root / "private-media" / "family archive"
+    make_face(private_media / "reference-secret.jpg")
+    make_face(private_media / "candidate-secret.png")
+    api = make_api(workspace)
+    api.project.scan_history.append(
+        {
+            "runId": "scan-private",
+            "source": str(private_media),
+            "label": "private-media",
+            "completedAt": "2026-01-01T00:00:00Z",
+            "durationMs": 1,
+            "metrics": {"processed": 2, "added": 0, "safeFiltered": 0},
+        }
+    )
+    api.project.save()
+    support = api.handle("export_support_bundle", {"includePaths": False})
+    support_path = Path(support["value"]["zipPath"])
+    with zipfile.ZipFile(support_path) as archive:
+        names = archive.namelist()
+        forbidden_suffixes = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mov", ".onnx", ".npy", ".npz", ".sqlite3")
+        assert not any(name.lower().endswith(forbidden_suffixes) for name in names)
+        support_text = "\n".join(
+            archive.read(name).decode("utf-8")
+            for name in names
+            if name.endswith(".json")
+        )
+    assert str(private_media.resolve()) not in support_text
+    assert str(workspace.resolve()) not in support_text
+    assert str(Path.home()) not in support_text
+
+
 def main() -> None:
     assert_corrupt_workspace_recovery()
+    assert_corrupt_sqlite_startup_recovery()
     assert_config_round_trip_and_invalid_shape()
     assert_invalid_project_rows_are_skipped()
     assert_command_validation_and_empty_inputs()
@@ -1886,6 +1973,8 @@ def main() -> None:
     assert_vector_store_edges()
     assert_backend_json_rpc_errors()
     assert_structured_backend_error_codes()
+    assert_release_hardening_diagnostics()
+    assert_support_bundle_redaction_is_strict()
     print("edge cases ok")
 
 

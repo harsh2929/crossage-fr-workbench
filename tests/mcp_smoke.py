@@ -39,6 +39,8 @@ EXPECTED_TOOLS = {
     "purge_reviewed_candidates",
     "workspace_health",
     "repair_workspace",
+    "database_integrity",
+    "repair_database_integrity",
     "relink_workspace_paths",
     "duplicate_people",
     "read_audit_events",
@@ -68,8 +70,11 @@ EXPECTED_TOOLS = {
     "export_support_bundle",
     "runtime_self_test",
     "runtime_benchmark",
+    "benchmark_history",
+    "storage_io_benchmark",
     "release_readiness",
     "model_integrity",
+    "model_distribution_audit",
     "installer_self_diagnostics",
     "apply_review_rules",
     "calibration_summary",
@@ -195,6 +200,11 @@ async def smoke() -> None:
             assert {"Workspace write", "Recognition engine", "Image decoder", "Workspace health"} <= check_names
             assert self_test.structuredContent["generatedAt"]
 
+            benchmark_history = await session.call_tool("benchmark_history", {"limit": 2})
+            assert not benchmark_history.isError
+            assert benchmark_history.structuredContent
+            assert "benchmarks" in benchmark_history.structuredContent
+
             installer = await session.call_tool("installer_self_diagnostics", {})
             assert not installer.isError
             assert installer.structuredContent
@@ -315,6 +325,14 @@ async def smoke() -> None:
             assert not repair.isError
             assert repair.structuredContent["repair"]["dryRun"] is True
 
+            database = await session.call_tool("database_integrity", {})
+            assert not database.isError
+            assert database.structuredContent["ok"] is True
+
+            database_repair = await session.call_tool("repair_database_integrity", {})
+            assert not database_repair.isError
+            assert database_repair.structuredContent["repair"]["dryRun"] is True
+
             relink = await session.call_tool("relink_workspace_paths", {"old_root": str(workspace.parent), "new_root": str(workspace.parent)})
             assert not relink.isError
             assert relink.structuredContent["relink"]["dryRun"] is True
@@ -332,6 +350,14 @@ async def smoke() -> None:
             integrity = await session.call_tool("model_integrity", {})
             assert not integrity.isError
             assert integrity.structuredContent["checks"]
+
+            distribution = await session.call_tool("model_distribution_audit", {})
+            assert not distribution.isError
+            assert distribution.structuredContent["items"]
+
+            storage_io = await session.call_tool("storage_io_benchmark", {"path": str(workspace), "size_mb": 1})
+            assert not storage_io.isError
+            assert storage_io.structuredContent["sizeBytes"] == 1024 * 1024
 
             report = await session.read_resource("vintrace://report")
             assert report.contents

@@ -130,6 +130,17 @@ export interface ModelSetupReport {
   recommendation: string;
 }
 
+export interface BuildInfo {
+  name: string;
+  version: string;
+  commit: string;
+  branch: string;
+  buildDate: string;
+  channel: string;
+  packaged: boolean;
+  python?: string;
+}
+
 export interface ModelDownloadProgress {
   pack: string;
   label: string;
@@ -363,6 +374,7 @@ export interface WorkspaceHealth {
   reviewedReadyToPurge: number;
   duplicateGroups: DuplicateCandidateGroup[];
   duplicateCandidateCount: number;
+  databaseIntegrity?: DatabaseIntegrityResult;
   recommendations: string[];
 }
 
@@ -415,6 +427,37 @@ export interface WorkspaceOptimizeResult {
   dbBytesAfter: number;
   dbBytesReclaimed: number;
   totalBytesReclaimed: number;
+}
+
+export interface DatabaseIntegrityResult {
+  generatedAt: string;
+  path: string;
+  exists: boolean;
+  ok: boolean;
+  integrity: string[];
+  foreignKeyErrors: Array<Record<string, unknown>>;
+  tableCounts: Record<string, number>;
+  dbBytes: number;
+  walBytes: number;
+  shmBytes: number;
+  error: string;
+}
+
+export interface DatabaseRepairResult {
+  generatedAt: string;
+  dryRun: boolean;
+  confirmed: boolean;
+  rebuilt: boolean;
+  optimized: WorkspaceOptimizeResult | Record<string, number> | null;
+  snapshot: {
+    generatedAt: string;
+    backupDir: string;
+    files: Array<{ from: string; to: string; bytes: number }>;
+    bytes: number;
+  } | null;
+  before: DatabaseIntegrityResult;
+  after: DatabaseIntegrityResult;
+  recommendations: string[];
 }
 
 export interface StorageBudgetEnforceResult {
@@ -834,6 +877,22 @@ export interface RuntimeBenchmarkResult {
   stateSerializeMs: number;
   stateCandidateWindow?: Record<string, unknown>;
   scale: ScaleSummary;
+  storageIo?: StorageIoBenchmarkResult;
+  recommendations: string[];
+}
+
+export interface StorageIoBenchmarkResult {
+  generatedAt: string;
+  path: string;
+  sizeBytes: number;
+  ok: boolean;
+  writeMs: number;
+  readMs: number;
+  writeMBps: number;
+  readMBps: number;
+  fsyncMs: number;
+  storage: FolderAnalysis["storage"];
+  error: string;
   recommendations: string[];
 }
 
@@ -844,8 +903,34 @@ export interface ReleaseReadinessResult {
   recommendations: string[];
 }
 
+export interface ModelDistributionItem {
+  kind: string;
+  id: string;
+  name: string;
+  source: string;
+  url: string;
+  filename: string;
+  sha256: string;
+  sizeBytes: number;
+  license: string;
+  licenseState: "declared" | "missing" | "needs-review" | string;
+  installed: boolean;
+  archivePath: string;
+  installedPath: string;
+  redistributionReady: boolean;
+}
+
+export interface ModelDistributionAudit {
+  generatedAt: string;
+  ok: boolean;
+  items: ModelDistributionItem[];
+  blockers: ModelDistributionItem[];
+  recommendations: string[];
+}
+
 export interface AppState {
   version: string;
+  buildInfo?: BuildInfo;
   workspace: string;
   consentOnFile: boolean;
   consent?: ConsentSummary;
@@ -861,6 +946,7 @@ export interface AppState {
   };
   scanHistory: ScanRun[];
   scanTotals: ScanTotals;
+  benchmarkHistory?: RuntimeBenchmarkResult[];
   scale?: ScaleSummary;
   calibration?: CalibrationSummary;
   scanJob?: ScanJobStatus;
