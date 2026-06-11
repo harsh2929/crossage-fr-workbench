@@ -9,6 +9,7 @@ import {
   Camera,
   Check,
   ChevronRight,
+  Copy as CopyIcon,
   Crosshair,
   Database,
   Download,
@@ -34,6 +35,7 @@ import {
   Settings,
   ShieldCheck,
   SlidersHorizontal,
+  Scissors,
   Timer,
   Trash2,
   Undo2,
@@ -52,11 +54,15 @@ import type {
   AppState,
   AuditEventsResult,
   CameraSaveResult,
+  CandidateMediaAction,
+  CandidateMediaActionValue,
+  CandidateMediaPreviewValue,
   CandidateStatus,
   CommandResult,
   AccuracyEvaluation,
   AccuracyLabelsExportValue,
   AccuracyLabelsImportValue,
+  AccuracyValidationPackValue,
   AuditLogExportValue,
   ConsentReceiptExportValue,
   DatabaseRepairResult,
@@ -69,6 +75,12 @@ import type {
   DuplicatePeopleResult,
   InstallerDiagnosticsResult,
   MediaBundleExportValue,
+  MediaActionHistoryValue,
+  MediaActionProgress,
+  MediaActionRestoreValue,
+  MediaActionUndoValue,
+  MediaTrashCleanupValue,
+  MediaTrashReportValue,
   ModelDriftReport,
   ModelIntegrityResult,
   ModelDownloadProgress,
@@ -88,6 +100,7 @@ import type {
   SystemIntegration,
   SystemPhotoSource,
   Thresholds,
+  VideoDecoderConfig,
   UpdateChannel,
   ScanHistoryExportValue,
   SupportBundleValue,
@@ -324,6 +337,7 @@ type SettingsDraft = {
   safeModeThreshold: number;
   storageBudgetBytes: number;
   maxMediaFileBytes: number;
+  videoDecoder: VideoDecoderConfig;
   reviewRules: {
     autoRejectBelow: number;
     autoUncertainLowQuality: boolean;
@@ -357,6 +371,11 @@ const defaultScanExclusions = {
   filePaths: []
 };
 
+const defaultVideoDecoder: VideoDecoderConfig = {
+  ffmpegPath: "",
+  ffprobePath: ""
+};
+
 const settingsPresets: SettingsPreset[] = [
   {
     key: "recommended",
@@ -373,6 +392,7 @@ const settingsPresets: SettingsPreset[] = [
       safeModeThreshold: 0.58,
       storageBudgetBytes: 0,
       maxMediaFileBytes: 0,
+      videoDecoder: defaultVideoDecoder,
       reviewRules: { autoRejectBelow: 0, autoUncertainLowQuality: false, autoRejectLowQualityVideo: false },
       scanExclusions: defaultScanExclusions
     }
@@ -392,6 +412,7 @@ const settingsPresets: SettingsPreset[] = [
       safeModeThreshold: 0.45,
       storageBudgetBytes: 0,
       maxMediaFileBytes: 0,
+      videoDecoder: defaultVideoDecoder,
       reviewRules: { autoRejectBelow: 0, autoUncertainLowQuality: false, autoRejectLowQualityVideo: false },
       scanExclusions: defaultScanExclusions
     }
@@ -411,6 +432,7 @@ const settingsPresets: SettingsPreset[] = [
       safeModeThreshold: 0.58,
       storageBudgetBytes: 0,
       maxMediaFileBytes: 0,
+      videoDecoder: defaultVideoDecoder,
       reviewRules: { autoRejectBelow: 0, autoUncertainLowQuality: false, autoRejectLowQualityVideo: false },
       scanExclusions: defaultScanExclusions
     }
@@ -430,6 +452,7 @@ const settingsPresets: SettingsPreset[] = [
       safeModeThreshold: 0.62,
       storageBudgetBytes: 0,
       maxMediaFileBytes: 0,
+      videoDecoder: defaultVideoDecoder,
       reviewRules: { autoRejectBelow: 0, autoUncertainLowQuality: false, autoRejectLowQualityVideo: false },
       scanExclusions: defaultScanExclusions
     }
@@ -907,6 +930,7 @@ function coerceSettingsProfile(incoming: unknown, current: SettingsDraft): Setti
   const thresholds = asRecord(profile.thresholds) ?? {};
   const reviewRules = asRecord(profile.reviewRules) ?? {};
   const scanExclusions = asRecord(profile.scanExclusions) ?? {};
+  const videoDecoder = asRecord(profile.videoDecoder) ?? {};
   return {
     ...current,
     thresholds: {
@@ -923,6 +947,10 @@ function coerceSettingsProfile(incoming: unknown, current: SettingsDraft): Setti
     safeModeThreshold: finiteNumber(profile.safeModeThreshold, current.safeModeThreshold, 0, 1),
     storageBudgetBytes: finiteInteger(profile.storageBudgetBytes, current.storageBudgetBytes, 0, 10 * 1024 * 1024 * 1024 * 1024),
     maxMediaFileBytes: finiteInteger(profile.maxMediaFileBytes, current.maxMediaFileBytes, 0, 1024 * 1024 * 1024 * 1024),
+    videoDecoder: {
+      ffmpegPath: safeText(videoDecoder.ffmpegPath, current.videoDecoder.ffmpegPath),
+      ffprobePath: safeText(videoDecoder.ffprobePath, current.videoDecoder.ffprobePath)
+    },
     reviewRules: {
       autoRejectBelow: finiteNumber(reviewRules.autoRejectBelow, current.reviewRules.autoRejectBelow, 0, 1),
       autoUncertainLowQuality: booleanSetting(reviewRules.autoUncertainLowQuality, current.reviewRules.autoUncertainLowQuality),
@@ -1069,6 +1097,8 @@ function settingsValuesEqual(left: SettingsValues, right: SettingsValues) {
     sameSettingValue(left.safeModeThreshold, right.safeModeThreshold) &&
     left.storageBudgetBytes === right.storageBudgetBytes &&
     left.maxMediaFileBytes === right.maxMediaFileBytes &&
+    left.videoDecoder.ffmpegPath === right.videoDecoder.ffmpegPath &&
+    left.videoDecoder.ffprobePath === right.videoDecoder.ffprobePath &&
     sameSettingValue(left.reviewRules.autoRejectBelow, right.reviewRules.autoRejectBelow) &&
     left.reviewRules.autoUncertainLowQuality === right.reviewRules.autoUncertainLowQuality &&
     left.reviewRules.autoRejectLowQualityVideo === right.reviewRules.autoRejectLowQualityVideo &&
@@ -1265,6 +1295,10 @@ function normalizeAppState(incoming: AppState, previous: AppState | null): AppSt
     safeModeThreshold: finiteNumber(rawConfig.safeModeThreshold, previousConfig?.safeModeThreshold ?? preset.safeModeThreshold, 0, 1),
     storageBudgetBytes: finiteNumber(rawConfig.storageBudgetBytes, previousConfig?.storageBudgetBytes ?? 0, 0),
     maxMediaFileBytes: finiteNumber(rawConfig.maxMediaFileBytes, previousConfig?.maxMediaFileBytes ?? 0, 0),
+    videoDecoder: {
+      ffmpegPath: safeText(asRecord(rawConfig.videoDecoder)?.ffmpegPath, previousConfig?.videoDecoder?.ffmpegPath ?? ""),
+      ffprobePath: safeText(asRecord(rawConfig.videoDecoder)?.ffprobePath, previousConfig?.videoDecoder?.ffprobePath ?? "")
+    },
     reviewRules: {
       autoRejectBelow: finiteNumber(asRecord(rawConfig.reviewRules)?.autoRejectBelow, previousConfig?.reviewRules.autoRejectBelow ?? 0, 0, 1),
       autoUncertainLowQuality: booleanSetting(asRecord(rawConfig.reviewRules)?.autoUncertainLowQuality, previousConfig?.reviewRules.autoUncertainLowQuality ?? false),
@@ -1379,6 +1413,7 @@ export default function App() {
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
   const [localScanMarkers, setLocalScanMarkers] = useState<{ cancelRequested: boolean; paused: boolean } | null>(null);
   const [modelDownloadProgress, setModelDownloadProgress] = useState<ModelDownloadProgress | null>(null);
+  const [mediaActionProgress, setMediaActionProgress] = useState<MediaActionProgress | null>(null);
   const [folderAnalysis, setFolderAnalysis] = useState<FolderAnalysis | null>(null);
   const [savedScanSources, setSavedScanSources] = useState<SavedScanSource[]>([]);
   const [scanQueue, setScanQueue] = useState<ScanQueueItem[]>([]);
@@ -1397,7 +1432,10 @@ export default function App() {
   const [runtimeBenchmark, setRuntimeBenchmark] = useState<RuntimeBenchmarkResult | null>(null);
   const [releaseReadiness, setReleaseReadiness] = useState<ReleaseReadinessResult | null>(null);
   const [accuracyEvaluation, setAccuracyEvaluation] = useState<AccuracyEvaluation | null>(null);
+  const [accuracyValidationPack, setAccuracyValidationPack] = useState<AccuracyValidationPackValue | null>(null);
   const [privacyReport, setPrivacyReport] = useState<PrivacyReport | null>(null);
+  const [mediaTrashReport, setMediaTrashReport] = useState<MediaTrashReportValue | null>(null);
+  const [mediaTrashCleanup, setMediaTrashCleanup] = useState<MediaTrashCleanupValue | null>(null);
   const [retentionPolicy, setRetentionPolicy] = useState<RetentionPolicyReport | null>(null);
   const [modelDriftReport, setModelDriftReport] = useState<ModelDriftReport | null>(null);
   const [watchStatus, setWatchStatus] = useState<FolderWatchStatus>(initialWatchStatus);
@@ -1595,6 +1633,13 @@ export default function App() {
     const unsubscribeProgress = window.crossAge.onScanProgress((event) => {
       if (event.name === "model_download") {
         setModelDownloadProgress(event.payload);
+        return;
+      }
+      if (event.name === "media_action") {
+        setMediaActionProgress(event.payload);
+        if (event.payload.state) {
+          applyState(event.payload.state);
+        }
         return;
       }
       setScanProgress(event.payload);
@@ -1849,6 +1894,7 @@ export default function App() {
       safeModeThreshold: next.config.safeModeThreshold,
       storageBudgetBytes: next.config.storageBudgetBytes ?? 0,
       maxMediaFileBytes: next.config.maxMediaFileBytes ?? 0,
+      videoDecoder: next.config.videoDecoder ?? defaultVideoDecoder,
       reviewRules: next.config.reviewRules ?? {
         autoRejectBelow: 0,
         autoUncertainLowQuality: false,
@@ -2165,6 +2211,18 @@ export default function App() {
     const knownTotal = folderAnalysis && folderAnalysis.folder === scanFolder.trim()
       ? folderAnalysis.imageCount + folderAnalysis.videoCount
       : 0;
+    const readiness = folderAnalysis && folderAnalysis.folder === scanFolder.trim() ? folderAnalysis.readiness : null;
+    if (readiness?.largeScan && readiness.status !== "pass") {
+      if (!readiness.ready) {
+        setNotice({ tone: "warn", text: `Large scan is blocked: ${readiness.blockers[0] || readiness.recommendedAction}` });
+        return;
+      }
+      const proceed = confirmUi("Large scan readiness has warnings. Continue scanning anyway?");
+      if (!proceed) {
+        setNotice({ tone: "warn", text: "Resolve readiness warnings before starting the large scan." });
+        return;
+      }
+    }
     const result = await invoke<CommandResult>("Scanning folder", "scan", {
       folder: scanFolder,
       source: "manual",
@@ -2552,6 +2610,108 @@ export default function App() {
     if (result.value?.jsonPath) {
       await window.crossAge.revealPath(result.value.jsonPath);
     }
+  }
+
+  async function previewCandidateMediaAction(candidateIds: string[], action: CandidateMediaAction, folder?: string, itemOffset = 0, itemLimit = 40) {
+    const ids = [...new Set(candidateIds.filter(Boolean))];
+    if (!ids.length) {
+      setNotice({ tone: "warn", text: "Select possible matches first." });
+      return null;
+    }
+    return invoke<CandidateMediaPreviewValue>("Checking source files", "preview_candidate_media_action", { candidateIds: ids, action, folder: folder || "", itemOffset, itemLimit });
+  }
+
+  async function manageCandidateMedia(candidateIds: string[], action: CandidateMediaAction, folder?: string) {
+    const ids = [...new Set(candidateIds.filter(Boolean))];
+    if (!ids.length) {
+      setNotice({ tone: "warn", text: "Select possible matches first." });
+      return null;
+    }
+    setMediaActionProgress(null);
+    const labels: Record<CandidateMediaAction, string> = {
+      copy: "Copying source media",
+      move: "Moving source media",
+      trash: "Moving source media to app trash"
+    };
+    const result = await invoke<CommandResult<CandidateMediaActionValue>>(labels[action], "manage_candidate_media", { candidateIds: ids, action, folder: folder || "" });
+    const counts = result.value?.counts;
+    const changed = (counts?.copied ?? 0) + (counts?.moved ?? 0) + (counts?.trashed ?? 0);
+    const skipped = counts?.skipped ?? 0;
+    const verb = action === "copy" ? "Copied" : action === "move" ? "Moved" : "Moved to app trash";
+    setNotice({
+      tone: skipped ? "warn" : "ok",
+      text: `${verb} ${changed} source file${changed === 1 ? "" : "s"}${skipped ? `; skipped ${skipped}` : ""}.`
+    });
+    if (result.value?.destinationPath) {
+      await window.crossAge.revealPath(result.value.destinationPath);
+    }
+    return result.value ?? null;
+  }
+
+  async function loadMediaActionHistory() {
+    return invoke<MediaActionHistoryValue>("Loading file action history", "media_action_history", { limit: 20 });
+  }
+
+  async function restoreMediaAction(manifestPath: string) {
+    const result = await invoke<CommandResult<MediaActionRestoreValue>>("Restoring files", "restore_media_action", { manifestPath });
+    const counts = result.value?.counts;
+    setNotice({
+      tone: counts?.restored ? "ok" : "warn",
+      text: counts ? `Restored ${counts.restored} file${counts.restored === 1 ? "" : "s"}${counts.existing ? `; ${counts.existing} already existed` : ""}${counts.missing ? `; ${counts.missing} missing` : ""}.` : "Restore finished."
+    });
+    return result.value ?? null;
+  }
+
+  async function retryMediaAction(manifestPath: string, folder?: string) {
+    const result = await invoke<CommandResult<CandidateMediaActionValue>>("Retrying skipped files", "retry_media_action", { manifestPath, folder: folder || "" });
+    const counts = result.value?.counts;
+    const changed = (counts?.copied ?? 0) + (counts?.moved ?? 0) + (counts?.trashed ?? 0);
+    setNotice({
+      tone: counts?.skipped ? "warn" : "ok",
+      text: counts ? `Retried file action: ${changed} changed, ${counts.skipped} skipped.` : "Retry finished."
+    });
+    return result.value ?? null;
+  }
+
+  async function undoMediaAction(manifestPath?: string) {
+    const result = await invoke<CommandResult<MediaActionUndoValue>>("Undoing file action", "undo_media_action", { manifestPath: manifestPath || "" });
+    const counts = result.value?.counts;
+    setNotice({
+      tone: counts && (counts.restored || counts.removedCopies) ? "ok" : "warn",
+      text: counts ? `Undo complete: ${counts.restored} restored, ${counts.removedCopies} copied file${counts.removedCopies === 1 ? "" : "s"} moved aside, ${counts.skipped + counts.missing + counts.existing} skipped.` : "Undo finished."
+    });
+    return result.value ?? null;
+  }
+
+  async function loadMediaTrashReport() {
+    const report = await invoke<MediaTrashReportValue>("Checking app trash", "media_trash_report");
+    setMediaTrashReport(report);
+    return report;
+  }
+
+  async function cleanupMediaTrash(days: number, dryRun = false) {
+    if (!dryRun && !confirmUi(`Permanently remove files in Vintrace app trash older than ${days} days? Restoring those trash entries will no longer be possible.`)) {
+      return null;
+    }
+    const result = await invoke<CommandResult<MediaTrashCleanupValue>>(dryRun ? "Previewing app trash cleanup" : "Cleaning app trash", "cleanup_media_trash", { days, dryRun });
+    if (result.value) {
+      setMediaTrashCleanup(result.value);
+      await loadMediaTrashReport();
+      const files = result.value.dryRun ? result.value.previewFiles : result.value.deletedFiles;
+      const bytes = result.value.dryRun ? result.value.previewBytes : result.value.deletedBytes;
+      setNotice({ tone: "ok", text: `${result.value.dryRun ? "Cleanup preview" : "App trash cleaned"}: ${files} file${files === 1 ? "" : "s"}, ${formatBytes(bytes)}.` });
+    }
+    return result.value ?? null;
+  }
+
+  async function cancelMediaAction() {
+    const result = await window.crossAge.cancelMediaAction();
+    setNotice(result.cancelled ? { tone: "warn", text: "File action cancellation requested. The current file will finish first." } : { tone: "error", text: "Could not cancel the file action." });
+    return result;
+  }
+
+  async function chooseDestinationFolder() {
+    return window.crossAge.chooseFolder();
   }
 
   async function saveCandidateNote(candidateId: string, note: string) {
@@ -3315,6 +3475,25 @@ export default function App() {
     });
   }
 
+  async function generateAccuracyValidationPack() {
+    const result = await invoke<CommandResult<AccuracyValidationPackValue>>(
+      "Running validation pack",
+      "run_accuracy_validation_pack"
+    );
+    if (result.state) {
+      applyState(result.state);
+    }
+    if (!result.value) {
+      setNotice({ tone: "warn", text: "Validation pack command completed without a result." });
+      return;
+    }
+    setAccuracyValidationPack(result.value);
+    setNotice({
+      tone: result.value.status === "fail" ? "error" : result.value.status === "warn" ? "warn" : "ok",
+      text: `Validation pack ${result.value.status ?? "complete"}: ${result.value.counts.cases} scenario cases.`
+    });
+  }
+
   async function applyCalibration() {
     if (!confirmUi("Apply the current review feedback to the matching levels? You can still change settings afterward.")) return;
     const result = await invoke<CommandResult>("Applying calibration", "apply_calibration");
@@ -3459,6 +3638,7 @@ export default function App() {
       safeModeThreshold: draft.safeModeThreshold,
       storageBudgetBytes: draft.storageBudgetBytes,
       maxMediaFileBytes: draft.maxMediaFileBytes,
+      videoDecoder: draft.videoDecoder,
       reviewRules: draft.reviewRules,
       scanExclusions: draft.scanExclusions
     };
@@ -3950,6 +4130,15 @@ export default function App() {
             reassignCandidatePerson={reassignCandidatePerson}
             addCandidateCalibrationLabel={addCandidateCalibrationLabel}
             exportSelectedCandidates={exportSelectedCandidates}
+            previewCandidateMediaAction={previewCandidateMediaAction}
+            manageCandidateMedia={manageCandidateMedia}
+            loadMediaActionHistory={loadMediaActionHistory}
+            restoreMediaAction={restoreMediaAction}
+            retryMediaAction={retryMediaAction}
+            undoMediaAction={undoMediaAction}
+            cancelMediaAction={cancelMediaAction}
+            chooseDestinationFolder={chooseDestinationFolder}
+            mediaActionProgress={mediaActionProgress}
             saveCandidateNote={saveCandidateNote}
             copyText={copyText}
             revealPath={revealCandidatePath}
@@ -4026,13 +4215,19 @@ export default function App() {
             releaseReadiness={releaseReadiness}
             runReleaseReadiness={runReleaseReadiness}
             accuracyEvaluation={accuracyEvaluation}
+            accuracyValidationPack={accuracyValidationPack}
             runAccuracyEvaluation={runAccuracyEvaluation}
+            generateAccuracyValidationPack={generateAccuracyValidationPack}
             applyCalibration={applyCalibration}
             exportAccuracyLabels={exportAccuracyLabels}
             importAccuracyLabels={importAccuracyLabels}
             privacyReport={privacyReport}
+            mediaTrashReport={mediaTrashReport}
+            mediaTrashCleanup={mediaTrashCleanup}
             retentionPolicy={retentionPolicy}
             loadPrivacyReport={loadPrivacyReport}
+            loadMediaTrashReport={loadMediaTrashReport}
+            cleanupMediaTrash={cleanupMediaTrash}
             deleteFaceData={deleteFaceData}
             exportAcceptedMediaBundle={exportAcceptedMediaBundle}
             performanceMode={performanceChoice}
@@ -4904,6 +5099,7 @@ function ModelSetupCard({
   }, [packages, setup?.currentPack]);
 
   const selected = packages.find((item) => item.pack === selectedPack) ?? packages[0];
+  const governance = selected?.governance ?? setup?.governance;
   const ready = Boolean(setup?.ready) && !setup?.fallbackActive;
   const downloading = Boolean(progress && progress.phase !== "complete" && progress.phase !== "error");
   const percentValue = progress ? Math.max(0, Math.min(100, progress.percent || (progress.totalBytes ? (progress.downloadedBytes / progress.totalBytes) * 100 : 0))) : 0;
@@ -4951,6 +5147,16 @@ function ModelSetupCard({
           <span>Download: {formatBytes(selected.size_bytes)}</span>
           <span>Checksum: SHA-256</span>
           <span>{selected.available ? "Installed" : selected.missing.slice(0, 1).join(", ") || "Ready to download"}</span>
+          {governance && <span>Use: {governance.humanReviewRequired ? "Review-assisted" : "Automated"} • {governance.accuracyTier}</span>}
+          {governance && <span>Release: {governance.redistributionRisk === "needs-license-review" ? "License review needed" : governance.redistributionRisk}</span>}
+        </div>
+      )}
+
+      {governance && (
+        <div className="health-list model-governance-list">
+          <span>{governance.intendedUse}</span>
+          {governance.limitations.slice(0, 2).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+          {governance.validation.slice(0, 1).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
         </div>
       )}
 
@@ -5959,6 +6165,7 @@ function FolderPreflight({ analysis }: { analysis: FolderAnalysis | null }) {
   const mediaCount = analysis.imageCount + analysis.videoCount;
   const issueCount = folderAnalysisIssueCount(analysis);
   const ready = isFolderAnalysisReady(analysis);
+  const readiness = analysis.readiness;
   const metrics = [
     { label: "Media files", value: formatNumber(mediaCount) },
     { label: "Images", value: formatNumber(analysis.imageCount) },
@@ -5981,6 +6188,29 @@ function FolderPreflight({ analysis }: { analysis: FolderAnalysis | null }) {
           <span key={metric.label}><small>{metric.label}</small><strong>{metric.value}</strong></span>
         ))}
       </div>
+      {readiness && (
+        <div className={readiness.status === "pass" ? "scan-readiness-card pass" : readiness.status === "warn" ? "scan-readiness-card warn" : "scan-readiness-card fail"}>
+          <div className="scan-readiness-head">
+            <strong>{readiness.status === "pass" ? "Pre-scan readiness passed" : readiness.status === "warn" ? "Pre-scan readiness warnings" : "Pre-scan readiness blocked"}</strong>
+            <span>{readiness.largeScan ? "Large scan gate" : "Standard scan"}</span>
+          </div>
+          <div className="scan-readiness-grid">
+            {readiness.checks.slice(0, 8).map((check) => (
+              <span key={check.name} className={check.ok ? "ok" : check.severity === "blocker" ? "fail" : "warn"}>
+                {check.ok ? <Check size={14} /> : <AlertCircle size={14} />}
+                <strong>{check.name}</strong>
+                <small>{localizeImperativeText(check.detail)}</small>
+              </span>
+            ))}
+          </div>
+          <div className="eta-detail preflight-eta">
+            <span><strong>{formatDuration(readiness.estimatedTotalSeconds * 1000)}</strong> ETA</span>
+            <span><strong>{formatBytes(readiness.estimatedWorkspaceBytes)}</strong> app data</span>
+            <span><strong>{formatNumber(readiness.mediaCount)}</strong> media files</span>
+            <span><strong>{localizeImperativeText(readiness.recommendedAction)}</strong></span>
+          </div>
+        </div>
+      )}
       {analysis.estimate && (
         <div className="eta-detail preflight-eta">
           <span><strong>{analysis.estimate.label}</strong> expected</span>
@@ -6186,6 +6416,15 @@ function ReviewView(props: {
   reassignCandidatePerson(candidateId: string, personName: string): void | Promise<void>;
   addCandidateCalibrationLabel(candidate: ReviewCandidate, isMatch: boolean): void | Promise<void>;
   exportSelectedCandidates(candidateIds: string[]): void | Promise<void>;
+  previewCandidateMediaAction(candidateIds: string[], action: CandidateMediaAction, folder?: string, itemOffset?: number, itemLimit?: number): Promise<CandidateMediaPreviewValue | null>;
+  manageCandidateMedia(candidateIds: string[], action: CandidateMediaAction, folder?: string): Promise<CandidateMediaActionValue | null>;
+  loadMediaActionHistory(): Promise<MediaActionHistoryValue>;
+  restoreMediaAction(manifestPath: string): Promise<MediaActionRestoreValue | null>;
+  retryMediaAction(manifestPath: string, folder?: string): Promise<CandidateMediaActionValue | null>;
+  undoMediaAction(manifestPath?: string): Promise<MediaActionUndoValue | null>;
+  cancelMediaAction(): Promise<{ cancelled: boolean; path: string }>;
+  chooseDestinationFolder(): Promise<string | null>;
+  mediaActionProgress: MediaActionProgress | null;
   saveCandidateNote(candidateId: string, note: string): void | Promise<void>;
   copyText(text: string, label?: string): void;
   revealPath(candidatePath?: string | null): void | Promise<void>;
@@ -6208,6 +6447,17 @@ function ReviewView(props: {
   const [privacyVeil, setPrivacyVeil] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [savedViews, setSavedViews] = useState<SavedReviewView[]>([]);
+  const [mediaActionDestination, setMediaActionDestination] = useState("");
+  const [mediaActionDestinations, setMediaActionDestinations] = useState<string[]>([]);
+  const [mediaActionPreview, setMediaActionPreview] = useState<{
+    ids: string[];
+    action: CandidateMediaAction;
+    folder: string;
+    offset: number;
+    preview: CandidateMediaPreviewValue;
+  } | null>(null);
+  const [mediaActionHistory, setMediaActionHistory] = useState<MediaActionHistoryValue | null>(null);
+  const [mediaActionHistoryOpen, setMediaActionHistoryOpen] = useState(false);
   const [pagedCandidates, setPagedCandidates] = useState<ReviewCandidate[]>([]);
   const [pagedTotal, setPagedTotal] = useState(0);
   const [pagedLoading, setPagedLoading] = useState(false);
@@ -6231,12 +6481,25 @@ function ReviewView(props: {
 
   useEffect(() => {
     setSavedViews(readSavedReviewViews(props.state.workspace));
+    const key = `vintrace:media-destinations:${props.state.workspace || "default"}`;
+    try {
+      const rows = JSON.parse(window.localStorage.getItem(key) || "[]");
+      setMediaActionDestinations(Array.isArray(rows) ? rows.filter((item) => typeof item === "string").slice(0, 6) : []);
+    } catch {
+      setMediaActionDestinations([]);
+    }
+    setMediaActionDestination("");
+    setMediaActionPreview(null);
   }, [props.state.workspace]);
 
   useEffect(() => {
     setNoteDraft(activeCandidate?.note ?? "");
     setIdentityTarget("");
   }, [activeCandidate?.candidateId, activeCandidate?.note]);
+
+  useEffect(() => {
+    void refreshMediaActionHistory();
+  }, [props.state.workspace]);
 
   const knownPeople = useMemo(() => {
     const people = new Set<string>();
@@ -6650,6 +6913,100 @@ function ReviewView(props: {
     void loadCandidatePage(false);
   }
 
+  function mediaActionLabel(action: CandidateMediaAction) {
+    return action === "copy" ? "Copy files" : action === "move" ? "Move files" : "Move to app trash";
+  }
+
+  function rememberMediaActionDestination(folder: string) {
+    const clean = folder.trim();
+    if (!clean) return;
+    const next = [clean, ...mediaActionDestinations.filter((item) => item !== clean)].slice(0, 6);
+    setMediaActionDestinations(next);
+    try {
+      window.localStorage.setItem(`vintrace:media-destinations:${props.state.workspace || "default"}`, JSON.stringify(next));
+    } catch {
+      // Recent destinations are a convenience only.
+    }
+  }
+
+  async function chooseMediaActionDestination() {
+    const folder = await props.chooseDestinationFolder();
+    if (!folder) return;
+    setMediaActionDestination(folder);
+    rememberMediaActionDestination(folder);
+    if (mediaActionPreview) {
+      await prepareCandidateMediaAction(mediaActionPreview.ids, mediaActionPreview.action, folder, mediaActionPreview.offset);
+    }
+  }
+
+  async function refreshMediaActionHistory() {
+    try {
+      const history = await props.loadMediaActionHistory();
+      setMediaActionHistory(history);
+    } catch {
+      setMediaActionHistory(null);
+    }
+  }
+
+  async function prepareCandidateMediaAction(ids: string[], action: CandidateMediaAction, folderOverride?: string, itemOffset = 0) {
+    const uniqueIds = [...new Set(ids.filter(Boolean))];
+    if (!uniqueIds.length) return;
+    const folder = folderOverride ?? mediaActionDestination.trim();
+    const preview = await props.previewCandidateMediaAction(uniqueIds, action, folder || undefined, itemOffset, 40);
+    if (!preview) return;
+    setMediaActionPreview({ ids: uniqueIds, action, folder, offset: itemOffset, preview });
+  }
+
+  async function executePreparedMediaAction() {
+    if (!mediaActionPreview) return;
+    const { ids, action, folder } = mediaActionPreview;
+    const result = await props.manageCandidateMedia(ids, action, folder || undefined);
+    if (folder) {
+      rememberMediaActionDestination(folder);
+    }
+    setMediaActionPreview(null);
+    if (action !== "copy") {
+      setSelectedIds(new Set());
+      const removed = new Set(ids);
+      setPagedCandidates((current) => current.filter((candidate) => !removed.has(candidate.candidateId)));
+      if (activeCandidate && removed.has(activeCandidate.candidateId)) {
+        const nextCandidate = filteredCandidates.find((candidate) => !removed.has(candidate.candidateId));
+        props.setSelectedCandidateId(nextCandidate?.candidateId ?? null);
+      }
+    }
+    if (result?.counts.skipped) {
+      setMediaActionHistoryOpen(true);
+    }
+    await refreshMediaActionHistory();
+    void loadCandidatePage(false);
+  }
+
+  async function restoreHistoryItem(manifestPath: string) {
+    await props.restoreMediaAction(manifestPath);
+    await refreshMediaActionHistory();
+  }
+
+  async function retryHistoryItem(manifestPath: string) {
+    await props.retryMediaAction(manifestPath);
+    await refreshMediaActionHistory();
+    void loadCandidatePage(false);
+  }
+
+  async function retryHistoryItemToNewDestination(manifestPath: string) {
+    const folder = await props.chooseDestinationFolder();
+    if (!folder) return;
+    await props.retryMediaAction(manifestPath, folder);
+    rememberMediaActionDestination(folder);
+    await refreshMediaActionHistory();
+    void loadCandidatePage(false);
+  }
+
+  async function undoHistoryItem(manifestPath?: string) {
+    await props.undoMediaAction(manifestPath);
+    await refreshMediaActionHistory();
+    void loadCandidatePage(false);
+  }
+
   async function saveActiveNote() {
     if (!activeCandidate) return;
     await props.saveCandidateNote(activeCandidate.candidateId, noteDraft);
@@ -6897,7 +7254,107 @@ function ReviewView(props: {
           <button className="secondary" onClick={() => bulkStatus("rejected")} disabled={!selectedIds.size || props.busy}><X size={16} /><span>Not a match</span></button>
           <button className="secondary" onClick={() => bulkStatus("uncertain")} disabled={!selectedIds.size || props.busy}><AlertCircle size={16} /><span>Not sure</span></button>
           <button className="secondary" onClick={() => props.exportSelectedCandidates([...selectedIds])} disabled={!selectedIds.size || props.busy}><Archive size={16} /><span>Export</span></button>
+          <button className="secondary" onClick={() => void prepareCandidateMediaAction([...selectedIds], "copy")} disabled={!selectedIds.size || props.busy}><CopyIcon size={16} /><span>Copy files</span></button>
+          <button className="secondary" onClick={() => void prepareCandidateMediaAction([...selectedIds], "move")} disabled={!selectedIds.size || props.busy}><Scissors size={16} /><span>Move files</span></button>
+          <button className="secondary danger" onClick={() => void prepareCandidateMediaAction([...selectedIds], "trash")} disabled={!selectedIds.size || props.busy}><Trash2 size={16} /><span>Trash files</span></button>
         </div>
+        {mediaActionPreview && (
+          <div className="media-action-preview" role="region" aria-label="File action preview">
+            <div className="panel-title">
+              {mediaActionPreview.action === "copy" ? <CopyIcon size={18} /> : mediaActionPreview.action === "move" ? <Scissors size={18} /> : <Trash2 size={18} />}
+              <span>{mediaActionLabel(mediaActionPreview.action)}</span>
+              <div className="spacer" />
+              <button className="ghost compact-action" onClick={() => setMediaActionPreview(null)} type="button">
+                <X size={16} />
+                <span>Cancel</span>
+              </button>
+            </div>
+            <div className="media-action-stats">
+              <span><small>Ready</small><strong>{mediaActionPreview.preview.counts.actionable}</strong></span>
+              <span><small>Unique files</small><strong>{mediaActionPreview.preview.counts.uniqueSources}</strong></span>
+              <span><small>Size</small><strong>{formatBytes(mediaActionPreview.preview.counts.totalBytes)}</strong></span>
+              <span><small>Duplicates</small><strong>{mediaActionPreview.preview.counts.duplicateSources}</strong></span>
+              <span><small>Skipped</small><strong>{mediaActionPreview.preview.counts.skipped}</strong></span>
+              <span><small>Review rows</small><strong>{mediaActionPreview.preview.counts.removedCandidatesEstimate}</strong></span>
+            </div>
+            <div className="media-action-destination">
+              <span title={mediaActionPreview.preview.destinationRoot}>
+                <strong>Destination</strong>
+                {mediaActionPreview.folder || "Vintrace managed folder"}
+              </span>
+              <span>
+                <strong>Free space</strong>
+                {mediaActionPreview.preview.storage.freeBytes ? formatBytes(mediaActionPreview.preview.storage.freeBytes) : "Unknown"}
+              </span>
+              <button className="secondary" onClick={() => void chooseMediaActionDestination()} type="button">
+                <FolderOpen size={16} />
+                <span>Choose folder</span>
+              </button>
+              <button className="ghost compact-action" onClick={() => void prepareCandidateMediaAction(mediaActionPreview.ids, mediaActionPreview.action, "", mediaActionPreview.offset)} type="button">
+                Use default
+              </button>
+            </div>
+            {mediaActionDestinations.length > 0 && (
+              <div className="media-action-recents" aria-label="Recent file action destinations">
+                {mediaActionDestinations.slice(0, 4).map((folder) => (
+                  <button key={folder} className="saved-view-chip" onClick={() => void prepareCandidateMediaAction(mediaActionPreview.ids, mediaActionPreview.action, folder, mediaActionPreview.offset)} title={folder} type="button">
+                    {basename(folder)}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="media-action-preview-list">
+              {mediaActionPreview.preview.items.map((item) => (
+                <span key={item.candidateId} className={item.result === "skipped" ? "preview-item skipped" : "preview-item"} title={item.sourcePath}>
+                  <strong>{basename(item.sourcePath)}</strong>
+                  <small>{item.result === "ready" || item.result === "duplicate_source" ? `${formatBytes(item.sizeBytes)} ${item.duplicate ? "duplicate" : ""}` : item.reason || item.result}</small>
+                </span>
+              ))}
+            </div>
+            <div className="media-action-pager">
+              <span>
+                Showing {mediaActionPreview.preview.itemsOffset + 1}-{Math.min(mediaActionPreview.preview.itemsOffset + mediaActionPreview.preview.items.length, mediaActionPreview.preview.itemsTotal)} of {mediaActionPreview.preview.itemsTotal}
+              </span>
+              <button className="ghost compact-action" onClick={() => void prepareCandidateMediaAction(mediaActionPreview.ids, mediaActionPreview.action, mediaActionPreview.folder, Math.max(0, mediaActionPreview.preview.itemsOffset - mediaActionPreview.preview.itemsLimit))} disabled={mediaActionPreview.preview.itemsOffset <= 0} type="button">
+                Previous
+              </button>
+              <button className="ghost compact-action" onClick={() => void prepareCandidateMediaAction(mediaActionPreview.ids, mediaActionPreview.action, mediaActionPreview.folder, mediaActionPreview.preview.itemsOffset + mediaActionPreview.preview.itemsLimit)} disabled={!mediaActionPreview.preview.truncated} type="button">
+                Next
+              </button>
+            </div>
+            {mediaActionPreview.preview.warnings.length > 0 && (
+              <div className="settings-warning">
+                <AlertCircle size={16} />
+                <span>{mediaActionPreview.preview.warnings.join(" ")}</span>
+              </div>
+            )}
+            {mediaActionPreview.preview.counts.skipped > 0 && (
+              <div className="media-action-errors">
+                {mediaActionPreview.preview.items.filter((item) => item.result === "skipped").slice(0, 4).map((item) => (
+                  <span key={item.candidateId} title={item.sourcePath}>
+                    <strong>{basename(item.sourcePath)}</strong>
+                    {item.reason || "Skipped"}
+                  </span>
+                ))}
+              </div>
+            )}
+            {props.mediaActionProgress && props.mediaActionProgress.phase !== "complete" && (
+              <div className="media-action-progress">
+                <progress max={Math.max(1, props.mediaActionProgress.total || 1)} value={props.mediaActionProgress.processed || 0} />
+                <span>{props.mediaActionProgress.processed}/{props.mediaActionProgress.total} files</span>
+                <span>{props.mediaActionProgress.etaMs ? `${formatDuration(Math.round(props.mediaActionProgress.etaMs))} remaining` : "Preparing"}</span>
+                <button className="ghost compact-action danger" onClick={() => void props.cancelMediaAction()} type="button">Cancel</button>
+              </div>
+            )}
+            <div className="button-row">
+              <button className={mediaActionPreview.action === "trash" ? "secondary danger" : "primary"} onClick={() => void executePreparedMediaAction()} disabled={props.busy || mediaActionPreview.preview.counts.actionable === 0} type="button">
+                {mediaActionPreview.action === "copy" ? <CopyIcon size={17} /> : mediaActionPreview.action === "move" ? <Scissors size={17} /> : <Trash2 size={17} />}
+                <span>{mediaActionLabel(mediaActionPreview.action)}</span>
+              </button>
+              <button className="secondary" onClick={() => setMediaActionPreview(null)} type="button">Cancel</button>
+            </div>
+          </div>
+        )}
         {pagedError && (
           <div className="settings-warning" role="alert">
             <AlertCircle size={16} />
@@ -6994,6 +7451,18 @@ function ReviewView(props: {
               <button className="ghost compact-action" onClick={() => props.openPath(candidateMediaPath(activeCandidate))} type="button">
                 <ExternalLink size={16} />
                 <span>Open</span>
+              </button>
+              <button className="ghost compact-action" onClick={() => void prepareCandidateMediaAction([activeCandidate.candidateId], "copy")} disabled={props.busy} type="button">
+                <CopyIcon size={16} />
+                <span>Copy</span>
+              </button>
+              <button className="ghost compact-action" onClick={() => void prepareCandidateMediaAction([activeCandidate.candidateId], "move")} disabled={props.busy} type="button">
+                <Scissors size={16} />
+                <span>Move</span>
+              </button>
+              <button className="ghost compact-action danger" onClick={() => void prepareCandidateMediaAction([activeCandidate.candidateId], "trash")} disabled={props.busy} type="button">
+                <Trash2 size={16} />
+                <span>Trash</span>
               </button>
               <span className={`status ${activeCandidate.status}`}>{reviewStatusLabel(activeCandidate.status)}</span>
             </div>
@@ -7116,6 +7585,92 @@ function ReviewView(props: {
           </>
         ) : (
           <EmptyState icon={ShieldCheck} label="No match selected" detail="Select a possible match to compare it with the saved person photo." />
+        )}
+      </div>
+      <div className="panel media-history-panel">
+        <div className="panel-title">
+          <Archive size={18} />
+          <span>File actions</span>
+          <span className="title-count">{mediaActionHistory?.items.length ?? 0}</span>
+          <div className="spacer" />
+          <button className="ghost compact-action" onClick={() => setMediaActionHistoryOpen((value) => !value)} type="button">
+            <BookOpen size={16} />
+            <span>{mediaActionHistoryOpen ? "Hide" : "History"}</span>
+          </button>
+          <button className="ghost compact-action" onClick={() => void refreshMediaActionHistory()} type="button">
+            <RefreshCcw size={16} />
+            <span>Refresh</span>
+          </button>
+          <button className="ghost compact-action" onClick={() => void undoHistoryItem()} disabled={!mediaActionHistory?.items.some((item) => item.canUndo) || props.busy} type="button">
+            <Undo2 size={16} />
+            <span>Undo last</span>
+          </button>
+        </div>
+        {props.mediaActionProgress && props.mediaActionProgress.phase !== "complete" && (
+          <div className="media-action-progress">
+            <progress max={Math.max(1, props.mediaActionProgress.total || 1)} value={props.mediaActionProgress.processed || 0} />
+            <span>{props.mediaActionProgress.action} {props.mediaActionProgress.processed}/{props.mediaActionProgress.total}</span>
+            <span>{props.mediaActionProgress.etaMs ? `${formatDuration(Math.round(props.mediaActionProgress.etaMs))} remaining` : props.mediaActionProgress.message || "Working"}</span>
+            <button className="ghost compact-action danger" onClick={() => void props.cancelMediaAction()} type="button">Cancel</button>
+          </div>
+        )}
+        {mediaActionHistoryOpen && (
+          <div className="media-history-list">
+            {mediaActionHistory?.items.length ? mediaActionHistory.items.map((item) => (
+              <div className="media-history-row" key={item.manifestPath}>
+                <div>
+                  <strong>{String(item.action || "action")}</strong>
+                  <span>{formatDateTime(item.generatedAt)} • {item.counts.copied + item.counts.moved + item.counts.trashed} changed • {item.counts.skipped} skipped • {item.counts.verified ?? 0} verified</span>
+                  <small title={item.destinationPath}>{item.destinationPath || "Destination unavailable"}</small>
+                  {item.skippedItems.length > 0 && (
+                    <div className="media-action-errors compact-errors">
+                      {item.skippedItems.slice(0, 3).map((skipped) => (
+                        <span key={`${item.manifestPath}:${skipped.candidateId}`} title={skipped.sourcePath}>
+                          <strong>{basename(skipped.sourcePath)}</strong>
+                          {skipped.reason || "Skipped"}
+                          <button className="ghost compact-action" onClick={() => props.revealPath(skipped.sourcePath)} type="button">Source</button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div className="button-row">
+                  <button className="ghost compact-action" onClick={() => props.revealPath(item.destinationPath || item.manifestPath)} disabled={!item.exists} type="button">
+                    <FolderOpen size={16} />
+                    <span>Reveal</span>
+                  </button>
+                  <button className="ghost compact-action" onClick={() => props.revealPath(item.manifestPath)} disabled={!item.exists} type="button">
+                    <FileText size={16} />
+                    <span>Manifest</span>
+                  </button>
+                  {item.canRestore && (
+                    <button className="secondary" onClick={() => void restoreHistoryItem(item.manifestPath)} disabled={!item.exists || props.busy} type="button">
+                      <Undo2 size={16} />
+                      <span>Restore</span>
+                    </button>
+                  )}
+                  {item.canUndo && (
+                    <button className="secondary" onClick={() => void undoHistoryItem(item.manifestPath)} disabled={!item.exists || props.busy} type="button">
+                      <Undo2 size={16} />
+                      <span>Undo</span>
+                    </button>
+                  )}
+                  {item.canRetry && (
+                    <button className="secondary" onClick={() => void retryHistoryItem(item.manifestPath)} disabled={!item.exists || props.busy} type="button">
+                      <RefreshCcw size={16} />
+                      <span>Retry skipped</span>
+                    </button>
+                  )}
+                  {item.canRetry && (
+                    <button className="secondary" onClick={() => void retryHistoryItemToNewDestination(item.manifestPath)} disabled={!item.exists || props.busy} type="button">
+                      <FolderOpen size={16} />
+                      <span>Switch destination</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            )) : <EmptyState icon={Archive} label="No file actions yet" detail="Copy, move, or trash files from selected review rows to build a local action history." />}
+          </div>
         )}
       </div>
     </section>
@@ -7249,13 +7804,19 @@ function SettingsView(props: {
   releaseReadiness: ReleaseReadinessResult | null;
   runReleaseReadiness(): void;
   accuracyEvaluation: AccuracyEvaluation | null;
+  accuracyValidationPack: AccuracyValidationPackValue | null;
   runAccuracyEvaluation(): void;
+  generateAccuracyValidationPack(): void;
   applyCalibration(): void;
   exportAccuracyLabels(): void;
   importAccuracyLabels(text: string): void | Promise<void>;
   privacyReport: PrivacyReport | null;
+  mediaTrashReport: MediaTrashReportValue | null;
+  mediaTrashCleanup: MediaTrashCleanupValue | null;
   retentionPolicy: RetentionPolicyReport | null;
   loadPrivacyReport(): void;
+  loadMediaTrashReport(): void;
+  cleanupMediaTrash(days: number, dryRun?: boolean): void;
   deleteFaceData(includeAudit?: boolean): void;
   exportAcceptedMediaBundle(): void;
   performanceMode: PerformanceChoice;
@@ -7550,6 +8111,14 @@ function SettingsView(props: {
         chooseModelRoot={props.chooseModelRoot}
         downloadModel={props.downloadModel}
       />
+      <VideoDecoderPanel
+        report={props.state.videoDecoder}
+        settings={props.settings}
+        setSettings={props.setSettings}
+        saveSettings={props.saveSettings}
+        copyText={props.copyText}
+        busy={props.busy}
+      />
       <InstallerDiagnosticsPanel
         result={props.installerDiagnostics}
         modelIntegrity={props.modelIntegrity}
@@ -7577,12 +8146,15 @@ function SettingsView(props: {
       <BenchmarkPanel result={props.runtimeBenchmark} history={props.state.benchmarkHistory ?? []} busy={props.busy} runBenchmark={props.runRuntimeBenchmark} />
       <AccuracyLabPanel
         result={props.accuracyEvaluation}
+        validationPack={props.accuracyValidationPack}
         calibration={props.state.calibration}
         busy={props.busy}
         runAccuracyEvaluation={props.runAccuracyEvaluation}
+        generateAccuracyValidationPack={props.generateAccuracyValidationPack}
         applyCalibration={props.applyCalibration}
         exportAccuracyLabels={props.exportAccuracyLabels}
         importAccuracyLabels={props.importAccuracyLabels}
+        copyText={props.copyText}
       />
       <ReviewRulesPanel
         settings={props.settings}
@@ -7659,6 +8231,13 @@ function SettingsView(props: {
         health={props.workspaceHealth}
         busy={props.busy}
         enforceStorageBudget={props.enforceStorageBudget}
+      />
+      <MediaTrashCleanupPanel
+        report={props.mediaTrashReport}
+        cleanup={props.mediaTrashCleanup}
+        busy={props.busy}
+        loadReport={props.loadMediaTrashReport}
+        cleanupTrash={props.cleanupMediaTrash}
       />
       <ScanExclusionsPanel
         settings={props.settings}
@@ -8026,6 +8605,98 @@ function StorageBudgetPanel({
         <button className="secondary" onClick={enforceStorageBudget} disabled={busy || budgetBytes <= 0}>
           <Database size={17} />
           <span>Clean generated cache</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function MediaTrashCleanupPanel({
+  report,
+  cleanup,
+  busy,
+  loadReport,
+  cleanupTrash
+}: {
+  report: MediaTrashReportValue | null;
+  cleanup: MediaTrashCleanupValue | null;
+  busy: boolean;
+  loadReport(): void;
+  cleanupTrash(days: number, dryRun?: boolean): void;
+}) {
+  const [days, setDays] = useState(30);
+  const safeDays = Math.max(0, Math.min(3650, Number.isFinite(days) ? days : 30));
+  const files = report?.counts.files ?? 0;
+  const recoverable = report?.counts.recoverableFiles ?? 0;
+  const bytes = report?.counts.bytes ?? 0;
+  const old30 = report?.counts.olderThanDays?.["30"] ?? 0;
+  const latestActions = report?.actions.slice(0, 3) ?? [];
+  return (
+    <div className="panel settings-panel media-trash-cleanup-panel">
+      <div className="panel-title">
+        <Trash2 size={18} />
+        <span>App trash</span>
+      </div>
+      <p className="compact">Manage only files Vintrace moved into its own trash during review actions. Original folders are never cleaned from here.</p>
+      <div className="media-trash-summary">
+        <span>
+          <small>Files</small>
+          <strong>{formatNumber(files)}</strong>
+        </span>
+        <span>
+          <small>Can restore</small>
+          <strong>{formatNumber(recoverable)}</strong>
+        </span>
+        <span>
+          <small>Size</small>
+          <strong>{formatBytes(bytes)}</strong>
+        </span>
+        <span>
+          <small>30+ days</small>
+          <strong>{formatNumber(old30)}</strong>
+        </span>
+      </div>
+      <label>Clean actions older than
+        <input
+          aria-label="App trash cleanup age in days"
+          type="number"
+          min={0}
+          max={3650}
+          step={1}
+          value={days}
+          onChange={(event) => setDays(Number(event.currentTarget.value))}
+        />
+      </label>
+      {latestActions.length > 0 && (
+        <div className="media-trash-actions" aria-label="Recent app trash actions">
+          {latestActions.map((action) => (
+            <span key={action.manifestPath} title={action.destinationPath}>
+              <strong>{formatNumber(action.recoverableFiles)} recoverable</strong>
+              {formatBytes(action.bytes)} • {Math.round(action.ageDays)} day{Math.round(action.ageDays) === 1 ? "" : "s"} old
+            </span>
+          ))}
+        </div>
+      )}
+      {cleanup && (
+        <div className={cleanup.dryRun ? "settings-warning" : "settings-warning ok"}>
+          <Database size={16} />
+          <span>
+            {cleanup.dryRun ? "Preview" : "Cleaned"} {formatNumber(cleanup.dryRun ? cleanup.previewFiles : cleanup.deletedFiles)} file{(cleanup.dryRun ? cleanup.previewFiles : cleanup.deletedFiles) === 1 ? "" : "s"} ({formatBytes(cleanup.dryRun ? cleanup.previewBytes : cleanup.deletedBytes)}).
+          </span>
+        </div>
+      )}
+      <div className="button-row">
+        <button className="secondary" onClick={loadReport} disabled={busy} type="button">
+          <RefreshCcw size={17} />
+          <span>Check app trash</span>
+        </button>
+        <button className="secondary" onClick={() => cleanupTrash(safeDays, true)} disabled={busy} type="button">
+          <FileText size={17} />
+          <span>Preview cleanup</span>
+        </button>
+        <button className="secondary danger" onClick={() => cleanupTrash(safeDays, false)} disabled={busy} type="button">
+          <Trash2 size={17} />
+          <span>Clean old app trash</span>
         </button>
       </div>
     </div>
@@ -8442,6 +9113,7 @@ function ScaleReadinessPanel({
   const candidateWindow = state.candidateWindow;
   const rows = [
     { label: "Manifest files", value: formatNumber(scale?.manifestFiles ?? 0) },
+    { label: "Hash resume", value: formatNumber(scale?.hashResumeEntries ?? 0) },
     { label: "Safe cache", value: formatNumber(scale?.safetyCacheEntries ?? 0) },
     { label: "Face cache", value: formatNumber(scale?.embeddingCacheEntries ?? 0) },
     { label: "Review index", value: formatNumber(scale?.reviewCandidateRows ?? 0) },
@@ -8461,6 +9133,7 @@ function ScaleReadinessPanel({
       </div>
       <div className="health-list">
         <span>Folder scans stream from disk and write a resumable manifest.</span>
+        <span>Completed files can resume by content hash when timestamps or copied folders change.</span>
         <span>Safe Mode scores are cached by file hash and model version.</span>
         <span>Face detections are cached per model and scan detail for faster repeated passes.</span>
         <span>Review decisions build the local calibration set over time.</span>
@@ -8526,22 +9199,131 @@ function BenchmarkPanel({ result, history, busy, runBenchmark }: { result: Runti
   );
 }
 
+function VideoDecoderPanel({
+  report,
+  settings,
+  setSettings,
+  saveSettings,
+  copyText,
+  busy
+}: {
+  report: AppState["videoDecoder"];
+  settings: SettingsDraft;
+  setSettings(value: SettingsDraft): void;
+  saveSettings(): void;
+  copyText(text: string, label?: string): void;
+  busy: boolean;
+}) {
+  const ready = Boolean(report?.opencvAvailable || report?.ffmpegAvailable);
+  const backend = report?.backend && report.backend !== "unavailable" ? report.backend.toUpperCase() : "Not ready";
+  const ffmpegDisplay = report?.ffmpegPath ? `${basename(report.ffmpegPath)} (${report.ffmpegSource ?? "auto"})` : "Missing";
+  const ffprobeDisplay = report?.ffprobePath ? `${basename(report.ffprobePath)} (${report.ffprobeSource ?? "auto"})` : report?.probeLimited ? "Limited" : "Missing";
+  function updateVideoDecoder(values: Partial<VideoDecoderConfig>) {
+    setSettings({
+      ...settings,
+      mode: "custom",
+      videoDecoder: {
+        ...(settings.videoDecoder ?? defaultVideoDecoder),
+        ...values
+      }
+    });
+  }
+  function resetAutoDetect() {
+    updateVideoDecoder({ ffmpegPath: "", ffprobePath: "" });
+  }
+  function copyInstallHelp() {
+    copyText(
+      [
+        "Vintrace video decoder options",
+        "",
+        "Managed dependency used by packaged builds:",
+        "python -m pip install imageio-ffmpeg",
+        "",
+        "Optional full metadata support:",
+        "macOS: brew install ffmpeg",
+        "Windows: install a trusted FFmpeg build, then set ffmpeg.exe and ffprobe.exe paths in Settings."
+      ].join("\n"),
+      "Video decoder setup"
+    );
+  }
+  return (
+    <div className={ready ? "panel settings-panel runtime-test-panel ok" : "panel settings-panel runtime-test-panel warn"}>
+      <div className="panel-title"><Video size={18} /> Video decoder</div>
+      <div className="workspace-health-grid">
+        <span><small>Active path</small><strong>{backend}</strong></span>
+        <span><small>Managed FFmpeg</small><strong>{report?.managedPackageAvailable ? "Ready" : "Missing"}</strong></span>
+        <span><small>FFmpeg</small><strong title={report?.ffmpegPath || ""}>{ffmpegDisplay}</strong></span>
+        <span><small>Metadata</small><strong title={report?.ffprobePath || ""}>{ffprobeDisplay}</strong></span>
+      </div>
+      <div className="health-list">
+        {(report?.recommendations?.length ? report.recommendations : [ready ? "Video decoding is available for scans." : "Install managed FFmpeg or choose a local FFmpeg binary."]).slice(0, 3).map((item) => (
+          <span key={item}>{item}</span>
+        ))}
+      </div>
+      <details className="accuracy-import">
+        <summary>Manual decoder paths</summary>
+        <div className="advanced-settings">
+          <label>FFmpeg binary
+            <input
+              type="text"
+              value={settings.videoDecoder.ffmpegPath}
+              onChange={(event) => updateVideoDecoder({ ffmpegPath: event.currentTarget.value })}
+              placeholder="/path/to/ffmpeg"
+              spellCheck={false}
+            />
+          </label>
+          <label>FFprobe binary
+            <input
+              type="text"
+              value={settings.videoDecoder.ffprobePath}
+              onChange={(event) => updateVideoDecoder({ ffprobePath: event.currentTarget.value })}
+              placeholder="/path/to/ffprobe"
+              spellCheck={false}
+            />
+          </label>
+        </div>
+        <div className="button-row">
+          <button className="secondary" onClick={saveSettings} disabled={busy} type="button">
+            <Save size={17} />
+            <span>Save decoder</span>
+          </button>
+          <button className="ghost compact-action" onClick={resetAutoDetect} type="button">
+            <RefreshCcw size={16} />
+            <span>Auto-detect</span>
+          </button>
+          <button className="ghost compact-action" onClick={copyInstallHelp} type="button">
+            <Download size={16} />
+            <span>Setup help</span>
+          </button>
+        </div>
+      </details>
+      {report?.licenseNote && <small className="compact">{report.licenseNote}</small>}
+    </div>
+  );
+}
+
 function AccuracyLabPanel({
   result,
+  validationPack,
   calibration,
   busy,
   runAccuracyEvaluation,
+  generateAccuracyValidationPack,
   applyCalibration,
   exportAccuracyLabels,
-  importAccuracyLabels
+  importAccuracyLabels,
+  copyText
 }: {
   result: AccuracyEvaluation | null;
+  validationPack: AccuracyValidationPackValue | null;
   calibration: AppState["calibration"];
   busy: boolean;
   runAccuracyEvaluation(): void;
+  generateAccuracyValidationPack(): void;
   applyCalibration(): void;
   exportAccuracyLabels(): void;
   importAccuracyLabels(text: string): void | Promise<void>;
+  copyText(text: string, label?: string): void;
 }) {
   const [importText, setImportText] = useState("");
   const likely = result?.metrics.likely;
@@ -8584,7 +9366,46 @@ function AccuracyLabPanel({
           <Archive size={17} />
           <span>Export labels</span>
         </button>
+        <button className="secondary" onClick={generateAccuracyValidationPack} disabled={busy}>
+          <Crosshair size={17} />
+          <span>Create validation pack</span>
+        </button>
       </div>
+      {validationPack && (
+        <div className="validation-pack-card">
+          <div className="workspace-health-grid">
+            <span><small>Status</small><strong>{validationPack.status ?? "complete"}</strong></span>
+            <span><small>Cases</small><strong>{formatNumber(validationPack.counts.cases)}</strong></span>
+            <span><small>Matches</small><strong>{formatNumber(validationPack.counts.matches)}</strong></span>
+            <span><small>Non-matches</small><strong>{formatNumber(validationPack.counts.nonMatches)}</strong></span>
+            <span><small>Likely precision</small><strong>{percent(validationPack.metrics.likely?.precision ?? 0)}</strong></span>
+          </div>
+          {validationPack.scenarioResults?.length ? (
+            <div className="validation-scenario-grid">
+              {validationPack.scenarioResults.map((item) => (
+                <span key={item.scenario} className={item.status === "pass" ? "ok" : item.status === "warn" ? "warn" : "fail"}>
+                  {item.status === "pass" ? <Check size={14} /> : <AlertCircle size={14} />}
+                  <strong>{item.scenario}</strong>
+                  <small>{item.status} · {item.score.toFixed(2)}</small>
+                </span>
+              ))}
+            </div>
+          ) : null}
+          <div className="health-list">
+            {validationPack.recommendations.slice(0, 2).map((item) => <span key={item}>{item}</span>)}
+          </div>
+          <div className="button-row">
+            <button className="ghost compact-action" onClick={() => copyText(validationPack.manifestPath, "Validation manifest path")} type="button">
+              <Archive size={16} />
+              <span>Copy manifest path</span>
+            </button>
+            <button className="ghost compact-action" onClick={() => copyText(validationPack.scenarios.join(", "), "Validation scenarios")} type="button">
+              <BookOpen size={16} />
+              <span>Copy scenarios</span>
+            </button>
+          </div>
+        </div>
+      )}
       <details className="accuracy-import">
         <summary>Import label JSON</summary>
         <label className="diagnostics-json-label">

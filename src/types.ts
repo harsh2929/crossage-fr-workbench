@@ -45,6 +45,53 @@ export interface ScanExclusions {
   filePaths: string[];
 }
 
+export interface ReadinessCheck {
+  name: string;
+  ok: boolean;
+  severity: "blocker" | "warning" | "info" | string;
+  detail: string;
+  value?: unknown;
+}
+
+export interface ScanReadiness {
+  generatedAt: string;
+  ready: boolean;
+  status: "pass" | "warn" | "fail" | string;
+  largeScan: boolean;
+  checks: ReadinessCheck[];
+  blockers: string[];
+  warnings: string[];
+  estimatedTotalSeconds: number;
+  estimatedWorkspaceBytes: number;
+  mediaCount: number;
+  recommendedAction: string;
+}
+
+export interface VideoDecoderConfig {
+  ffmpegPath: string;
+  ffprobePath: string;
+}
+
+export interface VideoDecoderReport {
+  extensions: string[];
+  opencvAvailable: boolean;
+  ffmpegAvailable: boolean;
+  ffprobeAvailable?: boolean;
+  ffmpegPath?: string;
+  ffprobePath?: string;
+  ffmpegSource?: string;
+  ffprobeSource?: string;
+  managedPackage?: string;
+  managedPackageAvailable?: boolean;
+  configuredFfmpegPath?: string;
+  configuredFfprobePath?: string;
+  backend: string;
+  probeLimited?: boolean;
+  fallbackOrder?: string[];
+  licenseNote?: string;
+  recommendations?: string[];
+}
+
 export interface AppConfig {
   modelPack?: string;
   modelRoot?: string;
@@ -62,6 +109,7 @@ export interface AppConfig {
   safeModeThreshold: number;
   storageBudgetBytes: number;
   maxMediaFileBytes: number;
+  videoDecoder?: VideoDecoderConfig;
   reviewRules: ReviewRules;
   scanExclusions: ScanExclusions;
   reviewOnly: boolean;
@@ -116,6 +164,16 @@ export interface ModelPackageStatus {
   missing: string[];
   downloadedArchive: boolean;
   installedBytes: number;
+  governance?: ModelGovernance;
+}
+
+export interface ModelGovernance {
+  accuracyTier: string;
+  intendedUse: string;
+  humanReviewRequired: boolean;
+  redistributionRisk: string;
+  limitations: string[];
+  validation: string[];
 }
 
 export interface ModelSetupReport {
@@ -125,6 +183,7 @@ export interface ModelSetupReport {
   modelRoot: string;
   defaultRoot: string;
   engine: string;
+  governance?: ModelGovernance;
   packages: ModelPackageStatus[];
   offlineMessage: string;
   recommendation: string;
@@ -223,6 +282,7 @@ export interface ScanMetrics {
   pausedSeconds?: number;
   resumed?: number;
   manifestSkipped?: number;
+  hashResumeSkipped?: number;
   embeddingCacheHits?: number;
   embeddingCacheMisses?: number;
   twoPassVerified?: number;
@@ -278,6 +338,7 @@ export interface FolderAnalysis {
   videoSamples: string[];
   extensionCounts?: Record<string, number>;
   recommendations: string[];
+  readiness?: ScanReadiness;
   decoder?: {
     extensions: string[];
     pillow: string[];
@@ -286,11 +347,7 @@ export interface FolderAnalysis {
     heifAvailable: boolean;
     rawAvailable: boolean;
   };
-  videoDecoder?: {
-    extensions: string[];
-    opencvAvailable: boolean;
-    backend: string;
-  };
+  videoDecoder?: VideoDecoderReport;
   storage?: {
     path: string;
     exists: boolean;
@@ -343,6 +400,171 @@ export interface MediaBundleExportValue {
     copied: number;
     missing: number;
   };
+}
+
+export type CandidateMediaAction = "copy" | "move" | "trash";
+
+export interface CandidateMediaActionValue {
+  action: CandidateMediaAction;
+  destinationPath: string;
+  mediaPath: string;
+  manifestPath: string;
+  counts: {
+    selected: number;
+    copied: number;
+    moved: number;
+    trashed: number;
+    skipped: number;
+    removedCandidates: number;
+    cancelled?: boolean;
+    verified?: number;
+    verificationFailed?: number;
+  };
+  items: Array<{
+    candidateId: string;
+    personName: string;
+    sourcePath: string;
+    targetPath: string;
+    action: CandidateMediaAction;
+    result: string;
+    reason?: string;
+    sourceSizeBytes?: number;
+    targetSizeBytes?: number;
+    verified?: boolean;
+    verifyStatus?: string;
+  }>;
+}
+
+export interface CandidateMediaPreviewValue {
+  action: CandidateMediaAction;
+  destinationRoot: string;
+  counts: {
+    selected: number;
+    actionable: number;
+    uniqueSources: number;
+    duplicateSources: number;
+    missing: number;
+    symlinks: number;
+    protectedReferences: number;
+    generatedFiles: number;
+    skipped: number;
+    removedCandidatesEstimate: number;
+    totalBytes: number;
+  };
+  storage: {
+    path: string;
+    freeBytes: number;
+    totalBytes: number;
+  };
+  warnings: string[];
+  items: Array<{
+    candidateId: string;
+    personName: string;
+    sourcePath: string;
+    mediaKind: string;
+    sizeBytes: number;
+    duplicate: boolean;
+    result: string;
+    reason?: string;
+  }>;
+  itemsOffset: number;
+  itemsLimit: number;
+  itemsTotal: number;
+  truncated: boolean;
+}
+
+export interface MediaActionHistoryValue {
+  items: Array<{
+    manifestPath: string;
+    generatedAt: string;
+    action: CandidateMediaAction | string;
+    destinationPath: string;
+    mediaPath: string;
+    counts: CandidateMediaActionValue["counts"];
+    exists: boolean;
+    canRestore: boolean;
+    canUndo: boolean;
+    canRetry: boolean;
+    skippedItems: CandidateMediaActionValue["items"];
+  }>;
+  total: number;
+}
+
+export interface MediaActionRestoreValue {
+  manifestPath: string;
+  counts: {
+    restored: number;
+    missing: number;
+    existing: number;
+    skipped: number;
+  };
+  items: Array<Record<string, unknown>>;
+}
+
+export interface MediaActionUndoValue {
+  manifestPath: string;
+  undoManifestPath: string;
+  undoPath: string;
+  counts: {
+    restored: number;
+    removedCopies: number;
+    missing: number;
+    existing: number;
+    skipped: number;
+  };
+  items: Array<Record<string, unknown>>;
+}
+
+export interface MediaTrashReportValue {
+  generatedAt: string;
+  trashPath: string;
+  counts: {
+    actions: number;
+    files: number;
+    recoverableFiles: number;
+    bytes: number;
+    olderThanDays: Record<string, number>;
+  };
+  actions: Array<{
+    manifestPath: string;
+    destinationPath: string;
+    generatedAt: string;
+    ageDays: number;
+    files: number;
+    recoverableFiles: number;
+    bytes: number;
+  }>;
+}
+
+export interface MediaTrashCleanupValue {
+  generatedAt: string;
+  dryRun: boolean;
+  days: number;
+  deletedDirs: number;
+  deletedFiles: number;
+  deletedBytes: number;
+  previewDirs: number;
+  previewFiles: number;
+  previewBytes: number;
+  targets: Array<{ path: string; files: number; bytes: number }>;
+}
+
+export interface MediaActionProgress {
+  phase: "started" | "processing" | "complete" | "cancelled" | "error" | string;
+  action: CandidateMediaAction | string;
+  processed: number;
+  total: number;
+  currentPath?: string;
+  message?: string;
+  destinationPath?: string;
+  elapsedMs?: number;
+  etaMs?: number | null;
+  copied?: number;
+  moved?: number;
+  trashed?: number;
+  skipped?: number;
+  removedCandidates?: number;
+  state?: AppState;
 }
 
 export interface DuplicateCandidateGroup {
@@ -712,6 +934,7 @@ export interface ScaleSummary {
   dbBytes: number;
   scanRuns: number;
   manifestFiles: number;
+  hashResumeEntries?: number;
   safetyCacheEntries: number;
   embeddingCacheEntries?: number;
   reviewCandidateRows?: number;
@@ -765,6 +988,66 @@ export interface AccuracyLabelsImportValue {
   imported: number;
   skipped: number;
   summary: CalibrationSummary;
+}
+
+export interface AccuracyValidationPackValue {
+  packPath: string;
+  manifestPath: string;
+  labelsJsonPath: string;
+  labelsCsvPath: string;
+  counts: {
+    cases: number;
+    matches: number;
+    nonMatches: number;
+  };
+  scenarios: string[];
+  metrics: Record<string, AccuracyBucket>;
+  segments: Record<string, AccuracyBucket>;
+  recommendations: string[];
+  runId?: string;
+  status?: "pass" | "warn" | "fail" | string;
+  passed?: number;
+  warned?: number;
+  failed?: number;
+  scenarioResults?: AccuracyValidationScenarioResult[];
+  validation?: AccuracyValidationRun;
+  history?: AccuracyValidationRun[];
+  importResult?: AccuracyLabelsImportValue | null;
+}
+
+export interface AccuracyValidationScenarioResult {
+  scenario: string;
+  status: "pass" | "warn" | "fail" | string;
+  expectedMatch: boolean;
+  score: number;
+  likelyThreshold: number;
+  reviewMoreThreshold: number;
+  difficulty: string;
+  mediaKind: string;
+  detail: string;
+}
+
+export interface AccuracyValidationRun {
+  runId: string;
+  generatedAt: string;
+  status: "pass" | "warn" | "fail" | string;
+  passed: number;
+  warned: number;
+  failed: number;
+  scenarioResults: AccuracyValidationScenarioResult[];
+  thresholds: Record<string, number>;
+  metrics: Record<string, AccuracyBucket>;
+  segments: Record<string, AccuracyBucket>;
+  counts: {
+    cases: number;
+    matches: number;
+    nonMatches: number;
+  };
+  packPath: string;
+  manifestPath: string;
+  labelsJsonPath: string;
+  labelsCsvPath: string;
+  recommendations: string[];
 }
 
 export interface CandidateQueryResult {
@@ -917,6 +1200,11 @@ export interface ModelDistributionItem {
   installed: boolean;
   archivePath: string;
   installedPath: string;
+  accuracyTier?: string;
+  humanReviewRequired?: boolean;
+  redistributionRisk?: string;
+  limitations?: string[];
+  validation?: string[];
   redistributionReady: boolean;
 }
 
@@ -955,6 +1243,7 @@ export interface AppState {
   config: AppConfig;
   safeModeModel?: SafeModeModelReport;
   modelSetup?: ModelSetupReport;
+  videoDecoder?: VideoDecoderReport;
   references: ReferenceFace[];
   candidates: ReviewCandidate[];
   candidateWindow?: {
@@ -1006,6 +1295,12 @@ export interface ModelDownloadProgressEvent {
   id: number;
   name: "model_download";
   payload: ModelDownloadProgress;
+}
+
+export interface MediaActionProgressEvent {
+  id: number;
+  name: "media_action";
+  payload: MediaActionProgress;
 }
 
 export interface BackendStartupEvent {
@@ -1154,6 +1449,7 @@ export interface CrossAgeApi {
   chooseFolder(): Promise<string | null>;
   saveCameraFrame(dataUrl: string): Promise<CameraSaveResult>;
   cancelScan(): Promise<{ cancelled: boolean; path: string }>;
+  cancelMediaAction(): Promise<{ cancelled: boolean; path: string }>;
   pauseScan(): Promise<{ paused: boolean; path: string }>;
   resumeScan(): Promise<{ paused: boolean; path: string }>;
   getScanMarkerStatus(): Promise<{ workspace: string; cancelRequested: boolean; paused: boolean; cancelPath: string; pausePath: string }>;
@@ -1183,7 +1479,7 @@ export interface CrossAgeApi {
   setAppLanguage(language: string): Promise<boolean>;
   onAppCommand(callback: (command: AppCommand) => void): () => void;
   onExternalOpen(callback: (payload: ExternalOpenPayload) => void): () => void;
-  onScanProgress(callback: (event: ScanProgressEvent | ModelDownloadProgressEvent) => void): () => void;
+  onScanProgress(callback: (event: ScanProgressEvent | ModelDownloadProgressEvent | MediaActionProgressEvent) => void): () => void;
   onBackendStartup(callback: (event: BackendStartupEvent) => void): () => void;
   onFolderWatch(callback: (status: FolderWatchStatus) => void): () => void;
   onBackendError(callback: (message: string) => void): () => void;

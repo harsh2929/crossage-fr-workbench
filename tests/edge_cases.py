@@ -18,8 +18,8 @@ from crossage_fr.enroll import manager as manager_module
 from crossage_fr.enroll import ProjectState
 from crossage_fr.ingest.image_io import ImageLoadError, load_image, sha256_file
 from crossage_fr.ingest.safety import SafetyAssessment
-from crossage_fr.ingest.video_io import VideoFrameSample
-from crossage_fr.model_manager import MODEL_PACKAGES, ModelPackageSpec, download_model_pack
+from crossage_fr.ingest.video_io import VideoFrameSample, probe_video, sample_video_frames, video_decoder_report
+from crossage_fr.model_manager import MODEL_PACKAGES, ModelPackageSpec, download_model_pack, model_governance, model_status
 from crossage_fr.models import EmbeddingResult, ReferenceFace, ReviewCandidate
 from crossage_fr.store import VectorStore
 from crossage_fr.store.workspace_db import path_signature
@@ -442,6 +442,14 @@ def assert_static_app_contracts() -> None:
         "export_report",
         "export_workspace_backup",
         "export_candidates",
+        "preview_candidate_media_action",
+        "manage_candidate_media",
+        "media_action_history",
+        "restore_media_action",
+        "retry_media_action",
+        "undo_media_action",
+        "media_trash_report",
+        "cleanup_media_trash",
         "export_media_bundle",
         "export_consent_receipt",
         "retention_policy_report",
@@ -457,6 +465,9 @@ def assert_static_app_contracts() -> None:
         "installer_self_diagnostics",
         "calibration_summary",
         "accuracy_evaluation",
+        "generate_accuracy_validation_pack",
+        "run_accuracy_validation_pack",
+        "accuracy_validation_history",
         "apply_calibration",
         "export_accuracy_labels",
         "import_accuracy_labels",
@@ -487,6 +498,12 @@ def assert_static_app_contracts() -> None:
     assert "repairDatabaseIntegrity" in app_tsx
     assert "Storage write" in app_tsx
     assert "Saving storage limit" in app_tsx
+    assert "Undo last" in app_tsx
+    assert "Switch destination" in app_tsx
+    assert "Check app trash" in app_tsx
+    assert "Preview cleanup" in app_tsx
+    assert "Clean old app trash" in app_tsx
+    assert "media-action-preview-list" in app_tsx
     assert "Saving review rules" in app_tsx
     assert "acceptedMediaAvailable" in app_tsx
     assert "Delete face data and history" in app_tsx
@@ -957,6 +974,8 @@ def assert_scan_exclusions_are_honored() -> None:
     assert analysis["storage"]["isDirectory"] is True
     assert "volumeKind" in analysis["storage"]
     assert "storage" in analysis["plan"]
+    assert analysis["readiness"]["ready"] is True
+    assert any(check["name"] == "Video decoder" for check in analysis["readiness"]["checks"])
     assert analysis["transientErrorCount"] == 0
     bounded_analysis = api.handle("analyze_folder", {"folder": str(scan), "maxEntries": 1, "timeBudgetMs": 1000})
     assert bounded_analysis["truncated"] is True
@@ -1128,6 +1147,23 @@ def assert_scan_cancel_and_resume_manifest() -> None:
     assert added2 >= 0
 
 
+def assert_vector_store_persists_reference_index() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-vector-store-"))
+    index_path = root / "vectors.npz"
+    store = VectorStore()
+    first = [1.0] + [0.0] * 511
+    second = [0.0, 1.0] + [0.0] * 510
+    store.add("one", first)
+    store.add("two", second)
+    saved = store.save(index_path)
+    assert saved["ok"] is True
+    restored = VectorStore()
+    assert restored.load(index_path, expected_ids={"one", "two"}) is True
+    hits = restored.search(first, k=1)
+    assert hits and hits[0].item_id == "one"
+    assert restored.load(index_path, expected_ids={"missing"}) is False
+
+
 def assert_stale_candidate_manifest_is_reprocessed() -> None:
     root = Path(tempfile.mkdtemp(prefix="crossage-edge-stale-manifest-"))
     scan = root / "scan"
@@ -1178,6 +1214,139 @@ def assert_stale_candidate_manifest_is_reprocessed() -> None:
     assert added2 == 1
     assert len(project.candidates) == 1
 
+    stat = candidate_path.stat()
+    os.utime(candidate_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+    added3, errors3, metrics3 = project.scan_paths(
+        [candidate_path],
+        StaticUnmatchedEngine(),
+        total=1,
+        source="manual",
+        label="stale-suite",
+        resume=True,
+    )
+    assert errors3 == []
+    assert added3 == 0
+    assert metrics3["resumed"] == 1
+    assert metrics3["manifestSkipped"] == 1
+    assert metrics3["hashResumeSkipped"] == 1
+
+
+def assert_video_decoder_fallback_metadata() -> None:
+    report = video_decoder_report()
+    assert "opencvAvailable" in report
+    assert "ffmpegAvailable" in report
+    assert "managedPackageAvailable" in report
+    assert "ffmpegSource" in report
+    assert "probeLimited" in report
+    assert "fallbackOrder" in report
+    assert report["backend"] in {"opencv", "ffmpeg", "unavailable"}
+
+
+def make_tiny_video(path: Path) -> bool:
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    codecs = ["mp4v", "avc1", "MJPG", "XVID"]
+    if path.suffix.lower() == ".webm":
+        codecs = ["VP80", "VP90", *codecs]
+    for codec in codecs:
+        try:
+            fourcc = cv2.VideoWriter_fourcc(*codec)
+            writer = cv2.VideoWriter(str(path), fourcc, 6.0, (64, 64))
+            if not writer.isOpened():
+                writer.release()
+                continue
+            for index in range(8):
+                frame = np.zeros((64, 64, 3), dtype=np.uint8)
+                frame[:, :, 0] = 20 + index * 12
+                frame[:, :, 1] = 80
+                frame[:, :, 2] = 180 - index * 8
+                cv2.putText(frame, str(index), (18, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                writer.write(frame)
+            writer.release()
+            if path.exists() and path.stat().st_size > 0:
+                return True
+        except Exception:
+            try:
+                writer.release()
+            except Exception:
+                pass
+    return False
+
+
+def assert_synthetic_video_decoder_suite() -> None:
+    with tempfile.TemporaryDirectory() as temp_name:
+        root = Path(temp_name)
+        video_path = root / "fixture.mp4"
+        assert make_tiny_video(video_path), "OpenCV could not create a synthetic MP4 fixture."
+        output_root = root / "frames"
+        probe = probe_video(video_path)
+        assert probe["readable"] is True
+        samples = sample_video_frames(video_path, output_root, max_frames=3, interval_seconds=0.25)
+        assert samples
+        assert all(sample.path.exists() for sample in samples)
+        alias_successes = 0
+        for suffix in (".mov", ".webm"):
+            alias = root / f"fixture{suffix}"
+            shutil.copy2(video_path, alias)
+            try:
+                alias_samples = sample_video_frames(alias, output_root, max_frames=1, interval_seconds=0.25)
+            except Exception:
+                continue
+            if alias_samples:
+                alias_successes += 1
+        assert alias_successes >= 1, "No MOV/WebM-style video alias could be decoded."
+
+
+def assert_accuracy_validation_pack() -> None:
+    with tempfile.TemporaryDirectory() as temp_name:
+        project = ProjectState(Path(temp_name) / "workspace")
+        result = project.generate_accuracy_validation_pack()
+        expected = {"cross-age", "low-light", "video-frame", "side-profile", "occlusion", "family-lookalike"}
+        assert set(result["scenarios"]) == expected
+        assert result["counts"]["cases"] == 6
+        assert Path(result["manifestPath"]).exists()
+        assert Path(result["labelsJsonPath"]).exists()
+        assert Path(result["labelsCsvPath"]).exists()
+        assert result["metrics"]["likely"]["labeled"] == 6
+        manifest = json.loads(Path(result["manifestPath"]).read_text(encoding="utf-8"))
+        assert len(manifest["labels"]) == 6
+        assert set(manifest["segments"]) == expected
+        run = project.run_accuracy_validation_pack()
+        assert run["status"] == "pass"
+        assert run["passed"] == 6
+        assert len(run["scenarioResults"]) == 6
+        history = project.accuracy_validation_history()
+        assert history and history[0]["runId"] == run["runId"]
+
+
+def assert_model_governance_metadata() -> None:
+    config = RuntimeConfig()
+    status = model_status(config, "local-image-fingerprint")
+    assert status["governance"]["humanReviewRequired"] is True
+    assert status["packages"][0]["governance"]["limitations"]
+    governance = model_governance(config.model_pack)
+    assert governance["redistributionRisk"]
+
+
+def assert_package_artifact_checker() -> None:
+    root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        ["node", str(root / "desktop" / "scripts" / "check-package-artifacts.cjs")],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    payload = json.loads(completed.stdout)
+    assert payload["ok"] is True
+    assert any(check["name"] == "backend resources configured" for check in payload["checks"])
+
 
 def assert_operational_use_case_commands() -> None:
     root = Path(tempfile.mkdtemp(prefix="crossage-edge-usecases-"))
@@ -1197,6 +1366,8 @@ def assert_operational_use_case_commands() -> None:
     assert preflight["plan"]["resumable"] is True
     assert preflight["plan"]["mediaCount"] == 1
     assert preflight["plan"]["estimatedWorkspaceBytes"] > 0
+    assert preflight["readiness"]["ready"] is False
+    assert any("Add at least one person" in item for item in preflight["readiness"]["blockers"])
 
     api.handle("set_consent", {"value": True})
     assert api.handle("enroll", {"personName": "Person", "folder": str(refs)})["added"] == 1
@@ -1563,6 +1734,172 @@ def assert_operational_use_case_commands() -> None:
     expect_raises(KeyError, lambda: api.handle("delete_person", {"personName": "Person Prime"}), "Person")
 
 
+def assert_candidate_media_actions() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-media-actions-"))
+    workspace = root / "workspace"
+    media = root / "media"
+    api = make_api(workspace)
+
+    def add_candidate(candidate_id: str, source: Path, person: str = "Person") -> None:
+        api.project.candidates[candidate_id] = ReviewCandidate(
+            candidate_id=candidate_id,
+            source_path=str(source),
+            person_name=person,
+            best_ref_id=None,
+            best_ref_path=None,
+            score=0.91,
+            band="confident",
+            quality=0.86,
+            model_name="test",
+            source_hash=sha256_file(source),
+        )
+
+    copy_source = media / "copy-source.jpg"
+    copy_source_b = media / "copy-source-b.jpg"
+    make_face(copy_source)
+    make_face(copy_source_b, shirt=(70, 100, 140))
+    add_candidate("cand_copy", copy_source)
+    add_candidate("cand_copy_b", copy_source_b)
+    api.project.save()
+    preview = api.handle("preview_candidate_media_action", {"candidateIds": ["cand_copy", "cand_copy_b"], "action": "copy", "itemLimit": 1})
+    assert preview["counts"]["actionable"] == 2
+    assert preview["counts"]["totalBytes"] > 0
+    assert preview["itemsLimit"] == 1
+    assert preview["itemsTotal"] == 2
+    assert preview["truncated"] is True
+    second_preview = api.handle("preview_candidate_media_action", {"candidateIds": ["cand_copy", "cand_copy_b"], "action": "copy", "itemLimit": 1, "itemOffset": 1})
+    assert second_preview["itemsOffset"] == 1
+    assert len(second_preview["items"]) == 1
+    assert second_preview["items"][0]["candidateId"] == "cand_copy_b"
+    progress_events: list[tuple[str, dict[str, object]]] = []
+    copied = api.handle(
+        "manage_candidate_media",
+        {"candidateIds": ["cand_copy", "cand_copy_b"], "action": "copy"},
+        progress=lambda payload, name="scan": progress_events.append((name, payload)),
+    )
+    copied_value = copied["value"]
+    assert copied_value["counts"]["copied"] == 2
+    assert copied_value["counts"]["verified"] == 2
+    assert copied_value["counts"]["verificationFailed"] == 0
+    assert copied_value["counts"]["removedCandidates"] == 0
+    assert copy_source.exists()
+    copied_targets = [Path(item["targetPath"]) for item in copied_value["items"] if item["result"] == "copied"]
+    assert len(copied_targets) == 2
+    assert all(target.exists() for target in copied_targets)
+    assert all(item["verified"] is True for item in copied_value["items"] if item["result"] == "copied")
+    assert "cand_copy" in api.project.candidates
+    assert any(name == "media_action" for name, _payload in progress_events)
+    undone_copy = api.handle("undo_media_action", {"manifestPath": copied_value["manifestPath"]})
+    assert undone_copy["value"]["counts"]["removedCopies"] == 2
+    assert all(not target.exists() for target in copied_targets)
+    assert Path(undone_copy["value"]["undoManifestPath"]).exists()
+    assert copy_source.exists()
+
+    move_source = media / "move-source.jpg"
+    make_face(move_source, shirt=(10, 120, 110))
+    add_candidate("cand_move_a", move_source)
+    add_candidate("cand_move_b", move_source)
+    api.project.save()
+    move_preview = api.handle("preview_candidate_media_action", {"candidateIds": ["cand_move_a"], "action": "move"})
+    assert move_preview["counts"]["removedCandidatesEstimate"] == 2
+    moved = api.handle("manage_candidate_media", {"candidateIds": ["cand_move_a"], "action": "move"})
+    moved_value = moved["value"]
+    assert moved_value["counts"]["moved"] == 1
+    assert moved_value["counts"]["removedCandidates"] == 2
+    assert not move_source.exists()
+    assert "cand_move_a" not in api.project.candidates
+    assert "cand_move_b" not in api.project.candidates
+    assert Path(moved_value["manifestPath"]).exists()
+    undone_move = api.handle("undo_media_action", {"manifestPath": moved_value["manifestPath"]})
+    assert undone_move["value"]["counts"]["restored"] == 1
+    assert move_source.exists()
+
+    trash_source = media / "trash-source.jpg"
+    make_face(trash_source, shirt=(130, 60, 110))
+    add_candidate("cand_trash", trash_source)
+    api.project.save()
+    trashed = api.handle("manage_candidate_media", {"candidateIds": ["cand_trash"], "action": "trash"})
+    trashed_value = trashed["value"]
+    assert trashed_value["counts"]["trashed"] == 1
+    assert trashed_value["counts"]["removedCandidates"] == 1
+    assert not trash_source.exists()
+    assert "media-trash" in trashed_value["destinationPath"]
+    assert Path(trashed_value["items"][0]["targetPath"]).exists()
+    assert "cand_trash" not in api.project.candidates
+    restored = api.handle("restore_media_action", {"manifestPath": trashed_value["manifestPath"]})
+    assert restored["value"]["counts"]["restored"] == 1
+    assert trash_source.exists()
+
+    cleanup_source = media / "cleanup-trash-source.jpg"
+    make_face(cleanup_source, shirt=(90, 40, 160))
+    add_candidate("cand_cleanup_trash", cleanup_source)
+    api.project.save()
+    cleanup_trash = api.handle("manage_candidate_media", {"candidateIds": ["cand_cleanup_trash"], "action": "trash"})
+    cleanup_value = cleanup_trash["value"]
+    cleanup_target = Path(cleanup_value["items"][0]["targetPath"])
+    assert cleanup_target.exists()
+    report = api.handle("media_trash_report", {})
+    assert report["counts"]["actions"] >= 1
+    assert report["counts"]["recoverableFiles"] >= 1
+    cleanup_preview = api.handle("cleanup_media_trash", {"days": 0, "dryRun": True})
+    assert cleanup_preview["value"]["previewFiles"] >= 1
+    assert cleanup_target.exists()
+    cleanup_result = api.handle("cleanup_media_trash", {"days": 0, "dryRun": False})
+    assert cleanup_result["value"]["deletedFiles"] >= 1
+    assert not cleanup_target.exists()
+
+    reference_source = media / "reference-source.jpg"
+    make_face(reference_source, shirt=(150, 80, 40))
+    api.project.references["ref_guard"] = ReferenceFace(
+        ref_id="ref_guard",
+        person_name="Guarded",
+        age_bucket="adult",
+        source_path=str(reference_source),
+        capture_date=None,
+        quality=0.92,
+        model_name="test",
+        vector=[1.0] + [0.0] * 511,
+    )
+    add_candidate("cand_ref_guard", reference_source, person="Guarded")
+    api.project.save()
+    guarded = api.handle("manage_candidate_media", {"candidateIds": ["cand_ref_guard"], "action": "trash"})
+    assert guarded["value"]["counts"]["skipped"] == 1
+    assert guarded["value"]["items"][0]["reason"] == "source_is_also_a_saved_person_photo"
+    assert reference_source.exists()
+    assert "cand_ref_guard" in api.project.candidates
+    history = api.handle("media_action_history", {"limit": 10})
+    assert history["items"]
+    assert any(item["canRestore"] for item in history["items"])
+    guarded_history = next(item for item in history["items"] if item["manifestPath"] == guarded["value"]["manifestPath"])
+    assert guarded_history["canRetry"] is True
+    retried = api.handle("retry_media_action", {"manifestPath": guarded["value"]["manifestPath"]})
+    assert retried["value"]["counts"]["skipped"] == 1
+
+    cancel_a = media / "cancel-a.jpg"
+    cancel_b = media / "cancel-b.jpg"
+    make_face(cancel_a, shirt=(20, 40, 160))
+    make_face(cancel_b, shirt=(40, 20, 160))
+    add_candidate("cand_cancel_a", cancel_a)
+    add_candidate("cand_cancel_b", cancel_b)
+    api.project.save()
+    cancel_events: list[dict[str, object]] = []
+
+    def cancel_after_first(payload: dict[str, object], name: str = "scan") -> None:
+        if name == "media_action":
+            cancel_events.append(payload)
+            if payload.get("phase") == "processing" and not api.project.media_action_cancel_path.exists():
+                api.project.media_action_cancel_path.write_text("cancel", encoding="utf-8")
+
+    cancelled = api.handle(
+        "manage_candidate_media",
+        {"candidateIds": ["cand_cancel_a", "cand_cancel_b"], "action": "copy"},
+        progress=cancel_after_first,
+    )
+    assert cancelled["value"]["counts"]["cancelled"] is True
+    assert cancelled["value"]["counts"]["copied"] == 1
+    assert any(event.get("phase") == "cancelled" for event in cancel_events)
+
+
 def assert_privacy_controls_delete_face_data() -> None:
     root = Path(tempfile.mkdtemp(prefix="crossage-edge-privacy-"))
     refs = root / "refs"
@@ -1892,7 +2229,7 @@ def assert_release_hardening_diagnostics() -> None:
 
     readiness = api.handle("release_readiness", {})
     check_names = {check["name"] for check in readiness["checks"]}
-    assert {"Model license manifest", "Database integrity", "Auto-update"} <= check_names
+    assert {"Model license manifest", "Database integrity", "Video decoder", "Accuracy validation pack", "Auto-update"} <= check_names
 
     benchmark = api.handle("runtime_benchmark", {})
     assert "storageIo" in benchmark
@@ -1961,9 +2298,16 @@ def main() -> None:
     assert_scan_exclusions_are_honored()
     assert_scan_folder_reports_discovery_errors()
     assert_video_frame_orphans_are_pruned()
+    assert_video_decoder_fallback_metadata()
+    assert_synthetic_video_decoder_suite()
+    assert_accuracy_validation_pack()
     assert_scan_cancel_and_resume_manifest()
+    assert_vector_store_persists_reference_index()
     assert_stale_candidate_manifest_is_reprocessed()
+    assert_model_governance_metadata()
+    assert_package_artifact_checker()
     assert_operational_use_case_commands()
+    assert_candidate_media_actions()
     assert_privacy_controls_delete_face_data()
     assert_repair_blocks_likely_disconnected_roots()
     assert_relink_blocks_partial_moves()

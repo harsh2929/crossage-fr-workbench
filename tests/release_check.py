@@ -38,6 +38,30 @@ def run_update_feed_check() -> dict[str, Any]:
     return payload
 
 
+def run_package_artifact_check(required: bool = False) -> dict[str, Any]:
+    script = repo_root() / "desktop" / "scripts" / "check-package-artifacts.cjs"
+    env = os.environ.copy()
+    if required:
+        env["VINTRACE_PACKAGE_REQUIRED"] = "1"
+    completed = subprocess.run(
+        ["node", str(script)],
+        cwd=repo_root(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError:
+        payload = {"ok": False, "error": completed.stdout.strip() or completed.stderr.strip()}
+    payload["exitCode"] = completed.returncode
+    if completed.stderr.strip():
+        payload["stderr"] = completed.stderr.strip()[-1000:]
+    return payload
+
+
 def capture(name: str, fn: Callable[[], Any], checks: list[dict[str, Any]]) -> Any:
     try:
         value = fn()
@@ -68,13 +92,15 @@ def main() -> None:
     readiness = capture("release readiness", api.release_readiness, checks) or {}
     clean = capture("clean workspace smoke", run_smoke, checks) or {}
     update_feed = capture("update feed dry-run", run_update_feed_check, checks) or {}
+    package_artifacts = capture("package artifact check", lambda: run_package_artifact_check(required=strict), checks) or {}
 
     structural_ok = all(check["ok"] for check in checks)
     runtime_ok = bool(runtime.get("ok", False))
     database_ok = bool(database.get("ok", False))
     storage_ok = bool(storage.get("ok", False))
     update_ok = bool(update_feed.get("ok", False))
-    no_credential_ok = structural_ok and database_ok and storage_ok and update_ok
+    package_ok = bool(package_artifacts.get("ok", False))
+    no_credential_ok = structural_ok and database_ok and storage_ok and update_ok and package_ok
     release_ready = bool(readiness.get("ok", False))
     distribution_blockers = [
         recommendation
@@ -124,6 +150,7 @@ def main() -> None:
         },
         "cleanWorkspace": clean,
         "updateFeed": update_feed,
+        "packageArtifacts": package_artifacts,
         "distributionBlockers": distribution_blockers,
     }
     print(json.dumps(result, indent=2))

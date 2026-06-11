@@ -76,6 +76,9 @@ jobs:
       - name: Update feed dry run
         run: npm run update:dry-run
 
+      - name: Package artifact configuration
+        run: npm run package:check
+
       - name: Release check
         run: npm run release:check
 

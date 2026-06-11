@@ -162,6 +162,77 @@ async function expectTopbarControlsReadable(page: Page, colorScheme: "light" | "
   expect(disabledContrasts.filter((item) => item.contrast < 4.5)).toEqual([]);
 }
 
+async function expectReviewBlocksReadable(page: Page, colorScheme: "light" | "dark") {
+  await page.emulateMedia({ colorScheme });
+  const lowContrast = await page.locator(".review-queue-panel").evaluate((panel, scheme) => {
+    type Rgba = { r: number; g: number; b: number; a: number };
+    function parseColor(value: string) {
+      if (value === "transparent") return null;
+      const match = value.match(/rgba?\(([^)]+)\)/);
+      if (match) {
+        const parts = match[1].replace(/\//g, " ").split(/[,\s]+/).filter(Boolean).map((part) => Number.parseFloat(part));
+        if (parts.length >= 3 && parts.every((part) => Number.isFinite(part))) {
+          return { r: parts[0], g: parts[1], b: parts[2], a: parts[3] ?? 1 };
+        }
+      }
+      const srgb = value.match(/color\(srgb\s+([^)]+)\)/);
+      if (srgb) {
+        const parts = srgb[1].replace(/\//g, " ").split(/[,\s]+/).filter(Boolean).map((part) => Number.parseFloat(part));
+        if (parts.length >= 3 && parts.every((part) => Number.isFinite(part))) {
+          const toChannel = (part: number) => part <= 1 ? part * 255 : part;
+          return { r: toChannel(parts[0]), g: toChannel(parts[1]), b: toChannel(parts[2]), a: parts[3] ?? 1 };
+        }
+      }
+      return null;
+    }
+    function blend(top: Rgba, bottom: Rgba): Rgba {
+      const alpha = top.a + bottom.a * (1 - top.a);
+      if (alpha <= 0) return { r: 0, g: 0, b: 0, a: 0 };
+      return {
+        r: (top.r * top.a + bottom.r * bottom.a * (1 - top.a)) / alpha,
+        g: (top.g * top.a + bottom.g * bottom.a * (1 - top.a)) / alpha,
+        b: (top.b * top.a + bottom.b * bottom.a * (1 - top.a)) / alpha,
+        a: alpha
+      };
+    }
+    function resolvedBackground(node: HTMLElement): Rgba {
+      const fallback = scheme === "dark"
+        ? { r: 17, g: 18, b: 22, a: 1 }
+        : { r: 255, g: 255, b: 255, a: 1 };
+      const colors: Rgba[] = [];
+      for (let current: HTMLElement | null = node; current; current = current.parentElement) {
+        const color = parseColor(window.getComputedStyle(current).backgroundColor);
+        if (color && color.a > 0) colors.unshift(color);
+      }
+      return colors.reduce((background, color) => blend(color, background), fallback);
+    }
+    function channel(value: number) {
+      const normalized = value / 255;
+      return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+    }
+    function luminance({ r, g, b }: Rgba) {
+      return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+    }
+    function contrast(foreground: Rgba, background: Rgba) {
+      const light = Math.max(luminance(foreground), luminance(background));
+      const dark = Math.min(luminance(foreground), luminance(background));
+      return (light + 0.05) / (dark + 0.05);
+    }
+    return Array.from(panel.querySelectorAll<HTMLElement>(".smart-batch span, .smart-batch strong, .lane-button span, .lane-button strong, .saved-view-chip button"))
+      .map((node) => {
+        const style = window.getComputedStyle(node);
+        const parent = node.closest<HTMLElement>(".smart-batch, .lane-button, .saved-view-chip") || node;
+        const foreground = parseColor(style.webkitTextFillColor || style.color) || parseColor(style.color) || { r: 0, g: 0, b: 0, a: 1 };
+        return {
+          label: node.textContent?.trim() || node.getAttribute("aria-label") || node.tagName,
+          contrast: contrast(foreground, resolvedBackground(parent))
+        };
+      })
+      .filter((item) => item.contrast < 4.5);
+  }, colorScheme);
+  expect(lowContrast, `${colorScheme} review block contrast`).toEqual([]);
+}
+
 async function closeOnboardingIfVisible(page: Page) {
   const guide = page.getByRole("dialog", { name: "Set up your first scan" });
   await guide.waitFor({ state: "visible", timeout: 1500 }).catch(() => undefined);
@@ -361,6 +432,8 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(page.getByRole("group", { name: "Review priority lanes" })).toBeVisible();
   await page.getByRole("button", { name: /Strong matches/ }).click();
   await page.getByRole("button", { name: /All/ }).click();
+  await expectReviewBlocksReadable(page, "light");
+  await expectReviewBlocksReadable(page, "dark");
   await expect(page.getByText("Saved person photo")).toBeVisible();
   await expect(page.getByLabel("Review session progress")).toBeVisible();
   const previewPanel = page.locator(".preview-panel");

@@ -73,7 +73,7 @@ npm run dist:win
 Installer builds compile the React app, build the Python backend sidecar with PyInstaller, and package with electron-builder.
 Public macOS releases must be signed and notarized with the Apple Developer credentials configured in the build environment.
 
-In-app updates are wired through `electron-updater`. Settings shows update status, release channels (Stable, Beta, Internal), checks for a release, downloads with progress, and restarts into the installer only after the user chooses it. Production builds use the packaged GitHub Releases feed for `harsh2929/vintrace`; for QA or private release channels, launch/build with `VINTRACE_UPDATE_URL=https://your-update-feed.example/releases/` so the app reads generic feed metadata instead. The current local `dist:*` scripts keep `--publish never`, so they create installers without uploading anything.
+In-app updates are wired through `electron-updater`. Settings shows update status, release channels (Stable, Beta, Internal), checks for a release, downloads with progress, and restarts into the installer only after the user chooses it. Production builds use the packaged GitHub Releases feed for `harsh2929/crossage-fr-workbench`; for QA or private release channels, launch/build with `VINTRACE_UPDATE_URL=https://your-update-feed.example/releases/` so the app reads generic feed metadata instead. The current local `dist:*` scripts keep `--publish never`, so they create installers without uploading anything.
 
 Release checks:
 

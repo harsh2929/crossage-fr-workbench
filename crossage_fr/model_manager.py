@@ -67,6 +67,52 @@ MODEL_PACKAGES: dict[str, ModelPackageSpec] = {
 }
 
 
+MODEL_GOVERNANCE: dict[str, dict[str, Any]] = {
+    "antelopev2": {
+        "accuracyTier": "recommended",
+        "intendedUse": "Local review assistance for finding likely face matches in personal photo libraries.",
+        "humanReviewRequired": True,
+        "redistributionRisk": "needs-license-review",
+        "limitations": [
+            "Do not use as sole identity proof.",
+            "Accuracy can fall for childhood-to-adult gaps, occlusion, low light, motion blur, and heavy edits.",
+            "Review every result before sharing, deleting, or making decisions from matches.",
+        ],
+        "validation": [
+            "Run Settings > Accuracy lab with accepted/rejected local labels.",
+            "Check false positives separately for cross-age and low-quality images.",
+        ],
+    },
+    "buffalo_l": {
+        "accuracyTier": "balanced",
+        "intendedUse": "Local review assistance where smaller model download size matters.",
+        "humanReviewRequired": True,
+        "redistributionRisk": "needs-license-review",
+        "limitations": [
+            "Do not use as sole identity proof.",
+            "May trade recall for smaller distribution size compared with the recommended package.",
+            "Review every result before sharing, deleting, or making decisions from matches.",
+        ],
+        "validation": [
+            "Run Settings > Accuracy lab after changing model packs.",
+            "Compare thresholds against a labeled local sample before large scans.",
+        ],
+    },
+}
+
+
+def model_governance(pack: str) -> dict[str, Any]:
+    default = {
+        "accuracyTier": "unknown",
+        "intendedUse": "Local review assistance only.",
+        "humanReviewRequired": True,
+        "redistributionRisk": "unknown",
+        "limitations": ["Review every result before acting on a match."],
+        "validation": ["Run local accuracy checks before broad use."],
+    }
+    return {**default, **MODEL_GOVERNANCE.get(pack, {})}
+
+
 def default_model_root() -> Path:
     return Path.home() / ".insightface"
 
@@ -158,6 +204,7 @@ def model_status(config: RuntimeConfig, engine_name: str = "") -> dict[str, Any]
         packs.append(
             {
                 **asdict(spec),
+                "governance": model_governance(spec.pack),
                 "path": str(resolved or directory),
                 "archivePath": str(archive_path),
                 "available": not missing,
@@ -176,6 +223,7 @@ def model_status(config: RuntimeConfig, engine_name: str = "") -> dict[str, Any]
         "modelRoot": str(root.expanduser()),
         "defaultRoot": str(default_model_root()),
         "engine": engine_name,
+        "governance": model_governance(config.model_pack),
         "packages": packs,
         "offlineMessage": "Connect to the internet, choose a writable folder, then download a face model." if not ready else "",
         "recommendation": "Download the recommended face model before sharing production installers." if fallback or not ready else "Full face model is ready.",

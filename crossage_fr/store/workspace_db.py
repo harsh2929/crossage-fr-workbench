@@ -119,6 +119,8 @@ class WorkspaceDb:
                     ON scan_files(run_id, path, path_key, status);
                 CREATE INDEX IF NOT EXISTS idx_scan_files_hash
                     ON scan_files(content_hash);
+                CREATE INDEX IF NOT EXISTS idx_scan_files_hash_resume
+                    ON scan_files(run_id, content_hash, status);
                 CREATE TABLE IF NOT EXISTS safety_cache (
                     file_hash TEXT NOT NULL,
                     model_version TEXT NOT NULL,
@@ -638,7 +640,7 @@ class WorkspaceDb:
                 """
                 SELECT run_id FROM scan_runs
                 WHERE label = ? AND source = ? AND root_path = ?
-                ORDER BY updated_at DESC
+                ORDER BY updated_at DESC, started_at DESC, rowid DESC
                 LIMIT 1
                 """,
                 (label, source, root_path),
@@ -677,6 +679,30 @@ class WorkspaceDb:
         if row and row["status"] in {"candidate", "clustered", "protected", "skipped", "completed"}:
             return dict(row)
         return None
+
+    def scan_file_resume_hash_row(
+        self,
+        run_id: str | None,
+        content_hash: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        if not run_id or not content_hash:
+            return None
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.scan_file_resume_hash_row(run_id, content_hash, local_conn)
+        row = conn.execute(
+            """
+            SELECT status, phase, candidate_id, path
+            FROM scan_files
+            WHERE run_id = ? AND content_hash = ?
+              AND status IN ('candidate', 'clustered', 'protected', 'skipped', 'completed')
+            ORDER BY processed_at DESC
+            LIMIT 1
+            """,
+            (run_id, content_hash),
+        ).fetchone()
+        return dict(row) if row else None
 
     def record_scan_file(
         self,
@@ -1270,8 +1296,11 @@ class WorkspaceDb:
             embedding_cache = int(conn.execute("SELECT COUNT(*) AS n FROM embedding_cache").fetchone()["n"])
             calibration = int(conn.execute("SELECT COUNT(*) AS n FROM calibration_labels").fetchone()["n"])
             review_candidates = int(conn.execute("SELECT COUNT(*) AS n FROM review_candidates").fetchone()["n"])
+            hash_resume_entries = int(conn.execute(
+                "SELECT COUNT(*) AS n FROM scan_files WHERE content_hash != ''"
+            ).fetchone()["n"])
             latest = conn.execute(
-                "SELECT * FROM scan_runs ORDER BY updated_at DESC LIMIT 1"
+                "SELECT * FROM scan_runs ORDER BY updated_at DESC, started_at DESC, rowid DESC LIMIT 1"
             ).fetchone()
         try:
             db_bytes = os.path.getsize(self.path)
@@ -1282,6 +1311,7 @@ class WorkspaceDb:
             "dbBytes": db_bytes,
             "scanRuns": scan_runs,
             "manifestFiles": scan_files,
+            "hashResumeEntries": hash_resume_entries,
             "safetyCacheEntries": safety_cache,
             "embeddingCacheEntries": embedding_cache,
             "calibrationLabels": calibration,

@@ -22,7 +22,7 @@ from crossage_fr.cluster import cluster_vectors
 from crossage_fr.embed import EmbeddingEngine
 from crossage_fr.ingest import ImageLoadError, VideoLoadError, image_record_for_path, iter_image_paths, load_image, sample_video_frames
 from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, needs_browser_preview, sha256_file, write_preview_image
-from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS
+from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, configure_video_decoder_paths
 from crossage_fr.ingest.safety import SafetyAssessment, assess_image_safety, safety_model_report
 from crossage_fr.match import group_hits
 from crossage_fr.models import EmbeddingResult, ReferenceFace, ReviewCandidate, new_id
@@ -30,6 +30,7 @@ from crossage_fr.storage import safe_is_mount, safe_resolve
 from crossage_fr.store import VectorStore
 from crossage_fr.store.workspace_db import WorkspaceDb, path_signature
 from crossage_fr.workspace_registry import ensure_workspace_metadata, now_iso, write_active_workspace
+from PIL import Image, ImageDraw, ImageEnhance
 
 
 ScanProgress = Callable[[dict[str, Any]], None]
@@ -111,15 +112,20 @@ class ProjectState:
         self.refs_path = self.root / "references.json"
         self.candidates_path = self.root / "review_candidates.json"
         self.scan_history_path = self.root / "scan_history.json"
+        self.accuracy_validation_history_path = self.root / "accuracy_validation_history.json"
         self.audit_path = self.root / "audit_log.jsonl"
         self.cancel_scan_path = self.root / ".scan-cancel"
         self.pause_scan_path = self.root / ".scan-pause"
+        self.media_action_cancel_path = self.root / ".media-action-cancel"
+        self.vector_index_path = self.root / "reference-vectors.npz"
         self.previews_path = self.root / "previews"
         self.video_frames_path = self.root / "video-frames"
+        self.validation_packs_path = self.root / "validation-packs"
         self.db = WorkspaceDb(self.root / "workspace.sqlite3")
         self.workspace_metadata = ensure_workspace_metadata(self.root, actor=actor)
         write_active_workspace(self.root, actor=actor, metadata=self.workspace_metadata)
         self.config = load_config(self.config_path)
+        self.apply_video_decoder_config()
         self.consent: dict[str, Any] = {}
         self.references: dict[str, ReferenceFace] = {}
         self.candidates: dict[str, ReviewCandidate] = {}
@@ -136,6 +142,9 @@ class ProjectState:
         self.load()
         self._ensure_generated_dir_sentinel(self.previews_path)
         self._ensure_generated_dir_sentinel(self.video_frames_path)
+
+    def apply_video_decoder_config(self) -> None:
+        configure_video_decoder_paths(self.config.ffmpeg_path, self.config.ffprobe_path)
 
     def _generated_dir_sentinel(self, path: Path) -> Path:
         return path / ".vintrace-generated.json"
@@ -221,7 +230,11 @@ class ProjectState:
                 self.candidates = loaded_from_index
         if self.scan_history_path.exists():
             self.scan_history.extend(self._read_json_array(self.scan_history_path)[:80])
-        self.vector_store.rebuild({ref_id: ref.vector for ref_id, ref in self.references.items()})
+        ref_vectors = {ref_id: ref.vector for ref_id, ref in self.references.items()}
+        if not self.vector_store.load(self.vector_index_path, expected_ids=set(ref_vectors)):
+            self.vector_store.rebuild(ref_vectors)
+            if ref_vectors:
+                self.vector_store.save(self.vector_index_path)
         self._candidate_dirty_ids.clear()
         self._candidate_deleted_ids.clear()
         self._ensure_candidate_index()
@@ -233,6 +246,7 @@ class ProjectState:
             self._write_json_atomic(self.consent_path, self.consent)
             refs = [asdict(ref) for ref in self.references.values()]
             self._write_json_atomic(self.refs_path, refs)
+            self.vector_store.save(self.vector_index_path)
             self._flush_candidate_index()
             if snapshot_candidates and len(self.candidates) <= CANDIDATE_JSON_SNAPSHOT_LIMIT:
                 self._write_json_array_atomic(self.candidates_path, (asdict(candidate) for candidate in self.candidates.values()))
@@ -529,6 +543,7 @@ class ProjectState:
             "pausedSeconds": 0,
             "resumed": 1 if resume_run_id else 0,
             "manifestSkipped": 0,
+            "hashResumeSkipped": 0,
             "embeddingCacheHits": 0,
             "embeddingCacheMisses": 0,
             "twoPassVerified": 0,
@@ -571,17 +586,18 @@ class ProjectState:
             labels = cluster_vectors([row[3] for row in batch], self.config.cluster_min_size)
             max_label = max(labels, default=-1)
             for (path, quality, model_name, _vector, metadata), label in zip(batch, labels):
+                manifest_hash = str(metadata.get("source_hash") or "")
                 if label < 0:
-                    self._record_manifest_file(run_id, path, "completed", "unmatched", "", scan_conn)
+                    self._record_manifest_file(run_id, path, "completed", "unmatched", "", scan_conn, content_hash=manifest_hash)
                     continue
                 person_name = f"Unmatched cluster {cluster_label_offset + label + 1}"
                 key = (self._candidate_dedupe_source(path, metadata), None, person_name)
                 if candidate_key_exists(key):
-                    self._record_manifest_file(run_id, path, "completed", "duplicate", "", scan_conn)
+                    self._record_manifest_file(run_id, path, "completed", "duplicate", "", scan_conn, content_hash=manifest_hash)
                     continue
                 if not video_candidate_allowed(metadata):
                     metrics["skipped"] += 1
-                    self._record_manifest_file(run_id, path, "completed", "video_candidate_cap", "", scan_conn)
+                    self._record_manifest_file(run_id, path, "completed", "video_candidate_cap", "", scan_conn, content_hash=manifest_hash)
                     continue
                 candidate = ReviewCandidate(
                     candidate_id=new_id("cand"),
@@ -616,7 +632,7 @@ class ProjectState:
                     current_path=str(path),
                     candidate_id=candidate.candidate_id,
                 )
-                self._record_manifest_file(run_id, path, "clustered", "candidate", candidate.candidate_id, scan_conn)
+                self._record_manifest_file(run_id, path, "clustered", "candidate", candidate.candidate_id, scan_conn, content_hash=manifest_hash)
                 if metrics["clustered"] % 25 == 0 and scan_conn is not None:
                     scan_conn.commit()
             if max_label >= 0:
@@ -669,12 +685,14 @@ class ProjectState:
             image: Any | None = None,
             media_metadata: dict[str, Any] | None = None,
             apply_safe_mode: bool = True,
+            precomputed_signature: dict[str, Any] | None = None,
+            precomputed_content_hash: str = "",
         ) -> int:
             nonlocal added
             ensure_not_cancelled()
             metadata = dict(media_metadata or {})
-            signature = path_signature(image_path)
-            content_hash = sha256_file(image_path, self.scan_cancel_requested)
+            signature = precomputed_signature or path_signature(image_path)
+            content_hash = precomputed_content_hash or sha256_file(image_path, self.scan_cancel_requested)
             ensure_not_cancelled()
             if image is None:
                 image = load_image(image_path)
@@ -783,6 +801,7 @@ class ProjectState:
                     "candidate",
                     phase="candidate",
                     candidate_id=candidate.candidate_id,
+                    content_hash=content_hash,
                     conn=scan_conn,
                 )
                 recorded_any = True
@@ -798,12 +817,12 @@ class ProjectState:
                 )
             if not accepted:
                 metrics["skipped"] += 1
-                self.db.record_scan_file(run_id, image_path, signature, "skipped", phase="skipped", conn=scan_conn)
+                self.db.record_scan_file(run_id, image_path, signature, "skipped", phase="skipped", content_hash=content_hash, conn=scan_conn)
             elif queued_unmatched:
                 if any(row[0] == image_path for row in unmatched):
-                    self.db.record_scan_file(run_id, image_path, signature, "unmatched", phase="pending_cluster", conn=scan_conn)
+                    self.db.record_scan_file(run_id, image_path, signature, "unmatched", phase="pending_cluster", content_hash=content_hash, conn=scan_conn)
             elif not recorded_any:
-                self.db.record_scan_file(run_id, image_path, signature, "completed", phase="processed", conn=scan_conn)
+                self.db.record_scan_file(run_id, image_path, signature, "completed", phase="processed", content_hash=content_hash, conn=scan_conn)
             return accepted
 
         self._emit_scan_progress(on_progress, "started", metrics)
@@ -901,16 +920,27 @@ class ProjectState:
                         candidate_id = str(resume_row.get("candidate_id") or "")
                         if candidate_id and candidate_id not in self.candidates:
                             resume_row = None
+                    resume_content_hash = ""
+                    if not resume_row and resume_run_id:
+                        resume_content_hash = sha256_file(path, self.scan_cancel_requested)
+                        resume_row = self.db.scan_file_resume_hash_row(resume_run_id, resume_content_hash, scan_conn)
+                        if resume_row and resume_row.get("status") in {"candidate", "clustered"}:
+                            candidate_id = str(resume_row.get("candidate_id") or "")
+                            if candidate_id and candidate_id not in self.candidates:
+                                resume_row = None
                     if resume_row:
                         metrics["manifestSkipped"] += 1
+                        if resume_content_hash:
+                            metrics["hashResumeSkipped"] += 1
                         metrics["skipped"] += 1
                         self.db.record_scan_file(
                             run_id,
                             path,
                             signature,
                             "skipped",
-                            phase="manifest",
-                            message="Skipped from previous completed manifest.",
+                            phase="manifest_hash" if resume_content_hash else "manifest",
+                            message="Skipped from previous completed content hash." if resume_content_hash else "Skipped from previous completed manifest.",
+                            content_hash=resume_content_hash,
                             conn=scan_conn,
                         )
                         metrics["processed"] += 1
@@ -929,6 +959,7 @@ class ProjectState:
                 try:
                     if path.suffix.lower() in VIDEO_EXTENSIONS:
                         metrics["videoFiles"] += 1
+                        video_content_hash = resume_content_hash or sha256_file(path, self.scan_cancel_requested)
                         self._ensure_generated_dir_sentinel(self.video_frames_path)
                         if not self._generated_dir_is_owned(self.video_frames_path):
                             raise VideoLoadError("Video frame cache is not an app-owned folder.")
@@ -958,6 +989,7 @@ class ProjectState:
                                         phase="protected",
                                         message=assessment.reason,
                                         safety_score=round(assessment.score, 6),
+                                        content_hash=video_content_hash,
                                         conn=scan_conn,
                                     )
                                     self._emit_scan_progress(
@@ -987,10 +1019,10 @@ class ProjectState:
                                 },
                                 apply_safe_mode=False,
                             )
-                        self.db.record_scan_file(run_id, path, signature, "completed", phase="video", conn=scan_conn)
+                        self.db.record_scan_file(run_id, path, signature, "completed", phase="video", content_hash=video_content_hash, conn=scan_conn)
                         prune_generated_video_frames(sample_paths)
                     else:
-                        queue_image(path)
+                        queue_image(path, precomputed_signature=signature, precomputed_content_hash=resume_content_hash)
                 except InterruptedError as exc:
                     metrics["cancelled"] = 1
                     final_status = "cancelled"
@@ -1425,11 +1457,20 @@ class ProjectState:
         except OSError:
             pass
 
+    def clear_media_action_cancel(self) -> None:
+        try:
+            self.media_action_cancel_path.unlink()
+        except OSError:
+            pass
+
     def scan_cancel_requested(self) -> bool:
         return self.cancel_scan_path.exists()
 
     def scan_pause_requested(self) -> bool:
         return self.pause_scan_path.exists()
+
+    def media_action_cancel_requested(self) -> bool:
+        return self.media_action_cancel_path.exists()
 
     def _append_candidate_note(self, note: str, addition: str) -> str:
         value = note.strip()
@@ -1622,6 +1663,7 @@ class ProjectState:
         phase: str = "",
         candidate_id: str = "",
         conn: sqlite3.Connection | None = None,
+        content_hash: str = "",
     ) -> None:
         try:
             self.db.record_scan_file(
@@ -1631,6 +1673,7 @@ class ProjectState:
                 status,
                 phase=phase,
                 candidate_id=candidate_id,
+                content_hash=content_hash,
                 conn=conn,
             )
         except OSError:
@@ -2660,6 +2703,743 @@ class ProjectState:
             "counts": payload["counts"],
         }
 
+    def _normalize_candidate_media_action(self, action: str) -> str:
+        action = str(action or "").strip().lower()
+        if action == "delete":
+            action = "trash"
+        if action not in {"copy", "move", "trash"}:
+            raise ValueError("Media action must be copy, move, or trash.")
+        return action
+
+    def _candidate_media_source(self, candidate: ReviewCandidate) -> Path:
+        if candidate.media_kind == "video" and candidate.media_source_path:
+            return Path(candidate.media_source_path)
+        return Path(candidate.source_path)
+
+    def _candidate_media_destination_root(self, action: str, folder: Path | None = None) -> Path:
+        if folder is not None:
+            return folder.expanduser().resolve()
+        if action == "trash":
+            return self.root / "media-trash"
+        return self.root / "exports" / "media-actions"
+
+    def _unique_candidate_ids_or_raise(self, candidate_ids: list[str]) -> list[str]:
+        unique_ids = list(dict.fromkeys(str(candidate_id) for candidate_id in candidate_ids if str(candidate_id).strip()))
+        if not unique_ids:
+            raise ValueError("Select at least one possible match first.")
+        missing = [candidate_id for candidate_id in unique_ids if candidate_id not in self.candidates]
+        if missing:
+            raise KeyError(f"Candidate not found: {missing[0]}")
+        return unique_ids
+
+    def _destination_storage_report(self, destination_root: Path) -> dict[str, Any]:
+        probe = destination_root
+        while not probe.exists() and probe.parent != probe:
+            probe = probe.parent
+        try:
+            usage = shutil.disk_usage(probe)
+            return {
+                "path": str(destination_root),
+                "freeBytes": int(usage.free),
+                "totalBytes": int(usage.total),
+            }
+        except OSError:
+            return {"path": str(destination_root), "freeBytes": 0, "totalBytes": 0}
+
+    def preview_candidate_media_action(self, candidate_ids: list[str], action: str, folder: Path | None = None, item_limit: int = 120, item_offset: int = 0) -> dict[str, Any]:
+        action = self._normalize_candidate_media_action(action)
+        unique_ids = self._unique_candidate_ids_or_raise(candidate_ids)
+        item_limit = max(1, min(250, int(item_limit)))
+        item_offset = max(0, int(item_offset))
+        destination_root = self._candidate_media_destination_root(action, folder)
+        reference_paths = {
+            str(safe_resolve(Path(ref.source_path)))
+            for ref in self.references.values()
+            if ref.source_path
+        }
+        generated_roots = [safe_resolve(self.previews_path), safe_resolve(self.video_frames_path)]
+        seen_sources: dict[str, dict[str, Any]] = {}
+        actionable_source_keys: set[str] = set()
+        items: list[dict[str, Any]] = []
+        counts = {
+            "selected": len(unique_ids),
+            "actionable": 0,
+            "uniqueSources": 0,
+            "duplicateSources": 0,
+            "missing": 0,
+            "symlinks": 0,
+            "protectedReferences": 0,
+            "generatedFiles": 0,
+            "skipped": 0,
+            "removedCandidatesEstimate": 0,
+            "totalBytes": 0,
+        }
+
+        for preview_index, candidate_id in enumerate(unique_ids):
+            candidate = self.candidates[candidate_id]
+            source = self._candidate_media_source(candidate).expanduser()
+            resolved_source = safe_resolve(source)
+            source_key = str(resolved_source)
+            size_bytes = 0
+            reason = ""
+            result = "ready"
+            actionable = False
+            duplicate = source_key in seen_sources
+            if duplicate:
+                counts["duplicateSources"] += 1
+                previous = seen_sources[source_key]
+                actionable = bool(previous.get("actionable"))
+                size_bytes = int(previous.get("sizeBytes", 0) or 0)
+                result = "duplicate_source" if actionable else "skipped"
+                reason = "duplicate_source" if actionable else str(previous.get("reason", "duplicate_source"))
+            else:
+                try:
+                    exists = resolved_source.exists()
+                    is_file = resolved_source.is_file()
+                    is_symlink = resolved_source.is_symlink()
+                    size_bytes = int(resolved_source.stat().st_size) if exists and is_file else 0
+                except OSError as exc:
+                    exists = False
+                    is_file = False
+                    is_symlink = False
+                    reason = f"stat_error: {exc}"
+                if not reason:
+                    if not exists or not is_file:
+                        reason = "missing"
+                        counts["missing"] += 1
+                    elif is_symlink:
+                        reason = "symbolic_links_are_not_managed"
+                        counts["symlinks"] += 1
+                    elif action in {"move", "trash"} and source_key in reference_paths:
+                        reason = "source_is_also_a_saved_person_photo"
+                        counts["protectedReferences"] += 1
+                    elif action in {"move", "trash"} and any(root == resolved_source or root in resolved_source.parents for root in generated_roots):
+                        reason = "generated_app_file"
+                        counts["generatedFiles"] += 1
+                actionable = not reason
+                if actionable:
+                    counts["actionable"] += 1
+                    counts["uniqueSources"] += 1
+                    counts["totalBytes"] += size_bytes
+                    actionable_source_keys.add(source_key)
+                else:
+                    counts["skipped"] += 1
+                    result = "skipped"
+                seen_sources[source_key] = {"actionable": actionable, "reason": reason, "sizeBytes": size_bytes}
+            if action in {"move", "trash"} and actionable:
+                actionable_source_keys.add(source_key)
+            if preview_index >= item_offset and len(items) < item_limit:
+                items.append(
+                    {
+                        "candidateId": candidate.candidate_id,
+                        "personName": candidate.person_name,
+                        "sourcePath": str(source),
+                        "mediaKind": candidate.media_kind,
+                        "sizeBytes": size_bytes,
+                        "duplicate": duplicate,
+                        "result": result,
+                        "reason": reason,
+                    }
+                )
+
+        if action in {"move", "trash"} and actionable_source_keys:
+            for candidate in self.candidates.values():
+                try:
+                    if str(safe_resolve(self._candidate_media_source(candidate))) in actionable_source_keys:
+                        counts["removedCandidatesEstimate"] += 1
+                except Exception:
+                    continue
+
+        storage = self._destination_storage_report(destination_root)
+        warnings: list[str] = []
+        if counts["skipped"]:
+            warnings.append(f"{counts['skipped']} selected item(s) cannot be changed and will be skipped.")
+        if action in {"move", "trash"} and counts["removedCandidatesEstimate"]:
+            warnings.append(f"{counts['removedCandidatesEstimate']} review row(s) will be removed after files are moved.")
+        if storage["freeBytes"] and counts["totalBytes"] and action in {"copy", "move"} and storage["freeBytes"] < counts["totalBytes"]:
+            warnings.append("The destination may not have enough free space.")
+        return {
+            "action": action,
+            "destinationRoot": str(destination_root),
+            "counts": counts,
+            "storage": storage,
+            "warnings": warnings,
+            "items": items,
+            "itemsOffset": item_offset,
+            "itemsLimit": item_limit,
+            "itemsTotal": len(unique_ids),
+            "truncated": item_offset + len(items) < len(unique_ids),
+        }
+
+    def manage_candidate_media(self, candidate_ids: list[str], action: str, folder: Path | None = None, on_progress: ScanProgress | None = None) -> dict[str, Any]:
+        action = self._normalize_candidate_media_action(action)
+        unique_ids = self._unique_candidate_ids_or_raise(candidate_ids)
+
+        destination_root = self._candidate_media_destination_root(action, folder)
+        destination_root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        action_root = destination_root / f"vintrace-{action}-{stamp}"
+        counter = 2
+        while action_root.exists():
+            action_root = destination_root / f"vintrace-{action}-{stamp}-{counter}"
+            counter += 1
+        media_root = action_root / "media"
+        media_root.mkdir(parents=True, exist_ok=True)
+
+        reference_paths = {
+            str(safe_resolve(Path(ref.source_path)))
+            for ref in self.references.values()
+            if ref.source_path
+        }
+        copied_or_moved_sources: dict[str, dict[str, Any]] = {}
+        affected_source_keys: set[str] = set()
+        removable_candidate_ids: set[str] = set()
+        items: list[dict[str, Any]] = []
+        counts = {
+            "selected": len(unique_ids),
+            "copied": 0,
+            "moved": 0,
+            "trashed": 0,
+            "skipped": 0,
+            "removedCandidates": 0,
+            "cancelled": False,
+            "verified": 0,
+            "verificationFailed": 0,
+        }
+
+        def safe_source_key(path: Path) -> str:
+            return str(safe_resolve(path))
+
+        def unique_target(source: Path, candidate: ReviewCandidate, index: int) -> Path:
+            person_dir = media_root / self._safe_filename(candidate.person_name or "Unlabeled")
+            person_dir.mkdir(parents=True, exist_ok=True)
+            suffix = source.suffix.lower() or ".bin"
+            stem = self._safe_filename(source.stem)[:80]
+            target = person_dir / f"{index:05d}-{self._safe_filename(candidate.candidate_id)}-{stem}{suffix}"
+            target_counter = 2
+            while target.exists():
+                target = person_dir / f"{index:05d}-{self._safe_filename(candidate.candidate_id)}-{stem}-{target_counter}{suffix}"
+                target_counter += 1
+            return target
+
+        def append_item(
+            candidate: ReviewCandidate,
+            source: Path,
+            target: str,
+            status: str,
+            reason: str = "",
+            source_size_bytes: int = 0,
+            target_size_bytes: int = 0,
+            verified: bool = False,
+            verify_status: str = "",
+        ) -> None:
+            items.append(
+                {
+                    "candidateId": candidate.candidate_id,
+                    "personName": candidate.person_name,
+                    "status": candidate.status,
+                    "score": round(float(candidate.score), 6),
+                    "mediaKind": candidate.media_kind,
+                    "sourcePath": str(source),
+                    "targetPath": target,
+                    "action": action,
+                    "result": status,
+                    "reason": reason,
+                    "sourceSizeBytes": source_size_bytes,
+                    "targetSizeBytes": target_size_bytes,
+                    "verified": verified,
+                    "verifyStatus": verify_status,
+                }
+            )
+
+        started = time.monotonic()
+        total = len(unique_ids)
+
+        def emit(phase: str, current_path: str = "", message: str = "") -> None:
+            if not on_progress:
+                return
+            processed = len(items)
+            elapsed_ms = max(1, int((time.monotonic() - started) * 1000))
+            remaining = max(0, total - processed)
+            eta_ms = int((elapsed_ms / max(1, processed)) * remaining) if processed else None
+            on_progress(
+                {
+                    "phase": phase,
+                    "action": action,
+                    "processed": processed,
+                    "total": total,
+                    "currentPath": current_path,
+                    "message": message,
+                    "destinationPath": str(action_root),
+                    "elapsedMs": elapsed_ms,
+                    "etaMs": eta_ms,
+                    **counts,
+                }
+            )
+
+        self.clear_media_action_cancel()
+        emit("started", message="Preparing source files.")
+        generated_roots = [safe_resolve(self.previews_path), safe_resolve(self.video_frames_path)]
+        for index, candidate_id in enumerate(unique_ids, start=1):
+            if self.media_action_cancel_requested():
+                counts["cancelled"] = True
+                emit("cancelled", message="Media action cancelled.")
+                break
+            candidate = self.candidates[candidate_id]
+            source = self._candidate_media_source(candidate).expanduser()
+            resolved_source = safe_resolve(source)
+            source_key = str(resolved_source)
+            emit("processing", str(source), f"{action.title()} source media.")
+            if source_key in copied_or_moved_sources:
+                previous = copied_or_moved_sources[source_key]
+                append_item(
+                    candidate,
+                    source,
+                    str(previous.get("targetPath", "")),
+                    "duplicate_source",
+                    source_size_bytes=int(previous.get("sourceSizeBytes", 0) or 0),
+                    target_size_bytes=int(previous.get("targetSizeBytes", 0) or 0),
+                    verified=bool(previous.get("verified", False)),
+                    verify_status=str(previous.get("verifyStatus", "duplicate_source")),
+                )
+                if action in {"move", "trash"}:
+                    affected_source_keys.add(source_key)
+                    removable_candidate_ids.add(candidate.candidate_id)
+                continue
+            try:
+                exists = resolved_source.exists()
+                is_file = resolved_source.is_file()
+                is_symlink = resolved_source.is_symlink()
+            except OSError as exc:
+                counts["skipped"] += 1
+                append_item(candidate, source, "", "skipped", f"stat_error: {exc}")
+                continue
+            if not exists or not is_file:
+                counts["skipped"] += 1
+                append_item(candidate, source, "", "skipped", "missing")
+                continue
+            if is_symlink:
+                counts["skipped"] += 1
+                append_item(candidate, source, "", "skipped", "symbolic_links_are_not_managed")
+                continue
+            if action in {"move", "trash"} and source_key in reference_paths:
+                counts["skipped"] += 1
+                append_item(candidate, source, "", "skipped", "source_is_also_a_saved_person_photo")
+                continue
+            if action in {"move", "trash"} and any(root == resolved_source or root in resolved_source.parents for root in generated_roots):
+                counts["skipped"] += 1
+                append_item(candidate, source, "", "skipped", "generated_app_file")
+                continue
+
+            target = unique_target(resolved_source, candidate, index)
+            source_size_bytes = 0
+            try:
+                source_size_bytes = int(resolved_source.stat().st_size)
+            except OSError:
+                source_size_bytes = 0
+            try:
+                if action == "copy":
+                    shutil.copy2(resolved_source, target)
+                    counts["copied"] += 1
+                    result_status = "copied"
+                else:
+                    shutil.move(str(resolved_source), str(target))
+                    if action == "move":
+                        counts["moved"] += 1
+                        result_status = "moved"
+                    else:
+                        counts["trashed"] += 1
+                        result_status = "trashed"
+                    affected_source_keys.add(source_key)
+                    removable_candidate_ids.add(candidate.candidate_id)
+                try:
+                    target_size_bytes = int(target.stat().st_size)
+                except OSError:
+                    target_size_bytes = 0
+                verified = bool(source_size_bytes and target_size_bytes == source_size_bytes)
+                verify_status = "size_match" if verified else "size_mismatch_or_unavailable"
+                if verified:
+                    counts["verified"] += 1
+                else:
+                    counts["verificationFailed"] += 1
+                copied_or_moved_sources[source_key] = {
+                    "targetPath": str(target),
+                    "sourceSizeBytes": source_size_bytes,
+                    "targetSizeBytes": target_size_bytes,
+                    "verified": verified,
+                    "verifyStatus": verify_status,
+                }
+                append_item(candidate, source, str(target), result_status, source_size_bytes=source_size_bytes, target_size_bytes=target_size_bytes, verified=verified, verify_status=verify_status)
+            except OSError as exc:
+                counts["skipped"] += 1
+                append_item(candidate, source, "", "skipped", f"io_error: {exc}", source_size_bytes=source_size_bytes)
+
+        if action in {"move", "trash"} and affected_source_keys:
+            for candidate_id, candidate in list(self.candidates.items()):
+                try:
+                    if safe_source_key(self._candidate_media_source(candidate)) in affected_source_keys:
+                        removable_candidate_ids.add(candidate_id)
+                except Exception:
+                    continue
+            self._mark_candidates_deleted(removable_candidate_ids)
+            for candidate_id in removable_candidate_ids:
+                self.candidates.pop(candidate_id, None)
+            counts["removedCandidates"] = len(removable_candidate_ids)
+
+        manifest = {
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "workspace": str(self.root),
+            "action": action,
+            "destinationPath": str(action_root),
+            "mediaPath": str(media_root),
+            "counts": counts,
+            "items": items,
+            "note": (
+                "Trash is app-managed: recover files from this folder if needed."
+                if action == "trash"
+                else "Copy and move actions operate on original source media, not face vectors."
+            ),
+        }
+        manifest_path = action_root / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        self._append_audit(
+            {
+                "action": "manage_candidate_media",
+                "media_action": action,
+                "selected": len(unique_ids),
+                "copied": counts["copied"],
+                "moved": counts["moved"],
+                "trashed": counts["trashed"],
+                "skipped": counts["skipped"],
+                "removed_candidates": counts["removedCandidates"],
+                "cancelled": counts["cancelled"],
+                "manifest_path": str(manifest_path),
+            }
+        )
+        if action in {"move", "trash"} and removable_candidate_ids:
+            self.save()
+        result = {
+            "action": action,
+            "destinationPath": str(action_root),
+            "mediaPath": str(media_root),
+            "manifestPath": str(manifest_path),
+            "counts": counts,
+            "items": items,
+        }
+        emit("cancelled" if counts["cancelled"] else "complete", message="Media action cancelled." if counts["cancelled"] else "Media action complete.")
+        self.clear_media_action_cancel()
+        return result
+
+    def _read_media_action_manifest(self, manifest_path: Path) -> dict[str, Any]:
+        path = manifest_path.expanduser().resolve()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("Media action manifest is invalid.")
+        if str(payload.get("workspace", "")) != str(self.root):
+            raise ValueError("This media action manifest belongs to another app folder.")
+        return payload
+
+    def media_action_history(self, limit: int = 20) -> dict[str, Any]:
+        limit = max(1, min(100, int(limit)))
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for event in reversed(self._read_audit_rows()):
+            if event.get("action") != "manage_candidate_media":
+                continue
+            manifest_value = str(event.get("manifest_path", "")).strip()
+            if not manifest_value or manifest_value in seen:
+                continue
+            seen.add(manifest_value)
+            manifest_path = Path(manifest_value)
+            manifest: dict[str, Any] = {}
+            if manifest_path.exists():
+                try:
+                    manifest = self._read_media_action_manifest(manifest_path)
+                except Exception:
+                    manifest = {}
+            counts = manifest.get("counts") if isinstance(manifest.get("counts"), dict) else {}
+            items = manifest.get("items") if isinstance(manifest.get("items"), list) else []
+            skipped_items = [item for item in items if isinstance(item, dict) and str(item.get("result")) == "skipped"]
+            row = {
+                "manifestPath": manifest_value,
+                "generatedAt": manifest.get("generatedAt") or event.get("at", ""),
+                "action": manifest.get("action") or event.get("media_action", ""),
+                "destinationPath": manifest.get("destinationPath") or "",
+                "mediaPath": manifest.get("mediaPath") or "",
+                "counts": {
+                    "selected": int(counts.get("selected", event.get("selected", 0)) or 0),
+                    "copied": int(counts.get("copied", event.get("copied", 0)) or 0),
+                    "moved": int(counts.get("moved", event.get("moved", 0)) or 0),
+                    "trashed": int(counts.get("trashed", event.get("trashed", 0)) or 0),
+                    "skipped": int(counts.get("skipped", event.get("skipped", 0)) or 0),
+                    "removedCandidates": int(counts.get("removedCandidates", event.get("removed_candidates", 0)) or 0),
+                    "verified": int(counts.get("verified", 0) or 0),
+                    "verificationFailed": int(counts.get("verificationFailed", 0) or 0),
+                    "cancelled": bool(counts.get("cancelled", event.get("cancelled", False))),
+                },
+                "exists": manifest_path.exists(),
+                "canRestore": bool((manifest.get("action") or event.get("media_action")) == "trash" and int(counts.get("trashed", event.get("trashed", 0)) or 0) > 0),
+                "canUndo": bool(manifest_path.exists() and (int(counts.get("copied", 0) or 0) + int(counts.get("moved", 0) or 0) + int(counts.get("trashed", 0) or 0)) > 0),
+                "canRetry": bool(skipped_items),
+                "skippedItems": skipped_items[:8],
+            }
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+        return {"items": rows, "total": len(rows)}
+
+    def restore_media_action(self, manifest_path: Path) -> dict[str, Any]:
+        manifest = self._read_media_action_manifest(manifest_path)
+        if str(manifest.get("action", "")) != "trash":
+            raise ValueError("Only app trash actions can be restored.")
+        restored = skipped = missing = existing = 0
+        rows: list[dict[str, Any]] = []
+        for item in manifest.get("items", []):
+            if not isinstance(item, dict) or str(item.get("result")) != "trashed":
+                continue
+            source = Path(str(item.get("sourcePath", ""))).expanduser()
+            target = Path(str(item.get("targetPath", ""))).expanduser()
+            if not target.exists() or not target.is_file():
+                missing += 1
+                rows.append({**item, "restoreResult": "missing_trash_file"})
+                continue
+            if source.exists():
+                existing += 1
+                rows.append({**item, "restoreResult": "source_already_exists"})
+                continue
+            try:
+                source.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(target), str(source))
+                restored += 1
+                rows.append({**item, "restoreResult": "restored"})
+            except OSError as exc:
+                skipped += 1
+                rows.append({**item, "restoreResult": f"io_error: {exc}"})
+        result = {
+            "manifestPath": str(manifest_path.expanduser().resolve()),
+            "counts": {
+                "restored": restored,
+                "missing": missing,
+                "existing": existing,
+                "skipped": skipped,
+            },
+            "items": rows,
+        }
+        self._append_audit({"action": "restore_media_action", "manifest_path": result["manifestPath"], **result["counts"]})
+        return result
+
+    def retry_media_action(self, manifest_path: Path, folder: Path | None = None, on_progress: ScanProgress | None = None) -> dict[str, Any]:
+        manifest = self._read_media_action_manifest(manifest_path)
+        action = self._normalize_candidate_media_action(str(manifest.get("action", "")))
+        candidate_ids = [
+            str(item.get("candidateId"))
+            for item in manifest.get("items", [])
+            if isinstance(item, dict) and str(item.get("result")) == "skipped" and str(item.get("candidateId")) in self.candidates
+        ]
+        if not candidate_ids:
+            return {
+                "action": action,
+                "destinationPath": str(manifest.get("destinationPath", "")),
+                "mediaPath": str(manifest.get("mediaPath", "")),
+                "manifestPath": str(manifest_path.expanduser().resolve()),
+                "counts": {"selected": 0, "copied": 0, "moved": 0, "trashed": 0, "skipped": 0, "removedCandidates": 0},
+                "items": [],
+            }
+        destination = folder.expanduser().resolve() if folder is not None else Path(str(manifest.get("destinationPath", ""))).expanduser().parent
+        return self.manage_candidate_media(candidate_ids, action, destination, on_progress=on_progress)
+
+    def _latest_media_action_manifest(self) -> Path:
+        for row in self.media_action_history(limit=50).get("items", []):
+            if row.get("exists") and row.get("canUndo"):
+                return Path(str(row.get("manifestPath", "")))
+        raise ValueError("No undoable file action was found.")
+
+    def undo_media_action(self, manifest_path: Path | None = None) -> dict[str, Any]:
+        target_manifest = manifest_path.expanduser().resolve() if manifest_path else self._latest_media_action_manifest()
+        manifest = self._read_media_action_manifest(target_manifest)
+        action = self._normalize_candidate_media_action(str(manifest.get("action", "")))
+        stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        undo_root = self.root / "media-action-undo" / f"vintrace-undo-{stamp}"
+        undo_root.mkdir(parents=True, exist_ok=True)
+        counts = {
+            "restored": 0,
+            "removedCopies": 0,
+            "missing": 0,
+            "existing": 0,
+            "skipped": 0,
+        }
+        rows: list[dict[str, Any]] = []
+        for index, item in enumerate(manifest.get("items", []), start=1):
+            if not isinstance(item, dict):
+                continue
+            result = str(item.get("result", ""))
+            if action == "copy" and result != "copied":
+                continue
+            if action in {"move", "trash"} and result not in {"moved", "trashed"}:
+                continue
+            source = Path(str(item.get("sourcePath", ""))).expanduser()
+            moved_target = Path(str(item.get("targetPath", ""))).expanduser()
+            if not moved_target.exists() or not moved_target.is_file():
+                counts["missing"] += 1
+                rows.append({**item, "undoResult": "target_missing"})
+                continue
+            try:
+                if action == "copy":
+                    person_dir = undo_root / self._safe_filename(str(item.get("personName", "Unlabeled")))
+                    person_dir.mkdir(parents=True, exist_ok=True)
+                    suffix = moved_target.suffix or ".bin"
+                    undo_target = person_dir / f"{index:05d}-{self._safe_filename(moved_target.stem)}{suffix}"
+                    counter = 2
+                    while undo_target.exists():
+                        undo_target = person_dir / f"{index:05d}-{self._safe_filename(moved_target.stem)}-{counter}{suffix}"
+                        counter += 1
+                    shutil.move(str(moved_target), str(undo_target))
+                    counts["removedCopies"] += 1
+                    rows.append({**item, "undoResult": "copy_removed", "undoPath": str(undo_target)})
+                else:
+                    if source.exists():
+                        counts["existing"] += 1
+                        rows.append({**item, "undoResult": "source_already_exists"})
+                        continue
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(moved_target), str(source))
+                    counts["restored"] += 1
+                    rows.append({**item, "undoResult": "restored"})
+            except OSError as exc:
+                counts["skipped"] += 1
+                rows.append({**item, "undoResult": f"io_error: {exc}"})
+        undo_manifest = {
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "workspace": str(self.root),
+            "action": "undo_media_action",
+            "originalManifestPath": str(target_manifest),
+            "undoPath": str(undo_root),
+            "counts": counts,
+            "items": rows,
+            "note": "Copy undo moves generated copies into this undo folder. Move/trash undo restores files to original paths when available.",
+        }
+        undo_manifest_path = undo_root / "manifest.json"
+        undo_manifest_path.write_text(json.dumps(undo_manifest, indent=2), encoding="utf-8")
+        self._append_audit({"action": "undo_media_action", "manifest_path": str(target_manifest), "undo_manifest_path": str(undo_manifest_path), **counts})
+        return {"manifestPath": str(target_manifest), "undoManifestPath": str(undo_manifest_path), "undoPath": str(undo_root), "counts": counts, "items": rows}
+
+    def _media_action_generated_ts(self, manifest: dict[str, Any], manifest_path: Path) -> float:
+        value = str(manifest.get("generatedAt", "")).strip()
+        if value:
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                pass
+        try:
+            return manifest_path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def media_trash_report(self) -> dict[str, Any]:
+        trash_root = self.root / "media-trash"
+        now_ts = time.time()
+        actions: list[dict[str, Any]] = []
+        total_bytes = total_files = recoverable_files = 0
+        older_than = {"7": 0, "30": 0, "90": 0}
+        if trash_root.exists():
+            for manifest_path in sorted(trash_root.glob("vintrace-trash-*/manifest.json"), reverse=True):
+                try:
+                    manifest = self._read_media_action_manifest(manifest_path)
+                except Exception:
+                    continue
+                if str(manifest.get("action", "")) != "trash":
+                    continue
+                generated_ts = self._media_action_generated_ts(manifest, manifest_path)
+                age_days = int(max(0, (now_ts - generated_ts) // (24 * 60 * 60))) if generated_ts else 0
+                bytes_for_action = files_for_action = recoverable_for_action = 0
+                for item in manifest.get("items", []):
+                    if not isinstance(item, dict) or str(item.get("result")) != "trashed":
+                        continue
+                    target = Path(str(item.get("targetPath", ""))).expanduser()
+                    if target.exists() and target.is_file():
+                        files_for_action += 1
+                        recoverable_for_action += 1
+                        try:
+                            bytes_for_action += int(target.stat().st_size)
+                        except OSError:
+                            pass
+                for days in (7, 30, 90):
+                    if age_days >= days:
+                        older_than[str(days)] += files_for_action
+                total_files += files_for_action
+                recoverable_files += recoverable_for_action
+                total_bytes += bytes_for_action
+                actions.append(
+                    {
+                        "manifestPath": str(manifest_path),
+                        "destinationPath": str(manifest.get("destinationPath", manifest_path.parent)),
+                        "generatedAt": manifest.get("generatedAt", ""),
+                        "ageDays": age_days,
+                        "files": files_for_action,
+                        "recoverableFiles": recoverable_for_action,
+                        "bytes": bytes_for_action,
+                    }
+                )
+        return {
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "trashPath": str(trash_root),
+            "counts": {
+                "actions": len(actions),
+                "files": total_files,
+                "recoverableFiles": recoverable_files,
+                "bytes": total_bytes,
+                "olderThanDays": older_than,
+            },
+            "actions": actions[:50],
+        }
+
+    def cleanup_media_trash(self, days: int = 30, dry_run: bool = True) -> dict[str, Any]:
+        days = max(0, int(days))
+        cutoff = time.time() - (days * 24 * 60 * 60)
+        trash_root = self.root / "media-trash"
+        deleted_dirs = deleted_files = deleted_bytes = 0
+        targets: list[dict[str, Any]] = []
+        if trash_root.exists():
+            for manifest_path in sorted(trash_root.glob("vintrace-trash-*/manifest.json")):
+                try:
+                    manifest = self._read_media_action_manifest(manifest_path)
+                except Exception:
+                    continue
+                if str(manifest.get("action", "")) != "trash":
+                    continue
+                generated_ts = self._media_action_generated_ts(manifest, manifest_path)
+                if days > 0 and generated_ts and generated_ts > cutoff:
+                    continue
+                action_dir = manifest_path.parent
+                bytes_for_dir = files_for_dir = 0
+                for file_path in action_dir.rglob("*"):
+                    if file_path.is_file():
+                        files_for_dir += 1
+                        try:
+                            bytes_for_dir += int(file_path.stat().st_size)
+                        except OSError:
+                            pass
+                targets.append({"path": str(action_dir), "files": files_for_dir, "bytes": bytes_for_dir})
+                deleted_dirs += 1
+                deleted_files += files_for_dir
+                deleted_bytes += bytes_for_dir
+                if not dry_run:
+                    shutil.rmtree(action_dir, ignore_errors=True)
+        result = {
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "dryRun": bool(dry_run),
+            "days": days,
+            "deletedDirs": deleted_dirs if not dry_run else 0,
+            "deletedFiles": deleted_files if not dry_run else 0,
+            "deletedBytes": deleted_bytes if not dry_run else 0,
+            "previewDirs": deleted_dirs if dry_run else 0,
+            "previewFiles": deleted_files if dry_run else 0,
+            "previewBytes": deleted_bytes if dry_run else 0,
+            "targets": targets[:50],
+        }
+        self._append_audit({"action": "cleanup_media_trash", "dry_run": bool(dry_run), "days": days, "files": deleted_files, "bytes": deleted_bytes})
+        return result
+
     def export_scan_history(self, folder: Path | None = None) -> dict[str, Any]:
         export_root = (folder or self.root / "exports").expanduser().resolve()
         export_root.mkdir(parents=True, exist_ok=True)
@@ -3303,6 +4083,276 @@ class ProjectState:
             "recommendations": recommendations,
         }
 
+    def generate_accuracy_validation_pack(self, folder: Path | None = None, import_labels: bool = False) -> dict[str, Any]:
+        export_root = (folder or self.validation_packs_path).expanduser().resolve()
+        export_root.mkdir(parents=True, exist_ok=True)
+        pack_root = export_root / "vintrace-accuracy-validation-pack-v1"
+        if pack_root.exists():
+            if pack_root.is_symlink() or safe_is_mount(pack_root):
+                raise ValueError("Validation pack folder is not safe to overwrite.")
+            shutil.rmtree(pack_root)
+        refs_dir = pack_root / "references"
+        cases_dir = pack_root / "cases"
+        refs_dir.mkdir(parents=True, exist_ok=True)
+        cases_dir.mkdir(parents=True, exist_ok=True)
+
+        scenario_specs = [
+            {
+                "scenario": "cross-age",
+                "person": "Validation Person A",
+                "variant": "cross_age",
+                "is_match": True,
+                "score": 0.62,
+                "quality": 0.88,
+                "media_kind": "image",
+                "difficulty": "medium",
+                "description": "Same synthetic identity with age-shape and texture changes.",
+            },
+            {
+                "scenario": "low-light",
+                "person": "Validation Person A",
+                "variant": "low_light",
+                "is_match": True,
+                "score": 0.36,
+                "quality": 0.42,
+                "media_kind": "image",
+                "difficulty": "hard",
+                "description": "Same identity under low brightness and reduced contrast.",
+            },
+            {
+                "scenario": "video-frame",
+                "person": "Validation Person A",
+                "variant": "video_frame",
+                "is_match": True,
+                "score": 0.39,
+                "quality": 0.52,
+                "media_kind": "video",
+                "difficulty": "medium",
+                "description": "Same identity as a compressed video-frame style sample.",
+            },
+            {
+                "scenario": "side-profile",
+                "person": "Validation Person A",
+                "variant": "side_profile",
+                "is_match": True,
+                "score": 0.34,
+                "quality": 0.48,
+                "media_kind": "image",
+                "difficulty": "hard",
+                "description": "Same identity with one-sided facial evidence.",
+            },
+            {
+                "scenario": "occlusion",
+                "person": "Validation Person A",
+                "variant": "occlusion",
+                "is_match": True,
+                "score": 0.31,
+                "quality": 0.45,
+                "media_kind": "image",
+                "difficulty": "hard",
+                "description": "Same identity with the lower face partially covered.",
+            },
+            {
+                "scenario": "family-lookalike",
+                "person": "Validation Person B",
+                "variant": "family_lookalike",
+                "is_match": False,
+                "score": 0.18,
+                "quality": 0.84,
+                "media_kind": "image",
+                "difficulty": "hard-negative",
+                "description": "Similar synthetic face that should stay below match threshold.",
+            },
+        ]
+        reference_path = refs_dir / "validation-person-a-reference.jpg"
+        self._write_validation_face(reference_path, "reference", person_seed=11)
+        labels: list[dict[str, Any]] = []
+        cases: list[dict[str, Any]] = []
+        for index, spec in enumerate(scenario_specs, start=1):
+            scenario = str(spec["scenario"])
+            case_dir = cases_dir / scenario
+            case_dir.mkdir(parents=True, exist_ok=True)
+            candidate_path = case_dir / f"{index:02d}-{scenario}.jpg"
+            self._write_validation_face(candidate_path, str(spec["variant"]), person_seed=19 if not spec["is_match"] else 11)
+            source_hash = sha256_file(candidate_path)
+            label = {
+                "candidateId": f"validation-{scenario}",
+                "sourcePath": str(candidate_path),
+                "sourceHash": source_hash,
+                "expectedPerson": "Validation Person A",
+                "actualPerson": "Validation Person A" if spec["is_match"] else "",
+                "matchScore": float(spec["score"]),
+                "quality": float(spec["quality"]),
+                "isMatch": bool(spec["is_match"]),
+                "status": "accepted" if spec["is_match"] else "rejected",
+                "mediaKind": str(spec["media_kind"]),
+                "safeLabel": scenario,
+                "scenario": scenario,
+                "difficulty": str(spec["difficulty"]),
+                "createdAt": now_iso(),
+            }
+            labels.append(label)
+            cases.append(
+                {
+                    "scenario": scenario,
+                    "description": str(spec["description"]),
+                    "difficulty": str(spec["difficulty"]),
+                    "referencePath": str(reference_path),
+                    "candidatePath": str(candidate_path),
+                    "expectedMatch": bool(spec["is_match"]),
+                    "score": float(spec["score"]),
+                    "quality": float(spec["quality"]),
+                    "mediaKind": str(spec["media_kind"]),
+                    "sourceHash": source_hash,
+                }
+            )
+
+        thresholds = {
+            "reviewMore": float(self.config.thresholds.relaxed_child),
+            "likely": float(self.config.thresholds.likely),
+            "strong": float(self.config.thresholds.confident),
+        }
+        metrics = {name: self._accuracy_from_label_rows(labels, threshold) for name, threshold in thresholds.items()}
+        segments = {
+            scenario: self._accuracy_from_label_rows([row for row in labels if row.get("scenario") == scenario], thresholds["likely"])
+            for scenario in sorted({str(row.get("scenario")) for row in labels})
+        }
+        manifest = {
+            "schemaVersion": 1,
+            "name": "Vintrace Accuracy Validation Pack",
+            "packVersion": "2026.06",
+            "generatedAt": now_iso(),
+            "workspace": str(self.root),
+            "referencePath": str(reference_path),
+            "scenarios": [case["scenario"] for case in cases],
+            "thresholds": thresholds,
+            "metrics": metrics,
+            "segments": segments,
+            "cases": cases,
+            "labels": labels,
+            "notes": [
+                "Synthetic validation images are generated locally and are not training data.",
+                "Use this pack to verify threshold behavior for cross-age, low-light, video-frame, side-profile, occlusion, and family-lookalike cases.",
+            ],
+        }
+        manifest_path = pack_root / "manifest.json"
+        labels_json_path = pack_root / "labels.json"
+        labels_csv_path = pack_root / "labels.csv"
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        labels_json_path.write_text(json.dumps({"labels": labels, "generatedAt": manifest["generatedAt"]}, indent=2), encoding="utf-8")
+        with labels_csv_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=[
+                    "candidateId",
+                    "sourcePath",
+                    "sourceHash",
+                    "expectedPerson",
+                    "actualPerson",
+                    "matchScore",
+                    "quality",
+                    "isMatch",
+                    "status",
+                    "mediaKind",
+                    "safeLabel",
+                    "scenario",
+                    "difficulty",
+                    "createdAt",
+                ],
+            )
+            writer.writeheader()
+            for row in labels:
+                writer.writerow(row)
+        import_result = self.import_accuracy_labels(labels) if import_labels else None
+        self._append_audit(
+            {
+                "action": "generate_accuracy_validation_pack",
+                "pack_path": str(pack_root),
+                "cases": len(cases),
+                "imported": int(import_result.get("imported", 0)) if isinstance(import_result, dict) else 0,
+            }
+        )
+        return {
+            "packPath": str(pack_root),
+            "manifestPath": str(manifest_path),
+            "labelsJsonPath": str(labels_json_path),
+            "labelsCsvPath": str(labels_csv_path),
+            "counts": {
+                "cases": len(cases),
+                "matches": sum(1 for row in labels if row["isMatch"]),
+                "nonMatches": sum(1 for row in labels if not row["isMatch"]),
+            },
+            "scenarios": [case["scenario"] for case in cases],
+            "metrics": metrics,
+            "segments": segments,
+            "recommendations": self._validation_pack_recommendations(metrics, segments),
+            "importResult": import_result,
+        }
+
+    def run_accuracy_validation_pack(self, folder: Path | None = None, import_labels: bool = False, store: bool = True) -> dict[str, Any]:
+        pack = self.generate_accuracy_validation_pack(folder=folder, import_labels=import_labels)
+        thresholds = {
+            "reviewMore": float(self.config.thresholds.relaxed_child),
+            "likely": float(self.config.thresholds.likely),
+            "strong": float(self.config.thresholds.confident),
+        }
+        labels_payload = self._read_json_object(Path(str(pack["labelsJsonPath"])))
+        labels = labels_payload.get("labels", []) if isinstance(labels_payload, dict) else []
+        rows = [row for row in labels if isinstance(row, dict)]
+        scenario_results = [self._validation_scenario_result(row, thresholds) for row in rows]
+        failed = sum(1 for row in scenario_results if row["status"] == "fail")
+        warned = sum(1 for row in scenario_results if row["status"] == "warn")
+        status = "fail" if failed else "warn" if warned else "pass"
+        run = {
+            "runId": new_id("validation"),
+            "generatedAt": now_iso(),
+            "status": status,
+            "passed": sum(1 for row in scenario_results if row["status"] == "pass"),
+            "warned": warned,
+            "failed": failed,
+            "scenarioResults": scenario_results,
+            "thresholds": thresholds,
+            "metrics": pack.get("metrics", {}),
+            "segments": pack.get("segments", {}),
+            "counts": pack.get("counts", {}),
+            "packPath": pack.get("packPath", ""),
+            "manifestPath": pack.get("manifestPath", ""),
+            "labelsJsonPath": pack.get("labelsJsonPath", ""),
+            "labelsCsvPath": pack.get("labelsCsvPath", ""),
+            "recommendations": self._validation_run_recommendations(status, scenario_results),
+        }
+        if store:
+            history = [run, *self.accuracy_validation_history(limit=49)]
+            self._write_json_atomic(self.accuracy_validation_history_path, history[:50])
+            self._append_audit(
+                {
+                    "action": "run_accuracy_validation_pack",
+                    "run_id": run["runId"],
+                    "status": status,
+                    "passed": run["passed"],
+                    "warned": warned,
+                    "failed": failed,
+                }
+            )
+        else:
+            history = self.accuracy_validation_history(limit=50)
+        return {
+            **pack,
+            "runId": run["runId"],
+            "status": status,
+            "passed": run["passed"],
+            "warned": warned,
+            "failed": failed,
+            "scenarioResults": scenario_results,
+            "validation": run,
+            "history": [run, *history[:19]] if store else history[:20],
+        }
+
+    def accuracy_validation_history(self, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self._read_json_array(self.accuracy_validation_history_path)
+        result = [row for row in rows if isinstance(row, dict)]
+        return result[: max(1, min(100, int(limit or 20)))]
+
     def apply_calibration_to_config(self) -> dict[str, Any]:
         summary = self.calibration_summary()
         recommended = summary.get("recommendedLikelyThreshold")
@@ -3626,6 +4676,166 @@ class ProjectState:
             "recall": round(recall, 4),
             "specificity": round(specificity, 4),
         }
+
+    def _accuracy_from_label_rows(self, rows: list[dict[str, Any]], threshold: float) -> dict[str, Any]:
+        true_positive = false_positive = true_negative = false_negative = 0
+        for row in rows:
+            try:
+                score = float(row.get("matchScore", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                score = 0.0
+            expected_match = bool(row.get("isMatch"))
+            predicted_match = score >= threshold
+            if expected_match and predicted_match:
+                true_positive += 1
+            elif not expected_match and predicted_match:
+                false_positive += 1
+            elif not expected_match and not predicted_match:
+                true_negative += 1
+            else:
+                false_negative += 1
+        precision = true_positive / max(1, true_positive + false_positive)
+        recall = true_positive / max(1, true_positive + false_negative)
+        specificity = true_negative / max(1, true_negative + false_positive)
+        return {
+            "threshold": round(float(threshold), 4),
+            "labeled": len(rows),
+            "truePositives": true_positive,
+            "falsePositives": false_positive,
+            "trueNegatives": true_negative,
+            "falseNegatives": false_negative,
+            "precision": round(precision, 4),
+            "recall": round(recall, 4),
+            "specificity": round(specificity, 4),
+        }
+
+    def _validation_pack_recommendations(self, metrics: dict[str, dict[str, Any]], segments: dict[str, dict[str, Any]]) -> list[str]:
+        recommendations: list[str] = []
+        likely = metrics.get("likely", {})
+        if int(likely.get("falsePositives", 0) or 0):
+            recommendations.append("Raise Likely match or require High confidence when family-lookalike negatives trigger matches.")
+        if int(likely.get("falseNegatives", 0) or 0):
+            recommendations.append("Review low-light, side-profile, and occlusion examples before lowering thresholds.")
+        weak_segments = [
+            name
+            for name, row in segments.items()
+            if int(row.get("labeled", 0) or 0) and (int(row.get("falsePositives", 0) or 0) or int(row.get("falseNegatives", 0) or 0))
+        ]
+        if weak_segments:
+            recommendations.append(f"Scenario threshold attention needed: {', '.join(sorted(weak_segments))}.")
+        if not recommendations:
+            recommendations.append("Validation pack thresholds pass the generated scenario suite.")
+        recommendations.append("Replace or extend this synthetic pack with consented labeled photos before making demographic accuracy claims.")
+        return recommendations
+
+    def _validation_scenario_result(self, row: dict[str, Any], thresholds: dict[str, float]) -> dict[str, Any]:
+        try:
+            score = float(row.get("matchScore", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        is_match = bool(row.get("isMatch"))
+        scenario = str(row.get("scenario") or row.get("safeLabel") or "unknown")
+        likely = float(thresholds.get("likely", self.config.thresholds.likely))
+        review_more = float(thresholds.get("reviewMore", self.config.thresholds.relaxed_child))
+        predicted_likely = score >= likely
+        predicted_review = score >= review_more
+        if is_match and predicted_likely:
+            status = "pass"
+            detail = "Expected match remains above the Likely threshold."
+        elif is_match and predicted_review:
+            status = "warn"
+            detail = "Expected match only passes the broader Review more threshold."
+        elif is_match:
+            status = "fail"
+            detail = "Expected match falls below the Review more threshold."
+        elif predicted_likely:
+            status = "fail"
+            detail = "Expected non-match crosses the Likely threshold."
+        elif predicted_review:
+            status = "warn"
+            detail = "Expected non-match enters Review more and needs human attention."
+        else:
+            status = "pass"
+            detail = "Expected non-match stays below matching thresholds."
+        return {
+            "scenario": scenario,
+            "status": status,
+            "expectedMatch": is_match,
+            "score": round(score, 4),
+            "likelyThreshold": round(likely, 4),
+            "reviewMoreThreshold": round(review_more, 4),
+            "difficulty": str(row.get("difficulty", "")),
+            "mediaKind": str(row.get("mediaKind", "image")),
+            "detail": detail,
+        }
+
+    def _validation_run_recommendations(self, status: str, scenario_results: list[dict[str, Any]]) -> list[str]:
+        weak = [str(row.get("scenario", "")) for row in scenario_results if row.get("status") != "pass"]
+        if status == "pass":
+            return [
+                "Validation pack passed the synthetic scenario suite.",
+                "Use consented real-world labels before publishing demographic or production accuracy claims.",
+            ]
+        if status == "warn":
+            return [
+                f"Review threshold behavior for: {', '.join(weak)}.",
+                "Warnings mean human review catches the case, but automatic confidence should not be raised yet.",
+            ]
+        return [
+            f"Validation failed for: {', '.join(weak)}.",
+            "Do not ship new matching thresholds until failed validation scenarios are resolved.",
+        ]
+
+    def _write_validation_face(self, path: Path, variant: str, person_seed: int) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        image = Image.new("RGB", (360, 360), (226, 231, 239))
+        draw = ImageDraw.Draw(image)
+        accent = (120 + person_seed * 3 % 80, 82 + person_seed * 5 % 80, 146 + person_seed * 7 % 70)
+        draw.rectangle((0, 0, 360, 360), fill=(230, 233, 239))
+        draw.ellipse((-80, -80, 180, 180), fill=(237, 209, 219))
+        draw.ellipse((205, 225, 430, 430), fill=(203, 225, 232))
+        face_box = (112, 72, 248, 254)
+        if variant == "side_profile":
+            face_box = (124, 76, 270, 254)
+        if variant == "cross_age":
+            face_box = (108, 66, 252, 262)
+        draw.ellipse(face_box, fill=(209, 172, 142), outline=(91, 68, 83), width=3)
+        hair_offset = 8 if person_seed % 2 else -4
+        draw.pieslice((93 + hair_offset, 46, 263 + hair_offset, 168), 180, 360, fill=(42, 43, 55))
+        draw.arc((116, 96, 244, 266), 18, 162, fill=(95, 63, 80), width=4)
+        if variant == "side_profile":
+            draw.ellipse((166, 139, 179, 152), fill=(35, 37, 45))
+            draw.line((214, 145, 245, 166, 213, 178), fill=(86, 58, 55), width=4)
+        else:
+            eye_shift = 4 if person_seed % 2 else 0
+            draw.ellipse((139 + eye_shift, 136, 153 + eye_shift, 150), fill=(34, 36, 43))
+            draw.ellipse((204 - eye_shift, 136, 218 - eye_shift, 150), fill=(34, 36, 43))
+            draw.line((180, 151, 174, 177, 188, 177), fill=(105, 74, 66), width=4)
+        draw.arc((154, 192, 210, 220), 12, 168, fill=(115, 58, 74), width=5)
+        draw.rounded_rectangle((132, 252, 228, 334), radius=28, fill=accent)
+        draw.rectangle((0, 318, 360, 360), fill=(38, 44, 54))
+        if variant == "cross_age":
+            draw.arc((137, 124, 169, 160), 215, 320, fill=(130, 96, 90), width=2)
+            draw.arc((194, 124, 226, 160), 220, 325, fill=(130, 96, 90), width=2)
+            draw.line((148, 114, 162, 108), fill=(238, 238, 238), width=2)
+            draw.line((200, 108, 214, 114), fill=(238, 238, 238), width=2)
+        elif variant == "low_light":
+            image = ImageEnhance.Brightness(image).enhance(0.34)
+            image = ImageEnhance.Contrast(image).enhance(0.78)
+        elif variant == "video_frame":
+            draw.rectangle((12, 12, 348, 348), outline=(246, 248, 250), width=2)
+            draw.text((24, 24), "00:02:12", fill=(246, 248, 250))
+            image = ImageEnhance.Sharpness(image).enhance(0.55)
+        elif variant == "occlusion":
+            draw.rounded_rectangle((120, 170, 240, 221), radius=16, fill=(34, 42, 51))
+            draw.line((126, 177, 236, 214), fill=(112, 124, 142), width=3)
+        elif variant == "family_lookalike":
+            draw.line((138, 126, 160, 120), fill=(38, 38, 48), width=5)
+            draw.line((200, 120, 222, 126), fill=(38, 38, 48), width=5)
+            draw.arc((148, 190, 214, 224), 0, 155, fill=(120, 50, 62), width=5)
+        temp = path.with_suffix(path.suffix + ".tmp")
+        image.save(temp, format="JPEG", quality=92, optimize=True)
+        temp.replace(path)
 
     def _safe_filename(self, value: str) -> str:
         cleaned = "".join(character if character.isalnum() or character in {"-", "_", ".", " "} else "_" for character in value.strip())

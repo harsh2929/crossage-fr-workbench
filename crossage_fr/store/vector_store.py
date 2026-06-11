@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import importlib.util
 import os
+from pathlib import Path
 
 import numpy as np
 
@@ -116,6 +117,50 @@ class VectorStore:
         if self._faiss is not None:
             self._faiss_index = self._make_faiss_index()
             self._faiss_index.add(self._vectors)
+
+    def save(self, path: Path) -> dict[str, object]:
+        path = path.expanduser().resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with temp.open("wb") as handle:
+                np.savez_compressed(
+                    handle,
+                    ids=np.asarray(self.ids, dtype=object),
+                    vectors=self._vectors[: len(self.ids)].astype("float32", copy=False),
+                    dimension=np.asarray([self.dimension], dtype="int32"),
+                )
+            temp.replace(path)
+            return {"ok": True, "path": str(path), "vectors": len(self.ids), "bytes": path.stat().st_size}
+        except Exception as exc:
+            try:
+                temp.unlink()
+            except OSError:
+                pass
+            return {"ok": False, "path": str(path), "vectors": len(self.ids), "error": str(exc)}
+
+    def load(self, path: Path, expected_ids: set[str] | None = None) -> bool:
+        path = path.expanduser().resolve()
+        if not path.exists():
+            return False
+        try:
+            with np.load(path, allow_pickle=True) as archive:
+                dimension = int(np.asarray(archive["dimension"]).reshape(-1)[0])
+                ids = [str(item) for item in archive["ids"].tolist()]
+                values = np.asarray(archive["vectors"], dtype="float32")
+        except Exception:
+            return False
+        if dimension != self.dimension or values.ndim != 2 or values.shape[1] != self.dimension or len(ids) != values.shape[0]:
+            return False
+        if expected_ids is not None and set(ids) != set(expected_ids):
+            return False
+        values = normalize_matrix(values)
+        self.ids = ids
+        self._vectors = values.copy()
+        if self._faiss is not None:
+            self._faiss_index = self._make_faiss_index()
+            self._faiss_index.add(self._vectors)
+        return True
 
     def search(self, vector: list[float] | np.ndarray, k: int = 10) -> list[SearchHit]:
         limit = min(max(int(k), 0), len(self.ids))

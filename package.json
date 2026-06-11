@@ -32,6 +32,7 @@
     "bench:scale": "PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/scale_benchmark.py",
     "bench:accuracy": "PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/accuracy_benchmark.py",
     "update:dry-run": "node desktop/scripts/check-update-feed.cjs",
+    "package:check": "node desktop/scripts/check-package-artifacts.cjs",
     "release:check": "node desktop/scripts/run-python.cjs tests/release_check.py",
     "test": "npm run build && npm run test:pipeline && npm run test:edge && npm run test:mcp && npm run test:e2e"
   },
@@ -61,7 +62,7 @@
       {
         "provider": "github",
         "owner": "harsh2929",
-        "repo": "vintrace"
+        "repo": "crossage-fr-workbench"
       }
     ],
     "files": [

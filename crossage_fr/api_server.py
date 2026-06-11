@@ -28,7 +28,7 @@ from crossage_fr.enroll import ProjectState
 from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, image_decoder_report, load_image
 from crossage_fr.ingest.safety import safety_model_report
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, probe_video, video_decoder_report
-from crossage_fr.model_manager import MODEL_PACKAGES, download_model_pack, model_pack_ready, model_root_for_config, model_roots_for_engine, model_status, set_model_root
+from crossage_fr.model_manager import MODEL_PACKAGES, download_model_pack, model_governance, model_pack_ready, model_root_for_config, model_roots_for_engine, model_status, set_model_root
 from crossage_fr.models import ReviewCandidate, new_id
 from crossage_fr.platform_detect import build_platform_report, memory_available_bytes, process_memory_bytes
 from crossage_fr.storage import inspect_storage_path, safe_resolve
@@ -458,6 +458,62 @@ class DesktopApi:
                 Path(folder_param).expanduser() if folder_param else None,
             )
             return {"value": result, "state": self.state()}
+        if command == "preview_candidate_media_action":
+            candidate_ids = params.get("candidateIds", [])
+            if not isinstance(candidate_ids, list):
+                raise ValueError("candidateIds must be a list.")
+            folder_param = str(params.get("folder", "")).strip()
+            return self.project.preview_candidate_media_action(
+                [str(candidate_id) for candidate_id in candidate_ids],
+                str(params.get("action", "")),
+                Path(folder_param).expanduser() if folder_param else None,
+                item_limit=int(params.get("itemLimit", 120) or 120),
+                item_offset=int(params.get("itemOffset", 0) or 0),
+            )
+        if command == "manage_candidate_media":
+            candidate_ids = params.get("candidateIds", [])
+            if not isinstance(candidate_ids, list):
+                raise ValueError("candidateIds must be a list.")
+            folder_param = str(params.get("folder", "")).strip()
+            result = self.project.manage_candidate_media(
+                [str(candidate_id) for candidate_id in candidate_ids],
+                str(params.get("action", "")),
+                Path(folder_param).expanduser() if folder_param else None,
+                on_progress=(lambda payload: progress(payload, "media_action")) if progress else None,
+            )
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "media_action_history":
+            return self.project.media_action_history(limit=int(params.get("limit", 20) or 20))
+        if command == "restore_media_action":
+            manifest_path = str(params.get("manifestPath", "")).strip()
+            if not manifest_path:
+                raise ValueError("manifestPath is required.")
+            result = self.project.restore_media_action(Path(manifest_path))
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "retry_media_action":
+            manifest_path = str(params.get("manifestPath", "")).strip()
+            if not manifest_path:
+                raise ValueError("manifestPath is required.")
+            folder_param = str(params.get("folder", "")).strip()
+            result = self.project.retry_media_action(
+                Path(manifest_path),
+                Path(folder_param).expanduser() if folder_param else None,
+                on_progress=(lambda payload: progress(payload, "media_action")) if progress else None,
+            )
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "undo_media_action":
+            manifest_path = str(params.get("manifestPath", "")).strip()
+            result = self.project.undo_media_action(Path(manifest_path) if manifest_path else None)
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "media_trash_report":
+            return self.project.media_trash_report()
+        if command == "cleanup_media_trash":
+            days_param = params.get("days", 30)
+            result = self.project.cleanup_media_trash(
+                days=int(30 if days_param in (None, "") else days_param),
+                dry_run=bool(params.get("dryRun", True)),
+            )
+            return {"value": result, "state": self.state(preview_create_budget=0)}
         if command == "export_media_bundle":
             candidate_ids = params.get("candidateIds")
             if candidate_ids is not None and not isinstance(candidate_ids, list):
@@ -498,6 +554,22 @@ class DesktopApi:
             return self.project.calibration_summary()
         if command == "accuracy_evaluation":
             return self.project.accuracy_evaluation()
+        if command == "generate_accuracy_validation_pack":
+            folder_param = str(params.get("folder", "")).strip()
+            result = self.project.generate_accuracy_validation_pack(
+                Path(folder_param).expanduser() if folder_param else None,
+                import_labels=bool(params.get("importLabels", False)),
+            )
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "run_accuracy_validation_pack":
+            folder_param = str(params.get("folder", "")).strip()
+            result = self.project.run_accuracy_validation_pack(
+                Path(folder_param).expanduser() if folder_param else None,
+                import_labels=bool(params.get("importLabels", False)),
+            )
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "accuracy_validation_history":
+            return {"history": self.project.accuracy_validation_history(limit=int(params.get("limit", 20) or 20))}
         if command == "apply_calibration":
             result = self.project.apply_calibration_to_config()
             self._reset_engine()
@@ -599,6 +671,19 @@ class DesktopApi:
             excluded_path_keywords = self._string_list(scan_exclusions.get("pathKeywords", self.project.config.excluded_path_keywords), "Excluded path words")
             excluded_extensions = self._extension_list(scan_exclusions.get("extensions", self.project.config.excluded_extensions))
             excluded_file_paths = self._string_list(scan_exclusions.get("filePaths", self.project.config.excluded_file_paths), "Excluded files", limit=400)
+            video_decoder_settings = params.get("videoDecoder", {})
+            if video_decoder_settings is None:
+                video_decoder_settings = {}
+            if not isinstance(video_decoder_settings, dict):
+                raise ValueError("Video decoder settings must be an object.")
+            ffmpeg_path = self._optional_existing_file(
+                video_decoder_settings.get("ffmpegPath", self.project.config.ffmpeg_path),
+                "FFmpeg path",
+            )
+            ffprobe_path = self._optional_existing_file(
+                video_decoder_settings.get("ffprobePath", self.project.config.ffprobe_path),
+                "FFprobe path",
+            )
             safe_mode_threshold = float(params.get("safeModeThreshold", self.project.config.safe_mode_threshold))
             if not math.isfinite(safe_mode_threshold) or safe_mode_threshold < 0.0 or safe_mode_threshold > 1.0:
                 raise ValueError("Safe Mode threshold must be between 0 and 1.")
@@ -620,8 +705,11 @@ class DesktopApi:
             self.project.config.excluded_path_keywords = excluded_path_keywords
             self.project.config.excluded_extensions = excluded_extensions
             self.project.config.excluded_file_paths = excluded_file_paths
+            self.project.config.ffmpeg_path = ffmpeg_path
+            self.project.config.ffprobe_path = ffprobe_path
             self.project.config.safe_mode = bool(params.get("safeMode", self.project.config.safe_mode))
             self.project.config.safe_mode_threshold = safe_mode_threshold
+            self.project.apply_video_decoder_config()
             self.project._append_audit(
                 {
                     "action": "save_settings",
@@ -648,6 +736,10 @@ class DesktopApi:
                         "path_keywords": excluded_path_keywords,
                         "extensions": excluded_extensions,
                         "file_paths": excluded_file_paths,
+                    },
+                    "video_decoder": {
+                        "ffmpeg_path_set": bool(ffmpeg_path),
+                        "ffprobe_path_set": bool(ffprobe_path),
                     },
                     "safe_mode": self.project.config.safe_mode,
                     "safe_mode_threshold": safe_mode_threshold,
@@ -725,6 +817,20 @@ class DesktopApi:
             result.append(extension[:32])
         return result
 
+    def _optional_existing_file(self, value: Any, label: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if len(text) > 1000:
+            raise ValueError(f"{label} is too long.")
+        path = Path(text).expanduser()
+        try:
+            if not path.exists() or not path.is_file():
+                raise ValueError(f"{label} does not exist or is not a file.")
+        except OSError as exc:
+            raise ValueError(f"{label} cannot be read: {exc}") from exc
+        return str(path)
+
     def set_workspace(self, path: Path) -> dict[str, Any]:
         self.project = ProjectState(path.expanduser().resolve(), actor=self.actor)
         self.consent_on_file = self.project.consent_on_file()
@@ -771,9 +877,11 @@ class DesktopApi:
         }
         if not result["exists"]:
             result["recommendations"].append("Choose an existing folder before scanning.")
+            result["readiness"] = self._build_scan_readiness(result)
             return result
         if not result["isDirectory"]:
             result["recommendations"].append("Choose a folder rather than a single file.")
+            result["readiness"] = self._build_scan_readiness(result)
             return result
         image_samples_for_decode: list[Path] = []
         video_samples_for_decode: list[Path] = []
@@ -914,6 +1022,7 @@ class DesktopApi:
             result["recommendations"].append("Folder is ready for scanning.")
         result["estimate"] = self._estimate_scan_duration(result)
         result["plan"] = self._build_scan_plan(result)
+        result["readiness"] = self._build_scan_readiness(result)
         return result
 
     def _estimate_scan_duration(self, analysis: dict[str, Any]) -> dict[str, Any]:
@@ -1029,6 +1138,130 @@ class DesktopApi:
             "recommendedAction": warnings[0] if warnings else "Folder is ready for a resumable scan.",
         }
 
+    def _build_scan_readiness(self, analysis: dict[str, Any]) -> dict[str, Any]:
+        image_count = int(analysis.get("imageCount", 0) or 0)
+        video_count = int(analysis.get("videoCount", 0) or 0)
+        media_count = image_count + video_count
+        transient_errors = int(analysis.get("transientErrorCount", 0) or 0)
+        stat_errors = int(analysis.get("statErrorCount", 0) or 0)
+        walk_errors = int(analysis.get("walkErrorCount", 0) or 0)
+        issue_count = len(analysis.get("unreadableSamples", []) or []) + len(analysis.get("unreadableVideoSamples", []) or [])
+        storage = analysis.get("storage", {}) if isinstance(analysis.get("storage"), dict) else {}
+        plan = analysis.get("plan", {}) if isinstance(analysis.get("plan"), dict) else {}
+        video_decoder = analysis.get("videoDecoder", {}) if isinstance(analysis.get("videoDecoder"), dict) else video_decoder_report()
+        face_model = model_status(self.project.config, self.engine_name)
+        safe_model = safety_model_report()
+        estimated_workspace_bytes = int(plan.get("estimatedWorkspaceBytes", 0) or 0)
+        free_bytes = int(storage.get("freeBytes", 0) or 0)
+        workspace_writable = self._workspace_writable()
+        checks: list[dict[str, Any]] = []
+
+        def add(name: str, ok: bool, severity: str, detail: str, value: Any = None) -> None:
+            row: dict[str, Any] = {"name": name, "ok": bool(ok), "severity": severity, "detail": detail}
+            if value is not None:
+                row["value"] = value
+            checks.append(row)
+
+        add(
+            "Folder",
+            bool(analysis.get("exists") and analysis.get("isDirectory")),
+            "blocker",
+            "Folder is readable." if analysis.get("exists") and analysis.get("isDirectory") else "Choose an existing folder before scanning.",
+            {"path": analysis.get("folder", "")},
+        )
+        add(
+            "Media files",
+            media_count > 0,
+            "blocker",
+            f"{media_count} supported photo/video file(s) found." if media_count else "No supported photo or video files were found.",
+        )
+        add(
+            "Permission",
+            bool(self.consent_on_file or not self.project.config.require_consent),
+            "blocker",
+            "Permission is confirmed." if self.consent_on_file or not self.project.config.require_consent else "Confirm permission before processing images and videos.",
+        )
+        add(
+            "People",
+            bool(self.project.references),
+            "blocker",
+            f"{len(self.project.references)} saved face photo(s) ready." if self.project.references else "Add at least one person before scanning.",
+        )
+        add(
+            "Face model",
+            bool(face_model.get("ready")),
+            "warning",
+            "Full face model is installed." if face_model.get("ready") else str(face_model.get("recommendation") or "Simple matching fallback is active."),
+            face_model,
+        )
+        add(
+            "Safe Mode",
+            bool((not self.project.config.safe_mode) or safe_model.get("available")),
+            "warning",
+            "Safe Mode model is ready." if (not self.project.config.safe_mode) or safe_model.get("available") else str(safe_model.get("reason") or "Safe Mode is using reduced protection."),
+            safe_model,
+        )
+        add(
+            "Video decoder",
+            bool(video_count == 0 or video_decoder.get("opencvAvailable") or video_decoder.get("ffmpegAvailable")),
+            "blocker",
+            "Video decoder is ready." if video_count == 0 or video_decoder.get("opencvAvailable") or video_decoder.get("ffmpegAvailable") else "Install managed FFmpeg or remove videos before scanning.",
+            video_decoder,
+        )
+        add(
+            "App folder",
+            workspace_writable,
+            "blocker",
+            "App folder is writable." if workspace_writable else "Choose a writable app folder before scanning.",
+            {"workspace": str(self.project.root)},
+        )
+        free_space_ok = free_bytes <= 0 or estimated_workspace_bytes <= 0 or free_bytes > int(estimated_workspace_bytes * 1.2)
+        add(
+            "Storage space",
+            free_space_ok,
+            "warning",
+            "Storage space looks sufficient." if free_space_ok else "Free space may be tight for generated previews and indexes.",
+            {"freeBytes": free_bytes, "estimatedWorkspaceBytes": estimated_workspace_bytes},
+        )
+        add(
+            "Sample read",
+            issue_count == 0 and transient_errors + stat_errors + walk_errors == 0,
+            "warning",
+            "Sampled files opened cleanly." if issue_count == 0 and transient_errors + stat_errors + walk_errors == 0 else "Some sampled files or folders could not be read.",
+        )
+        add("Resume support", True, "info", "Scan manifests and hash resume are enabled.")
+        blockers = [check["detail"] for check in checks if not check["ok"] and check["severity"] == "blocker"]
+        warnings = [check["detail"] for check in checks if not check["ok"] and check["severity"] == "warning"]
+        large_scan = bool(media_count >= 1000 or int(analysis.get("totalBytes", 0) or 0) >= 50 * 1024 * 1024 * 1024 or analysis.get("truncated"))
+        status = "fail" if blockers else "warn" if warnings else "pass"
+        return {
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "ready": not blockers,
+            "status": status,
+            "largeScan": large_scan,
+            "checks": checks,
+            "blockers": blockers,
+            "warnings": warnings,
+            "estimatedTotalSeconds": int((analysis.get("estimate", {}) or {}).get("totalSeconds", 0) if isinstance(analysis.get("estimate"), dict) else 0),
+            "estimatedWorkspaceBytes": estimated_workspace_bytes,
+            "mediaCount": media_count,
+            "recommendedAction": blockers[0] if blockers else warnings[0] if warnings else "Ready to start scanning.",
+        }
+
+    def _workspace_writable(self) -> bool:
+        probe = self.project.root / ".vintrace-readiness-write"
+        try:
+            self.project.root.mkdir(parents=True, exist_ok=True)
+            probe.write_text("ok", encoding="utf-8")
+            return probe.read_text(encoding="utf-8") == "ok"
+        except OSError:
+            return False
+        finally:
+            try:
+                probe.unlink()
+            except OSError:
+                pass
+
     def _duration_label(self, seconds: float) -> str:
         seconds = max(0, int(seconds))
         hours, remainder = divmod(seconds, 3600)
@@ -1070,7 +1303,12 @@ class DesktopApi:
         add("Face model", bool(face_model.get("ready")), str(face_model.get("recommendation") or face_model.get("engine")), face_model)
         add("Safe Mode model", bool(safe_model.get("available")), str(safe_model.get("modelName") or safe_model.get("reason") or safe_model.get("engine")), safe_model)
         add("Image decoder", bool(image_decoder.get("extensions")), f"{len(image_decoder.get('extensions', []))} supported extension(s).", image_decoder)
-        add("Video decoder", bool(video_decoder.get("opencvAvailable")), str(video_decoder.get("backend") or "Unavailable"), video_decoder)
+        add(
+            "Video decoder",
+            bool(video_decoder.get("opencvAvailable") or video_decoder.get("ffmpegAvailable")),
+            str(video_decoder.get("backend") or "Unavailable"),
+            video_decoder,
+        )
         add("Acceleration", bool(platform.get("primary_provider")), str(platform.get("accelerator_status") or platform.get("primary_provider")), platform)
         health = self.project.workspace_health()
         add("Workspace health", not any(health.get(key, 0) for key in ("missingReferences", "missingCandidates", "missingMediaSources")), "Missing-file checks complete.", health)
@@ -1079,8 +1317,8 @@ class DesktopApi:
             recommendations.append("Install or bundle an ONNX Safe Mode model before production use.")
         if not face_model.get("ready"):
             recommendations.append("Download a face model before sharing production installers.")
-        if not video_decoder.get("opencvAvailable"):
-            recommendations.append("Install OpenCV video support to scan video files.")
+        if not (video_decoder.get("opencvAvailable") or video_decoder.get("ffmpegAvailable")):
+            recommendations.append("Install or bundle the managed FFmpeg decoder before scanning video files.")
         if health.get("duplicateCandidateCount"):
             recommendations.append("Run duplicate cleanup before final export.")
         if not recommendations:
@@ -1284,6 +1522,7 @@ class DesktopApi:
 
         for spec in MODEL_PACKAGES.values():
             package = next((item for item in face_model.get("packages", []) if isinstance(item, dict) and item.get("pack") == spec.pack), {})
+            governance = model_governance(spec.pack)
             items.append(
                 {
                     "kind": "face",
@@ -1299,7 +1538,12 @@ class DesktopApi:
                     "installed": bool(package.get("available")),
                     "archivePath": str(package.get("archivePath", "")),
                     "installedPath": str(package.get("path", "")),
-                    "redistributionReady": license_state(spec.license) == "declared",
+                    "accuracyTier": governance.get("accuracyTier", "unknown"),
+                    "humanReviewRequired": bool(governance.get("humanReviewRequired", True)),
+                    "redistributionRisk": governance.get("redistributionRisk", "unknown"),
+                    "limitations": governance.get("limitations", []),
+                    "validation": governance.get("validation", []),
+                    "redistributionReady": license_state(spec.license) == "declared" and governance.get("redistributionRisk") != "needs-license-review",
                 }
             )
         safe_license = str(safe_model.get("license") or "")
@@ -1318,12 +1562,18 @@ class DesktopApi:
                 "installed": bool(safe_model.get("available")),
                 "archivePath": "",
                 "installedPath": str(safe_model.get("path") or ""),
+                "accuracyTier": "safety-filter",
+                "humanReviewRequired": True,
+                "redistributionRisk": "declared" if safe_license else "local",
+                "limitations": ["Safe Mode is a protective filter, not a complete intimate-content detector."],
+                "validation": ["Review Safe Mode audit totals after test scans."],
                 "redistributionReady": bool(safe_model.get("available")) and (not safe_license or license_state(safe_license) == "declared"),
             }
         )
         blockers = [item for item in items if item["licenseState"] in {"missing", "needs-review"}]
+        governance_blockers = [item for item in items if item.get("redistributionRisk") == "needs-license-review"]
         recommendations = []
-        if blockers:
+        if blockers or governance_blockers:
             recommendations.append("Resolve model license/redistribution review before publishing public installers.")
         if not face_model.get("ready"):
             recommendations.append("Install at least one face model or rely on the in-app first-run downloader.")
@@ -1333,9 +1583,9 @@ class DesktopApi:
             recommendations.append("Model manifest is complete for the installed local models.")
         return {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            "ok": not blockers and bool(safe_model.get("available")),
+            "ok": not blockers and not governance_blockers and bool(safe_model.get("available")),
             "items": items,
-            "blockers": blockers,
+            "blockers": [*blockers, *governance_blockers],
             "recommendations": recommendations,
         }
 
@@ -1344,6 +1594,11 @@ class DesktopApi:
         safe_model = safety_model_report()
         distribution = self.model_distribution_audit()
         db_integrity = self.project.database_integrity()
+        video_decoder = video_decoder_report()
+        try:
+            validation = self.project.run_accuracy_validation_pack(store=False)
+        except Exception as exc:
+            validation = {"status": "fail", "recommendations": [str(exc)], "scenarioResults": []}
         update_feed_ready = bool(
             os.environ.get("VINTRACE_UPDATE_URL")
             or os.environ.get("CROSSAGE_UPDATE_URL")
@@ -1373,6 +1628,18 @@ class DesktopApi:
                 "ok": bool(db_integrity.get("ok")),
                 "detail": "SQLite workspace index passed integrity checks." if db_integrity.get("ok") else str(db_integrity.get("error") or "SQLite workspace index needs repair."),
                 "value": db_integrity,
+            },
+            {
+                "name": "Video decoder",
+                "ok": bool(video_decoder.get("opencvAvailable") or video_decoder.get("ffmpegAvailable")),
+                "detail": str(video_decoder.get("backend") or "Video decoder unavailable."),
+                "value": video_decoder,
+            },
+            {
+                "name": "Accuracy validation pack",
+                "ok": str(validation.get("status", "fail")) == "pass",
+                "detail": "Synthetic validation pack passed." if str(validation.get("status", "fail")) == "pass" else "; ".join([str(item) for item in validation.get("recommendations", [])[:2]]) or "Synthetic validation pack did not pass.",
+                "value": validation,
             },
             {
                 "name": "Consent policy",
@@ -1472,7 +1739,7 @@ class DesktopApi:
         add("Model license manifest", bool(distribution.get("ok")), "Model manifest is ready for redistribution review." if distribution.get("ok") else "; ".join(distribution.get("recommendations", [])[:2]), distribution)
         add("Workspace database", bool(db_integrity.get("ok")), "SQLite workspace index passed integrity checks." if db_integrity.get("ok") else str(db_integrity.get("error") or "SQLite workspace index needs repair."), db_integrity)
         add("Image decoder", bool(image_decoder.get("extensions")), f"{len(image_decoder.get('extensions', []))} image extension(s) supported.", image_decoder)
-        add("Video decoder", bool(video_decoder.get("opencvAvailable")), str(video_decoder.get("backend") or "Video decoder unavailable."), video_decoder)
+        add("Video decoder", bool(video_decoder.get("opencvAvailable") or video_decoder.get("ffmpegAvailable")), str(video_decoder.get("backend") or "Video decoder unavailable."), video_decoder)
         recommendations = [check["detail"] for check in checks if not check["ok"]]
         if not recommendations:
             recommendations.append("Model and runtime integrity checks passed.")
@@ -1699,7 +1966,7 @@ class DesktopApi:
             },
             {
                 "name": "Video support",
-                "ok": bool(video_decoder.get("opencvAvailable")),
+                "ok": bool(video_decoder.get("opencvAvailable") or video_decoder.get("ffmpegAvailable")),
                 "detail": str(video_decoder.get("backend") or "Video decoder unavailable."),
             },
             {
@@ -2029,6 +2296,10 @@ class DesktopApi:
                 "safeModeThreshold": self.project.config.safe_mode_threshold,
                 "storageBudgetBytes": self.project.config.storage_budget_bytes,
                 "maxMediaFileBytes": self.project.config.max_media_file_bytes,
+                "videoDecoder": {
+                    "ffmpegPath": self.project.config.ffmpeg_path,
+                    "ffprobePath": self.project.config.ffprobe_path,
+                },
                 "reviewRules": {
                     "autoRejectBelow": self.project.config.auto_reject_below,
                     "autoUncertainLowQuality": self.project.config.auto_uncertain_low_quality,
@@ -2045,6 +2316,7 @@ class DesktopApi:
             },
             "safeModeModel": safety_model_report(),
             "modelSetup": model_status(self.project.config, self.engine_name),
+            "videoDecoder": video_decoder_report(),
             "references": [
                 {
                     "refId": ref.ref_id,

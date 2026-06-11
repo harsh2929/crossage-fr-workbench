@@ -3,8 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
+import json
 import os
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 from typing import Iterable
 
 from PIL import Image
@@ -48,6 +53,19 @@ class VideoFrameSample:
     duration_ms: int
 
 
+def configure_video_decoder_paths(ffmpeg_path: str = "", ffprobe_path: str = "") -> None:
+    ffmpeg = str(ffmpeg_path or "").strip()
+    ffprobe = str(ffprobe_path or "").strip()
+    if ffmpeg:
+        os.environ["VINTRACE_FFMPEG_PATH"] = ffmpeg
+    else:
+        os.environ.pop("VINTRACE_FFMPEG_PATH", None)
+    if ffprobe:
+        os.environ["VINTRACE_FFPROBE_PATH"] = ffprobe
+    else:
+        os.environ.pop("VINTRACE_FFPROBE_PATH", None)
+
+
 def is_video_path(path: Path) -> bool:
     return path.suffix.lower() in VIDEO_EXTENSIONS
 
@@ -68,19 +86,49 @@ def iter_video_paths(root: Path) -> Iterable[Path]:
 
 
 def video_decoder_report() -> dict[str, object]:
+    opencv_available = _cv2_available()
+    ffmpeg = _discover_ffmpeg()
+    ffprobe = _discover_ffprobe()
+    managed_available = _managed_ffmpeg_available()
+    ffmpeg_path = str(ffmpeg.get("path") or "")
+    ffprobe_path = str(ffprobe.get("path") or "")
+    backend = "opencv" if opencv_available else "ffmpeg" if ffmpeg_path else "unavailable"
+    recommendations = []
+    if not ffmpeg_path:
+        recommendations.append("Install the managed video decoder package or choose an FFmpeg binary in Settings.")
+    if ffmpeg_path and not ffprobe_path:
+        recommendations.append("Video frame extraction works with FFmpeg, but metadata is limited until ffprobe is available.")
     return {
         "extensions": sorted(VIDEO_EXTENSIONS),
-        "opencvAvailable": _cv2_available(),
-        "backend": "opencv" if _cv2_available() else "unavailable",
+        "opencvAvailable": opencv_available,
+        "ffmpegAvailable": bool(ffmpeg_path),
+        "ffprobeAvailable": bool(ffprobe_path),
+        "ffmpegPath": ffmpeg_path or "",
+        "ffprobePath": ffprobe_path or "",
+        "ffmpegSource": str(ffmpeg.get("source") or "missing"),
+        "ffprobeSource": str(ffprobe.get("source") or "missing"),
+        "managedPackage": "imageio-ffmpeg",
+        "managedPackageAvailable": managed_available,
+        "configuredFfmpegPath": os.environ.get("VINTRACE_FFMPEG_PATH") or os.environ.get("CROSSAGE_FFMPEG_PATH") or "",
+        "configuredFfprobePath": os.environ.get("VINTRACE_FFPROBE_PATH") or os.environ.get("CROSSAGE_FFPROBE_PATH") or "",
+        "backend": backend,
+        "probeLimited": bool(ffmpeg_path and not ffprobe_path),
+        "fallbackOrder": [item for item, available in (("opencv", opencv_available), ("ffmpeg", bool(ffmpeg_path))) if available],
+        "licenseNote": "Managed FFmpeg uses imageio-ffmpeg. Review FFmpeg codec and LGPL/GPL redistribution requirements before commercial release.",
+        "recommendations": recommendations,
     }
 
 
 def probe_video(path: Path) -> dict[str, object]:
-    cv2 = _require_cv2()
+    try:
+        cv2 = _require_cv2()
+    except VideoLoadError:
+        return _probe_video_ffmpeg(path)
     capture = cv2.VideoCapture(str(path))
     try:
         if not capture.isOpened():
-            raise VideoLoadError(f"Could not open video {path}")
+            capture.release()
+            return _probe_video_ffmpeg(path)
         frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
@@ -108,11 +156,14 @@ def sample_video_frames(
     interval_seconds: float = 2.0,
     jpeg_quality: int = 88,
 ) -> list[VideoFrameSample]:
-    cv2 = _require_cv2()
+    try:
+        cv2 = _require_cv2()
+    except VideoLoadError:
+        return _sample_video_frames_ffmpeg(path, output_root, max_frames=max_frames, interval_seconds=interval_seconds, jpeg_quality=jpeg_quality)
     resolved = path.expanduser().resolve()
     capture = cv2.VideoCapture(str(resolved))
     if not capture.isOpened():
-        raise VideoLoadError(f"Could not open video {resolved}")
+        return _sample_video_frames_ffmpeg(path, output_root, max_frames=max_frames, interval_seconds=interval_seconds, jpeg_quality=jpeg_quality)
     try:
         frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
@@ -168,6 +219,288 @@ def _require_cv2():
     except Exception as exc:
         raise VideoLoadError("Video support requires OpenCV or a future FFmpeg backend.") from exc
     return cv2
+
+
+def _existing_file(value: object) -> str:
+    try:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        path = Path(text).expanduser()
+        if path.exists() and path.is_file():
+            return str(path)
+    except (OSError, ValueError):
+        return ""
+    return ""
+
+
+def _resource_dirs() -> list[Path]:
+    candidates: list[Path] = []
+    env_dir = os.environ.get("VINTRACE_FFMPEG_DIR") or os.environ.get("CROSSAGE_FFMPEG_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir).expanduser())
+    frozen_root = getattr(sys, "_MEIPASS", "")
+    if frozen_root:
+        candidates.append(Path(str(frozen_root)).expanduser())
+    try:
+        candidates.append(Path(sys.executable).expanduser().resolve().parent)
+    except (OSError, ValueError):
+        pass
+    try:
+        candidates.append(Path(__file__).resolve().parents[2])
+    except (OSError, IndexError):
+        pass
+    candidates.append(Path.cwd())
+    expanded: list[Path] = []
+    seen: set[str] = set()
+    for base in candidates:
+        for path in (base, base / "bin", base / "ffmpeg", base / "imageio_ffmpeg" / "binaries"):
+            key = str(path)
+            if key not in seen:
+                seen.add(key)
+                expanded.append(path)
+    return expanded
+
+
+def _binary_names(name: str) -> list[str]:
+    suffixes = [".exe", ".cmd", ".bat"] if os.name == "nt" else [""]
+    names = [f"{name}{suffix}" for suffix in suffixes]
+    if name == "ffmpeg":
+        names.extend([f"ffmpeg-{sys.platform}{suffix}" for suffix in suffixes])
+    return names
+
+
+def _bundled_binary(name: str) -> str:
+    for folder in _resource_dirs():
+        for filename in _binary_names(name):
+            path = folder / filename
+            existing = _existing_file(path)
+            if existing:
+                return existing
+    return ""
+
+
+def _managed_ffmpeg_available() -> bool:
+    try:
+        import imageio_ffmpeg  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _managed_ffmpeg_path() -> str:
+    try:
+        import imageio_ffmpeg
+    except Exception:
+        return ""
+    try:
+        return _existing_file(imageio_ffmpeg.get_ffmpeg_exe())
+    except Exception:
+        return ""
+
+
+def _discover_ffmpeg() -> dict[str, str]:
+    configured = _existing_file(os.environ.get("VINTRACE_FFMPEG_PATH") or os.environ.get("CROSSAGE_FFMPEG_PATH"))
+    if configured:
+        return {"path": configured, "source": "configured"}
+    bundled = _bundled_binary("ffmpeg")
+    if bundled:
+        return {"path": bundled, "source": "bundled"}
+    managed = _managed_ffmpeg_path()
+    if managed:
+        return {"path": managed, "source": "managed"}
+    system = shutil.which("ffmpeg") or ""
+    return {"path": system, "source": "system" if system else "missing"}
+
+
+def _discover_ffprobe() -> dict[str, str]:
+    configured = _existing_file(os.environ.get("VINTRACE_FFPROBE_PATH") or os.environ.get("CROSSAGE_FFPROBE_PATH"))
+    if configured:
+        return {"path": configured, "source": "configured"}
+    bundled = _bundled_binary("ffprobe")
+    if bundled:
+        return {"path": bundled, "source": "bundled"}
+    system = shutil.which("ffprobe") or ""
+    return {"path": system, "source": "system" if system else "missing"}
+
+
+def _ffmpeg_path() -> str:
+    return str(_discover_ffmpeg().get("path") or "")
+
+
+def _ffprobe_path() -> str:
+    return str(_discover_ffprobe().get("path") or "")
+
+
+def _probe_video_ffmpeg(path: Path) -> dict[str, object]:
+    resolved = path.expanduser().resolve()
+    ffprobe = _ffprobe_path()
+    if not ffprobe:
+        ffmpeg = _ffmpeg_path()
+        if not ffmpeg:
+            raise VideoLoadError("Video support requires OpenCV or FFmpeg.")
+        command = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(resolved),
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=20, check=False)
+        if completed.returncode != 0:
+            raise VideoLoadError((completed.stderr or completed.stdout or f"Could not probe video {resolved}").strip()[:400])
+        return {
+            "path": str(resolved),
+            "exists": resolved.exists(),
+            "readable": True,
+            "frameCount": 0,
+            "fps": 0.0,
+            "width": 0,
+            "height": 0,
+            "durationMs": 0,
+            "backend": "ffmpeg",
+            "probeLimited": True,
+        }
+    command = [
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,nb_frames,r_frame_rate,duration",
+        "-of",
+        "json",
+        str(resolved),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, timeout=20, check=False)
+    if completed.returncode != 0:
+        raise VideoLoadError((completed.stderr or completed.stdout or f"Could not probe video {resolved}").strip()[:400])
+    try:
+        payload = json.loads(completed.stdout or "{}")
+        stream = (payload.get("streams") or [{}])[0]
+    except (json.JSONDecodeError, AttributeError, IndexError):
+        stream = {}
+    width = _safe_int(stream.get("width"))
+    height = _safe_int(stream.get("height"))
+    frame_rate = _parse_frame_rate(stream.get("r_frame_rate"))
+    duration_seconds = _safe_float(stream.get("duration"))
+    frame_count = _safe_int(stream.get("nb_frames"))
+    if frame_count <= 0 and duration_seconds > 0 and frame_rate > 0:
+        frame_count = int(round(duration_seconds * frame_rate))
+    return {
+        "path": str(resolved),
+        "exists": resolved.exists(),
+        "readable": True,
+        "frameCount": frame_count,
+        "fps": frame_rate,
+        "width": width,
+        "height": height,
+        "durationMs": int(duration_seconds * 1000) if duration_seconds > 0 else 0,
+        "backend": "ffmpeg",
+    }
+
+
+def _sample_video_frames_ffmpeg(
+    path: Path,
+    output_root: Path,
+    max_frames: int = 48,
+    interval_seconds: float = 2.0,
+    jpeg_quality: int = 88,
+) -> list[VideoFrameSample]:
+    ffmpeg = _ffmpeg_path()
+    if not ffmpeg:
+        raise VideoLoadError("Video support requires OpenCV or FFmpeg on PATH.")
+    resolved = path.expanduser().resolve()
+    probe: dict[str, object]
+    try:
+        probe = _probe_video_ffmpeg(resolved)
+    except VideoLoadError:
+        probe = {"width": 0, "height": 0, "durationMs": 0, "fps": 0.0}
+    max_frames = max(1, min(1000, int(max_frames)))
+    interval_seconds = max(0.25, float(interval_seconds))
+    target_dir = output_root / _video_slug(resolved)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="vintrace-ffmpeg-frames-") as temp_name:
+        temp_dir = Path(temp_name)
+        pattern = temp_dir / "frame-%08d.jpg"
+        quality_scale = max(2, min(31, int(round(31 - (max(1, min(100, jpeg_quality)) / 100) * 29))))
+        command = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(resolved),
+            "-vf",
+            f"fps=1/{interval_seconds}",
+            "-frames:v",
+            str(max_frames),
+            "-q:v",
+            str(quality_scale),
+            str(pattern),
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=max(30, max_frames * 2), check=False)
+        if completed.returncode != 0:
+            raise VideoLoadError((completed.stderr or completed.stdout or f"Could not decode video {resolved}").strip()[:400])
+        frames = sorted(temp_dir.glob("frame-*.jpg"))
+        if not frames:
+            raise VideoLoadError(f"No frames could be decoded from {resolved}")
+        width = int(probe.get("width") or 0)
+        height = int(probe.get("height") or 0)
+        duration_ms = int(probe.get("durationMs") or 0)
+        samples: list[VideoFrameSample] = []
+        for offset, source_frame in enumerate(frames[:max_frames]):
+            timestamp_ms = int(round(offset * interval_seconds * 1000))
+            frame_path = target_dir / f"frame-ffmpeg-{offset:08d}-{timestamp_ms:010d}ms.jpg"
+            source_frame.replace(frame_path)
+            samples.append(
+                VideoFrameSample(
+                    path=frame_path,
+                    timestamp_ms=timestamp_ms,
+                    frame_index=offset,
+                    width=width,
+                    height=height,
+                    duration_ms=max(0, duration_ms),
+                )
+            )
+        return samples
+
+
+def _safe_int(value: object) -> int:
+    try:
+        text = str(value).strip()
+        if text.upper() == "N/A" or not text:
+            return 0
+        return int(float(text))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _safe_float(value: object) -> float:
+    try:
+        text = str(value).strip()
+        if text.upper() == "N/A" or not text:
+            return 0.0
+        return float(text)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _parse_frame_rate(value: object) -> float:
+    text = str(value).strip()
+    if "/" in text:
+        left, right = text.split("/", 1)
+        numerator = _safe_float(left)
+        denominator = _safe_float(right)
+        return numerator / denominator if denominator else 0.0
+    return _safe_float(text)
 
 
 def _sample_indices(frame_count: int, fps: float, max_frames: int, interval_seconds: float) -> list[int]:

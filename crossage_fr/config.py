@@ -49,6 +49,8 @@ class RuntimeConfig:
     cluster_min_size: int = 2
     storage_budget_bytes: int = 0
     max_media_file_bytes: int = 0
+    ffmpeg_path: str = ""
+    ffprobe_path: str = ""
     auto_reject_below: float = 0.0
     auto_uncertain_low_quality: bool = False
     auto_reject_low_quality_video: bool = False
@@ -151,6 +153,8 @@ def _validate_config(config: RuntimeConfig) -> RuntimeConfig:
         raise ValueError(f"cluster_min_size must be less than or equal to {MAX_CLUSTER_MIN_SIZE}.")
     config.storage_budget_bytes = _require_int(config.storage_budget_bytes, "storage_budget_bytes")
     config.max_media_file_bytes = _require_int(config.max_media_file_bytes, "max_media_file_bytes")
+    config.ffmpeg_path = str(config.ffmpeg_path or "").strip()[:1000]
+    config.ffprobe_path = str(config.ffprobe_path or "").strip()[:1000]
     config.auto_reject_below = _require_unit_float(config.auto_reject_below, "auto_reject_below")
     config.auto_uncertain_low_quality = _require_bool(config.auto_uncertain_low_quality, "auto_uncertain_low_quality")
     config.auto_reject_low_quality_video = _require_bool(config.auto_reject_low_quality_video, "auto_reject_low_quality_video")

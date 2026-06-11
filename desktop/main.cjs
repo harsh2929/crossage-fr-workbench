@@ -398,6 +398,14 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "prune_workspace_backups",
   "prune_scan_manifests",
   "export_candidates",
+  "preview_candidate_media_action",
+  "manage_candidate_media",
+  "media_action_history",
+  "restore_media_action",
+  "retry_media_action",
+  "undo_media_action",
+  "media_trash_report",
+  "cleanup_media_trash",
   "export_media_bundle",
   "workspace_health",
   "runtime_self_test",
@@ -411,6 +419,9 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "installer_self_diagnostics",
   "calibration_summary",
   "accuracy_evaluation",
+  "generate_accuracy_validation_pack",
+  "run_accuracy_validation_pack",
+  "accuracy_validation_history",
   "apply_calibration",
   "export_accuracy_labels",
   "import_accuracy_labels",
@@ -1921,7 +1932,7 @@ function validateBackendPayload(payload = {}) {
 }
 
 function grantPathsFromBackendRequest(command, params) {
-  if (["set_workspace", "enroll", "scan", "analyze_folder", "export_report", "export_candidates"].includes(command)) {
+  if (["set_workspace", "enroll", "scan", "analyze_folder", "export_report", "export_candidates", "preview_candidate_media_action", "manage_candidate_media"].includes(command)) {
     grantUserPath(params.path || params.folder);
   }
   if (command === "enroll_age_groups" && Array.isArray(params.groups)) {
@@ -3305,6 +3316,17 @@ ipcMain.handle("scan:cancel", async (event) => {
   fs.mkdirSync(workspace, { recursive: true });
   fs.writeFileSync(marker, new Date().toISOString(), "utf8");
   auditDesktopAction({ action: "scan_cancel_requested", path: marker });
+  return { cancelled: true, path: marker };
+});
+
+ipcMain.handle("media-action:cancel", async (event) => {
+  assertTrustedSender(event);
+  await backend.start();
+  const workspace = backend.readyState?.workspace || path.join(app.getPath("userData"), "workspace");
+  const marker = path.join(workspace, ".media-action-cancel");
+  fs.mkdirSync(workspace, { recursive: true });
+  fs.writeFileSync(marker, new Date().toISOString(), "utf8");
+  auditDesktopAction({ action: "media_action_cancel_requested", path: marker });
   return { cancelled: true, path: marker };
 });
 
