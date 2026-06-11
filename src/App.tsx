@@ -164,7 +164,14 @@ function confirmUi(message: string) {
 }
 
 function promptUi(message: string, defaultValue = "") {
-  return window.prompt(localizeImperativeText(message), defaultValue);
+  if (window.crossAge) {
+    return defaultValue;
+  }
+  try {
+    return window.prompt(localizeImperativeText(message), defaultValue);
+  } catch {
+    return defaultValue;
+  }
 }
 
 function skippedSummary(count: number) {
@@ -851,6 +858,14 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+function safeText(value: unknown, fallback = "") {
+  return typeof value === "string" ? value : value == null ? fallback : String(value);
+}
+
+function isUnmatchedClusterName(value: unknown) {
+  return safeText(value).startsWith("Unmatched cluster");
+}
+
 function finiteNumber(value: unknown, fallback: number, min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY) {
   const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
   if (!Number.isFinite(parsed)) return fallback;
@@ -1205,21 +1220,135 @@ function formatProvider(value: unknown) {
 }
 
 function providerSummary(state: AppState) {
-  return state.platform.selected_providers.map(formatProvider).join(", ");
+  return (state.platform.selected_providers ?? []).map(formatProvider).join(", ") || state.platform.primary_provider || "Unknown";
 }
 
 function platformLabel(state: AppState) {
-  const platform = state.platform.platform_key.replace(/_/g, " ");
+  const platform = safeText(state.platform.platform_key, "unknown").replace(/_/g, " ");
   return `${platform} (${state.platform.system} ${state.platform.machine})`;
 }
 
-function engineLabel(value: string) {
-  if (value.startsWith("local-image-fingerprint")) return "Local image fingerprint";
-  return value.replace(/^insightface-/, "InsightFace ");
+function engineLabel(value: unknown) {
+  const engine = safeText(value, "Unknown");
+  if (engine.startsWith("local-image-fingerprint")) return "Local image fingerprint";
+  return engine.replace(/^insightface-/, "InsightFace ");
 }
 
 function firstPendingCandidate(state: AppState | null) {
   return state?.candidates.find((candidate) => candidate.status === "pending") ?? state?.candidates[0] ?? null;
+}
+
+function normalizeAppState(incoming: AppState, previous: AppState | null): AppState {
+  const raw = asRecord(incoming) ?? {};
+  const previousConfig = previous?.config;
+  const rawConfig = asRecord(raw.config) ?? {};
+  const preset = settingsPresets[0].values;
+  const config: AppState["config"] = {
+    modelPack: safeText(rawConfig.modelPack, previousConfig?.modelPack ?? "antelopev2"),
+    modelRoot: safeText(rawConfig.modelRoot, previousConfig?.modelRoot ?? ""),
+    thresholds: {
+      confident: finiteNumber(asRecord(rawConfig.thresholds)?.confident, previousConfig?.thresholds.confident ?? preset.thresholds.confident, 0, 1),
+      likely: finiteNumber(asRecord(rawConfig.thresholds)?.likely, previousConfig?.thresholds.likely ?? preset.thresholds.likely, 0, 1),
+      relaxedChild: finiteNumber(asRecord(rawConfig.thresholds)?.relaxedChild, previousConfig?.thresholds.relaxedChild ?? preset.thresholds.relaxedChild, 0, 1),
+      qualityMin: finiteNumber(asRecord(rawConfig.thresholds)?.qualityMin, previousConfig?.thresholds.qualityMin ?? preset.thresholds.qualityMin, 0, 1)
+    },
+    clusterMinSize: finiteInteger(rawConfig.clusterMinSize, previousConfig?.clusterMinSize ?? preset.clusterMinSize, 2, 20),
+    faceDetectorSize: finiteInteger(rawConfig.faceDetectorSize, previousConfig?.faceDetectorSize ?? preset.faceDetectorSize, 320, 1024),
+    twoPassScan: booleanSetting(rawConfig.twoPassScan, previousConfig?.twoPassScan ?? preset.twoPassScan),
+    verificationDetectorSize: finiteInteger(rawConfig.verificationDetectorSize, previousConfig?.verificationDetectorSize ?? preset.verificationDetectorSize, 320, 1024),
+    performanceMode: safeText(rawConfig.performanceMode, previousConfig?.performanceMode ?? "auto"),
+    effectivePerformanceMode: safeText(rawConfig.effectivePerformanceMode, previousConfig?.effectivePerformanceMode ?? "balanced"),
+    effectiveFaceDetectorSize: finiteInteger(rawConfig.effectiveFaceDetectorSize, previousConfig?.effectiveFaceDetectorSize ?? preset.faceDetectorSize, 320, 1024),
+    effectiveTwoPassScan: booleanSetting(rawConfig.effectiveTwoPassScan, previousConfig?.effectiveTwoPassScan ?? preset.twoPassScan),
+    effectiveVerificationDetectorSize: finiteInteger(rawConfig.effectiveVerificationDetectorSize, previousConfig?.effectiveVerificationDetectorSize ?? preset.verificationDetectorSize, 320, 1024),
+    safeMode: booleanSetting(rawConfig.safeMode, previousConfig?.safeMode ?? preset.safeMode),
+    safeModeThreshold: finiteNumber(rawConfig.safeModeThreshold, previousConfig?.safeModeThreshold ?? preset.safeModeThreshold, 0, 1),
+    storageBudgetBytes: finiteNumber(rawConfig.storageBudgetBytes, previousConfig?.storageBudgetBytes ?? 0, 0),
+    maxMediaFileBytes: finiteNumber(rawConfig.maxMediaFileBytes, previousConfig?.maxMediaFileBytes ?? 0, 0),
+    reviewRules: {
+      autoRejectBelow: finiteNumber(asRecord(rawConfig.reviewRules)?.autoRejectBelow, previousConfig?.reviewRules.autoRejectBelow ?? 0, 0, 1),
+      autoUncertainLowQuality: booleanSetting(asRecord(rawConfig.reviewRules)?.autoUncertainLowQuality, previousConfig?.reviewRules.autoUncertainLowQuality ?? false),
+      autoRejectLowQualityVideo: booleanSetting(asRecord(rawConfig.reviewRules)?.autoRejectLowQualityVideo, previousConfig?.reviewRules.autoRejectLowQualityVideo ?? false)
+    },
+    scanExclusions: {
+      dirNames: stringListSetting(asRecord(rawConfig.scanExclusions)?.dirNames, previousConfig?.scanExclusions.dirNames ?? defaultScanExclusions.dirNames),
+      pathKeywords: stringListSetting(asRecord(rawConfig.scanExclusions)?.pathKeywords, previousConfig?.scanExclusions.pathKeywords ?? defaultScanExclusions.pathKeywords),
+      extensions: stringListSetting(asRecord(rawConfig.scanExclusions)?.extensions, previousConfig?.scanExclusions.extensions ?? defaultScanExclusions.extensions),
+      filePaths: stringListSetting(asRecord(rawConfig.scanExclusions)?.filePaths, previousConfig?.scanExclusions.filePaths ?? defaultScanExclusions.filePaths)
+    },
+    reviewOnly: booleanSetting(rawConfig.reviewOnly, previousConfig?.reviewOnly ?? false),
+    requireConsent: booleanSetting(rawConfig.requireConsent, previousConfig?.requireConsent ?? true)
+  };
+  const rawPlatform = asRecord(raw.platform) ?? {};
+  const previousPlatform = previous?.platform;
+  const platform: AppState["platform"] = {
+    platform_key: safeText(rawPlatform.platform_key, previousPlatform?.platform_key ?? "unknown"),
+    system: safeText(rawPlatform.system, previousPlatform?.system ?? "Unknown"),
+    machine: safeText(rawPlatform.machine, previousPlatform?.machine ?? "Unknown"),
+    python_arch: safeText(rawPlatform.python_arch, previousPlatform?.python_arch ?? ""),
+    rosetta_translated: booleanSetting(rawPlatform.rosetta_translated, previousPlatform?.rosetta_translated ?? false),
+    onnxruntime_available: booleanSetting(rawPlatform.onnxruntime_available, previousPlatform?.onnxruntime_available ?? false),
+    available_providers: stringListSetting(rawPlatform.available_providers, previousPlatform?.available_providers ?? []),
+    selected_providers: Array.isArray(rawPlatform.selected_providers) ? rawPlatform.selected_providers : previousPlatform?.selected_providers ?? [],
+    primary_provider: safeText(rawPlatform.primary_provider, previousPlatform?.primary_provider ?? "CPU"),
+    accelerator_status: safeText(rawPlatform.accelerator_status, previousPlatform?.accelerator_status ?? "Unknown"),
+    precision: safeText(rawPlatform.precision, previousPlatform?.precision ?? "fp32"),
+    vector_backend: safeText(rawPlatform.vector_backend, previousPlatform?.vector_backend ?? ""),
+    platform_notes: stringListSetting(rawPlatform.platform_notes, previousPlatform?.platform_notes ?? []),
+    cpu_logical_count: finiteInteger(rawPlatform.cpu_logical_count, previousPlatform?.cpu_logical_count ?? 0, 0, 4096),
+    memory_total_bytes: finiteNumber(rawPlatform.memory_total_bytes, previousPlatform?.memory_total_bytes ?? 0, 0),
+    performance_tier: safeText(rawPlatform.performance_tier, previousPlatform?.performance_tier ?? "balanced"),
+    recommended_performance_mode: safeText(rawPlatform.recommended_performance_mode, previousPlatform?.recommended_performance_mode ?? "balanced"),
+    performance_notes: stringListSetting(rawPlatform.performance_notes, previousPlatform?.performance_notes ?? []),
+    insightface_available: booleanSetting(rawPlatform.insightface_available, previousPlatform?.insightface_available ?? false),
+    faiss_available: booleanSetting(rawPlatform.faiss_available, previousPlatform?.faiss_available ?? false),
+    hdbscan_available: booleanSetting(rawPlatform.hdbscan_available, previousPlatform?.hdbscan_available ?? false)
+  };
+  const rawCounts = asRecord(raw.counts) ?? {};
+  const counts = {
+    references: finiteInteger(rawCounts.references, previous?.counts.references ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    pending: finiteInteger(rawCounts.pending, previous?.counts.pending ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    reviewed: finiteInteger(rawCounts.reviewed, previous?.counts.reviewed ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    candidates: finiteInteger(rawCounts.candidates, previous?.counts.candidates ?? 0, 0, Number.MAX_SAFE_INTEGER)
+  };
+  const rawTotals = asRecord(raw.scanTotals) ?? {};
+  const previousTotals = previous?.scanTotals;
+  const scanTotals: AppState["scanTotals"] = {
+    runs: finiteInteger(rawTotals.runs, previousTotals?.runs ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    total: finiteInteger(rawTotals.total, previousTotals?.total ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    processed: finiteInteger(rawTotals.processed, previousTotals?.processed ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    added: finiteInteger(rawTotals.added, previousTotals?.added ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    matched: finiteInteger(rawTotals.matched, previousTotals?.matched ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    clustered: finiteInteger(rawTotals.clustered, previousTotals?.clustered ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    skipped: finiteInteger(rawTotals.skipped, previousTotals?.skipped ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    errors: finiteInteger(rawTotals.errors, previousTotals?.errors ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    unmatched: finiteInteger(rawTotals.unmatched, previousTotals?.unmatched ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    safeFiltered: finiteInteger(rawTotals.safeFiltered, previousTotals?.safeFiltered ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    videoFiles: finiteInteger(rawTotals.videoFiles, previousTotals?.videoFiles ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    videoFrames: finiteInteger(rawTotals.videoFrames, previousTotals?.videoFrames ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    videoProtected: finiteInteger(rawTotals.videoProtected, previousTotals?.videoProtected ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    excluded: finiteInteger(rawTotals.excluded, previousTotals?.excluded ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    durationMs: finiteNumber(rawTotals.durationMs, previousTotals?.durationMs ?? 0, 0),
+    lastCompletedAt: typeof rawTotals.lastCompletedAt === "string" || rawTotals.lastCompletedAt === null ? rawTotals.lastCompletedAt : previousTotals?.lastCompletedAt ?? null
+  };
+  return {
+    ...(previous ?? {}),
+    ...(incoming as AppState),
+    version: safeText(raw.version, previous?.version ?? "0.0.0"),
+    workspace: safeText(raw.workspace, previous?.workspace ?? ""),
+    consentOnFile: booleanSetting(raw.consentOnFile, previous?.consentOnFile ?? false),
+    engine: safeText(raw.engine, previous?.engine ?? "local-image-fingerprint"),
+    vectorStore: safeText(raw.vectorStore, previous?.vectorStore ?? platform.vector_backend),
+    platform,
+    counts,
+    scanHistory: Array.isArray(raw.scanHistory) ? raw.scanHistory as AppState["scanHistory"] : previous?.scanHistory ?? [],
+    scanTotals,
+    benchmarkHistory: Array.isArray(raw.benchmarkHistory) ? raw.benchmarkHistory as AppState["benchmarkHistory"] : previous?.benchmarkHistory ?? [],
+    videoMoments: Array.isArray(raw.videoMoments) ? raw.videoMoments as AppState["videoMoments"] : previous?.videoMoments ?? [],
+    references: Array.isArray(raw.references) ? raw.references as AppState["references"] : previous?.references ?? [],
+    candidates: Array.isArray(raw.candidates) ? raw.candidates as AppState["candidates"] : previous?.candidates ?? [],
+    config
+  };
 }
 
 export default function App() {
@@ -1582,10 +1711,11 @@ export default function App() {
     try {
       const next = await window.crossAge.getInitialState();
       if (requestId !== startupRequestId.current) return;
+      const safeNext = normalizeAppState(next, state);
       recordLatency("Startup", "initial_state", startedAt);
-      applyState(next);
+      applyState(safeNext);
       setNotice({ tone: "ok", text: "Backend ready." });
-      const startupMode = resolvePerformanceMode(normalizePerformanceChoice(next.config.performanceMode), next.platform);
+      const startupMode = resolvePerformanceMode(normalizePerformanceChoice(safeNext.config.performanceMode), safeNext.platform);
       const startupPreviewLimit = performanceProfiles[startupMode].previewWarmupLimit;
       if (startupPreviewLimit > 0) {
         window.setTimeout(() => warmPreviewCache(startupPreviewLimit), 240);
@@ -1704,7 +1834,8 @@ export default function App() {
     }
   }
 
-  function applyState(next: AppState) {
+  function applyState(rawNext: AppState) {
+    const next = normalizeAppState(rawNext, state);
     stateReadyRef.current = true;
     setState(next);
     setPerformanceChoiceState(normalizePerformanceChoice(next.config.performanceMode));
@@ -3427,11 +3558,13 @@ export default function App() {
     () => {
       const people = new Set<string>();
       for (const ref of state?.references ?? []) {
-        if (ref.personName.trim()) people.add(ref.personName);
+        const personName = safeText(ref.personName).trim();
+        if (personName) people.add(personName);
       }
       for (const candidate of state?.candidates ?? []) {
-        if (candidate.personName.trim() && !candidate.personName.startsWith("Unmatched cluster")) {
-          people.add(candidate.personName);
+        const personName = safeText(candidate.personName).trim();
+        if (personName && !isUnmatchedClusterName(personName)) {
+          people.add(personName);
         }
       }
       return [...people].sort((a, b) => a.localeCompare(b));
@@ -3439,7 +3572,7 @@ export default function App() {
     [state?.candidates, state?.references]
   );
 
-  const isDemoMode = state?.engine.startsWith("local-image-fingerprint");
+  const isDemoMode = safeText(state?.engine).startsWith("local-image-fingerprint");
   const workspaceLocked = Boolean(workspaceLock?.locked);
   const canProcess = Boolean(state?.consentOnFile) && !busy && !workspaceLocked;
   const enrollDisabled = !canProcess || !personName.trim() || !enrollFolder.trim();
@@ -6108,11 +6241,13 @@ function ReviewView(props: {
   const knownPeople = useMemo(() => {
     const people = new Set<string>();
     for (const ref of props.state.references) {
-      if (ref.personName.trim()) people.add(ref.personName);
+      const personName = safeText(ref.personName).trim();
+      if (personName) people.add(personName);
     }
     for (const candidate of props.state.candidates) {
-      if (candidate.personName.trim() && !candidate.personName.startsWith("Unmatched cluster")) {
-        people.add(candidate.personName);
+      const personName = safeText(candidate.personName).trim();
+      if (personName && !isUnmatchedClusterName(personName)) {
+        people.add(personName);
       }
     }
     return [...people].sort((a, b) => a.localeCompare(b));
@@ -6142,8 +6277,8 @@ function ReviewView(props: {
     return [...candidatesByPath.entries()]
       .map(([sourcePath, candidates]) => {
         const people = [...new Set(candidates
-          .filter((candidate) => !candidate.personName.startsWith("Unmatched cluster"))
-          .map((candidate) => candidate.personName))]
+          .map((candidate) => safeText(candidate.personName).trim())
+          .filter((personName) => personName && !isUnmatchedClusterName(personName)))]
           .sort((a, b) => a.localeCompare(b));
         const best = [...candidates].sort((a, b) => b.score - a.score)[0];
         return {

@@ -173,6 +173,55 @@ async function closeOnboardingIfVisible(page: Page) {
   }
 }
 
+async function assertNoRendererCrash(page: Page, pageErrors: string[], context: string) {
+  const bootFallback = page.getByRole("alert").filter({ hasText: "Vintrace could not load" });
+  await expect(bootFallback, `${context} should not show renderer fallback`).toHaveCount(0);
+  expect(pageErrors, `${context} should not emit page errors`).toEqual([]);
+}
+
+async function closeBlockingDialogIfVisible(page: Page) {
+  const dialog = page.getByRole("dialog").last();
+  if (!(await dialog.isVisible().catch(() => false))) return;
+  for (const name of [/Cancel/i, /Remind me later/i, /Close/i, /Done/i]) {
+    const button = dialog.getByRole("button", { name }).last();
+    if (await button.isVisible().catch(() => false)) {
+      await button.click().catch(() => undefined);
+      return;
+    }
+  }
+  await page.keyboard.press("Escape").catch(() => undefined);
+}
+
+async function auditVisibleTabButtons(page: Page, pageErrors: string[]) {
+  const skip = /download|install update|quit|start camera|capture best frame|arm auto capture|auto ready|stop camera|choose|open$|reveal$|export diagnostics|delete face data/i;
+  const tabs = ["Dashboard", "People", "Scan", "Review", "Settings"];
+  const clicked = new Set<string>();
+  for (const tab of tabs) {
+    await page.locator(".nav-list").getByRole("button", { name: tab }).click();
+    await assertNoRendererCrash(page, pageErrors, `open ${tab}`);
+    for (let pass = 0; pass < 3; pass += 1) {
+      const buttons = page.locator(".workspace button:visible");
+      const count = await buttons.count();
+      for (let index = 0; index < count; index += 1) {
+        const button = buttons.nth(index);
+        if (!(await button.isVisible().catch(() => false))) continue;
+        if (!(await button.isEnabled().catch(() => false))) continue;
+        const label = ((await button.innerText().catch(() => "")) || (await button.getAttribute("aria-label").catch(() => "")) || "").replace(/\s+/g, " ").trim();
+        if (!label || skip.test(label)) continue;
+        const key = `${tab}:${label}`;
+        if (clicked.has(key)) continue;
+        clicked.add(key);
+        await button.scrollIntoViewIfNeeded().catch(() => undefined);
+        await button.click({ timeout: 5000 }).catch(() => undefined);
+        await page.waitForTimeout(120);
+        await closeBlockingDialogIfVisible(page);
+        await assertNoRendererCrash(page, pageErrors, `click ${key}`);
+      }
+    }
+  }
+  expect(clicked.size, "button audit should exercise a meaningful set of tab controls").toBeGreaterThan(25);
+}
+
 test("desktop workbench renders and every primary control path works", async () => {
   const projectRoot = process.cwd();
   const temp = mkdtempSync(path.join(os.tmpdir(), "vintrace-e2e-"));
@@ -429,6 +478,7 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(page.getByText("Recent scan runs")).toBeVisible();
   await expect(page.getByText("Review mix")).toBeVisible();
   await expect(page.getByText("System and safety")).toBeVisible();
+  await auditVisibleTabButtons(page, pageErrors);
 
   const smallControls = await page.locator("button:visible, input:not([type='checkbox']):visible, select:visible, .consent:visible").evaluateAll((nodes) =>
     nodes
