@@ -1,26 +1,54 @@
 from __future__ import annotations
 
 from contextlib import redirect_stdout
+from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 import argparse
+import hashlib
+import heapq
+import importlib.util
 import json
+import math
 import os
+import re
+import sqlite3
 import sys
 import traceback
+import zipfile
 from time import monotonic
 from typing import Any
 
 from crossage_fr import __version__
-from crossage_fr.embed import create_embedding_engine
+from crossage_fr.config import MAX_CLUSTER_MIN_SIZE, MAX_FACE_DETECTOR_SIZE, MIN_FACE_DETECTOR_SIZE
+from crossage_fr.embed import EmbeddingEngine, create_embedding_engine
 from crossage_fr.enroll import ProjectState
 from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, image_decoder_report, load_image
 from crossage_fr.ingest.safety import safety_model_report
-from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, iter_video_paths, probe_video, video_decoder_report
-from crossage_fr.model_manager import download_model_pack, model_root_for_config, model_status, set_model_root
+from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, probe_video, video_decoder_report
+from crossage_fr.model_manager import download_model_pack, model_pack_ready, model_root_for_config, model_roots_for_engine, model_status, set_model_root
+from crossage_fr.models import ReviewCandidate, new_id
 from crossage_fr.platform_detect import build_platform_report
+from crossage_fr.storage import inspect_storage_path, safe_resolve
+from crossage_fr.store import VectorStore
 from crossage_fr.workspace_registry import resolve_workspace
+
+
+try:
+    VERIFY_CANDIDATE_BATCH_LIMIT = max(25, int(os.environ.get("CROSSAGE_VERIFY_CANDIDATE_BATCH_LIMIT", "500")))
+except ValueError:
+    VERIFY_CANDIDATE_BATCH_LIMIT = 500
+
+try:
+    ANALYZE_ENTRY_BUDGET = max(10_000, int(os.environ.get("CROSSAGE_ANALYZE_ENTRY_BUDGET", "250000")))
+except ValueError:
+    ANALYZE_ENTRY_BUDGET = 250_000
+
+try:
+    ANALYZE_TIME_BUDGET_MS = max(1_000, int(os.environ.get("CROSSAGE_ANALYZE_TIME_BUDGET_MS", "15000")))
+except ValueError:
+    ANALYZE_TIME_BUDGET_MS = 15_000
 
 
 class DesktopApi:
@@ -29,10 +57,10 @@ class DesktopApi:
         self.startup = startup
         self.project = ProjectState(workspace, actor=actor)
         self.consent_on_file = self.project.consent_on_file()
+        self._engine: EmbeddingEngine | None = None
+        self._engine_model_name = self._infer_engine_name()
         self._startup("workspace", f"Workspace ready: {self.project.root}")
-        self._startup("engine", "Loading recognition engine")
-        with redirect_stdout(sys.stderr):
-            self.engine = create_embedding_engine(self.project.config)
+        self._startup("engine", "Recognition engine will load when needed")
         self._startup("platform", "Detecting platform acceleration")
         self.platform_report = build_platform_report()
         self._last_progress_state_at = 0.0
@@ -43,15 +71,48 @@ class DesktopApi:
         if self.startup:
             self.startup({"phase": phase, "message": message})
 
+    @property
+    def engine_name(self) -> str:
+        return self._engine.model_name if self._engine is not None else self._engine_model_name
+
+    def _engine_instance(self) -> EmbeddingEngine:
+        if self._engine is None:
+            self._startup("engine", "Loading recognition engine")
+            with redirect_stdout(sys.stderr):
+                self._engine = create_embedding_engine(self.project.config)
+            self._engine_model_name = self._engine.model_name
+            self._startup("engine", f"Recognition engine ready: {self._engine_model_name}")
+        return self._engine
+
+    def _reset_engine(self) -> None:
+        self._engine = None
+        self._engine_model_name = self._infer_engine_name()
+
+    def _infer_engine_name(self) -> str:
+        if os.environ.get("CROSSAGE_FORCE_FALLBACK") == "1":
+            return "local-image-fingerprint"
+        if importlib.util.find_spec("insightface") is None:
+            return "local-image-fingerprint"
+        candidates = [self.project.config.model_pack]
+        if "buffalo_l" not in candidates:
+            candidates.append("buffalo_l")
+        for pack in candidates:
+            if any(model_pack_ready(root, pack) for root in model_roots_for_engine(self.project.config)):
+                return f"insightface-{pack}"
+        return "local-image-fingerprint (face model download needed)"
+
     def handle(self, command: str, params: dict[str, Any], progress: Any | None = None) -> Any:
         if not isinstance(params, dict):
             raise ValueError("Command parameters must be an object.")
         if command == "ping":
             return {"pong": True, "version": __version__}
         if command == "get_state":
-            return self.state()
+            return self.state(
+                preview_create_budget=int(params.get("previewBudget", 8) or 0),
+                candidate_limit=int(params.get("candidateLimit", 500) or 500),
+            )
         if command == "model_status":
-            return model_status(self.project.config, self.engine.model_name)
+            return model_status(self.project.config, self.engine_name)
         if command == "set_model_root":
             root_value = str(params.get("root", "")).strip()
             if not root_value:
@@ -59,8 +120,7 @@ class DesktopApi:
             root = set_model_root(self.project.config, Path(root_value))
             self.project._append_audit({"action": "set_model_root", "root": str(root), "source": str(params.get("source", "desktop"))})
             self.project.save()
-            with redirect_stdout(sys.stderr):
-                self.engine = create_embedding_engine(self.project.config)
+            self._reset_engine()
             return self.state()
         if command == "download_model":
             pack = str(params.get("pack", self.project.config.model_pack or "antelopev2"))
@@ -85,8 +145,7 @@ class DesktopApi:
                 }
             )
             self.project.save()
-            with redirect_stdout(sys.stderr):
-                self.engine = create_embedding_engine(self.project.config)
+            self._reset_engine()
             return {"value": result, "state": self.state()}
         if command == "set_workspace":
             return self.set_workspace(Path(str(params["path"])))
@@ -102,11 +161,12 @@ class DesktopApi:
             return self.state()
         if command == "enroll":
             self._require_consent()
+            engine = self._engine_instance()
             added, errors = self.project.enroll_folder(
                 str(params.get("personName", "")),
                 str(params.get("ageBucket", "unknown")),
                 Path(str(params.get("folder", ""))).expanduser(),
-                self.engine,
+                engine,
             )
             return {"added": added, "errors": errors, "state": self.state()}
         if command == "enroll_age_groups":
@@ -114,10 +174,11 @@ class DesktopApi:
             groups_param = params.get("groups", [])
             if not isinstance(groups_param, list):
                 raise ValueError("Age-group enrollment expects a list of folders.")
+            engine = self._engine_instance()
             added, errors, groups = self.project.enroll_age_groups(
                 str(params.get("personName", "")),
                 groups_param,
-                self.engine,
+                engine,
             )
             return {"added": added, "errors": errors, "value": {"groups": groups}, "state": self.state()}
         if command == "scan":
@@ -125,12 +186,22 @@ class DesktopApi:
             if not self.project.references:
                 raise ValueError("Enroll at least one reference before scanning.")
             source = str(params.get("source", "manual"))
+            existing_candidate_ids = set(self.project.candidates)
+            engine = self._engine_instance()
             added, errors, metrics = self.project.scan_folder(
                 Path(str(params.get("folder", ""))).expanduser(),
-                self.engine,
+                engine,
                 on_progress=lambda payload: self._progress(progress, {**payload, "source": source}),
                 source=source,
+                resume=bool(params.get("resume", True)),
+                total=int(params.get("total", 0) or 0) or None,
             )
+            verification = self._maybe_verify_new_candidates(existing_candidate_ids, metrics, progress, source)
+            metrics.update({
+                "twoPassVerified": int(verification.get("verified", 0)),
+                "twoPassChanged": int(verification.get("changed", 0)),
+                "twoPassDeferred": int(verification.get("deferred", 0)),
+            })
             return {"added": added, "errors": errors, "metrics": metrics, "state": self.state()}
         if command == "scan_paths":
             self._require_consent()
@@ -145,16 +216,37 @@ class DesktopApi:
                 for item in paths_param
                 if Path(str(item)).suffix.lower() in IMAGE_EXTENSIONS or Path(str(item)).suffix.lower() in VIDEO_EXTENSIONS
             ]
+            existing_candidate_ids = set(self.project.candidates)
+            engine = self._engine_instance()
             added, errors, metrics = self.project.scan_paths(
                 paths,
-                self.engine,
+                engine,
                 on_progress=lambda payload: self._progress(progress, {**payload, "source": source}),
                 source=source,
                 label=f"{len(paths)} selected file(s)",
+                resume=bool(params.get("resume", False)),
             )
+            verification = self._maybe_verify_new_candidates(existing_candidate_ids, metrics, progress, source)
+            metrics.update({
+                "twoPassVerified": int(verification.get("verified", 0)),
+                "twoPassChanged": int(verification.get("changed", 0)),
+                "twoPassDeferred": int(verification.get("deferred", 0)),
+            })
             return {"added": added, "errors": errors, "metrics": metrics, "state": self.state()}
         if command == "analyze_folder":
-            return self.analyze_folder(Path(str(params.get("folder", ""))).expanduser())
+            return self.analyze_folder(
+                Path(str(params.get("folder", ""))).expanduser(),
+                max_entries=int(params.get("maxEntries", ANALYZE_ENTRY_BUDGET) or ANALYZE_ENTRY_BUDGET),
+                time_budget_ms=int(params.get("timeBudgetMs", ANALYZE_TIME_BUDGET_MS) or ANALYZE_TIME_BUDGET_MS),
+            )
+        if command == "cancel_scan":
+            return self.project.request_scan_cancel(source=str(params.get("source", self.actor)))
+        if command == "pause_scan":
+            return self.project.request_scan_pause(source=str(params.get("source", self.actor)))
+        if command == "resume_scan":
+            return self.project.request_scan_resume(source=str(params.get("source", self.actor)))
+        if command == "scan_job_status":
+            return self.project.scan_job_status()
         if command == "set_status":
             self.project.set_candidate_status(str(params["candidateId"]), str(params["status"]))
             return self.state()
@@ -167,6 +259,26 @@ class DesktopApi:
         if command == "set_candidate_note":
             self.project.set_candidate_note(str(params["candidateId"]), str(params.get("note", "")))
             return self.state()
+        if command == "block_false_match":
+            result = self.project.block_false_match(str(params["candidateId"]), str(params.get("note", "")))
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "reassign_candidate_person":
+            result = self.project.reassign_candidate_person(
+                str(params["candidateId"]),
+                str(params["personName"]),
+                clear_reference=bool(params.get("clearReference", True)),
+            )
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "duplicate_people":
+            return self.project.duplicate_people(
+                threshold=float(params.get("threshold", 0.82)),
+                limit=int(params.get("limit", 20)),
+            )
+        if command == "apply_review_rules":
+            result = self.project.apply_review_rules()
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "query_candidates":
+            return self.query_candidates(params)
         if command == "clear_queue":
             self.project.clear_candidates()
             return self.state()
@@ -200,10 +312,49 @@ class DesktopApi:
                 raise ValueError("statuses must be a list.")
             count = self.project.purge_old_candidates(int(params.get("days", 90)), [str(status) for status in statuses])
             return {"purged": count, "state": self.state()}
+        if command == "repair_workspace":
+            result = self.project.repair_workspace(dry_run=bool(params.get("dryRun", True)), force=bool(params.get("force", False)))
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "relink_workspace_paths":
+            result = self.project.relink_workspace_paths(
+                Path(str(params.get("oldRoot", ""))).expanduser(),
+                Path(str(params.get("newRoot", ""))).expanduser(),
+                dry_run=bool(params.get("dryRun", True)),
+                force_partial=bool(params.get("forcePartial", False)),
+            )
+            return {"value": result, "state": self.state(preview_create_budget=0)}
         if command == "export_report":
             folder_param = str(params.get("folder", "")).strip()
             result = self.project.export_report(Path(folder_param).expanduser() if folder_param else None)
             return {"value": result, "state": self.state()}
+        if command == "export_workspace_inventory":
+            folder_param = str(params.get("folder", "")).strip()
+            result = self.project.export_workspace_inventory(Path(folder_param).expanduser() if folder_param else None)
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "export_audit_log":
+            folder_param = str(params.get("folder", "")).strip()
+            result = self.project.export_audit_log(Path(folder_param).expanduser() if folder_param else None)
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "export_consent_receipt":
+            folder_param = str(params.get("folder", "")).strip()
+            result = self.project.export_consent_receipt(Path(folder_param).expanduser() if folder_param else None)
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "retention_policy_report":
+            return self.project.retention_policy_report()
+        if command == "export_safe_mode_audit":
+            folder_param = str(params.get("folder", "")).strip()
+            result = self.project.export_safe_mode_audit(Path(folder_param).expanduser() if folder_param else None)
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "model_drift_report":
+            return self.project.model_drift_report(self.engine_name)
+        if command == "export_review_ledger":
+            folder_param = str(params.get("folder", "")).strip()
+            result = self.project.export_review_ledger(Path(folder_param).expanduser() if folder_param else None)
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "export_scan_history":
+            folder_param = str(params.get("folder", "")).strip()
+            result = self.project.export_scan_history(Path(folder_param).expanduser() if folder_param else None)
+            return {"value": result, "state": self.state(preview_create_budget=0)}
         if command == "export_workspace_backup":
             folder_param = str(params.get("folder", "")).strip()
             result = self.project.export_workspace_backup(
@@ -211,6 +362,16 @@ class DesktopApi:
                 include_generated=bool(params.get("includeGenerated", True)),
             )
             return {"value": result, "state": self.state()}
+        if command == "verify_workspace_backup":
+            path_param = str(params.get("path", "")).strip()
+            result = self.project.verify_workspace_backup(Path(path_param).expanduser() if path_param else None)
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "prune_workspace_backups":
+            result = self.project.prune_workspace_backups(int(params.get("keep", 5) or 5))
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "prune_scan_manifests":
+            result = self.project.prune_scan_manifests(int(params.get("keepRuns", 20) or 20))
+            return {"value": result, "state": self.state(preview_create_budget=0)}
         if command == "export_candidates":
             candidate_ids = params.get("candidateIds", [])
             if not isinstance(candidate_ids, list):
@@ -221,10 +382,73 @@ class DesktopApi:
                 Path(folder_param).expanduser() if folder_param else None,
             )
             return {"value": result, "state": self.state()}
+        if command == "export_media_bundle":
+            candidate_ids = params.get("candidateIds")
+            if candidate_ids is not None and not isinstance(candidate_ids, list):
+                raise ValueError("candidateIds must be a list.")
+            statuses = params.get("statuses", ["accepted"])
+            if not isinstance(statuses, list):
+                raise ValueError("statuses must be a list.")
+            folder_param = str(params.get("folder", "")).strip()
+            result = self.project.export_media_bundle(
+                [str(candidate_id) for candidate_id in candidate_ids] if isinstance(candidate_ids, list) else None,
+                Path(folder_param).expanduser() if folder_param else None,
+                [str(status) for status in statuses],
+                include_original_media=bool(params.get("includeOriginalMedia", True)),
+            )
+            return {"value": result, "state": self.state()}
         if command == "workspace_health":
             return self.project.workspace_health()
         if command == "runtime_self_test":
             return self.runtime_self_test()
+        if command == "runtime_benchmark":
+            return self.runtime_benchmark()
+        if command == "release_readiness":
+            return self.release_readiness()
+        if command == "model_integrity":
+            return self.model_integrity()
+        if command == "export_support_bundle":
+            result = self.export_support_bundle(include_paths=bool(params.get("includePaths", False)))
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "installer_self_diagnostics":
+            return self.installer_self_diagnostics()
+        if command == "calibration_summary":
+            return self.project.calibration_summary()
+        if command == "accuracy_evaluation":
+            return self.project.accuracy_evaluation()
+        if command == "apply_calibration":
+            result = self.project.apply_calibration_to_config()
+            self._reset_engine()
+            return {"value": result, "state": self.state()}
+        if command == "export_accuracy_labels":
+            folder_param = str(params.get("folder", "")).strip()
+            result = self.project.export_accuracy_labels(Path(folder_param).expanduser() if folder_param else None)
+            return {"value": result, "state": self.state()}
+        if command == "import_accuracy_labels":
+            rows = params.get("rows", [])
+            if not isinstance(rows, list):
+                raise ValueError("Accuracy labels must be a list of rows.")
+            result = self.project.import_accuracy_labels([row for row in rows if isinstance(row, dict)])
+            return {"value": result, "state": self.state()}
+        if command == "privacy_report":
+            return self.project.privacy_report()
+        if command == "delete_face_data":
+            result = self.project.delete_face_data(
+                confirm=bool(params.get("confirm", False)),
+                include_audit=bool(params.get("includeAudit", False)),
+            )
+            return {"value": result, "state": self.state()}
+        if command == "optimize_workspace":
+            result = self.project.optimize_workspace()
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "enforce_storage_budget":
+            result = self.project.enforce_storage_budget()
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        if command == "add_calibration_label":
+            row = params.get("row", {})
+            if not isinstance(row, dict):
+                raise ValueError("Calibration label must be an object.")
+            return self.project.add_calibration_label({str(key): value for key, value in row.items()})
         if command == "audit_events":
             return self.project.audit_events(int(params.get("limit", 100)), int(params.get("offset", 0)))
         if command == "record_audit":
@@ -243,21 +467,73 @@ class DesktopApi:
             relaxed_child = float(incoming.get("relaxedChild", thresholds.relaxed_child))
             quality_min = float(incoming.get("qualityMin", thresholds.quality_min))
             values = [confident, likely, relaxed_child, quality_min]
-            if any(value < 0.0 or value > 1.0 for value in values):
+            if any(not math.isfinite(value) or value < 0.0 or value > 1.0 for value in values):
                 raise ValueError("Thresholds and quality minimum must be between 0 and 1.")
             if not confident >= likely >= relaxed_child:
                 raise ValueError("Thresholds must be descending: confident >= likely >= relaxed child.")
             cluster_min_size = int(params.get("clusterMinSize", self.project.config.cluster_min_size))
             if cluster_min_size < 2:
                 raise ValueError("Cluster minimum size must be at least 2.")
+            if cluster_min_size > MAX_CLUSTER_MIN_SIZE:
+                raise ValueError(f"Cluster minimum size must be {MAX_CLUSTER_MIN_SIZE} or lower.")
+            face_detector_size = int(params.get("faceDetectorSize", self.project.config.face_detector_size))
+            if face_detector_size < MIN_FACE_DETECTOR_SIZE:
+                raise ValueError(f"Face scan detail must be at least {MIN_FACE_DETECTOR_SIZE}.")
+            if face_detector_size > MAX_FACE_DETECTOR_SIZE:
+                raise ValueError(f"Face scan detail must be {MAX_FACE_DETECTOR_SIZE} or lower.")
+            face_detector_size = int(round(face_detector_size / 32) * 32)
+            two_pass_scan = bool(params.get("twoPassScan", self.project.config.two_pass_scan))
+            verification_detector_size = int(params.get("verificationDetectorSize", self.project.config.verification_detector_size))
+            if verification_detector_size < MIN_FACE_DETECTOR_SIZE:
+                raise ValueError(f"High-detail recheck must be at least {MIN_FACE_DETECTOR_SIZE}.")
+            if verification_detector_size > MAX_FACE_DETECTOR_SIZE:
+                raise ValueError(f"High-detail recheck must be {MAX_FACE_DETECTOR_SIZE} or lower.")
+            verification_detector_size = int(round(verification_detector_size / 32) * 32)
+            if verification_detector_size < face_detector_size:
+                verification_detector_size = face_detector_size
+            storage_budget_bytes = int(params.get("storageBudgetBytes", self.project.config.storage_budget_bytes))
+            if storage_budget_bytes < 0:
+                raise ValueError("Storage limit must be zero or higher.")
+            storage_budget_bytes = min(storage_budget_bytes, 10 * 1024 * 1024 * 1024 * 1024)
+            max_media_file_bytes = int(params.get("maxMediaFileBytes", self.project.config.max_media_file_bytes))
+            if max_media_file_bytes < 0:
+                raise ValueError("Maximum media file size must be zero or higher.")
+            max_media_file_bytes = min(max_media_file_bytes, 10 * 1024 * 1024 * 1024 * 1024)
+            review_rules = params.get("reviewRules", {})
+            if not isinstance(review_rules, dict):
+                raise ValueError("Review rules must be an object.")
+            auto_reject_below = float(review_rules.get("autoRejectBelow", self.project.config.auto_reject_below))
+            if not math.isfinite(auto_reject_below) or auto_reject_below < 0.0 or auto_reject_below > 1.0:
+                raise ValueError("Auto-reject level must be between 0 and 1.")
+            auto_uncertain_low_quality = bool(review_rules.get("autoUncertainLowQuality", self.project.config.auto_uncertain_low_quality))
+            auto_reject_low_quality_video = bool(review_rules.get("autoRejectLowQualityVideo", self.project.config.auto_reject_low_quality_video))
+            scan_exclusions = params.get("scanExclusions", {})
+            if not isinstance(scan_exclusions, dict):
+                raise ValueError("Scan exclusions must be an object.")
+            excluded_dir_names = self._string_list(scan_exclusions.get("dirNames", self.project.config.excluded_dir_names), "Excluded folder names")
+            excluded_path_keywords = self._string_list(scan_exclusions.get("pathKeywords", self.project.config.excluded_path_keywords), "Excluded path words")
+            excluded_extensions = self._extension_list(scan_exclusions.get("extensions", self.project.config.excluded_extensions))
+            excluded_file_paths = self._string_list(scan_exclusions.get("filePaths", self.project.config.excluded_file_paths), "Excluded files", limit=400)
             safe_mode_threshold = float(params.get("safeModeThreshold", self.project.config.safe_mode_threshold))
-            if safe_mode_threshold < 0.0 or safe_mode_threshold > 1.0:
+            if not math.isfinite(safe_mode_threshold) or safe_mode_threshold < 0.0 or safe_mode_threshold > 1.0:
                 raise ValueError("Safe Mode threshold must be between 0 and 1.")
             thresholds.confident = confident
             thresholds.likely = likely
             thresholds.relaxed_child = relaxed_child
             thresholds.quality_min = quality_min
             self.project.config.cluster_min_size = cluster_min_size
+            self.project.config.face_detector_size = face_detector_size
+            self.project.config.two_pass_scan = two_pass_scan
+            self.project.config.verification_detector_size = verification_detector_size
+            self.project.config.storage_budget_bytes = storage_budget_bytes
+            self.project.config.max_media_file_bytes = max_media_file_bytes
+            self.project.config.auto_reject_below = auto_reject_below
+            self.project.config.auto_uncertain_low_quality = auto_uncertain_low_quality
+            self.project.config.auto_reject_low_quality_video = auto_reject_low_quality_video
+            self.project.config.excluded_dir_names = excluded_dir_names
+            self.project.config.excluded_path_keywords = excluded_path_keywords
+            self.project.config.excluded_extensions = excluded_extensions
+            self.project.config.excluded_file_paths = excluded_file_paths
             self.project.config.safe_mode = bool(params.get("safeMode", self.project.config.safe_mode))
             self.project.config.safe_mode_threshold = safe_mode_threshold
             self.project._append_audit(
@@ -270,6 +546,22 @@ class DesktopApi:
                         "quality_min": quality_min,
                     },
                     "cluster_min_size": cluster_min_size,
+                    "face_detector_size": face_detector_size,
+                    "two_pass_scan": two_pass_scan,
+                    "verification_detector_size": verification_detector_size,
+                    "storage_budget_bytes": storage_budget_bytes,
+                    "max_media_file_bytes": max_media_file_bytes,
+                    "review_rules": {
+                        "auto_reject_below": auto_reject_below,
+                        "auto_uncertain_low_quality": auto_uncertain_low_quality,
+                        "auto_reject_low_quality_video": auto_reject_low_quality_video,
+                    },
+                    "scan_exclusions": {
+                        "dir_names": excluded_dir_names,
+                        "path_keywords": excluded_path_keywords,
+                        "extensions": excluded_extensions,
+                        "file_paths": excluded_file_paths,
+                    },
                     "safe_mode": self.project.config.safe_mode,
                     "safe_mode_threshold": safe_mode_threshold,
                     "source": str(params.get("source", "desktop")),
@@ -277,25 +569,104 @@ class DesktopApi:
                 }
             )
             self.project.save()
+            self._reset_engine()
             return self.state()
         raise ValueError(f"Unknown command: {command}")
+
+    def _verification_engine(self) -> Any | None:
+        if not self.project.config.two_pass_scan:
+            return None
+        if self.project.config.verification_detector_size <= self.project.config.face_detector_size:
+            return None
+        config = deepcopy(self.project.config)
+        config.face_detector_size = self.project.config.verification_detector_size
+        with redirect_stdout(sys.stderr):
+            return create_embedding_engine(config)
+
+    def _maybe_verify_new_candidates(
+        self,
+        existing_candidate_ids: set[str],
+        scan_metrics: dict[str, Any],
+        progress: Any | None,
+        source: str,
+    ) -> dict[str, int]:
+        if int(scan_metrics.get("cancelled", 0) or 0):
+            return {}
+        verification_engine = self._verification_engine()
+        if verification_engine is None:
+            return {}
+        candidate_ids = [
+            candidate_id
+            for candidate_id in self.project.candidates
+            if candidate_id not in existing_candidate_ids
+        ]
+        if not candidate_ids:
+            return {}
+        deferred = max(0, len(candidate_ids) - VERIFY_CANDIDATE_BATCH_LIMIT)
+        result = self.project.verify_candidates(
+            candidate_ids[:VERIFY_CANDIDATE_BATCH_LIMIT],
+            verification_engine,
+            on_progress=lambda payload: self._progress(progress, {**payload, "source": source}) if progress else None,
+        )
+        result["deferred"] = deferred
+        return result
+
+    def _string_list(self, value: Any, label: str, limit: int = 80) -> list[str]:
+        if not isinstance(value, list):
+            raise ValueError(f"{label} must be a list.")
+        result: list[str] = []
+        seen: set[str] = set()
+        for item in value[:limit]:
+            text = str(item).strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(text[:160])
+        return result
+
+    def _extension_list(self, value: Any) -> list[str]:
+        result: list[str] = []
+        for item in self._string_list(value, "Excluded file types", limit=80):
+            extension = item.strip().lower()
+            if not extension:
+                continue
+            if not extension.startswith("."):
+                extension = f".{extension}"
+            result.append(extension[:32])
+        return result
 
     def set_workspace(self, path: Path) -> dict[str, Any]:
         self.project = ProjectState(path.expanduser().resolve(), actor=self.actor)
         self.consent_on_file = self.project.consent_on_file()
-        with redirect_stdout(sys.stderr):
-            self.engine = create_embedding_engine(self.project.config)
+        self._reset_engine()
         return self.state()
 
-    def analyze_folder(self, folder: Path) -> dict[str, Any]:
-        resolved = folder.expanduser().resolve()
+    def analyze_folder(self, folder: Path, max_entries: int = ANALYZE_ENTRY_BUDGET, time_budget_ms: int = ANALYZE_TIME_BUDGET_MS) -> dict[str, Any]:
+        resolved = safe_resolve(folder)
+        storage = inspect_storage_path(resolved, self.project.root)
+        entry_budget = max(1, int(max_entries or ANALYZE_ENTRY_BUDGET))
+        time_budget_ms = max(1_000, int(time_budget_ms or ANALYZE_TIME_BUDGET_MS))
+        deadline = monotonic() + (time_budget_ms / 1000)
         result: dict[str, Any] = {
             "folder": str(resolved),
-            "exists": resolved.exists(),
-            "isDirectory": resolved.is_dir(),
+            "exists": bool(storage.get("exists")),
+            "isDirectory": bool(storage.get("isDirectory")),
+            "entriesChecked": 0,
+            "entryBudget": entry_budget,
+            "timeBudgetMs": time_budget_ms,
+            "truncated": False,
             "imageCount": 0,
             "videoCount": 0,
             "nonImageCount": 0,
+            "excludedCount": 0,
+            "excludedDirectoryCount": 0,
+            "statErrorCount": 0,
+            "walkErrorCount": 0,
+            "transientErrorCount": 0,
+            "excludedSamples": [],
             "totalBytes": 0,
             "checkedImages": 0,
             "checkedVideos": 0,
@@ -305,8 +676,11 @@ class DesktopApi:
             "videoSamples": [],
             "extensionCounts": {},
             "recommendations": [],
+            "estimate": {},
+            "plan": {},
             "decoder": image_decoder_report(),
             "videoDecoder": video_decoder_report(),
+            "storage": storage,
         }
         if not result["exists"]:
             result["recommendations"].append("Choose an existing folder before scanning.")
@@ -314,42 +688,101 @@ class DesktopApi:
         if not result["isDirectory"]:
             result["recommendations"].append("Choose a folder rather than a single file.")
             return result
-        image_paths: list[Path] = []
-        for current, dirnames, filenames in os.walk(resolved):
-            dirnames.sort()
-            for filename in sorted(filenames):
-                path = Path(current) / filename
-                if path.suffix.lower() in IMAGE_EXTENSIONS:
-                    result["imageCount"] += 1
-                    extension_counts = result["extensionCounts"]
-                    extension_counts[path.suffix.lower()] = int(extension_counts.get(path.suffix.lower(), 0)) + 1
-                    image_paths.append(path)
+        image_samples_for_decode: list[Path] = []
+        video_samples_for_decode: list[Path] = []
+        stack = [resolved]
+        while stack:
+            if result["entriesChecked"] >= entry_budget or monotonic() >= deadline:
+                result["truncated"] = True
+                break
+            current = stack.pop()
+            try:
+                entries_context = os.scandir(current)
+            except OSError as exc:
+                result["walkErrorCount"] += 1
+                result["transientErrorCount"] += 1
+                if len(result["unreadableSamples"]) < 8:
+                    result["unreadableSamples"].append({"path": str(current), "error": str(exc)})
+                continue
+            with entries_context as entries:
+                for entry in entries:
+                    result["entriesChecked"] += 1
+                    if result["entriesChecked"] > entry_budget or monotonic() >= deadline:
+                        result["truncated"] = True
+                        break
+                    path = Path(entry.path)
                     try:
-                        result["totalBytes"] += path.stat().st_size
-                    except OSError:
-                        pass
-                    if len(result["imageSamples"]) < 8:
-                        result["imageSamples"].append(str(path))
-                elif path.suffix.lower() in VIDEO_EXTENSIONS:
-                    result["videoCount"] += 1
-                    extension_counts = result["extensionCounts"]
-                    extension_counts[path.suffix.lower()] = int(extension_counts.get(path.suffix.lower(), 0)) + 1
-                    try:
-                        result["totalBytes"] += path.stat().st_size
-                    except OSError:
-                        pass
-                    if len(result["videoSamples"]) < 8:
-                        result["videoSamples"].append(str(path))
-                else:
-                    result["nonImageCount"] += 1
-        for path in image_paths[:24]:
+                        is_dir = entry.is_dir(follow_symlinks=False)
+                        is_file = entry.is_file(follow_symlinks=False)
+                    except OSError as exc:
+                        result["walkErrorCount"] += 1
+                        result["transientErrorCount"] += 1
+                        if len(result["unreadableSamples"]) < 8:
+                            result["unreadableSamples"].append({"path": str(path), "error": str(exc)})
+                        continue
+                    if is_dir:
+                        reason = self.project.scan_exclusion_reason(path, is_dir=True)
+                        if reason:
+                            result["excludedDirectoryCount"] += 1
+                            if len(result["excludedSamples"]) < 8:
+                                result["excludedSamples"].append({"path": str(path), "reason": reason})
+                        else:
+                            stack.append(path)
+                        continue
+                    if not is_file:
+                        continue
+                    suffix = path.suffix.lower()
+                    exclusion_reason = self.project.scan_exclusion_reason(path, is_dir=False)
+                    if exclusion_reason:
+                        result["excludedCount"] += 1
+                        if len(result["excludedSamples"]) < 8:
+                            result["excludedSamples"].append({"path": str(path), "reason": exclusion_reason})
+                        continue
+                    if suffix in IMAGE_EXTENSIONS:
+                        result["imageCount"] += 1
+                        extension_counts = result["extensionCounts"]
+                        extension_counts[suffix] = int(extension_counts.get(suffix, 0)) + 1
+                        if len(image_samples_for_decode) < 24:
+                            image_samples_for_decode.append(path)
+                        try:
+                            result["totalBytes"] += path.stat().st_size
+                        except OSError:
+                            result["statErrorCount"] += 1
+                            result["transientErrorCount"] += 1
+                        if len(result["imageSamples"]) < 8:
+                            result["imageSamples"].append(str(path))
+                    elif suffix in VIDEO_EXTENSIONS:
+                        result["videoCount"] += 1
+                        extension_counts = result["extensionCounts"]
+                        extension_counts[suffix] = int(extension_counts.get(suffix, 0)) + 1
+                        try:
+                            result["totalBytes"] += path.stat().st_size
+                        except OSError:
+                            result["statErrorCount"] += 1
+                            result["transientErrorCount"] += 1
+                        if len(result["videoSamples"]) < 8:
+                            result["videoSamples"].append(str(path))
+                        if len(video_samples_for_decode) < 12:
+                            video_samples_for_decode.append(path)
+                    else:
+                        result["nonImageCount"] += 1
+            if result["truncated"]:
+                break
+        decode_budget_exhausted = False
+        for path in image_samples_for_decode:
+            if monotonic() >= deadline:
+                decode_budget_exhausted = True
+                break
             result["checkedImages"] += 1
             try:
                 load_image(path)
             except Exception as exc:
                 if len(result["unreadableSamples"]) < 8:
                     result["unreadableSamples"].append({"path": str(path), "error": str(exc)})
-        for path in list(iter_video_paths(resolved))[:12]:
+        for path in video_samples_for_decode:
+            if monotonic() >= deadline:
+                decode_budget_exhausted = True
+                break
             result["checkedVideos"] += 1
             try:
                 probe_video(path)
@@ -371,6 +804,19 @@ class DesktopApi:
             result["recommendations"].append("Some sampled images could not be opened and will be counted as scan errors.")
         if result["unreadableVideoSamples"]:
             result["recommendations"].append("Some sampled videos could not be opened and will be counted as scan errors.")
+        if result["transientErrorCount"]:
+            result["recommendations"].append("Some files or folders changed while checking. If this is a USB drive, keep it connected and retry.")
+        if result["truncated"]:
+            result["recommendations"].append("Folder check stopped at the safety limit. The scan itself will continue streaming all files with resume support.")
+        if decode_budget_exhausted:
+            result["recommendations"].append("Folder check skipped some sample decoding because the time limit was reached.")
+        for warning in storage.get("warnings", []):
+            if warning not in result["recommendations"]:
+                result["recommendations"].append(str(warning))
+        if result["excludedCount"] or result["excludedDirectoryCount"]:
+            result["recommendations"].append("Scan exclusions are active; skipped folders and file types will not be processed.")
+        if self.project.config.max_media_file_bytes > 0:
+            result["recommendations"].append("Large-file guard is active; media above the selected size limit will be skipped.")
         if self.project.config.safe_mode:
             result["recommendations"].append("Safe Mode is on; likely intimate images and videos will be protected from matching and clustering.")
         if not self.project.references:
@@ -379,7 +825,121 @@ class DesktopApi:
             result["recommendations"].append("Mark consent before processing images and videos.")
         if not result["recommendations"]:
             result["recommendations"].append("Folder is ready for scanning.")
+        result["estimate"] = self._estimate_scan_duration(result)
+        result["plan"] = self._build_scan_plan(result)
         return result
+
+    def _estimate_scan_duration(self, analysis: dict[str, Any]) -> dict[str, Any]:
+        image_count = int(analysis.get("imageCount", 0) or 0)
+        video_count = int(analysis.get("videoCount", 0) or 0)
+        extension_counts = analysis.get("extensionCounts", {})
+        heic_count = int(extension_counts.get(".heic", 0) + extension_counts.get(".heif", 0)) if isinstance(extension_counts, dict) else 0
+        detector_size = max(MIN_FACE_DETECTOR_SIZE, min(MAX_FACE_DETECTOR_SIZE, self.project.config.face_detector_size))
+        base_rate = 3.6 if detector_size <= 512 else 3.1
+        if detector_size <= 384:
+            base_rate = 4.2
+        heic_penalty_seconds = heic_count * 0.12
+        image_seconds = image_count / max(base_rate, 0.1) + heic_penalty_seconds
+        sampled_video_frames = video_count * 9
+        video_seconds = sampled_video_frames / 2.8
+        two_pass_seconds = image_count * 0.04 if self.project.config.two_pass_scan and self.project.config.verification_detector_size > detector_size else 0.0
+        total_seconds = image_seconds + video_seconds + two_pass_seconds
+        return {
+            "detectorSize": detector_size,
+            "imagesPerSecond": round(base_rate, 2),
+            "imageSeconds": int(image_seconds),
+            "videoSeconds": int(video_seconds),
+            "twoPassSeconds": int(two_pass_seconds),
+            "totalSeconds": int(total_seconds),
+            "label": self._duration_label(total_seconds),
+            "assumptions": [
+                "Estimate uses recent local benchmarks and media counts.",
+                "Large HEIC files and long videos can vary substantially.",
+                "Resume skips and embedding cache can reduce repeated scan time.",
+            ],
+        }
+
+    def _build_scan_plan(self, analysis: dict[str, Any]) -> dict[str, Any]:
+        image_count = int(analysis.get("imageCount", 0) or 0)
+        video_count = int(analysis.get("videoCount", 0) or 0)
+        media_count = image_count + video_count
+        total_bytes = int(analysis.get("totalBytes", 0) or 0)
+        extension_counts = analysis.get("extensionCounts", {})
+        estimate = analysis.get("estimate", {}) if isinstance(analysis.get("estimate"), dict) else {}
+        storage = analysis.get("storage", {}) if isinstance(analysis.get("storage"), dict) else {}
+        scale = self.project.scale_summary()
+        mode = "Balanced"
+        if media_count >= 250_000:
+            mode = "Large library"
+        elif storage.get("externalLikely") or storage.get("networkLikely"):
+            mode = "External drive"
+        elif video_count > image_count * 0.1 and video_count > 50:
+            mode = "Video aware"
+        elif self.project.config.face_detector_size <= 384:
+            mode = "Fast discovery"
+        warnings: list[str] = []
+        if media_count >= 1_000_000:
+            warnings.append("Use an external or SSD-backed app folder; this is a million-file scale job.")
+        elif media_count >= 100_000:
+            warnings.append("Keep the app open and use pause/resume rather than restarting the scan.")
+        if isinstance(extension_counts, dict) and any(ext in extension_counts for ext in (".heic", ".heif", ".dng", ".raw", ".cr3", ".nef")):
+            warnings.append("Apple/RAW formats are supported but can scan slower than JPEG/PNG.")
+        if video_count:
+            warnings.append("Videos are sampled into review moments; export bundles may copy original video files.")
+        for warning in storage.get("warnings", []):
+            if str(warning) not in warnings:
+                warnings.append(str(warning))
+        if storage.get("externalLikely"):
+            warnings.append("Avoid unplugging or sleeping the computer during this scan; resume can continue after interruptions.")
+        if storage.get("networkLikely"):
+            warnings.append("Prefer scanning from a local copy when possible; network latency can make face extraction uneven.")
+        if not self.project.references:
+            warnings.append("Add at least one person before starting the scan.")
+        if self.project.config.require_consent and not self.consent_on_file:
+            warnings.append("Confirm permission before scanning.")
+        estimated_db_bytes = media_count * 620
+        estimated_preview_bytes = max(1, min(media_count, 50_000)) * 36_000 if media_count else 0
+        return {
+            "mode": mode,
+            "mediaCount": media_count,
+            "estimatedTotalSeconds": int(estimate.get("totalSeconds", 0) or 0),
+            "estimatedWorkspaceBytes": estimated_db_bytes + estimated_preview_bytes,
+            "sourceBytes": total_bytes,
+            "storage": {
+                "volumeKind": storage.get("volumeKind", "unknown"),
+                "mountRoot": storage.get("mountRoot", ""),
+                "externalLikely": bool(storage.get("externalLikely")),
+                "networkLikely": bool(storage.get("networkLikely")),
+                "sameVolumeAsWorkspace": bool(storage.get("sameVolumeAsWorkspace")),
+                "freeBytes": int(storage.get("freeBytes", 0) or 0),
+            },
+            "resumable": True,
+            "safeMode": bool(self.project.config.safe_mode),
+            "twoPass": bool(self.project.config.two_pass_scan),
+            "cache": {
+                "safetyEntries": int(scale.get("safetyCacheEntries", 0) or 0),
+                "embeddingEntries": int(scale.get("embeddingCacheEntries", 0) or 0),
+                "manifestFiles": int(scale.get("manifestFiles", 0) or 0),
+            },
+            "stages": [
+                "Stream folder paths from disk",
+                "Skip completed files from previous manifest",
+                "Run Safe Mode before matching",
+                "Cache face detections by file hash",
+                "Recheck likely matches at higher detail" if self.project.config.two_pass_scan else "Use one-pass matching",
+                "Show review results while scanning continues",
+            ],
+            "warnings": warnings,
+            "recommendedAction": warnings[0] if warnings else "Folder is ready for a resumable scan.",
+        }
+
+    def _duration_label(self, seconds: float) -> str:
+        seconds = max(0, int(seconds))
+        hours, remainder = divmod(seconds, 3600)
+        minutes, _ = divmod(remainder, 60)
+        if hours:
+            return f"About {hours}h {minutes}m"
+        return f"About {max(1, minutes)}m" if minutes else "Under 1m"
 
     def runtime_self_test(self) -> dict[str, Any]:
         checks: list[dict[str, Any]] = []
@@ -409,8 +969,8 @@ class DesktopApi:
             except OSError:
                 pass
         add("Workspace write", workspace_ok, workspace_detail)
-        add("Recognition engine", bool(self.engine.model_name), self.engine.model_name)
-        face_model = model_status(self.project.config, self.engine.model_name)
+        add("Recognition engine", bool(self.engine_name), self.engine_name)
+        face_model = model_status(self.project.config, self.engine_name)
         add("Face model", bool(face_model.get("ready")), str(face_model.get("recommendation") or face_model.get("engine")), face_model)
         add("Safe Mode model", bool(safe_model.get("available")), str(safe_model.get("modelName") or safe_model.get("reason") or safe_model.get("engine")), safe_model)
         add("Image decoder", bool(image_decoder.get("extensions")), f"{len(image_decoder.get('extensions', []))} supported extension(s).", image_decoder)
@@ -436,9 +996,602 @@ class DesktopApi:
             "recommendations": recommendations,
         }
 
-    def state(self, preview_create_budget: int = 8) -> dict[str, Any]:
-        pending = sum(1 for candidate in self.project.candidates.values() if candidate.status == "pending")
-        reviewed = len(self.project.candidates) - pending
+    def runtime_benchmark(self) -> dict[str, Any]:
+        started = monotonic()
+        vector_store = VectorStore()
+        base_vector = [1.0] + [0.0] * 511
+        add_count = 2048
+        search_count = 256
+        add_started = monotonic()
+        for index in range(add_count):
+            vector = base_vector.copy()
+            vector[index % 512] = 1.0
+            vector_store.add(f"bench-{index}", vector)
+        add_ms = max(0.0, (monotonic() - add_started) * 1000)
+        search_started = monotonic()
+        for _ in range(search_count):
+            vector_store.search(base_vector, k=20)
+        search_ms = max(0.0, (monotonic() - search_started) * 1000)
+        state_started = monotonic()
+        state = self.state(preview_create_budget=0)
+        state_ms = max(0.0, (monotonic() - state_started) * 1000)
+        scale = self.project.scale_summary()
+        result = {
+            "runId": new_id("bench"),
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "durationMs": int((monotonic() - started) * 1000),
+            "vectorBackend": vector_store.backend_name,
+            "vectorAddPerSecond": round(add_count / max(add_ms / 1000, 0.001), 2),
+            "vectorSearchP50MsEstimate": round(search_ms / max(search_count, 1), 4),
+            "stateSerializeMs": round(state_ms, 2),
+            "stateCandidateWindow": state.get("candidateWindow", {}),
+            "scale": scale,
+            "recommendations": self._benchmark_recommendations(state_ms, scale),
+        }
+        self.project.db.add_benchmark_run(str(result["runId"]), result)
+        return result
+
+    def _benchmark_recommendations(self, state_ms: float, scale: dict[str, Any]) -> list[str]:
+        recommendations: list[str] = []
+        if state_ms > 500:
+            recommendations.append("State serialization is getting heavy; keep candidate windows small and use review filters.")
+        if int(scale.get("manifestFiles", 0)) > 100_000:
+            recommendations.append("Large scan manifest active; resumable scans and cached Safe Mode scores are enabled.")
+        if not recommendations:
+            recommendations.append("Local benchmark is within the expected range for this workspace.")
+        return recommendations
+
+    def release_readiness(self) -> dict[str, Any]:
+        face_model = model_status(self.project.config, self.engine_name)
+        safe_model = safety_model_report()
+        update_feed_ready = bool(
+            os.environ.get("VINTRACE_UPDATE_URL")
+            or os.environ.get("CROSSAGE_UPDATE_URL")
+            or os.environ.get("CROSSAGE_RELEASE_FEED_READY") == "1"
+            or os.environ.get("GH_TOKEN")
+            or os.environ.get("GITHUB_TOKEN")
+        )
+        checks = [
+            {
+                "name": "Face model",
+                "ok": bool(face_model.get("ready")),
+                "detail": "Full face model is installed." if face_model.get("ready") else str(face_model.get("recommendation") or "Download a face model."),
+            },
+            {
+                "name": "Safe Mode model",
+                "ok": bool(safe_model.get("available")),
+                "detail": str(safe_model.get("modelName") or safe_model.get("reason") or "Safe Mode model unavailable."),
+            },
+            {
+                "name": "Consent policy",
+                "ok": bool(self.project.config.require_consent),
+                "detail": "Processing requires permission." if self.project.config.require_consent else "Permission requirement is disabled.",
+            },
+            {
+                "name": "macOS signing",
+                "ok": bool(os.environ.get("CSC_LINK") or os.environ.get("APPLE_ID")),
+                "detail": "Signing environment detected." if os.environ.get("CSC_LINK") or os.environ.get("APPLE_ID") else "Configure Apple Developer signing and notarization before public DMGs.",
+            },
+            {
+                "name": "Windows signing",
+                "ok": bool(os.environ.get("WIN_CSC_LINK") or os.environ.get("CSC_LINK")),
+                "detail": "Windows signing environment detected." if os.environ.get("WIN_CSC_LINK") or os.environ.get("CSC_LINK") else "Configure a Windows code-signing certificate to reduce SmartScreen friction.",
+            },
+            {
+                "name": "Auto-update",
+                "ok": update_feed_ready,
+                "detail": "Update feed credentials/configuration detected." if update_feed_ready else "Configure a signed release feed before sharing production DMGs/EXEs.",
+            },
+            {
+                "name": "Crash reporting",
+                "ok": True,
+                "detail": "Local consent-first diagnostics export is available; network sending remains opt-in/manual.",
+            },
+        ]
+        return {
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "ok": all(check["ok"] for check in checks),
+            "checks": checks,
+            "recommendations": [check["detail"] for check in checks if not check["ok"]][:5] or ["Release checklist passed."],
+        }
+
+    def model_integrity(self) -> dict[str, Any]:
+        face_model = model_status(self.project.config, self.engine_name)
+        safe_model = safety_model_report()
+        image_decoder = image_decoder_report()
+        video_decoder = video_decoder_report()
+        checks: list[dict[str, Any]] = []
+
+        def add(name: str, ok: bool, detail: str, value: Any | None = None) -> None:
+            row: dict[str, Any] = {"name": name, "ok": bool(ok), "detail": detail}
+            if value is not None:
+                row["value"] = value
+            checks.append(row)
+
+        model_root = Path(str(face_model.get("modelRoot", ""))).expanduser()
+        root_writable = False
+        try:
+            model_root.mkdir(parents=True, exist_ok=True)
+            probe = model_root / ".vintrace-integrity-write"
+            probe.write_text("ok", encoding="utf-8")
+            root_writable = probe.read_text(encoding="utf-8") == "ok"
+            probe.unlink(missing_ok=True)
+        except OSError:
+            root_writable = False
+
+        add("Face model", bool(face_model.get("ready")), str(face_model.get("recommendation") or face_model.get("engine") or "Face model checked."), face_model)
+        add("Model folder writable", root_writable, str(model_root) if root_writable else "Choose a writable model download folder.")
+        installed_checks = []
+        current_pack = str(face_model.get("currentPack", ""))
+        for package in face_model.get("packages", []):
+            if not isinstance(package, dict) or str(package.get("pack", "")) != current_pack:
+                continue
+            pack_dir = Path(str(package.get("path", ""))).expanduser()
+            for group in package.get("required_any", []):
+                if not isinstance(group, (list, tuple)):
+                    continue
+                candidates = [pack_dir / str(filename) for filename in group]
+                selected = next((candidate for candidate in candidates if candidate.exists()), candidates[0] if candidates else pack_dir)
+                installed_checks.append(self._onnx_integrity_check(selected))
+        installed_ok = bool(installed_checks) and all(bool(item.get("ok")) for item in installed_checks)
+        add(
+            "Installed ONNX files",
+            installed_ok if face_model.get("ready") else False,
+            "Installed face model files passed structural checks." if installed_ok else "Installed face model files are missing, empty, or unreadable.",
+            installed_checks,
+        )
+        archive_checks = []
+        for package in face_model.get("packages", []):
+            if not isinstance(package, dict):
+                continue
+            archive_path = Path(str(package.get("archivePath", ""))).expanduser()
+            if not archive_path.exists():
+                archive_checks.append({"pack": package.get("pack"), "status": "missing", "ok": bool(package.get("available"))})
+                continue
+            expected = str(package.get("sha256", ""))
+            digest = self._sha256_path(archive_path)
+            ok = bool(expected and digest == expected)
+            archive_checks.append({"pack": package.get("pack"), "status": "verified" if ok else "mismatch", "ok": ok, "sha256": digest})
+        archive_ok = all(bool(item.get("ok")) for item in archive_checks if item.get("status") != "missing")
+        add("Downloaded archives", archive_ok, "Downloaded model archives pass checksum checks." if archive_ok else "One or more downloaded model archives failed checksum verification.", archive_checks)
+        add("Safe Mode model", bool(safe_model.get("available")), str(safe_model.get("modelName") or safe_model.get("reason") or "Safe Mode model checked."), safe_model)
+        add("Image decoder", bool(image_decoder.get("extensions")), f"{len(image_decoder.get('extensions', []))} image extension(s) supported.", image_decoder)
+        add("Video decoder", bool(video_decoder.get("opencvAvailable")), str(video_decoder.get("backend") or "Video decoder unavailable."), video_decoder)
+        recommendations = [check["detail"] for check in checks if not check["ok"]]
+        if not recommendations:
+            recommendations.append("Model and runtime integrity checks passed.")
+        return {
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "ok": all(check["ok"] for check in checks),
+            "checks": checks,
+            "recommendations": recommendations,
+        }
+
+    def _sha256_path(self, path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _onnx_integrity_check(self, path: Path) -> dict[str, Any]:
+        result: dict[str, Any] = {"path": str(path), "ok": False, "bytes": 0, "checkedWith": "filesystem", "error": ""}
+        try:
+            stat = path.stat()
+            result["bytes"] = int(stat.st_size)
+            if not path.is_file() or stat.st_size <= 0:
+                result["error"] = "Model file is missing or empty."
+                return result
+        except OSError as exc:
+            result["error"] = str(exc)
+            return result
+        try:
+            import onnxruntime as ort  # type: ignore
+
+            session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+            result["checkedWith"] = "onnxruntime"
+            result["inputs"] = len(session.get_inputs())
+            result["outputs"] = len(session.get_outputs())
+        except ImportError:
+            result["checkedWith"] = "filesystem"
+        except Exception as exc:
+            result["checkedWith"] = "onnxruntime"
+            result["error"] = str(exc)
+            return result
+        result["ok"] = True
+        return result
+
+    def export_support_bundle(self, include_paths: bool = False) -> dict[str, Any]:
+        export_root = self.project.root / "exports"
+        export_root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        bundle_path = export_root / f"vintrace-support-bundle-{stamp}.zip"
+        counter = 2
+        while bundle_path.exists():
+            bundle_path = export_root / f"vintrace-support-bundle-{stamp}-{counter}.zip"
+            counter += 1
+        payloads = {
+            "manifest.json": {
+                "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "appVersion": __version__,
+                "workspaceId": self.project.workspace_metadata.get("workspaceId"),
+                "includePaths": bool(include_paths),
+                "note": "Diagnostics only. This ZIP does not include original photos, videos, thumbnails, face vectors, or model files.",
+            },
+            "workspace-health.json": self.project.workspace_health(),
+            "privacy-report.json": self.project.privacy_report(),
+            "retention-policy-report.json": self.project.retention_policy_report(),
+            "model-drift-report.json": self.project.model_drift_report(self.engine_name),
+            "runtime-self-test.json": self.runtime_self_test(),
+            "model-integrity.json": self.model_integrity(),
+            "release-readiness.json": self.release_readiness(),
+            "model-status.json": model_status(self.project.config, self.engine_name),
+            "safe-mode-model.json": safety_model_report(),
+            "image-decoder.json": image_decoder_report(),
+            "video-decoder.json": video_decoder_report(),
+            "scale-summary.json": self.project.scale_summary(),
+            "audit-events.json": self.project.audit_events(limit=80, offset=0),
+        }
+        serializable = self._redact_paths(payloads, include_paths=include_paths)
+        with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name, payload in serializable.items():
+                archive.writestr(name, json.dumps(payload, indent=2))
+        size = bundle_path.stat().st_size
+        self.project._append_audit(
+            {
+                "action": "export_support_bundle",
+                "zip_path": str(bundle_path),
+                "include_paths": bool(include_paths),
+                "bytes": size,
+            }
+        )
+        return {
+            "zipPath": str(bundle_path),
+            "bytes": size,
+            "fileCount": len(serializable),
+            "includePaths": bool(include_paths),
+        }
+
+    def _redact_paths(self, value: Any, include_paths: bool = False) -> Any:
+        if include_paths:
+            return value
+        path_keys = {
+            "path",
+            "workspace",
+            "workspacePath",
+            "dbPath",
+            "sourcePath",
+            "source_path",
+            "folder",
+            "mediaSourcePath",
+            "media_source_path",
+            "bestRefPath",
+            "modelRoot",
+            "defaultRoot",
+            "root",
+            "zipPath",
+            "jsonPath",
+            "csvPath",
+            "bundlePath",
+            "manifestPath",
+            "archivePath",
+            "removedPaths",
+            "scope",
+            "oldRoot",
+            "newRoot",
+            "old_root",
+            "new_root",
+            "directory",
+            "folder",
+            "from",
+            "to",
+        }
+        path_key_suffixes = ("path", "paths", "root", "roots", "directory", "directories", "folder", "folders")
+        if isinstance(value, dict):
+            redacted: dict[str, Any] = {}
+            for key, item in value.items():
+                key_text = str(key)
+                key_lower = key_text.lower()
+                if key_text in path_keys or key_lower.endswith(path_key_suffixes):
+                    if isinstance(item, list):
+                        redacted[key_text] = [self._redacted_path(str(path)) for path in item[:20]]
+                    elif item is None:
+                        redacted[key_text] = None
+                    else:
+                        redacted[key_text] = self._redacted_path(str(item))
+                else:
+                    redacted[key_text] = self._redact_paths(item, include_paths=False)
+            return redacted
+        if isinstance(value, (list, tuple)):
+            return [self._redact_paths(item, include_paths=False) for item in value]
+        if isinstance(value, str):
+            return self._redact_string(value)
+        return value
+
+    def _redact_string(self, value: str) -> str:
+        if not value:
+            return value
+        text = value
+        prefixes = {
+            str(self.project.root),
+            os.path.realpath(str(self.project.root)),
+            str(self.project.root.parent),
+            os.path.realpath(str(self.project.root.parent)),
+            str(Path.home()),
+            os.path.realpath(str(Path.home())),
+        }
+        for prefix in sorted((item for item in prefixes if item), key=len, reverse=True):
+            if text == prefix or text.startswith(f"{prefix}/") or text.startswith(f"{prefix}\\"):
+                return self._redacted_path(text)
+            text = text.replace(prefix, "[hidden]")
+        if text.startswith(("/", "~")) or re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith("\\\\"):
+            return self._redacted_path(text)
+        return text
+
+    def _redacted_path(self, value: str) -> str:
+        if not value:
+            return ""
+        try:
+            name = Path(value).name or value
+        except (OSError, ValueError):
+            name = ""
+        return f"[hidden]/{name}" if name else "[hidden]"
+
+    def installer_self_diagnostics(self) -> dict[str, Any]:
+        runtime = self.runtime_self_test()
+        face_model = model_status(self.project.config, self.engine_name)
+        safe_model = safety_model_report()
+        image_decoder = image_decoder_report()
+        video_decoder = video_decoder_report()
+        workspace_health = self.project.workspace_health()
+        packaged = bool(getattr(sys, "frozen", False) or os.environ.get("CROSSAGE_PACKAGED_BACKEND") == "1")
+        model_packages = face_model.get("packages", []) if isinstance(face_model.get("packages"), list) else []
+        downloadable = any(str(package.get("url", "")).startswith(("http://", "https://")) and str(package.get("sha256", "")) for package in model_packages if isinstance(package, dict))
+        checks = [
+            {
+                "name": "App folder write",
+                "ok": any(check.get("name") == "Workspace write" and check.get("ok") for check in runtime.get("checks", [])),
+                "detail": "The app can save settings, results, and generated previews.",
+            },
+            {
+                "name": "Face model",
+                "ok": bool(face_model.get("ready")),
+                "detail": str(face_model.get("recommendation") or face_model.get("engine") or "Face model status checked."),
+            },
+            {
+                "name": "Model downloader",
+                "ok": downloadable or bool(face_model.get("ready")),
+                "detail": "Download URL and checksum are configured." if downloadable else "Face model is already ready or no downloadable pack is configured.",
+            },
+            {
+                "name": "Safe Mode",
+                "ok": bool(self.project.config.safe_mode and safe_model.get("available")),
+                "detail": str(safe_model.get("modelName") or safe_model.get("reason") or "Safe Mode model checked."),
+            },
+            {
+                "name": "Photo formats",
+                "ok": bool(image_decoder.get("extensions")),
+                "detail": f"{len(image_decoder.get('extensions', []))} image extension(s) available.",
+            },
+            {
+                "name": "Video support",
+                "ok": bool(video_decoder.get("opencvAvailable")),
+                "detail": str(video_decoder.get("backend") or "Video decoder unavailable."),
+            },
+            {
+                "name": "Packaged backend",
+                "ok": packaged,
+                "detail": "Packaged backend detected." if packaged else "Running from source; installer builds should include the frozen backend.",
+            },
+            {
+                "name": "Workspace health",
+                "ok": not any(workspace_health.get(key, 0) for key in ("missingReferences", "missingCandidates", "missingMediaSources")),
+                "detail": "No missing workspace files found." if not any(workspace_health.get(key, 0) for key in ("missingReferences", "missingCandidates", "missingMediaSources")) else "Some saved files or media links are missing.",
+            },
+        ]
+        recommendations = [check["detail"] for check in checks if not check["ok"]]
+        recommendations.extend(str(item) for item in runtime.get("recommendations", []) if str(item) not in recommendations)
+        if not recommendations:
+            recommendations.append("Installer diagnostics passed for this machine.")
+        return {
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "ok": all(check["ok"] for check in checks),
+            "packagedBackend": packaged,
+            "checks": checks,
+            "recommendations": recommendations[:8],
+        }
+
+    def query_candidates(self, params: dict[str, Any]) -> dict[str, Any]:
+        status = str(params.get("status", "all")).strip().lower()
+        if status not in {"all", "pending", "accepted", "rejected", "uncertain"}:
+            raise ValueError("Candidate status filter must be all, pending, accepted, rejected, or uncertain.")
+        lane = str(params.get("lane", "all")).strip()
+        if lane not in {"all", "high", "lowQuality", "groups", "video", "notes"}:
+            raise ValueError("Candidate lane must be all, high, lowQuality, groups, video, or notes.")
+        query = str(params.get("query", "")).strip().lower()
+        sort = str(params.get("sort", "score")).strip()
+        offset = max(0, int(params.get("offset", 0) or 0))
+        limit = max(1, min(1000, int(params.get("limit", 100) or 100)))
+        preview_budget = max(0, min(64, int(params.get("previewBudget", 0) or 0)))
+        low_quality_threshold = max(0.2, float(self.project.config.thresholds.quality_min))
+        try:
+            db_candidate_count = self.project.db.candidate_count()
+            if db_candidate_count >= len(self.project.candidates):
+                db_page = self.project.db.query_candidates(
+                    status=status,
+                    lane=lane,
+                    query=query,
+                    sort=sort,
+                    offset=offset,
+                    limit=limit,
+                    confident_threshold=self.project.config.thresholds.confident,
+                    low_quality_threshold=low_quality_threshold,
+                )
+                page = []
+                for payload in db_page.get("items", []):
+                    if not isinstance(payload, dict):
+                        continue
+                    try:
+                        candidate = ReviewCandidate(**payload)
+                    except (TypeError, ValueError):
+                        continue
+                    page.append(candidate)
+                items = []
+                remaining_preview_budget = preview_budget
+                for candidate in page:
+                    before_preview = self.project.preview_path_for(candidate.source_path, create=False)
+                    row = self._candidate_state_row(candidate, remaining_preview_budget)
+                    if remaining_preview_budget > 0 and not before_preview and row.get("previewPath"):
+                        remaining_preview_budget -= 1
+                    items.append(row)
+                return {
+                    "total": int(db_page.get("total", 0) or 0),
+                    "offset": offset,
+                    "limit": limit,
+                    "returned": len(items),
+                    "items": items,
+                    "index": "sqlite",
+                }
+        except Exception:
+            pass
+        grouped_candidate_ids: set[str] = set()
+        if lane == "groups":
+            by_media_path: dict[str, dict[str, Any]] = {}
+            for candidate in self.project.candidates.values():
+                media_path = candidate.media_source_path or candidate.source_path
+                row = by_media_path.setdefault(media_path, {"ids": [], "people": set()})
+                row["ids"].append(candidate.candidate_id)
+                if candidate.person_name.strip() and not candidate.person_name.startswith("Unmatched cluster"):
+                    row["people"].add(candidate.person_name)
+            for row in by_media_path.values():
+                if len(row["people"]) >= 2:
+                    grouped_candidate_ids.update(row["ids"])
+
+        def matches(candidate: Any) -> bool:
+            if status != "all" and candidate.status != status:
+                return False
+            if lane == "high" and candidate.score < self.project.config.thresholds.confident:
+                return False
+            if lane == "lowQuality" and candidate.quality >= low_quality_threshold:
+                return False
+            if lane == "groups" and candidate.candidate_id not in grouped_candidate_ids:
+                return False
+            if lane == "video" and candidate.media_kind != "video":
+                return False
+            if lane == "notes" and not candidate.note.strip():
+                return False
+            if query:
+                haystack = "\n".join(
+                    [
+                        candidate.person_name,
+                        candidate.band,
+                        candidate.source_path,
+                        candidate.media_source_path,
+                        candidate.note,
+                        candidate.source_hash,
+                    ]
+                ).lower()
+                if query not in haystack:
+                    return False
+            return True
+
+        total = 0
+
+        def iter_matches() -> Any:
+            nonlocal total
+            for candidate in self.project.candidates.values():
+                if matches(candidate):
+                    total += 1
+                    yield candidate
+
+        bound = offset + limit
+        heap_bound_limit = 20_000
+        if bound <= heap_bound_limit:
+            if sort == "newest":
+                ranked = heapq.nlargest(bound, iter_matches(), key=lambda item: (item.created_at, item.candidate_id))
+            elif sort == "quality":
+                ranked = heapq.nlargest(bound, iter_matches(), key=lambda item: (float(item.quality), item.created_at, item.candidate_id))
+            elif sort == "status":
+                ranked = heapq.nsmallest(bound, iter_matches(), key=lambda item: (item.status, item.person_name.lower(), -float(item.score), item.candidate_id))
+            else:
+                ranked = heapq.nlargest(bound, iter_matches(), key=lambda item: (float(item.score), item.quality, item.created_at, item.candidate_id))
+        else:
+            matched = list(iter_matches())
+            if sort == "newest":
+                ranked = sorted(matched, key=lambda item: (item.created_at, item.candidate_id), reverse=True)
+            elif sort == "quality":
+                ranked = sorted(matched, key=lambda item: (float(item.quality), item.created_at, item.candidate_id), reverse=True)
+            elif sort == "status":
+                ranked = sorted(matched, key=lambda item: (item.status, item.person_name.lower(), -float(item.score), item.candidate_id))
+            else:
+                ranked = sorted(matched, key=lambda item: (float(item.score), item.quality, item.created_at, item.candidate_id), reverse=True)
+        page = ranked[offset:offset + limit]
+        items = []
+        remaining_preview_budget = preview_budget
+        for candidate in page:
+            before_preview = self.project.preview_path_for(candidate.source_path, create=False)
+            row = self._candidate_state_row(candidate, remaining_preview_budget)
+            if remaining_preview_budget > 0 and not before_preview and row.get("previewPath"):
+                remaining_preview_budget -= 1
+            items.append(row)
+        return {
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "returned": len(page),
+            "items": items,
+            "index": "memory",
+        }
+
+    def _candidate_state_row(self, candidate: Any, preview_budget: int = 0) -> dict[str, Any]:
+        preview_path = self.project.preview_path_for(candidate.source_path, create=False)
+        if not preview_path and preview_budget > 0:
+            preview_path = self.project.preview_path_for(candidate.source_path, create=True)
+        best_preview_path = self.project.preview_path_for(candidate.best_ref_path, create=False)
+        return {
+            "candidateId": candidate.candidate_id,
+            "sourcePath": candidate.source_path,
+            "personName": candidate.person_name,
+            "bestRefId": candidate.best_ref_id,
+            "bestRefPath": candidate.best_ref_path,
+            "previewPath": preview_path,
+            "bestRefPreviewPath": best_preview_path,
+            "score": candidate.score,
+            "band": candidate.band,
+            "quality": candidate.quality,
+            "modelName": candidate.model_name,
+            "status": candidate.status,
+            "note": candidate.note,
+            "mediaKind": candidate.media_kind,
+            "mediaSourcePath": candidate.media_source_path,
+            "videoTimestampMs": candidate.video_timestamp_ms,
+            "videoFrameIndex": candidate.video_frame_index,
+            "videoDurationMs": candidate.video_duration_ms,
+            "sourceHash": candidate.source_hash,
+            "createdAt": candidate.created_at,
+        }
+
+    def state(self, preview_create_budget: int = 8, candidate_limit: int = 500) -> dict[str, Any]:
+        candidate_limit = max(250, min(10_000, int(candidate_limit)))
+        scale = self.project.scale_summary()
+        try:
+            indexed_candidates = int(scale.get("reviewCandidateRows", -1)) if isinstance(scale, dict) else self.project.db.candidate_count()
+        except (TypeError, ValueError, sqlite3.Error):
+            indexed_candidates = -1
+        index_ready = indexed_candidates >= len(self.project.candidates) and indexed_candidates >= 0
+        candidate_total = indexed_candidates if index_ready else len(self.project.candidates)
+        if index_ready:
+            try:
+                status_counts = self.project.db.candidate_status_counts()
+                pending = int(status_counts.get("pending", 0) or 0)
+                reviewed = int(status_counts.get("reviewed", 0) or 0)
+            except Exception:
+                pending = sum(1 for candidate in self.project.candidates.values() if candidate.status == "pending")
+                reviewed = len(self.project.candidates) - pending
+                index_ready = False
+        else:
+            pending = sum(1 for candidate in self.project.candidates.values() if candidate.status == "pending")
+            reviewed = len(self.project.candidates) - pending
         preview_cache: dict[str, str | None] = {}
         remaining_preview_creates = max(0, int(preview_create_budget))
 
@@ -446,16 +1599,53 @@ class DesktopApi:
             nonlocal remaining_preview_creates
             if not source_path:
                 return None
-            if source_path not in preview_cache:
+            try:
+                cache_key = str(Path(source_path).expanduser().resolve())
+            except OSError:
+                cache_key = source_path
+            if cache_key not in preview_cache:
                 cached_preview = self.project.preview_path_for(source_path, create=False)
                 if cached_preview:
-                    preview_cache[source_path] = cached_preview
+                    preview_cache[cache_key] = cached_preview
                 elif remaining_preview_creates > 0:
                     remaining_preview_creates -= 1
-                    preview_cache[source_path] = self.project.preview_path_for(source_path, create=True)
+                    preview_cache[cache_key] = self.project.preview_path_for(source_path, create=True)
                 else:
-                    preview_cache[source_path] = None
-            return preview_cache[source_path]
+                    preview_cache[cache_key] = None
+            return preview_cache[cache_key]
+
+        def candidate_sort_key(item: Any) -> tuple[bool, float, str]:
+            return (item.status != "pending", -float(item.score), item.person_name.lower())
+
+        if index_ready:
+            try:
+                db_page = self.project.db.query_candidates(
+                    sort="state",
+                    offset=0,
+                    limit=candidate_limit,
+                    confident_threshold=self.project.config.thresholds.confident,
+                    low_quality_threshold=max(0.2, float(self.project.config.thresholds.quality_min)),
+                )
+                top_candidates = [
+                    ReviewCandidate(**payload)
+                    for payload in db_page.get("items", [])
+                    if isinstance(payload, dict)
+                ]
+            except Exception:
+                top_candidates = heapq.nsmallest(candidate_limit, self.project.candidates.values(), key=candidate_sort_key)
+                index_ready = False
+        else:
+            top_candidates = heapq.nsmallest(candidate_limit, self.project.candidates.values(), key=candidate_sort_key)
+        if index_ready:
+            try:
+                video_moments = self.project.db.video_moments(limit=80)
+                review_insights = self.project.db.review_insights(self.project.config.thresholds.confident)
+            except Exception:
+                video_moments = self.project.video_moments(limit=80)
+                review_insights = self.project.review_insights()
+        else:
+            video_moments = self.project.video_moments(limit=80)
+            review_insights = self.project.review_insights()
 
         return {
             "version": __version__,
@@ -463,17 +1653,22 @@ class DesktopApi:
             "consentOnFile": self.consent_on_file,
             "consent": self.project.consent_summary(),
             "workspaceMetadata": self.project.workspace_metadata,
-            "engine": self.engine.model_name,
+            "engine": self.engine_name,
             "vectorStore": self.project.vector_store.backend_name,
             "platform": asdict(self.platform_report),
             "counts": {
                 "references": len(self.project.references),
                 "pending": pending,
                 "reviewed": reviewed,
-                "candidates": len(self.project.candidates),
+                "candidates": candidate_total,
             },
             "scanHistory": self.project.scan_history[:20],
             "scanTotals": self._scan_totals(),
+            "scale": scale,
+            "calibration": self.project.calibration_summary(),
+            "scanJob": self.project.scan_job_status(scale.get("latestScan") if isinstance(scale, dict) else None),
+            "videoMoments": video_moments,
+            "reviewInsights": review_insights,
             "config": {
                 "modelPack": self.project.config.model_pack,
                 "modelRoot": self.project.config.model_root,
@@ -484,13 +1679,29 @@ class DesktopApi:
                     "qualityMin": self.project.config.thresholds.quality_min,
                 },
                 "clusterMinSize": self.project.config.cluster_min_size,
+                "faceDetectorSize": self.project.config.face_detector_size,
+                "twoPassScan": self.project.config.two_pass_scan,
+                "verificationDetectorSize": self.project.config.verification_detector_size,
                 "safeMode": self.project.config.safe_mode,
                 "safeModeThreshold": self.project.config.safe_mode_threshold,
+                "storageBudgetBytes": self.project.config.storage_budget_bytes,
+                "maxMediaFileBytes": self.project.config.max_media_file_bytes,
+                "reviewRules": {
+                    "autoRejectBelow": self.project.config.auto_reject_below,
+                    "autoUncertainLowQuality": self.project.config.auto_uncertain_low_quality,
+                    "autoRejectLowQualityVideo": self.project.config.auto_reject_low_quality_video,
+                },
+                "scanExclusions": {
+                    "dirNames": self.project.config.excluded_dir_names,
+                    "pathKeywords": self.project.config.excluded_path_keywords,
+                    "extensions": self.project.config.excluded_extensions,
+                    "filePaths": self.project.config.excluded_file_paths,
+                },
                 "reviewOnly": self.project.config.review_only,
                 "requireConsent": self.project.config.require_consent,
             },
             "safeModeModel": safety_model_report(),
-            "modelSetup": model_status(self.project.config, self.engine.model_name),
+            "modelSetup": model_status(self.project.config, self.engine_name),
             "references": [
                 {
                     "refId": ref.ref_id,
@@ -525,13 +1736,18 @@ class DesktopApi:
                     "videoTimestampMs": candidate.video_timestamp_ms,
                     "videoFrameIndex": candidate.video_frame_index,
                     "videoDurationMs": candidate.video_duration_ms,
+                    "sourceHash": candidate.source_hash,
                     "createdAt": candidate.created_at,
                 }
-                for candidate in sorted(
-                    self.project.candidates.values(),
-                    key=lambda item: (item.status != "pending", -item.score, item.person_name.lower()),
-                )
+                for candidate in top_candidates
             ],
+            "candidateWindow": {
+                "limit": candidate_limit,
+                "returned": len(top_candidates),
+                "total": candidate_total,
+                "truncated": candidate_total > candidate_limit,
+                "index": "sqlite" if index_ready else "memory",
+            },
         }
 
     def _scan_totals(self) -> dict[str, Any]:
@@ -549,6 +1765,7 @@ class DesktopApi:
             "videoFiles": 0,
             "videoFrames": 0,
             "videoProtected": 0,
+            "excluded": 0,
             "durationMs": 0,
         }
         for run in self.project.scan_history:
@@ -566,6 +1783,7 @@ class DesktopApi:
                 "videoFiles",
                 "videoFrames",
                 "videoProtected",
+                "excluded",
             ):
                 totals[key] += int(metrics.get(key, 0)) if isinstance(metrics, dict) else 0
             totals["durationMs"] += int(run.get("durationMs", 0)) if isinstance(run, dict) else 0
@@ -580,7 +1798,7 @@ class DesktopApi:
         if progress is None:
             return
         phase = str(payload.get("phase", ""))
-        if phase == "complete":
+        if phase in {"complete", "cancelled"}:
             self._last_progress_state_at = 0.0
             self._last_progress_state_added = 0
             progress({**payload, "state": self.state(preview_create_budget=0)})
@@ -611,14 +1829,51 @@ def emit(message: dict[str, Any], stream: Any | None = None) -> None:
     target.flush()
 
 
+ERROR_CODE_BY_EXCEPTION = {
+    "PermissionError": ("E-BACKEND-PERMISSION", "privacy", "warn", True),
+    "ValueError": ("E-BACKEND-VALIDATION", "input", "warn", True),
+    "KeyError": ("E-BACKEND-NOT-FOUND", "data", "warn", True),
+    "FileNotFoundError": ("E-FS-NOT-FOUND", "filesystem", "warn", True),
+    "IsADirectoryError": ("E-FS-DIRECTORY", "filesystem", "warn", True),
+    "NotADirectoryError": ("E-FS-NOT-DIRECTORY", "filesystem", "warn", True),
+    "TimeoutError": ("E-BACKEND-TIMEOUT", "backend", "error", True),
+    "ImageLoadError": ("E-MEDIA-IMAGE-DECODE", "media", "warn", True),
+    "VideoLoadError": ("E-MEDIA-VIDEO-DECODE", "media", "warn", True),
+    "FileChangedDuringScanError": ("E-SCAN-FILE-CHANGED", "scan", "warn", True),
+    "InterruptedError": ("E-SCAN-CANCELLED", "scan", "info", True),
+    "OperationalError": ("E-DB-SQLITE", "database", "error", False),
+    "DatabaseError": ("E-DB-SQLITE", "database", "error", False),
+}
+
+
+def structured_error(exc: Exception, command: str = "") -> dict[str, Any]:
+    exc_type = exc.__class__.__name__
+    code, category, severity, recoverable = ERROR_CODE_BY_EXCEPTION.get(
+        exc_type,
+        ("E-BACKEND-UNKNOWN", "backend", "error", False),
+    )
+    if isinstance(exc, OSError) and code == "E-BACKEND-UNKNOWN":
+        code, category, severity, recoverable = ("E-FS-IO", "filesystem", "error", True)
+    return {
+        "type": exc_type,
+        "code": code,
+        "category": category,
+        "severity": severity,
+        "recoverable": recoverable,
+        "command": command,
+        "message": str(exc),
+        "traceback": traceback.format_exc(limit=8) if os.environ.get("CROSSAGE_DEBUG") else "",
+    }
+
+
 def serve(workspace: Path | None = None) -> None:
-    root = resolve_workspace(workspace or os.environ.get("CROSSAGE_WORKSPACE"))
+    root = resolve_workspace(workspace or os.environ.get("VINTRACE_WORKSPACE") or os.environ.get("CROSSAGE_WORKSPACE"))
     json_stream = sys.stdout
     def startup(payload: dict[str, Any]) -> None:
         emit({"event": "startup", "payload": payload}, stream=json_stream)
 
     api = DesktopApi(root, actor="desktop", startup=startup)
-    emit({"ready": True, "state": api.state()}, stream=json_stream)
+    emit({"ready": True, "state": api.state(preview_create_budget=2, candidate_limit=250)}, stream=json_stream)
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -639,19 +1894,17 @@ def serve(workspace: Path | None = None) -> None:
                     params = {}
                 if not isinstance(params, dict):
                     raise ValueError("Command parameters must be an object.")
-                result = api.handle(str(request.get("command")), params, progress=progress)
+                command = str(request.get("command"))
+                result = api.handle(command, params, progress=progress)
             emit({"id": request.get("id"), "ok": True, "result": result}, stream=json_stream)
         except Exception as exc:
             request_id = request.get("id") if isinstance(request, dict) else None
+            command = str(request.get("command", "")) if isinstance(request, dict) else ""
             emit(
                 {
                     "id": request_id,
                     "ok": False,
-                    "error": {
-                        "type": exc.__class__.__name__,
-                        "message": str(exc),
-                        "traceback": traceback.format_exc(limit=8) if os.environ.get("CROSSAGE_DEBUG") else "",
-                    },
+                    "error": structured_error(exc, command),
                 },
                 stream=json_stream,
             )

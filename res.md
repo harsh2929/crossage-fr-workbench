@@ -1,4 +1,4 @@
-# Local, Offline NSFW/Intimate-Image Detection for CrossAge FR — Model Selection & Implementation Plan
+# Local, Offline NSFW/Intimate-Image Detection for Vintrace — Model Selection & Implementation Plan
 
 ## TL;DR
 - **Adopt a two-model architecture: Marqo/nsfw-image-detection-384 (Apache-2.0, ViT-Tiny base `vit_tiny_patch16_384`, ~5–6M params, 384px input, calibrated 2-class softmax) as the primary fast gate, plus an explainable body-part detector as an optional second "explain why flagged" stage** — both run fully offline in ONNX Runtime with CoreML/CUDA/TensorRT/DirectML/OpenVINO/CPU fallback. Do not bundle NudeNet's package for redistribution: its v3 repo is **AGPL-3.0**.

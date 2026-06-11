@@ -1,8 +1,8 @@
 {
-  "name": "crossage-fr-workbench",
+  "name": "vintrace",
   "version": "0.1.0",
-  "description": "Cross-age face recognition review workbench",
-  "author": "CrossAge FR Workbench",
+  "description": "Local face and photo review workbench",
+  "author": "Vintrace",
   "license": "UNLICENSED",
   "main": "desktop/main.cjs",
   "private": true,
@@ -31,6 +31,7 @@
     "test": "npm run build && npm run test:pipeline && npm run test:edge && npm run test:mcp && npm run test:e2e"
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
@@ -49,8 +50,15 @@
     "vite": "^6.0.0"
   },
   "build": {
-    "appId": "com.crossagefr.workbench",
-    "productName": "CrossAge FR Workbench",
+    "appId": "com.vintrace.workbench",
+    "productName": "Vintrace",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "harsh2929",
+        "repo": "vintrace"
+      }
+    ],
     "files": [
       "dist/index.html",
       "dist/assets/**/*",
@@ -59,9 +67,9 @@
     ],
     "protocols": [
       {
-        "name": "CrossAge FR Link",
+        "name": "Vintrace Link",
         "schemes": [
-          "crossage"
+          "vintrace"
         ]
       }
     ],
@@ -143,7 +151,6 @@
           "flv",
           "asf",
           "ogv",
-          "ts",
           "dv"
         ],
         "role": "Viewer"
@@ -154,7 +161,9 @@
         "from": "backend-dist",
         "to": "backend",
         "filter": [
-          "crossage-backend*"
+          "crossage-backend",
+          "crossage-backend.exe",
+          "crossage-backend/**/*"
         ]
       },
       {
@@ -203,7 +212,7 @@
       "category": "public.app-category.photography",
       "icon": "desktop/assets/icon.icns",
       "extendInfo": {
-        "NSCameraUsageDescription": "CrossAge FR Workbench uses the camera to capture local review photos for face matching."
+        "NSCameraUsageDescription": "Vintrace uses the camera to capture local review photos for face matching."
       },
       "target": [
         "dmg",

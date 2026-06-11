@@ -1,4 +1,4 @@
-# CrossAge FR User Pain Points And Implementation Backlog
+# Vintrace User Pain Points And Implementation Backlog
 
 This backlog was generated from three focused agent reviews: UI workflow, backend/image pipeline, and desktop/MCP production integration. The product stance remains consent-gated, review-first, and local-first.
 

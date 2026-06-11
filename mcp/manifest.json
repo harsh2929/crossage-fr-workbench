@@ -1,25 +1,29 @@
 {
   "manifest_version": "0.3",
-  "name": "crossage-fr-workbench",
-  "display_name": "CrossAge FR Workbench",
+  "name": "vintrace",
+  "display_name": "Vintrace",
   "version": "0.1.0",
-  "description": "Consent-gated local MCP access to CrossAge FR enrollment, scanning, Safe Mode, review queues, metrics, and audit context.",
-  "long_description": "CrossAge FR Workbench exposes a local, review-first face-recognition workbench to MCP clients. Agents can read project state, enroll consented references, scan image and video folders, inspect Safe Mode assessments, triage review candidates, export reports, audit workspace health, and update review decisions only with explicit confirmation for destructive or decision-changing actions.",
+  "description": "Consent-gated local MCP access to Vintrace enrollment, scanning, Safe Mode, review queues, metrics, and audit context.",
+  "long_description": "Vintrace exposes a local, review-first face-recognition workbench to MCP clients. Agents can read project state, enroll consented references, scan image and video folders, inspect Safe Mode assessments, triage review candidates, export reports, audit workspace health, and update review decisions only with explicit confirmation for destructive or decision-changing actions.",
   "author": {
-    "name": "CrossAge FR Workbench"
+    "name": "Vintrace"
   },
   "server": {
     "type": "binary",
-    "entry_point": "server/crossage-backend",
+    "entry_point": "server/crossage-backend/crossage-backend",
     "mcp_config": {
-      "command": "${__dirname}${/}server${/}crossage-backend",
+      "command": "${__dirname}${/}server${/}crossage-backend${/}crossage-backend",
       "args": ["--mcp", "--workspace", "${user_config.workspace}"],
       "env": {
-        "CROSSAGE_WORKSPACE": "${user_config.workspace}"
+        "VINTRACE_WORKSPACE": "${user_config.workspace}",
+        "CROSSAGE_WORKSPACE": "${user_config.workspace}",
+        "VINTRACE_REPORT_PATH": "${__dirname}${/}report.md",
+        "CROSSAGE_SAFE_MODEL_DIR": "${__dirname}${/}models${/}safety",
+        "CROSSAGE_REPORT_PATH": "${__dirname}${/}report.md"
       },
       "platform_overrides": {
         "win32": {
-          "command": "${__dirname}${/}server${/}crossage-backend.exe"
+          "command": "${__dirname}${/}server${/}crossage-backend${/}crossage-backend.exe"
         }
       }
     }
@@ -31,7 +35,7 @@
     },
     {
       "name": "set_workspace",
-      "description": "Switch the active CrossAge FR workspace directory."
+      "description": "Switch the active Vintrace workspace directory."
     },
     {
       "name": "mark_consent",
@@ -58,6 +62,22 @@
       "description": "Compatibility alias for scanning explicit media paths."
     },
     {
+      "name": "cancel_active_scan",
+      "description": "Request cancellation of the active scan, requiring confirm=true."
+    },
+    {
+      "name": "pause_active_scan",
+      "description": "Pause the active scan between files, requiring confirm=true."
+    },
+    {
+      "name": "resume_active_scan",
+      "description": "Resume a paused scan."
+    },
+    {
+      "name": "scan_job_status",
+      "description": "Read active scan controls and latest resumable scan status."
+    },
+    {
       "name": "analyze_folder",
       "description": "Preflight a folder before scanning with media counts, sample readability, and recommendations."
     },
@@ -82,6 +102,18 @@
       "description": "Save an operator note on a review candidate."
     },
     {
+      "name": "block_false_match",
+      "description": "Reject and suppress an exact image/person false-match pair, requiring confirm=true."
+    },
+    {
+      "name": "reassign_candidate_person",
+      "description": "Move one candidate row to another person label, requiring confirm=true."
+    },
+    {
+      "name": "query_candidates",
+      "description": "Page and search review candidates without loading the full queue."
+    },
+    {
       "name": "clear_review_queue",
       "description": "Clear queued candidates, requiring confirm=true."
     },
@@ -92,6 +124,18 @@
     {
       "name": "workspace_health",
       "description": "Audit workspace health, missing files, duplicate rows, storage footprint, and cleanup recommendations."
+    },
+    {
+      "name": "repair_workspace",
+      "description": "Preview or repair missing saved-photo and match links; changes require confirm=true."
+    },
+    {
+      "name": "relink_workspace_paths",
+      "description": "Relink saved photo/video paths after a library folder has moved; changes require confirm=true."
+    },
+    {
+      "name": "duplicate_people",
+      "description": "Find enrolled person labels that may represent the same person."
     },
     {
       "name": "read_audit_events",
@@ -123,23 +167,131 @@
     },
     {
       "name": "save_settings",
-      "description": "Update thresholds, clustering minimum, and Safe Mode settings."
+      "description": "Update thresholds, clustering minimum, Safe Mode settings, storage budget, large-file guard, scan exclusions, and review rules."
+    },
+    {
+      "name": "apply_review_rules",
+      "description": "Apply saved auto-triage review rules to pending candidates, requiring confirm=true."
+    },
+    {
+      "name": "calibration_summary",
+      "description": "Return the local calibration summary from accepted/rejected review decisions."
+    },
+    {
+      "name": "accuracy_evaluation",
+      "description": "Evaluate local precision/recall from accepted and rejected review decisions."
+    },
+    {
+      "name": "export_accuracy_labels",
+      "description": "Export accepted/rejected review labels to JSON and CSV."
+    },
+    {
+      "name": "import_accuracy_labels",
+      "description": "Import local ground-truth label rows, requiring confirm=true."
+    },
+    {
+      "name": "apply_calibration",
+      "description": "Apply local review feedback to matching thresholds, requiring confirm=true."
     },
     {
       "name": "export_review_report",
       "description": "Export a JSON audit report and CSV candidate table into the workspace exports folder."
     },
     {
+      "name": "export_workspace_inventory",
+      "description": "Export source-folder inventory, saved references, and review rows without media files."
+    },
+    {
+      "name": "export_audit_log",
+      "description": "Export the full local activity log to JSON and CSV."
+    },
+    {
+      "name": "export_consent_receipt",
+      "description": "Export a consent receipt with policy and counts, without photos, thumbnails, vectors, or model files."
+    },
+    {
+      "name": "retention_policy_report",
+      "description": "Report reviewed-match retention windows, generated data size, and cleanup recommendations."
+    },
+    {
+      "name": "export_safe_mode_audit",
+      "description": "Export Safe Mode policy, model status, cache counts, and protected-media scan totals."
+    },
+    {
+      "name": "model_drift_report",
+      "description": "Report references or review rows created with a different active face model."
+    },
+    {
+      "name": "export_review_ledger",
+      "description": "Export review decision metadata and audit events without media, thumbnails, vectors, or model files."
+    },
+    {
+      "name": "export_scan_history",
+      "description": "Export scan run history to JSON and CSV for performance and support review."
+    },
+    {
       "name": "export_workspace_backup",
-      "description": "Export a ZIP backup of workspace metadata, audit logs, and generated workspace files."
+      "description": "Export a ZIP backup of workspace metadata and audit logs; generated files require confirm=true."
+    },
+    {
+      "name": "verify_workspace_backup",
+      "description": "Verify a Vintrace workspace backup ZIP before sharing or archiving it."
+    },
+    {
+      "name": "prune_workspace_backups",
+      "description": "Remove older workspace backup ZIPs while keeping the newest backups, requiring confirm=true."
+    },
+    {
+      "name": "prune_scan_manifests",
+      "description": "Remove older resumable scan manifest rows while keeping the newest runs, requiring confirm=true."
     },
     {
       "name": "export_selected_candidates",
       "description": "Export selected candidate rows to JSON and CSV in the workspace exports folder."
     },
     {
+      "name": "export_accepted_media_bundle",
+      "description": "Copy accepted media into a shareable folder with manifests, requiring confirm=true."
+    },
+    {
+      "name": "export_support_bundle",
+      "description": "Export a diagnostics-only support bundle without photos, videos, thumbnails, vectors, or model files."
+    },
+    {
+      "name": "privacy_report",
+      "description": "Report local face data, generated previews, caches, and audit history."
+    },
+    {
+      "name": "delete_face_data",
+      "description": "Delete saved faces, possible matches, scan history, previews, and private caches, requiring confirm=true."
+    },
+    {
+      "name": "optimize_workspace",
+      "description": "Remove regenerable preview cache and orphan video frames, requiring confirm=true."
+    },
+    {
+      "name": "enforce_storage_budget",
+      "description": "Clean generated cache to satisfy the configured storage limit, requiring confirm=true."
+    },
+    {
+      "name": "model_integrity",
+      "description": "Verify model folder writability, downloaded archive checksums, Safe Mode model, and decoder readiness."
+    },
+    {
       "name": "runtime_self_test",
       "description": "Run local diagnostics for workspace writeability, decoders, acceleration, Safe Mode, and workspace health."
+    },
+    {
+      "name": "runtime_benchmark",
+      "description": "Run a local benchmark for vector search, state serialization, and scale database health."
+    },
+    {
+      "name": "release_readiness",
+      "description": "Return a local release checklist for models, Safe Mode, signing, updates, and crash reporting."
+    },
+    {
+      "name": "installer_self_diagnostics",
+      "description": "Run first-run installer diagnostics for model download, decoders, Safe Mode, workspace, and packaged backend readiness."
     }
   ],
   "prompts": [
@@ -168,10 +320,10 @@
   "user_config": {
     "workspace": {
       "type": "directory",
-      "title": "CrossAge workspace",
+      "title": "Vintrace workspace",
       "description": "Directory where references, review candidates, settings, and audit logs are stored.",
       "required": true,
-      "default": "${DOCUMENTS}${/}CrossAge FR Workspace"
+      "default": "${DOCUMENTS}${/}Vintrace Workspace"
     }
   }
 }

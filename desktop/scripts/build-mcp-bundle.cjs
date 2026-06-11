@@ -7,14 +7,16 @@ const packageJson = require(path.join(root, "package.json"));
 const platform = process.platform;
 const arch = process.arch;
 const backendName = platform === "win32" ? "crossage-backend.exe" : "crossage-backend";
-const backendPath = path.join(root, "backend-dist", backendName);
+const backendDir = path.join(root, "backend-dist", "crossage-backend");
+const backendFile = path.join(root, "backend-dist", backendName);
+const backendPath = fs.existsSync(path.join(backendDir, backendName)) ? backendDir : backendFile;
 const templatePath = path.join(root, "mcp", "manifest.json");
-const buildRoot = path.join(root, "build", "mcpb", "crossage-fr-workbench");
+const buildRoot = path.join(root, "build", "mcpb", "vintrace");
 const serverDir = path.join(buildRoot, "server");
 const modelSourceDir = path.join(root, "models", "safety");
 const modelDestDir = path.join(buildRoot, "models", "safety");
 const outputDir = path.join(root, "dist");
-const outputPath = path.join(outputDir, `CrossAge-FR-Workbench-${platform}-${arch}.mcpb`);
+const outputPath = path.join(outputDir, `Vintrace-${platform}-${arch}.mcpb`);
 const reportPath = path.join(root, "report.md");
 const localMcpbBin = path.join(root, "node_modules", ".bin", platform === "win32" ? "mcpb.cmd" : "mcpb");
 const mcpbCommand = fs.existsSync(localMcpbBin) ? localMcpbBin : "npx";
@@ -31,9 +33,18 @@ if (!fs.existsSync(templatePath)) {
 fs.rmSync(buildRoot, { recursive: true, force: true });
 fs.mkdirSync(serverDir, { recursive: true });
 fs.mkdirSync(outputDir, { recursive: true });
-fs.copyFileSync(backendPath, path.join(serverDir, backendName));
-if (platform !== "win32") {
-  fs.chmodSync(path.join(serverDir, backendName), 0o755);
+if (fs.statSync(backendPath).isDirectory()) {
+  fs.cpSync(backendPath, path.join(serverDir, "crossage-backend"), { recursive: true });
+  if (platform !== "win32") {
+    fs.chmodSync(path.join(serverDir, "crossage-backend", backendName), 0o755);
+  }
+} else {
+  const fallbackDir = path.join(serverDir, "crossage-backend");
+  fs.mkdirSync(fallbackDir, { recursive: true });
+  fs.copyFileSync(backendPath, path.join(fallbackDir, backendName));
+  if (platform !== "win32") {
+    fs.chmodSync(path.join(fallbackDir, backendName), 0o755);
+  }
 }
 if (fs.existsSync(modelSourceDir)) {
   fs.cpSync(modelSourceDir, modelDestDir, { recursive: true });

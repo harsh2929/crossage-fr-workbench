@@ -131,5 +131,9 @@ class VectorStore:
                 if int(index) >= 0
             ]
         scores = self._vectors[: len(self.ids)] @ query[0]
-        order = np.argsort(-scores)[:limit]
+        if limit >= len(self.ids):
+            order = np.argsort(-scores)
+        else:
+            top = np.argpartition(scores, -limit)[-limit:]
+            order = top[np.argsort(-scores[top])]
         return [SearchHit(item_id=self.ids[int(index)], score=float(scores[int(index)])) for index in order]

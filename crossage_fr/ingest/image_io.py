@@ -5,11 +5,18 @@ from pathlib import Path
 import hashlib
 import importlib.util
 import os
-from typing import Iterable
+import warnings
+from typing import Callable, Iterable
 
 from PIL import ExifTags, Image, ImageOps
 
 from crossage_fr.models import ImageRecord, new_id
+
+
+try:
+    Image.MAX_IMAGE_PIXELS = max(20_000_000, int(os.environ.get("CROSSAGE_MAX_IMAGE_PIXELS", "180000000")))
+except ValueError:
+    Image.MAX_IMAGE_PIXELS = 180_000_000
 
 
 PILLOW_IMAGE_EXTENSIONS = {
@@ -196,8 +203,10 @@ def load_image(path: Path) -> Image.Image:
     if path.suffix.lower() in RAW_IMAGE_EXTENSIONS:
         return _load_raw_image(path)
     try:
-        with Image.open(path) as image:
-            return _to_rgb(_representative_frame(image))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path) as image:
+                return _to_rgb(_representative_frame(image))
     except Exception as exc:
         raise ImageLoadError(f"Could not load image {path}: {exc}") from exc
 
@@ -216,10 +225,12 @@ def write_preview_image(source: Path, target: Path, max_edge: int = 1024, qualit
     return target
 
 
-def sha256_file(path: Path) -> str:
+def sha256_file(path: Path, cancel_requested: Callable[[], bool] | None = None) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            if cancel_requested and cancel_requested():
+                raise InterruptedError("Scan cancelled while reading this file.")
             digest.update(chunk)
     return digest.hexdigest()
 

@@ -5,6 +5,24 @@ from pathlib import Path
 import json
 import math
 
+MAX_CLUSTER_MIN_SIZE = 20
+MIN_FACE_DETECTOR_SIZE = 320
+MAX_FACE_DETECTOR_SIZE = 1024
+DEFAULT_EXCLUDED_DIR_NAMES = [
+    ".git",
+    ".hg",
+    ".svn",
+    ".cache",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".venv",
+    "__pycache__",
+    "$RECYCLE.BIN",
+    "System Volume Information",
+    "node_modules",
+    "venv",
+]
+
 
 @dataclass(slots=True)
 class Thresholds:
@@ -22,8 +40,20 @@ class RuntimeConfig:
     require_consent: bool = True
     safe_mode: bool = True
     safe_mode_threshold: float = 0.58
+    face_detector_size: int = 512
+    two_pass_scan: bool = True
+    verification_detector_size: int = 640
     max_flat_vectors: int = 1_000_000
     cluster_min_size: int = 2
+    storage_budget_bytes: int = 0
+    max_media_file_bytes: int = 0
+    auto_reject_below: float = 0.0
+    auto_uncertain_low_quality: bool = False
+    auto_reject_low_quality_video: bool = False
+    excluded_dir_names: list[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDED_DIR_NAMES))
+    excluded_path_keywords: list[str] = field(default_factory=list)
+    excluded_extensions: list[str] = field(default_factory=list)
+    excluded_file_paths: list[str] = field(default_factory=list)
     thresholds: Thresholds = field(default_factory=Thresholds)
 
 
@@ -46,12 +76,50 @@ def _require_int(value: object, field_name: str, minimum: int = 0) -> int:
     return value
 
 
+def _require_detector_size(value: object) -> int:
+    size = _require_int(value, "face_detector_size", minimum=MIN_FACE_DETECTOR_SIZE)
+    if size > MAX_FACE_DETECTOR_SIZE:
+        raise ValueError(f"face_detector_size must be {MAX_FACE_DETECTOR_SIZE} or lower.")
+    return int(round(size / 32) * 32)
+
+
 def _require_unit_float(value: object, field_name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
         raise ValueError(f"{field_name} must be a finite number.")
     result = float(value)
     if result < 0.0 or result > 1.0:
         raise ValueError(f"{field_name} must be between 0 and 1.")
+    return result
+
+
+def _require_string_list(value: object, field_name: str, limit: int = 80) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a list.")
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value[:limit]:
+        text = str(item).strip()
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text[:160])
+    return result
+
+
+def _normalize_extensions(value: object) -> list[str]:
+    result = []
+    for item in _require_string_list(value, "excluded_extensions", limit=80):
+        ext = item.lower().strip()
+        if not ext:
+            continue
+        if not ext.startswith("."):
+            ext = f".{ext}"
+        result.append(ext[:32])
     return result
 
 
@@ -62,8 +130,24 @@ def _validate_config(config: RuntimeConfig) -> RuntimeConfig:
     config.require_consent = _require_bool(config.require_consent, "require_consent")
     config.safe_mode = _require_bool(config.safe_mode, "safe_mode")
     config.safe_mode_threshold = _require_unit_float(config.safe_mode_threshold, "safe_mode_threshold")
+    config.face_detector_size = _require_detector_size(config.face_detector_size)
+    config.two_pass_scan = _require_bool(config.two_pass_scan, "two_pass_scan")
+    config.verification_detector_size = _require_detector_size(config.verification_detector_size)
+    if config.verification_detector_size < config.face_detector_size:
+        config.verification_detector_size = config.face_detector_size
     config.max_flat_vectors = _require_int(config.max_flat_vectors, "max_flat_vectors")
     config.cluster_min_size = _require_int(config.cluster_min_size, "cluster_min_size", minimum=2)
+    if config.cluster_min_size > MAX_CLUSTER_MIN_SIZE:
+        raise ValueError(f"cluster_min_size must be less than or equal to {MAX_CLUSTER_MIN_SIZE}.")
+    config.storage_budget_bytes = _require_int(config.storage_budget_bytes, "storage_budget_bytes")
+    config.max_media_file_bytes = _require_int(config.max_media_file_bytes, "max_media_file_bytes")
+    config.auto_reject_below = _require_unit_float(config.auto_reject_below, "auto_reject_below")
+    config.auto_uncertain_low_quality = _require_bool(config.auto_uncertain_low_quality, "auto_uncertain_low_quality")
+    config.auto_reject_low_quality_video = _require_bool(config.auto_reject_low_quality_video, "auto_reject_low_quality_video")
+    config.excluded_dir_names = _require_string_list(config.excluded_dir_names, "excluded_dir_names")
+    config.excluded_path_keywords = _require_string_list(config.excluded_path_keywords, "excluded_path_keywords")
+    config.excluded_extensions = _normalize_extensions(config.excluded_extensions)
+    config.excluded_file_paths = _require_string_list(config.excluded_file_paths, "excluded_file_paths", limit=400)
     config.thresholds.confident = _require_unit_float(config.thresholds.confident, "thresholds.confident")
     config.thresholds.likely = _require_unit_float(config.thresholds.likely, "thresholds.likely")
     config.thresholds.relaxed_child = _require_unit_float(config.thresholds.relaxed_child, "thresholds.relaxed_child")

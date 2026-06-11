@@ -1,17 +1,18 @@
 {
   "mcpServers": {
-    "crossage-fr": {
+    "vintrace": {
       "type": "stdio",
-      "command": "/Users/harshbishnoi/face/.venv/bin/python",
+      "command": "/absolute/path/to/face/.venv/bin/python",
       "args": [
         "-m",
         "crossage_fr.mcp_server",
         "--workspace",
-        "/Users/harshbishnoi/face/crossage_project"
+        "/absolute/path/to/vintrace-workspace"
       ],
       "env": {
-        "PYTHONPATH": "/Users/harshbishnoi/face",
-        "CROSSAGE_WORKSPACE": "/Users/harshbishnoi/face/crossage_project"
+        "PYTHONPATH": "/absolute/path/to/face",
+        "VINTRACE_WORKSPACE": "/absolute/path/to/vintrace-workspace",
+        "CROSSAGE_WORKSPACE": "/absolute/path/to/vintrace-workspace"
       }
     }
   }

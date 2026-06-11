@@ -1,11 +1,11 @@
 # MCP Agent Integration
 
-CrossAge FR Workbench exposes a local MCP server for Codex, Claude Desktop, Claude Code, and other MCP-compatible agents.
+Vintrace exposes a local MCP server for Codex, Claude Desktop, Claude Code, and other MCP-compatible agents.
 
 ## Capabilities
 
-- Resources: `crossage://state`, `crossage://summary`, `crossage://references`, `crossage://candidates`, `crossage://config`, `crossage://audit`, `crossage://agent-guide`, and `crossage://report`.
-- Tools: workspace switching, consent marking, reference enrollment, multi-age enrollment, image/video folder and path scanning with progress, scan preflight, video probing, Safe Mode image assessment, workspace health, review decisions, bulk review, candidate notes, audit/export actions, reviewed-candidate purge, duplicate cleanup, person/reference deletion, queue/reference clearing, and settings updates.
+- Resources: `vintrace://state`, `vintrace://summary`, `vintrace://references`, `vintrace://candidates`, `vintrace://config`, `vintrace://audit`, `vintrace://agent-guide`, and `vintrace://report`.
+- Tools: workspace switching, consent marking, reference enrollment, multi-age enrollment, image/video folder and path scanning with progress, scan preflight, video probing, Safe Mode image assessment, workspace health, review decisions, bulk review, candidate notes, audit/export actions, consent receipts, retention reports, Safe Mode audits, model-drift checks, review ledgers, reviewed-candidate purge, duplicate cleanup, person/reference deletion, queue/reference clearing, and settings updates.
 - Prompts: pending-candidate triage, multi-age enrollment planning, and Safe Mode policy.
 
 ## Run From Source
@@ -14,13 +14,13 @@ CrossAge FR Workbench exposes a local MCP server for Codex, Claude Desktop, Clau
 npm install
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-production.txt
-npm run mcp -- --workspace /path/to/crossage-workspace
+npm run mcp -- --workspace /path/to/vintrace-workspace
 ```
 
 Streamable HTTP is available for local agent SDK clients:
 
 ```bash
-npm run mcp:http -- --workspace /path/to/crossage-workspace --host 127.0.0.1 --port 8765
+npm run mcp:http -- --workspace /path/to/vintrace-workspace --host 127.0.0.1 --port 8765
 ```
 
 HTTP stays localhost-only unless `--allow-remote-http` is explicitly passed.
@@ -30,7 +30,7 @@ HTTP stays localhost-only unless `--allow-remote-http` is explicitly passed.
 Install into the local Codex MCP configuration:
 
 ```bash
-./mcp/codex-install.sh /path/to/crossage-workspace
+./mcp/codex-install.sh /path/to/vintrace-workspace
 ```
 
 Or copy `mcp/codex-config.example.toml` into `~/.codex/config.toml` or a trusted project `.codex/config.toml`.
@@ -52,7 +52,7 @@ The generated `.mcpb` lands in `dist/` and uses the same PyInstaller backend sid
 Use the same stdio server with Claude Code:
 
 ```bash
-claude mcp add --transport stdio --env PYTHONPATH=/Users/harshbishnoi/face crossage-fr -- /Users/harshbishnoi/face/.venv/bin/python -m crossage_fr.mcp_server --workspace /path/to/crossage-workspace
+claude mcp add --transport stdio --env PYTHONPATH=/absolute/path/to/face vintrace -- /absolute/path/to/face/.venv/bin/python -m crossage_fr.mcp_server --workspace /absolute/path/to/vintrace-workspace
 ```
 
 Or adapt `mcp/claude-code.mcp.example.json` as a project-scoped `.mcp.json`.

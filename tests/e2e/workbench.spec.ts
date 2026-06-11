@@ -164,16 +164,18 @@ async function expectTopbarControlsReadable(page: Page, colorScheme: "light" | "
 
 async function closeOnboardingIfVisible(page: Page) {
   const guide = page.getByRole("dialog", { name: "Set up your first scan" });
+  await guide.waitFor({ state: "visible", timeout: 1500 }).catch(() => undefined);
   if (await guide.isVisible().catch(() => false)) {
     await expect(guide.getByText("Choose an app folder")).toBeVisible();
     await expect(guide.getByText("Permission required")).toBeVisible();
     await guide.getByRole("button", { name: "Remind me later" }).click();
+    await expect(guide).toBeHidden();
   }
 }
 
 test("desktop workbench renders and every primary control path works", async () => {
   const projectRoot = process.cwd();
-  const temp = mkdtempSync(path.join(os.tmpdir(), "crossage-fr-e2e-"));
+  const temp = mkdtempSync(path.join(os.tmpdir(), "vintrace-e2e-"));
   const workspace = path.join(temp, "workspace");
   const fixtures = makeFixtures(temp);
   const pageErrors: string[] = [];
@@ -200,9 +202,18 @@ test("desktop workbench renders and every primary control path works", async () 
   page.on("requestfailed", (request) => failedRequests.push(`${request.url()} ${request.failure()?.errorText}`));
   page.on("dialog", (dialog) => dialog.accept());
 
-  await expect(page.getByText("CrossAge FR", { exact: true })).toBeVisible();
+  await expect(page.getByText("Vintrace", { exact: true })).toBeVisible();
   await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
-  await expect(page.locator(".nav-list").getByRole("button", { name: "Home" })).toBeVisible();
+  await expect(page.locator(".nav-list").getByRole("button", { name: "Dashboard" })).toBeVisible();
+  const languageSelect = page.locator(".language-picker select");
+  await languageSelect.selectOption("fr");
+  await expect(page.locator(".nav-list").getByRole("button", { name: "Tableau" })).toBeVisible();
+  await languageSelect.selectOption("ar");
+  await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+  await expect(page.locator(".nav-list").getByRole("button", { name: "لوحة التحكم" })).toBeVisible();
+  await languageSelect.selectOption("en");
+  await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
+  await expect(page.locator(".nav-list").getByRole("button", { name: "Dashboard" })).toBeVisible();
   await closeOnboardingIfVisible(page);
   await page.getByRole("button", { name: "Guide" }).click();
   await expect(page.getByRole("dialog", { name: "Set up your first scan" })).toBeVisible();
@@ -210,12 +221,12 @@ test("desktop workbench renders and every primary control path works", async () 
   await page.getByRole("button", { name: "Remind me later" }).click();
   await expect(page.locator("body")).not.toHaveText("");
   const integration = await page.evaluate(() => (window as any).crossAge.getSystemIntegration());
-  expect(integration.protocolScheme).toBe("crossage");
+  expect(integration.protocolScheme).toBe("vintrace");
   expect(typeof integration.launchAtLogin).toBe("boolean");
   expect(pageErrors).toEqual([]);
   expect(failedRequests).toEqual([]);
 
-  for (const name of ["Home", "People", "Scan", "Matches", "Settings"]) {
+  for (const name of ["Dashboard", "People", "Scan", "Review", "Settings"]) {
     await page.locator(".nav-list").getByRole("button", { name }).click();
     await expect(page.locator(".nav-list").getByRole("button", { name })).toHaveClass(/active/);
   }
@@ -235,7 +246,7 @@ test("desktop workbench renders and every primary control path works", async () 
 
   await page.locator(".topbar-actions").getByText("Permission").click();
   await expect(page.getByRole("dialog", { name: "Confirm permission" })).toBeVisible();
-  await page.getByRole("textbox", { name: "Permission note" }).fill("E2E operator consent.");
+  await page.getByRole("textbox", { name: "Optional note" }).fill("E2E operator consent.");
   await page.getByRole("button", { name: "Confirm permission" }).click();
   await expect(enrollButton).toBeEnabled();
   await enrollButton.click();
@@ -270,9 +281,12 @@ test("desktop workbench renders and every primary control path works", async () 
   await page.locator(".form-panel").getByRole("button", { name: /^Scan folder$/ }).click();
   await expect(page.getByText(/Found 1 possible match/)).toBeVisible({ timeout: 120_000 });
   await expect(page.getByText("candidate_a.jpg")).toBeVisible();
-  await expect(page.getByText(/1\/2|2\/2/)).toBeVisible();
+  const scanActivity = page.locator(".scan-activity").first();
+  await expect(scanActivity.locator(".activity-head-actions strong")).toHaveText(/\d+\/\d+/, { timeout: 120_000 });
+  await expect(scanActivity).toContainText("cached faces");
+  await expect(scanActivity).toContainText("rechecked");
   await page.getByRole("button", { name: "Toggle scan ETA" }).click();
-  await expect(page.locator(".eta-detail")).toBeVisible();
+  await expect(scanActivity.locator(".eta-detail")).toBeVisible();
 
   await page.getByRole("button", { name: "Clear results" }).click();
   await expect(page.getByText("No possible matches yet")).toBeVisible();
@@ -287,7 +301,7 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(page.getByText(/Processed 1 new file|Scanning 1 new file/)).toBeVisible({ timeout: 120_000 });
   await page.getByRole("button", { name: /Stop watching|Watching/ }).click();
 
-  await page.locator(".nav-list").getByRole("button", { name: "Matches" }).click();
+  await page.locator(".nav-list").getByRole("button", { name: "Review" }).click();
   await expect(page.getByText("Find people together")).toBeVisible();
   await expect(page.getByRole("spinbutton", { name: "Minimum people together" })).toHaveValue("2");
   const peopleTogether = page.getByRole("group", { name: "People to find together" });
@@ -301,7 +315,7 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(page.getByText("Saved person photo")).toBeVisible();
   await expect(page.getByLabel("Review session progress")).toBeVisible();
   const previewPanel = page.locator(".preview-panel");
-  await expect(previewPanel.locator(".image-preview img").first()).toHaveAttribute("src", /^crossage-media:\/\//);
+  await expect(previewPanel.locator(".image-preview img").first()).toHaveAttribute("src", /^vintrace-media:\/\//);
   await expect(previewPanel.getByRole("button", { name: "Reveal" })).toBeVisible();
   await expect(previewPanel.getByRole("button", { name: "Open" })).toBeVisible();
   await expect(page.getByText("Why this appeared")).toBeVisible();
@@ -351,11 +365,25 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(page.getByRole("button", { name: "Save settings" })).toBeDisabled();
   await expect(page.getByRole("checkbox", { name: "Safe Mode" })).toBeChecked();
   await expect(page.getByRole("checkbox", { name: "Start at login" })).toBeVisible();
-  await expect(page.getByText(/crossage:\/\/ ready|Not registered/)).toBeVisible();
+  await expect(page.getByText(/vintrace:\/\/ ready|Not registered/)).toBeVisible();
   await expect(page.getByText("System check")).toBeVisible();
   await page.locator(".panel", { hasText: "Local engine" }).getByRole("button", { name: "Run check" }).click();
   await expect(page.getByText(/System check (passed|found items to review)/)).toBeVisible({ timeout: 120_000 });
+  const updatesPanel = page.locator(".panel").filter({ has: page.getByRole("button", { name: "Check updates" }) });
+  await expect(updatesPanel).toBeVisible();
+  await expect(updatesPanel.getByRole("button", { name: "Check updates" })).toBeVisible();
+  await expect(updatesPanel.getByRole("group", { name: "Update channel" })).toBeVisible();
+  await expect(updatesPanel.getByRole("button", { name: "Stable" })).toBeVisible();
+  const diagnosticsPanel = page.locator(".panel", { hasText: "Error reports" });
+  await expect(diagnosticsPanel).toBeVisible();
+  await diagnosticsPanel.getByRole("button", { name: "Preview report" }).click();
+  await expect(page.getByText("Diagnostics report preview loaded.")).toBeVisible();
+  await expect(diagnosticsPanel.getByText("Events", { exact: true })).toBeVisible();
+  await expect(diagnosticsPanel.getByText("Latest code", { exact: true })).toBeVisible();
+  await expect(diagnosticsPanel.getByRole("textbox", { name: "Diagnostics JSON preview" })).toHaveValue(/summary/);
   await expect(page.getByText("Performance center")).toBeVisible();
+  await expect(page.getByText("Storage limit")).toBeVisible();
+  await expect(page.getByRole("spinbutton", { name: "Storage limit in GB" })).toBeVisible();
   const performanceCenter = page.locator(".performance-center");
   await expect(performanceCenter.getByRole("group", { name: "Performance modes" })).toBeVisible();
   await performanceCenter.getByRole("button", { name: /Fast/ }).click();
@@ -394,7 +422,7 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(page.getByRole("button", { name: "Remove reviewed matches" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Delete person" })).toBeVisible();
 
-  await page.locator(".nav-list").getByRole("button", { name: "Home" }).click();
+  await page.locator(".nav-list").getByRole("button", { name: "Dashboard" }).click();
   await expect(page.getByText("First scan checklist")).toBeVisible();
   await expect(page.getByText("Top 7 current priorities")).toBeVisible();
   await expect(page.locator(".dashboard-metrics").getByText("Files scanned", { exact: true })).toBeVisible();

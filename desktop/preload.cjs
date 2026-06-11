@@ -11,10 +11,19 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "enroll_age_groups",
   "scan",
   "scan_paths",
+  "cancel_scan",
+  "pause_scan",
+  "resume_scan",
+  "scan_job_status",
   "analyze_folder",
   "set_status",
   "bulk_set_status",
   "set_candidate_note",
+  "block_false_match",
+  "reassign_candidate_person",
+  "duplicate_people",
+  "apply_review_rules",
+  "query_candidates",
   "clear_queue",
   "purge_candidates",
   "purge_duplicate_candidates",
@@ -24,33 +33,92 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "rename_person",
   "clear_references",
   "purge_old_candidates",
+  "repair_workspace",
+  "relink_workspace_paths",
   "export_report",
+  "export_workspace_inventory",
+  "export_audit_log",
+  "export_consent_receipt",
+  "retention_policy_report",
+  "export_safe_mode_audit",
+  "model_drift_report",
+  "export_review_ledger",
+  "export_scan_history",
   "export_workspace_backup",
+  "verify_workspace_backup",
+  "prune_workspace_backups",
+  "prune_scan_manifests",
   "export_candidates",
+  "export_media_bundle",
   "workspace_health",
   "runtime_self_test",
+  "runtime_benchmark",
+  "release_readiness",
+  "model_integrity",
+  "export_support_bundle",
+  "installer_self_diagnostics",
+  "calibration_summary",
+  "accuracy_evaluation",
+  "apply_calibration",
+  "export_accuracy_labels",
+  "import_accuracy_labels",
+  "privacy_report",
+  "delete_face_data",
+  "optimize_workspace",
+  "enforce_storage_budget",
+  "add_calibration_label",
   "save_settings",
   "audit_events"
 ]);
 
 function assertPlainObject(value, label = "Payload") {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} must be an object.`);
+    throw codedError("E-IPC-PAYLOAD", `${label} must be an object.`);
   }
+}
+
+function codedError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function normalizeIpcError(error) {
+  const raw = error instanceof Error ? error.message : String(error || "The action failed.");
+  const cleaned = raw
+    .replace(/^Error invoking remote method '[^']+':\s*/i, "")
+    .replace(/^Error:\s*/i, "")
+    .trim();
+  const code = cleaned.match(/\b([EW]-[A-Z0-9-]{2,})\b/)?.[1] || "";
+  const message = cleaned.replace(/^\[[EW]-[A-Z0-9-]{2,}\]\s*/, "").trim() || "The action failed.";
+  const normalized = new Error(message);
+  if (code) {
+    normalized.code = code;
+  }
+  if (error instanceof Error && error.stack) {
+    normalized.stack = error.stack;
+  }
+  return normalized;
+}
+
+function safeInvoke(channel, payload) {
+  return ipcRenderer.invoke(channel, payload).catch((error) => {
+    throw normalizeIpcError(error);
+  });
 }
 
 function invokeBackend(command, params = {}) {
   const safeCommand = String(command || "");
   if (!TRUSTED_BACKEND_COMMANDS.has(safeCommand)) {
-    throw new Error(`Blocked backend command: ${safeCommand || "empty"}.`);
+    throw codedError("E-IPC-BLOCKED-COMMAND", `Blocked backend command: ${safeCommand || "empty"}.`);
   }
   assertPlainObject(params, "Command params");
-  return ipcRenderer.invoke("backend:invoke", { command: safeCommand, params });
+  return safeInvoke("backend:invoke", { command: safeCommand, params });
 }
 
 function subscribe(channel, callback) {
   if (typeof callback !== "function") {
-    throw new Error("Listener must be a function.");
+    throw codedError("E-IPC-PAYLOAD", "Listener must be a function.");
   }
   const listener = (_event, payload) => callback(payload);
   ipcRenderer.on(channel, listener);
@@ -62,23 +130,49 @@ const safeEnv = typeof process !== "undefined" && process.env ? process.env : {}
 
 contextBridge.exposeInMainWorld("crossAge", Object.freeze({
   invoke: invokeBackend,
-  chooseFolder: () => ipcRenderer.invoke("dialog:choose-folder"),
-  saveCameraFrame: (dataUrl) => ipcRenderer.invoke("camera:save-frame", { dataUrl }),
-  startFolderWatch: (folder) => ipcRenderer.invoke("folder-watch:start", { folder }),
-  stopFolderWatch: () => ipcRenderer.invoke("folder-watch:stop"),
-  getSystemIntegration: () => ipcRenderer.invoke("system:get-integration"),
-  setLaunchAtLogin: (openAtLogin) => ipcRenderer.invoke("system:set-launch-at-login", { openAtLogin }),
-  revealPath: (targetPath) => ipcRenderer.invoke("shell:reveal-path", { path: targetPath }),
-  openPath: (targetPath) => ipcRenderer.invoke("shell:open-path", { path: targetPath }),
-  writeClipboardText: (text) => ipcRenderer.invoke("clipboard:write-text", { text }),
-  getInitialState: () => ipcRenderer.invoke("backend:initial-state"),
-  rendererReady: () => ipcRenderer.invoke("app:renderer-ready"),
+  chooseFolder: () => safeInvoke("dialog:choose-folder"),
+  saveCameraFrame: (dataUrl) => safeInvoke("camera:save-frame", { dataUrl }),
+  cancelScan: () => safeInvoke("scan:cancel"),
+  pauseScan: () => safeInvoke("scan:pause"),
+  resumeScan: () => safeInvoke("scan:resume"),
+  getScanMarkerStatus: () => safeInvoke("scan:marker-status"),
+  startFolderWatch: (folder) => {
+    if (typeof folder !== "string" || !folder.trim()) {
+      return Promise.reject(codedError("E-FOLDER-WATCH-PATH", "Choose a folder to watch."));
+    }
+    return safeInvoke("folder-watch:start", { folder });
+  },
+  stopFolderWatch: () => safeInvoke("folder-watch:stop"),
+  getSystemIntegration: () => safeInvoke("system:get-integration"),
+  setLaunchAtLogin: (openAtLogin) => safeInvoke("system:set-launch-at-login", { openAtLogin }),
+  getUpdateStatus: () => safeInvoke("updater:get-status"),
+  checkForUpdates: () => safeInvoke("updater:check"),
+  setUpdateChannel: (channel) => safeInvoke("updater:set-channel", { channel }),
+  downloadUpdate: () => safeInvoke("updater:download"),
+  installUpdate: () => safeInvoke("updater:install"),
+  getDiagnosticsReport: (includePaths = false) => safeInvoke("diagnostics:get-report", { includePaths }),
+  exportDiagnosticsReport: (includePaths = false) => safeInvoke("diagnostics:export-report", { includePaths }),
+  recordDiagnosticEvent: (event) => safeInvoke("diagnostics:record-event", event && typeof event === "object" ? event : { message: String(event || "") }),
+  getPhotoSources: () => safeInvoke("photos:get-sources"),
+  getWorkspaceLockStatus: () => safeInvoke("workspace-lock:get-status"),
+  enableWorkspaceLock: () => safeInvoke("workspace-lock:enable"),
+  lockWorkspace: () => safeInvoke("workspace-lock:lock"),
+  unlockWorkspace: () => safeInvoke("workspace-lock:unlock"),
+  disableWorkspaceLock: () => safeInvoke("workspace-lock:disable"),
+  revealPath: (targetPath) => safeInvoke("shell:reveal-path", { path: targetPath }),
+  openPath: (targetPath) => safeInvoke("shell:open-path", { path: targetPath }),
+  writeClipboardText: (text) => safeInvoke("clipboard:write-text", { text }),
+  getInitialState: () => safeInvoke("backend:initial-state"),
+  rendererReady: () => safeInvoke("app:renderer-ready"),
+  setAppLanguage: (language) => safeInvoke("app:set-language", { language }),
   onAppCommand: (callback) => subscribe("app:command", callback),
   onExternalOpen: (callback) => subscribe("app:external-open", callback),
   onScanProgress: (callback) => subscribe("backend:progress", callback),
   onBackendStartup: (callback) => subscribe("backend:startup", callback),
   onFolderWatch: (callback) => subscribe("folder-watch:event", callback),
   onBackendError: (callback) => subscribe("backend:error", callback),
+  onUpdateStatus: (callback) => subscribe("updater:event", callback),
+  onDiagnosticsEvent: (callback) => subscribe("diagnostics:event", callback),
   platform: safePlatform,
   testCamera: safeEnv.CROSSAGE_TEST_CAMERA === "1"
 }));

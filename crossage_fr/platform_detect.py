@@ -77,7 +77,7 @@ def detect_platform() -> str:
 
 def _cache_dir(name: str) -> str:
     configured = os.environ.get("CROSSAGE_ORT_CACHE")
-    root = Path(configured).expanduser() if configured else Path.home() / ".cache" / "crossage-fr" / "onnxruntime"
+    root = Path(configured).expanduser() if configured else Path.home() / ".cache" / "vintrace" / "onnxruntime"
     path = root / name
     try:
         path.mkdir(parents=True, exist_ok=True)

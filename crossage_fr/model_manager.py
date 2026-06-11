@@ -7,6 +7,7 @@ import os
 import shutil
 import ssl
 import sys
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -184,7 +185,7 @@ def model_status(config: RuntimeConfig, engine_name: str = "") -> dict[str, Any]
 def set_model_root(config: RuntimeConfig, root: Path) -> Path:
     resolved = root.expanduser().resolve()
     resolved.mkdir(parents=True, exist_ok=True)
-    test_path = resolved / ".crossage-write-test"
+    test_path = resolved / ".vintrace-write-test"
     try:
         test_path.write_text("ok", encoding="utf-8")
     finally:
@@ -222,6 +223,9 @@ def download_model_pack(pack: str, root: Path, on_progress: ProgressCallback | N
             )
 
     emit({"phase": "starting", "message": "Preparing download"})
+    if force:
+        archive_path.unlink(missing_ok=True)
+        archive_path.with_suffix(archive_path.suffix + ".part").unlink(missing_ok=True)
     if archive_path.exists() and not force:
         try:
             _verify_archive(archive_path, spec)
@@ -254,33 +258,93 @@ def download_model_pack(pack: str, root: Path, on_progress: ProgressCallback | N
 
 def _download_archive(spec: ModelPackageSpec, archive_path: Path, emit: ProgressCallback) -> None:
     temp_path = archive_path.with_suffix(archive_path.suffix + ".part")
-    temp_path.unlink(missing_ok=True)
-    request = urllib.request.Request(spec.url, headers={"User-Agent": "CrossAge-FR-Workbench/0.1"})
-    try:
-        with urllib.request.urlopen(request, timeout=45, context=_ssl_context()) as response:
-            total = int(response.headers.get("Content-Length") or spec.size_bytes)
-            downloaded = 0
-            with temp_path.open("wb") as handle:
-                while True:
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    handle.write(chunk)
-                    downloaded += len(chunk)
-                    if downloaded == len(chunk) or downloaded % (8 * 1024 * 1024) < len(chunk):
-                        emit(
-                            {
-                                "phase": "downloading",
-                                "downloadedBytes": downloaded,
-                                "totalBytes": total,
-                                "percent": min(99, round(downloaded / max(total, 1) * 100)),
-                                "message": "Downloading face model",
-                            }
-                        )
-        temp_path.replace(archive_path)
-    except (urllib.error.URLError, TimeoutError, OSError, ssl.SSLError) as exc:
-        temp_path.unlink(missing_ok=True)
-        raise ConnectionError("Model download failed. Check your internet connection or try a different network.") from exc
+    if temp_path.exists():
+        try:
+            partial_size = temp_path.stat().st_size
+        except OSError:
+            partial_size = 0
+        if partial_size == spec.size_bytes:
+            temp_path.replace(archive_path)
+            return
+        if partial_size > spec.size_bytes:
+            temp_path.unlink(missing_ok=True)
+
+    last_error: BaseException | None = None
+    for attempt in range(1, 4):
+        resume_from = temp_path.stat().st_size if temp_path.exists() else 0
+        headers = {"User-Agent": "Vintrace/0.1"}
+        if resume_from > 0:
+            headers["Range"] = f"bytes={resume_from}-"
+            emit(
+                {
+                    "phase": "downloading",
+                    "downloadedBytes": resume_from,
+                    "totalBytes": spec.size_bytes,
+                    "percent": min(99, round(resume_from / max(spec.size_bytes, 1) * 100)),
+                    "message": "Resuming face model download",
+                }
+            )
+        request = urllib.request.Request(spec.url, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=45, context=_ssl_context()) as response:
+                status = int(getattr(response, "status", 200) or 200)
+                if resume_from > 0 and status != 206:
+                    resume_from = 0
+                    temp_path.unlink(missing_ok=True)
+                total = _download_total_bytes(response.headers, spec.size_bytes, resume_from)
+                downloaded = resume_from
+                mode = "ab" if resume_from else "wb"
+                with temp_path.open(mode) as handle:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                        downloaded += len(chunk)
+                        if downloaded == len(chunk) or downloaded % (8 * 1024 * 1024) < len(chunk):
+                            emit(
+                                {
+                                    "phase": "downloading",
+                                    "downloadedBytes": downloaded,
+                                    "totalBytes": total,
+                                    "percent": min(99, round(downloaded / max(total, 1) * 100)),
+                                    "message": "Downloading face model",
+                                }
+                            )
+            if temp_path.stat().st_size != spec.size_bytes:
+                raise ConnectionError(
+                    f"Downloaded {temp_path.stat().st_size} bytes for {spec.filename}; expected {spec.size_bytes}. Retry will resume."
+                )
+            temp_path.replace(archive_path)
+            return
+        except (urllib.error.URLError, TimeoutError, OSError, ssl.SSLError, ConnectionError) as exc:
+            last_error = exc
+            if attempt < 3:
+                emit(
+                    {
+                        "phase": "downloading",
+                        "downloadedBytes": temp_path.stat().st_size if temp_path.exists() else 0,
+                        "totalBytes": spec.size_bytes,
+                        "percent": min(99, round((temp_path.stat().st_size if temp_path.exists() else 0) / max(spec.size_bytes, 1) * 100)),
+                        "message": f"Network interrupted. Retrying {attempt + 1}/3",
+                    }
+                )
+                time.sleep(min(2.0, 0.4 * attempt))
+                continue
+            raise ConnectionError("Model download failed. The partial download was kept so Retry can resume it.") from exc
+    raise ConnectionError("Model download failed. The partial download was kept so Retry can resume it.") from last_error
+
+
+def _download_total_bytes(headers: Any, expected: int, resume_from: int) -> int:
+    content_range = str(headers.get("Content-Range") or "")
+    if "/" in content_range:
+        tail = content_range.rsplit("/", 1)[-1].strip()
+        if tail.isdigit():
+            return int(tail)
+    content_length = str(headers.get("Content-Length") or "")
+    if content_length.isdigit():
+        return int(content_length) + int(resume_from)
+    return expected
 
 
 def _verify_archive(path: Path, spec: ModelPackageSpec) -> str:
@@ -309,27 +373,41 @@ def _extract_model_archive(path: Path, root: Path, spec: ModelPackageSpec) -> Pa
     destination = model_pack_dir(root, spec.pack)
     extract_dir = models_dir / f".{spec.pack}.extracting"
     install_dir = models_dir / f".{spec.pack}.installing"
+    backup_dir = models_dir / f".{spec.pack}.previous"
     shutil.rmtree(extract_dir, ignore_errors=True)
     shutil.rmtree(install_dir, ignore_errors=True)
+    shutil.rmtree(backup_dir, ignore_errors=True)
     extract_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(path) as archive:
-        extract_root = extract_dir.resolve()
-        for member in archive.infolist():
-            target = (extract_dir / member.filename).resolve()
-            try:
-                target.relative_to(extract_root)
-            except ValueError as exc:
-                raise ValueError(f"Unsafe path in model archive: {member.filename}")
-            archive.extract(member, extract_dir)
-    candidate = _find_extracted_pack_dir(extract_dir, spec)
-    if not candidate:
-        raise ValueError(f"Could not find {spec.pack} model files after extraction.")
-    shutil.copytree(candidate, install_dir)
-    if destination.exists():
-        shutil.rmtree(destination)
-    install_dir.replace(destination)
-    shutil.rmtree(extract_dir, ignore_errors=True)
-    return destination
+    try:
+        with zipfile.ZipFile(path) as archive:
+            extract_root = extract_dir.resolve()
+            for member in archive.infolist():
+                target = (extract_dir / member.filename).resolve()
+                try:
+                    target.relative_to(extract_root)
+                except ValueError as exc:
+                    raise ValueError(f"Unsafe path in model archive: {member.filename}") from exc
+                archive.extract(member, extract_dir)
+        candidate = _find_extracted_pack_dir(extract_dir, spec)
+        if not candidate:
+            raise ValueError(f"Could not find {spec.pack} model files after extraction.")
+        shutil.copytree(candidate, install_dir)
+        try:
+            if destination.exists():
+                destination.replace(backup_dir)
+            install_dir.replace(destination)
+        except Exception:
+            if not destination.exists() and backup_dir.exists():
+                backup_dir.replace(destination)
+            raise
+        shutil.rmtree(backup_dir, ignore_errors=True)
+        return destination
+    finally:
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        if install_dir.exists():
+            shutil.rmtree(install_dir, ignore_errors=True)
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir, ignore_errors=True)
 
 
 def _find_extracted_pack_dir(root: Path, spec: ModelPackageSpec) -> Path | None:

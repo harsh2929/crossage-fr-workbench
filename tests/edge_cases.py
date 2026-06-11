@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,10 +12,17 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from crossage_fr.api_server import DesktopApi
-from crossage_fr.config import RuntimeConfig, load_config, save_config
+from crossage_fr.api_server import DesktopApi, structured_error
+from crossage_fr.config import MAX_CLUSTER_MIN_SIZE, RuntimeConfig, load_config, save_config
+from crossage_fr.enroll import manager as manager_module
+from crossage_fr.enroll import ProjectState
+from crossage_fr.ingest.image_io import ImageLoadError, load_image, sha256_file
+from crossage_fr.ingest.safety import SafetyAssessment
+from crossage_fr.ingest.video_io import VideoFrameSample
 from crossage_fr.model_manager import MODEL_PACKAGES, ModelPackageSpec, download_model_pack
+from crossage_fr.models import EmbeddingResult, ReferenceFace, ReviewCandidate
 from crossage_fr.store import VectorStore
+from crossage_fr.store.workspace_db import path_signature
 
 
 def make_face(path: Path, shirt=(74, 88, 138)) -> None:
@@ -93,6 +101,12 @@ def assert_config_round_trip_and_invalid_shape() -> None:
     assert recovered.safe_mode is True
     assert recovered.cluster_min_size == 2
     assert (root / "unsafe-config.corrupt.json").exists()
+
+    oversized_path = root / "oversized-config.json"
+    oversized_path.write_text(json.dumps({"cluster_min_size": MAX_CLUSTER_MIN_SIZE + 1}), encoding="utf-8")
+    recovered = load_config(oversized_path)
+    assert recovered.cluster_min_size == 2
+    assert (root / "oversized-config.corrupt.json").exists()
 
 
 def assert_invalid_project_rows_are_skipped() -> None:
@@ -222,8 +236,10 @@ def assert_command_validation_and_empty_inputs() -> None:
     assert filtered["state"]["scanHistory"][0]["metrics"]["total"] == 0
 
     missing = api.handle("scan", {"folder": str(root / "missing-folder")})
-    assert missing["metrics"]["total"] == 0
-    assert missing["metrics"]["errors"] == 0
+    assert missing["metrics"]["total"] == 1
+    assert missing["metrics"]["errors"] == 1
+    assert missing["metrics"]["pathErrors"] == 1
+    assert missing["state"]["scanHistory"][0]["status"] == "error"
 
 
 def assert_consent_workspace_registry_and_audit_pagination() -> None:
@@ -233,7 +249,7 @@ def assert_consent_workspace_registry_and_audit_pagination() -> None:
     state = api.state()
     assert state["workspaceMetadata"]["workspaceId"]
     assert state["consentOnFile"] is False
-    assert (workspace / ".crossage-workspace.json").exists()
+    assert (workspace / ".vintrace-workspace.json").exists()
     assert (root / "registry" / "active-workspace.json").exists()
 
     api.handle("set_consent", {"value": True, "operator": "Edge", "note": "durable consent", "source": "test"})
@@ -270,38 +286,134 @@ def assert_broken_and_sensitive_images_do_not_pollute_queue() -> None:
     assert len(result["state"]["scanHistory"][0]["errorSamples"]) == 1
 
 
+def assert_image_decompression_guard() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-decompression-"))
+    path = root / "small.jpg"
+    Image.new("RGB", (4, 4), (120, 140, 160)).save(path, quality=95)
+    old_limit = Image.MAX_IMAGE_PIXELS
+    try:
+        Image.MAX_IMAGE_PIXELS = 1
+        expect_raises(ImageLoadError, lambda: load_image(path), "decompression bomb")
+    finally:
+        Image.MAX_IMAGE_PIXELS = old_limit
+
+
 def assert_static_app_contracts() -> None:
     root = Path(__file__).resolve().parents[1]
     html = (root / "index.html").read_text(encoding="utf-8")
     assert html.startswith("<!doctype html>"), "index.html must not contain stray text before the doctype."
     assert html.count('<div id="root"></div>') == 1
     assert "Content-Security-Policy" in html
-    assert "crossage-media:" in html
+    assert "vintrace-media:" in html
     assert "object-src 'none'" in html
     assert "frame-src 'none'" in html
+
+    desktop_main = (root / "desktop" / "main.cjs").read_text(encoding="utf-8")
+    assert "function safeRealpath" in desktop_main
+    assert "previewsReal" in desktop_main
+    assert "!fs.existsSync(target) || !isTrustedMediaPath(target)" in desktop_main
+
+    release_workflow = (root / ".github" / "workflows" / "windows-release.yml").read_text(encoding="utf-8")
+    assert "release_tag" in release_workflow
+    assert "softprops/action-gh-release@v2" in release_workflow
+    assert "dist/latest*.yml" in release_workflow
+    assert "contents: write" in release_workflow
+
+    i18n = (root / "src" / "i18n.ts").read_text(encoding="utf-8")
+    for code in ('"en"', '"zh"', '"es"', '"fr"', '"ar"', '"hi"', '"ja"'):
+        assert code in i18n
+    assert "localizeDom" in i18n
+    assert "हिन्दी" in i18n
+    assert "Español" in i18n
+    assert "中文" in i18n
+    assert "Français" in i18n
+    assert "العربية" in i18n
+    assert "日本語" in i18n
+    assert "translateUiText(language: LanguageCode, source: string" in i18n
+    assert "uiPhraseTranslations" in i18n
+    assert "export type UiMessageKey" in i18n
+    assert "formatUiMessage(language: LanguageCode" in i18n
+    assert "formatErrorMessage(language: LanguageCode" in i18n
+    assert '"E-WORKSPACE-LOCKED"' in i18n
+    assert '"E-BACKEND-TIMEOUT"' in i18n
+    assert '"notice.possibleMatchesFound"' in i18n
+    assert 'localizeAttribute(element, "alt", language)' in i18n
+    assert "isLocalizableAttributeElement" in i18n
+    app_tsx = (root / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "languageStorageKey" in app_tsx
+    assert 'document.getElementById("root") || document.body' in app_tsx
+    assert "localizeDom(targetRoot, language)" in app_tsx
+    assert 'attributeFilter: ["alt", "aria-label", "placeholder", "title"]' in app_tsx
+    assert 'className="language-picker"' in app_tsx
+    assert 'document.documentElement.dir = language === "ar" ? "rtl" : "ltr"' in app_tsx
+    assert "setImperativeLanguage(language)" in app_tsx
+    assert "window.crossAge.setAppLanguage" in app_tsx
+    assert "setNoticeMessage(" in app_tsx
+    assert "setErrorNotice(error" in app_tsx
+    assert "formatErrorMessage(language, notice.errorCode" in app_tsx
+    assert "notice.messageKey" in app_tsx
+
+    preload = (root / "desktop" / "preload.cjs").read_text(encoding="utf-8")
+    assert "setAppLanguage" in preload
+    assert "normalizeIpcError" in preload
+    assert "safeInvoke(\"backend:invoke\"" in preload
+    assert "app:set-language" in desktop_main
+    assert "nativeUiText" in desktop_main
+    assert "createAppError(\"E-WORKSPACE-LOCKED\"" in desktop_main
+    assert "createAppError(\"E-IPC-BLOCKED-COMMAND\"" in desktop_main
+    assert 'lang="${escapeHtml(appLanguage)}"' in desktop_main
+    main_tsx = (root / "src" / "main.tsx").read_text(encoding="utf-8")
+    assert 'bootT("boot.couldNotLoad")' in main_tsx
+    assert "applyBootLanguage(language)" in main_tsx
 
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
     resources = {entry["from"] for entry in package["build"]["extraResources"]}
     assert {"models/safety", "mcp", "report.md", "crossage_fr"} <= resources
+    backend_resource = next(entry for entry in package["build"]["extraResources"] if entry["from"] == "backend-dist")
+    assert backend_resource["to"] == "backend"
+    assert {"crossage-backend", "crossage-backend.exe", "crossage-backend/**/*"} <= set(backend_resource["filter"])
 
     associations = package["build"]["fileAssociations"]
     image_exts = set(associations[0]["ext"])
     video_exts = set(associations[1]["ext"])
     assert {"jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "heif", "dng", "raw"} <= image_exts
     assert {"mov", "mp4", "m4v", "avi", "mkv", "webm", "hevc"} <= video_exts
+    assert "ts" not in video_exts
+
+    mcp_manifest = json.loads((root / "mcp" / "manifest.json").read_text(encoding="utf-8"))
+    mcp_server = mcp_manifest["server"]
+    assert mcp_server["entry_point"] == "server/crossage-backend/crossage-backend"
+    mcp_config = mcp_server["mcp_config"]
+    assert mcp_config["command"] == "${__dirname}${/}server${/}crossage-backend${/}crossage-backend"
+    assert mcp_config["platform_overrides"]["win32"]["command"] == "${__dirname}${/}server${/}crossage-backend${/}crossage-backend.exe"
+    assert mcp_config["env"]["CROSSAGE_SAFE_MODEL_DIR"] == "${__dirname}${/}models${/}safety"
+    assert mcp_config["env"]["CROSSAGE_REPORT_PATH"] == "${__dirname}${/}report.md"
+    manifest_tools = {tool["name"] for tool in mcp_manifest["tools"]}
 
     required_commands = {
         "get_state",
+        "model_status",
+        "set_model_root",
+        "download_model",
         "set_workspace",
         "set_consent",
         "enroll",
         "enroll_age_groups",
         "scan",
         "scan_paths",
+        "cancel_scan",
+        "pause_scan",
+        "resume_scan",
+        "scan_job_status",
         "analyze_folder",
         "set_status",
         "bulk_set_status",
         "set_candidate_note",
+        "block_false_match",
+        "reassign_candidate_person",
+        "duplicate_people",
+        "apply_review_rules",
+        "query_candidates",
         "clear_queue",
         "purge_candidates",
         "purge_duplicate_candidates",
@@ -314,16 +426,65 @@ def assert_static_app_contracts() -> None:
         "export_report",
         "export_workspace_backup",
         "export_candidates",
+        "export_media_bundle",
+        "export_consent_receipt",
+        "retention_policy_report",
+        "export_safe_mode_audit",
+        "model_drift_report",
+        "export_review_ledger",
         "workspace_health",
         "runtime_self_test",
+        "runtime_benchmark",
+        "release_readiness",
+        "installer_self_diagnostics",
+        "calibration_summary",
+        "accuracy_evaluation",
+        "apply_calibration",
+        "export_accuracy_labels",
+        "import_accuracy_labels",
+        "privacy_report",
+        "delete_face_data",
+        "optimize_workspace",
+        "enforce_storage_budget",
+        "add_calibration_label",
         "save_settings",
         "audit_events",
     }
     for rel in ("desktop/main.cjs", "desktop/preload.cjs"):
-        text = (root / rel).read_text(encoding="utf-8")
+        text = desktop_main if rel == "desktop/main.cjs" else (root / rel).read_text(encoding="utf-8")
         assert "TRUSTED_BACKEND_COMMANDS" in text
         for command in required_commands:
             assert f'"{command}"' in text, f"{command} is missing from {rel}."
+    app_tsx = (root / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert '"import_accuracy_labels"' in app_tsx
+    assert "function parseAccuracyLabelRows" in app_tsx
+    assert "Import label JSON" in app_tsx
+    assert '"add_calibration_label"' in app_tsx
+    assert "Teach accuracy" in app_tsx
+    assert "getScanMarkerStatus" in app_tsx
+    assert "saveSettingsDraftIfDirty" in app_tsx
+    assert "Saving storage limit" in app_tsx
+    assert "Saving review rules" in app_tsx
+    assert "acceptedMediaAvailable" in app_tsx
+    assert "Delete face data and history" in app_tsx
+    mcp_bundle_builder = (root / "desktop" / "scripts" / "build-mcp-bundle.cjs").read_text(encoding="utf-8")
+    assert 'path.join(serverDir, "crossage-backend")' in mcp_bundle_builder
+    assert 'path.join(fallbackDir, backendName)' in mcp_bundle_builder
+    assert {
+        "get_project_state",
+        "mark_consent",
+        "enroll_reference_folder",
+        "scan_folder",
+        "scan_media_paths",
+        "query_candidates",
+        "review_candidate",
+        "bulk_review_candidates",
+        "export_review_report",
+        "export_workspace_backup",
+        "delete_face_data",
+        "runtime_benchmark",
+        "release_readiness",
+    } <= manifest_tools
 
 
 def assert_model_downloader_integrity_and_safe_extract() -> None:
@@ -356,11 +517,34 @@ def assert_model_downloader_integrity_and_safe_extract() -> None:
         assert result["sha256"] == digest
         assert (installed / "det_10g.onnx").read_bytes() == b"detector"
         assert (installed / "w600k_r50.onnx").read_bytes() == b"recognizer"
+        assert not (root / "models-root" / "models" / ".tiny_pack.extracting").exists()
+        assert not (root / "models-root" / "models" / ".tiny_pack.installing").exists()
         assert progress_events[0]["phase"] == "starting"
         assert progress_events[-1]["phase"] == "complete"
         assert any(event["phase"] == "downloading" for event in progress_events)
         assert any(event["phase"] == "verifying" for event in progress_events)
         assert any(event["phase"] == "extracting" for event in progress_events)
+
+        resume_root = root / "resume-root"
+        resume_downloads = resume_root / "downloads"
+        resume_downloads.mkdir(parents=True)
+        (resume_downloads / f"{spec.filename}.part").write_bytes(archive.read_bytes())
+        resume_events: list[dict] = []
+        resumed = download_model_pack(spec.pack, resume_root, on_progress=resume_events.append)
+        assert resumed["verified"] is True
+        assert (resume_downloads / spec.filename).exists()
+        assert not (resume_downloads / f"{spec.filename}.part").exists()
+        assert resume_events[-1]["phase"] == "complete"
+
+        force_root = root / "force-root"
+        force_downloads = force_root / "downloads"
+        force_downloads.mkdir(parents=True)
+        (force_downloads / spec.filename).write_bytes(b"corrupt existing archive")
+        (force_downloads / f"{spec.filename}.part").write_bytes(b"stale partial")
+        forced = download_model_pack(spec.pack, force_root, force=True)
+        assert forced["verified"] is True
+        assert (force_downloads / spec.filename).read_bytes() == archive.read_bytes()
+        assert not (force_downloads / f"{spec.filename}.part").exists()
 
         bad_archive = source / "unsafe_pack.zip"
         with zipfile.ZipFile(bad_archive, "w") as handle:
@@ -382,9 +566,593 @@ def assert_model_downloader_integrity_and_safe_extract() -> None:
         MODEL_PACKAGES[bad_spec.pack] = bad_spec
         expect_raises(ValueError, lambda: download_model_pack(bad_spec.pack, root / "unsafe-root"), "Unsafe path")
         assert not (root / "escape.onnx").exists()
+        assert not (root / "unsafe-root" / "models" / ".unsafe_pack.extracting").exists()
+        assert not (root / "unsafe-root" / "models" / ".unsafe_pack.installing").exists()
     finally:
         MODEL_PACKAGES.pop("tiny_pack", None)
         MODEL_PACKAGES.pop("unsafe_pack", None)
+
+
+def assert_corrupt_installed_models_fail_integrity() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-corrupt-model-"))
+    model_root = root / "models-root"
+    pack_dir = model_root / "models" / "antelopev2"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "det_10g.onnx").write_bytes(b"")
+    (pack_dir / "w600k_r50.onnx").write_bytes(b"not an onnx model")
+    api = make_api(root / "workspace")
+    api.project.config.model_root = str(model_root)
+    api.project.config.model_pack = "antelopev2"
+    integrity = api.model_integrity()
+    installed = next(check for check in integrity["checks"] if check["name"] == "Installed ONNX files")
+    assert installed["ok"] is False
+    assert integrity["ok"] is False
+    assert any(item["ok"] is False for item in installed["value"])
+
+
+class StaticUnmatchedEngine:
+    model_name = "edge-static-unmatched"
+
+    def embed_image(self, path: Path) -> list[EmbeddingResult]:
+        with Image.open(path) as image:
+            return self.embed_loaded_image(image.convert("RGB"), path)
+
+    def embed_loaded_image(self, image: Image.Image, path: Path | None = None) -> list[EmbeddingResult]:
+        del image, path
+        return [
+            EmbeddingResult(
+                vector=[1.0] + [0.0] * 511,
+                quality=1.0,
+                bbox=(0, 0, 10, 10),
+                model_name=self.model_name,
+            )
+        ]
+
+
+class CountingMatchedEngine(StaticUnmatchedEngine):
+    model_name = "edge-counting-matched"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def embed_loaded_image(self, image: Image.Image, path: Path | None = None) -> list[EmbeddingResult]:
+        self.calls += 1
+        return super().embed_loaded_image(image, path)
+
+
+class NoEmbeddingEngine(StaticUnmatchedEngine):
+    model_name = "edge-no-embeddings"
+
+    def embed_loaded_image(self, image: Image.Image, path: Path | None = None) -> list[EmbeddingResult]:
+        del image, path
+        return []
+
+
+def assert_unmatched_clustering_flushes_in_batches() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-cluster-batch-"))
+    scan = root / "scan"
+    for index in range(4):
+        make_face(scan / f"unknown-{index}.jpg", shirt=(60 + index * 38, 80 + index * 22, 120 + index * 11))
+    project = ProjectState(root / "workspace")
+    project.config.safe_mode = False
+    project.config.cluster_min_size = 2
+    original_batch_size = manager_module.UNMATCHED_CLUSTER_BATCH_SIZE
+    manager_module.UNMATCHED_CLUSTER_BATCH_SIZE = 2
+    try:
+        added, errors, metrics = project.scan_paths(sorted(scan.glob("*.jpg")), StaticUnmatchedEngine(), total=4)
+    finally:
+        manager_module.UNMATCHED_CLUSTER_BATCH_SIZE = original_batch_size
+    assert errors == []
+    assert added == 4
+    assert metrics["unmatched"] == 4
+    assert metrics["clustered"] == 4
+    assert project.scan_history[0]["metrics"]["clustered"] == 4
+    assert {candidate.person_name for candidate in project.candidates.values()} == {"Unmatched cluster 1", "Unmatched cluster 2"}
+
+
+def assert_embedding_cache_reuses_face_work() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-embedding-cache-"))
+    scan = root / "scan"
+    ref_path = root / "ref.jpg"
+    image_path = scan / "candidate.jpg"
+    make_face(ref_path)
+    make_face(image_path)
+    project = ProjectState(root / "workspace")
+    project.config.safe_mode = False
+    ref = ReferenceFace(
+        ref_id="ref_cache",
+        person_name="Person",
+        age_bucket="adult",
+        source_path=str(ref_path),
+        capture_date=None,
+        quality=1.0,
+        model_name="edge-counting-matched",
+        vector=[1.0] + [0.0] * 511,
+    )
+    project.references[ref.ref_id] = ref
+    project.vector_store.add(ref.ref_id, ref.vector)
+    first_engine = CountingMatchedEngine()
+    _added, errors, metrics = project.scan_paths([image_path], first_engine, total=1, source="cache-a", label="cache-a")
+    assert errors == []
+    assert first_engine.calls == 1
+    assert metrics["embeddingCacheMisses"] == 1
+    second_engine = CountingMatchedEngine()
+    _added2, errors2, metrics2 = project.scan_paths([image_path], second_engine, total=1, source="cache-b", label="cache-b")
+    assert errors2 == []
+    assert second_engine.calls == 0
+    assert metrics2["embeddingCacheHits"] == 1
+
+
+def assert_duplicate_content_is_suppressed_across_paths() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-hash-dedupe-"))
+    scan = root / "scan"
+    ref_path = root / "ref.jpg"
+    first = scan / "candidate-a.jpg"
+    second = scan / "candidate-renamed-copy.jpg"
+    make_face(ref_path)
+    make_face(first)
+    second.parent.mkdir(parents=True, exist_ok=True)
+    second.write_bytes(first.read_bytes())
+    project = ProjectState(root / "workspace")
+    project.config.safe_mode = False
+    ref = ReferenceFace(
+        ref_id="ref_hash",
+        person_name="Person",
+        age_bucket="adult",
+        source_path=str(ref_path),
+        capture_date=None,
+        quality=1.0,
+        model_name="edge-static-unmatched",
+        vector=[1.0] + [0.0] * 511,
+    )
+    project.references[ref.ref_id] = ref
+    project.vector_store.add(ref.ref_id, ref.vector)
+    added, errors, metrics = project.scan_paths([first, second], StaticUnmatchedEngine(), total=2, source="hash-dedupe", label="hash-dedupe")
+    assert errors == []
+    assert added == 1
+    assert metrics["matched"] == 1
+    assert metrics["skipped"] >= 1
+    assert len(project.candidates) == 1
+    candidate = next(iter(project.candidates.values()))
+    assert candidate.source_hash
+    assert project.workspace_health()["duplicateCandidateCount"] == 0
+
+
+def assert_scan_candidates_survive_without_json_snapshot() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-sqlite-candidates-"))
+    workspace = root / "workspace"
+    scan = root / "scan"
+    ref_path = root / "ref.jpg"
+    candidate_path = scan / "candidate.jpg"
+    make_face(ref_path)
+    make_face(candidate_path)
+    project = ProjectState(workspace)
+    project.config.safe_mode = False
+    ref = ReferenceFace(
+        ref_id="ref_sqlite",
+        person_name="Person",
+        age_bucket="adult",
+        source_path=str(ref_path),
+        capture_date=None,
+        quality=1.0,
+        model_name="edge-static-unmatched",
+        vector=[1.0] + [0.0] * 511,
+    )
+    project.references[ref.ref_id] = ref
+    project.vector_store.add(ref.ref_id, ref.vector)
+    added, errors, metrics = project.scan_paths([candidate_path], StaticUnmatchedEngine(), total=1, source="sqlite-save", label="sqlite-save")
+    assert errors == []
+    assert added == 1
+    assert metrics["matched"] == 1
+    assert not (workspace / "review_candidates.json").exists()
+    reloaded = ProjectState(workspace)
+    assert len(reloaded.candidates) == 1
+    assert next(iter(reloaded.candidates.values())).person_name == "Person"
+    api = DesktopApi(workspace)
+    api.project.candidates.clear()
+    state = api.state(preview_create_budget=0, candidate_limit=10)
+    assert state["counts"]["candidates"] == 1
+    assert state["candidateWindow"]["index"] == "sqlite"
+    assert len(state["candidates"]) == 1
+
+
+def assert_large_store_dedupe_uses_sqlite_lookup() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-sqlite-dedupe-"))
+    scan = root / "scan"
+    ref_path = root / "ref.jpg"
+    candidate_path = scan / "candidate.jpg"
+    make_face(ref_path)
+    make_face(candidate_path)
+    project = ProjectState(root / "workspace")
+    project.config.safe_mode = False
+    ref = ReferenceFace(
+        ref_id="ref_sqlite_dedupe",
+        person_name="Person",
+        age_bucket="adult",
+        source_path=str(ref_path),
+        capture_date=None,
+        quality=1.0,
+        model_name="edge-static-unmatched",
+        vector=[1.0] + [0.0] * 511,
+    )
+    project.references[ref.ref_id] = ref
+    project.vector_store.add(ref.ref_id, ref.vector)
+    added, errors, metrics = project.scan_paths([candidate_path], StaticUnmatchedEngine(), total=1, source="sqlite-dedupe-a", label="sqlite-dedupe-a")
+    assert errors == []
+    assert added == 1
+    original_limit = manager_module.CANDIDATE_MEMORY_DEDUPE_LIMIT
+    manager_module.CANDIDATE_MEMORY_DEDUPE_LIMIT = 0
+    try:
+        added2, errors2, metrics2 = project.scan_paths([candidate_path], StaticUnmatchedEngine(), total=1, source="sqlite-dedupe-b", label="sqlite-dedupe-b")
+    finally:
+        manager_module.CANDIDATE_MEMORY_DEDUPE_LIMIT = original_limit
+    assert errors2 == []
+    assert added2 == 0
+    assert metrics2["skipped"] >= 1
+    assert len(project.candidates) == 1
+
+
+def assert_heuristic_fallback_safety_is_not_cached() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-safety-cache-"))
+    image_path = root / "scan" / "candidate.jpg"
+    make_face(image_path)
+    image = load_image(image_path)
+    project = ProjectState(root / "workspace")
+    calls = 0
+    original = manager_module.assess_image_safety
+
+    def fake_assess(path: Path, threshold: float, image=None) -> SafetyAssessment:
+        nonlocal calls
+        del path, threshold, image
+        calls += 1
+        if calls == 1:
+            return SafetyAssessment(
+                sensitive=False,
+                score=0.1,
+                reason="temporary fallback",
+                skin_ratio=0.0,
+                lower_skin_ratio=0.0,
+                largest_region_ratio=0.0,
+                engine="heuristic-fallback",
+            )
+        return SafetyAssessment(
+            sensitive=False,
+            score=0.02,
+            reason="model recovered",
+            skin_ratio=0.0,
+            lower_skin_ratio=0.0,
+            largest_region_ratio=0.0,
+            engine="onnx-hybrid",
+            model_name="safe-mode-test",
+        )
+
+    manager_module.assess_image_safety = fake_assess
+    try:
+        first, content_hash = project._assess_safety_cached(image_path, image)
+        second, _ = project._assess_safety_cached(image_path, image, content_hash=content_hash)
+    finally:
+        manager_module.assess_image_safety = original
+    assert first.engine == "heuristic-fallback"
+    assert second.engine == "onnx-hybrid"
+    assert calls == 2
+
+
+def assert_hashing_can_be_cancelled() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-hash-cancel-"))
+    payload = root / "large.bin"
+    payload.write_bytes(b"x" * (2 * 1024 * 1024))
+    expect_raises(InterruptedError, lambda: sha256_file(payload, lambda: True), "cancelled")
+
+
+def assert_external_drive_discovery_edges() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-storage-"))
+    project = ProjectState(root / "workspace")
+    project.config.safe_mode = False
+    _added, errors, metrics = project.scan_folder(root / "missing-drive", StaticUnmatchedEngine())
+    assert errors
+    assert metrics["pathErrors"] >= 1
+    assert project.scan_history[0]["status"] == "error"
+
+    scan = root / "scan"
+    target = scan / "target.jpg"
+    link = scan / "alias.jpg"
+    make_face(target)
+    try:
+        link.symlink_to(target)
+    except OSError:
+        return
+    project2 = ProjectState(root / "workspace-symlink")
+    project2.config.safe_mode = False
+    _added2, errors2, metrics2 = project2.scan_folder(scan, StaticUnmatchedEngine())
+    assert any("Skipped symlink" in error for error in errors2)
+    assert metrics2["pathErrors"] >= 1
+
+
+def assert_mutating_file_is_deferred() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-mutating-file-"))
+    workspace = root / "workspace"
+    scan = root / "scan"
+    ref_path = root / "ref.jpg"
+    candidate_path = scan / "candidate.jpg"
+    make_face(ref_path)
+    make_face(candidate_path)
+    project = ProjectState(workspace)
+    project.config.safe_mode = False
+    ref = ReferenceFace(
+        ref_id="ref_mutating",
+        person_name="Person",
+        age_bucket="adult",
+        source_path=str(ref_path),
+        capture_date=None,
+        quality=1.0,
+        model_name="edge-static-unmatched",
+        vector=[1.0] + [0.0] * 511,
+    )
+    project.references[ref.ref_id] = ref
+    project.vector_store.add(ref.ref_id, ref.vector)
+    original_sha = manager_module.sha256_file
+    changed = False
+
+    def mutate_once(path: Path, cancel_requested=None) -> str:
+        nonlocal changed
+        del cancel_requested
+        if not changed:
+            changed = True
+            with path.open("ab") as handle:
+                handle.write(b"changed-during-scan")
+        return original_sha(path)
+
+    manager_module.sha256_file = mutate_once
+    try:
+        added, errors, metrics = project.scan_paths([candidate_path], StaticUnmatchedEngine(), total=1)
+    finally:
+        manager_module.sha256_file = original_sha
+    assert added == 0
+    assert errors and "changed while it was being scanned" in errors[0]
+    assert metrics["pathErrors"] >= 1
+    assert not project.candidates
+
+
+def assert_scan_exclusions_are_honored() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-exclusions-"))
+    refs = root / "refs"
+    scan = root / "scan"
+    skipped = scan / "skipme"
+    make_face(refs / "person.jpg")
+    make_face(scan / "candidate.jpg")
+    make_face(skipped / "ignored.jpg")
+    api = make_api(root / "workspace")
+    api.handle("set_consent", {"value": True})
+    assert api.handle("enroll", {"personName": "Person", "folder": str(refs)})["added"] == 1
+    api.handle("save_settings", {"scanExclusions": {"dirNames": ["skipme"], "pathKeywords": [], "extensions": []}})
+    analysis = api.handle("analyze_folder", {"folder": str(scan)})
+    assert analysis["imageCount"] == 1
+    assert analysis["excludedDirectoryCount"] == 1
+    assert analysis["excludedSamples"]
+    assert analysis["storage"]["exists"] is True
+    assert analysis["storage"]["isDirectory"] is True
+    assert "volumeKind" in analysis["storage"]
+    assert "storage" in analysis["plan"]
+    assert analysis["transientErrorCount"] == 0
+    bounded_analysis = api.handle("analyze_folder", {"folder": str(scan), "maxEntries": 1, "timeBudgetMs": 1000})
+    assert bounded_analysis["truncated"] is True
+    assert bounded_analysis["entriesChecked"] >= 1
+    assert any("safety limit" in item for item in bounded_analysis["recommendations"])
+    direct = api.handle("scan_paths", {"paths": [str(skipped / "ignored.jpg")], "source": "exclusion-test", "resume": False})
+    assert direct["metrics"]["excluded"] == 1
+    assert direct["added"] == 0
+    api.handle("save_settings", {"scanExclusions": {"dirNames": ["skipme"], "pathKeywords": [], "extensions": [], "filePaths": [str(scan / "candidate.jpg")]}})
+    exact_analysis = api.handle("analyze_folder", {"folder": str(scan)})
+    assert exact_analysis["imageCount"] == 0
+    assert exact_analysis["excludedCount"] == 1
+    assert exact_analysis["excludedDirectoryCount"] == 1
+    size_limited = api.handle(
+        "save_settings",
+        {
+            "maxMediaFileBytes": 1,
+            "scanExclusions": {"dirNames": ["skipme"], "pathKeywords": [], "extensions": [], "filePaths": []},
+        },
+    )
+    assert size_limited["config"]["maxMediaFileBytes"] == 1
+    size_analysis = api.handle("analyze_folder", {"folder": str(scan)})
+    assert size_analysis["imageCount"] == 0
+    assert size_analysis["excludedCount"] == 1
+    assert any("size limit" in item["reason"] for item in size_analysis["excludedSamples"])
+    size_direct = api.handle("scan_paths", {"paths": [str(scan / "candidate.jpg")], "source": "size-limit-test", "resume": False})
+    assert size_direct["metrics"]["excluded"] == 1
+    assert size_direct["added"] == 0
+
+    missing = scan / "vanished.jpg"
+    project = ProjectState(root / "missing-workspace")
+    added, errors, metrics = project.scan_paths(
+        [missing],
+        StaticUnmatchedEngine(),
+        total=1,
+        source="missing-drive-test",
+        label="missing-drive-test",
+        resume=False,
+    )
+    assert added == 0
+    assert errors
+    assert metrics["errors"] == 1
+    assert metrics["pathErrors"] == 1
+    assert metrics["processed"] == 1
+
+
+def assert_scan_folder_reports_discovery_errors() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-discovery-errors-"))
+    scan = root / "scan"
+    bad = scan / "bad-drive"
+    good = scan / "good"
+    make_face(good / "candidate.jpg")
+    bad.mkdir(parents=True)
+    project = ProjectState(root / "workspace")
+    project.config.safe_mode = False
+    original_scandir = manager_module.os.scandir
+    bad_resolved = bad.resolve()
+
+    def flaky_scandir(value):
+        if Path(value).resolve() == bad_resolved:
+            raise OSError("drive disappeared")
+        return original_scandir(value)
+
+    manager_module.os.scandir = flaky_scandir
+    try:
+        added, errors, metrics = project.scan_folder(scan, StaticUnmatchedEngine(), total=None, resume=False)
+    finally:
+        manager_module.os.scandir = original_scandir
+    assert added >= 0
+    assert errors
+    assert any("drive disappeared" in error for error in errors)
+    assert metrics["pathErrors"] == 1
+    assert metrics["errors"] == 1
+    assert metrics["processed"] >= 1
+    with project.db.connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM scan_files WHERE phase = 'discovery' AND status = 'error'").fetchone()
+        assert int(row["n"]) == 1
+
+
+def assert_video_frame_orphans_are_pruned() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-video-prune-"))
+    video = root / "clip.mp4"
+    video.write_bytes(b"fake-video")
+    project = ProjectState(root / "workspace")
+    project.config.safe_mode = False
+    frame_path = project.video_frames_path / "fake-clip" / "frame-00000001-0000001000ms.jpg"
+    original_sampler = manager_module.sample_video_frames
+
+    def fake_sampler(path: Path, output_root: Path, *args, **kwargs):
+        del path, args, kwargs
+        target = output_root / "fake-clip" / "frame-00000001-0000001000ms.jpg"
+        make_face(target)
+        return [
+            VideoFrameSample(
+                path=target,
+                timestamp_ms=1000,
+                frame_index=1,
+                width=280,
+                height=280,
+                duration_ms=2000,
+            )
+        ]
+
+    manager_module.sample_video_frames = fake_sampler
+    try:
+        added, errors, metrics = project.scan_paths([video], NoEmbeddingEngine(), total=1, source="video-prune", label="video-prune")
+    finally:
+        manager_module.sample_video_frames = original_sampler
+    assert added == 0
+    assert errors == []
+    assert metrics["videoFrames"] == 1
+    assert not frame_path.exists()
+
+
+def assert_scan_cancel_and_resume_manifest() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-resume-"))
+    scan = root / "scan"
+    for index in range(3):
+        make_face(scan / f"resume-{index}.jpg", shirt=(80 + index, 90, 120))
+    ref_path = root / "ref.jpg"
+    make_face(ref_path)
+    project = ProjectState(root / "workspace")
+    project.config.safe_mode = False
+    ref = ReferenceFace(
+        ref_id="ref_resume",
+        person_name="Person",
+        age_bucket="adult",
+        source_path=str(ref_path),
+        capture_date=None,
+        quality=1.0,
+        model_name="edge-static-unmatched",
+        vector=[1.0] + [0.0] * 511,
+    )
+    project.references[ref.ref_id] = ref
+    project.vector_store.add(ref.ref_id, ref.vector)
+    events: list[dict[str, object]] = []
+
+    def progress(payload: dict[str, object]) -> None:
+        events.append(payload)
+        if payload.get("phase") == "processed" and int(payload.get("processed", 0) or 0) == 1:
+            project.request_scan_cancel(source="test")
+
+    added, errors, metrics = project.scan_paths(
+        sorted(scan.glob("*.jpg")),
+        StaticUnmatchedEngine(),
+        total=3,
+        source="manual",
+        label="resume-suite",
+        resume=True,
+        on_progress=progress,
+    )
+    assert errors == []
+    assert metrics["cancelled"] == 1
+    assert any(event.get("phase") == "cancelled" for event in events)
+    assert added >= 0
+
+    added2, errors2, metrics2 = project.scan_paths(
+        sorted(scan.glob("*.jpg")),
+        StaticUnmatchedEngine(),
+        total=3,
+        source="manual",
+        label="resume-suite",
+        resume=True,
+    )
+    assert errors2 == []
+    assert metrics2["resumed"] == 1
+    assert metrics2["manifestSkipped"] >= 1
+    assert metrics2["processed"] == 3
+    assert added2 >= 0
+
+
+def assert_stale_candidate_manifest_is_reprocessed() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-stale-manifest-"))
+    scan = root / "scan"
+    candidate_path = scan / "candidate.jpg"
+    ref_path = root / "ref.jpg"
+    make_face(candidate_path)
+    make_face(ref_path)
+    project = ProjectState(root / "workspace")
+    project.config.safe_mode = False
+    ref = ReferenceFace(
+        ref_id="ref_stale",
+        person_name="Person",
+        age_bucket="adult",
+        source_path=str(ref_path),
+        capture_date=None,
+        quality=1.0,
+        model_name="edge-static-unmatched",
+        vector=[1.0] + [0.0] * 511,
+    )
+    project.references[ref.ref_id] = ref
+    project.vector_store.add(ref.ref_id, ref.vector)
+    added, errors, metrics = project.scan_paths(
+        [candidate_path],
+        StaticUnmatchedEngine(),
+        total=1,
+        source="manual",
+        label="stale-suite",
+        resume=True,
+    )
+    assert errors == []
+    assert added == 1
+    assert metrics["matched"] == 1
+    assert len(project.candidates) == 1
+
+    project.candidates.clear()
+    project.save()
+    added2, errors2, metrics2 = project.scan_paths(
+        [candidate_path],
+        StaticUnmatchedEngine(),
+        total=1,
+        source="manual",
+        label="stale-suite",
+        resume=True,
+    )
+    assert errors2 == []
+    assert metrics2["resumed"] == 1
+    assert metrics2["manifestSkipped"] == 0
+    assert added2 == 1
+    assert len(project.candidates) == 1
 
 
 def assert_operational_use_case_commands() -> None:
@@ -402,6 +1170,9 @@ def assert_operational_use_case_commands() -> None:
     assert preflight["imageCount"] == 1
     assert preflight["nonImageCount"] == 1
     assert preflight["recommendations"]
+    assert preflight["plan"]["resumable"] is True
+    assert preflight["plan"]["mediaCount"] == 1
+    assert preflight["plan"]["estimatedWorkspaceBytes"] > 0
 
     api.handle("set_consent", {"value": True})
     assert api.handle("enroll", {"personName": "Person", "folder": str(refs)})["added"] == 1
@@ -420,13 +1191,239 @@ def assert_operational_use_case_commands() -> None:
     assert bulk["updated"] == 1
     assert bulk["state"]["candidates"][0]["status"] == "accepted"
 
+    page = api.handle("query_candidates", {"status": "accepted", "query": "Person Prime", "limit": 10})
+    assert page["total"] == 1
+    assert page["returned"] == 1
+    assert page["index"] == "sqlite"
+    assert api.project.db.candidate_count() == len(api.project.candidates)
+    assert page["items"][0]["candidateId"] == candidate_id
+    assert page["items"][0]["sourceHash"]
+
+    accuracy = api.handle("accuracy_evaluation", {})
+    assert accuracy["metrics"]["likely"]["labeled"] == 1
+    assert "precision" in accuracy["metrics"]["likely"]
+    labels = api.handle("export_accuracy_labels", {})
+    label_value = labels["value"]
+    assert Path(label_value["jsonPath"]).exists()
+    assert Path(label_value["csvPath"]).exists()
+    assert label_value["counts"]["labels"] == 1
+    imported = api.handle(
+        "import_accuracy_labels",
+        {
+            "rows": [
+                {
+                    "candidateId": candidate_id,
+                    "sourcePath": str(scan / "candidate.jpg"),
+                    "sourceHash": page["items"][0]["sourceHash"],
+                    "expectedPerson": "Person Prime",
+                    "actualPerson": "Person Prime",
+                    "matchScore": 0.91,
+                    "isMatch": True,
+                }
+            ]
+        },
+    )
+    assert imported["value"]["imported"] == 1
+    api.handle(
+        "add_calibration_label",
+        {
+            "row": {
+                "sourcePath": str(scan / "candidate.jpg"),
+                "expectedPerson": "Person Prime",
+                "actualPerson": "Person Prime",
+                "matchScore": 0.9,
+                "isMatch": True,
+            }
+        },
+    )
+    api.handle(
+        "add_calibration_label",
+        {
+            "row": {
+                "sourcePath": str(scan / "notes.txt"),
+                "expectedPerson": "Person Prime",
+                "actualPerson": "Other",
+                "matchScore": 0.12,
+                "isMatch": False,
+            }
+        },
+    )
+    calibrated = api.handle("apply_calibration", {})
+    assert calibrated["state"]["calibration"]["positivePairs"] >= 1
+    assert calibrated["state"]["config"]["thresholds"]["likely"] > 0.12
+
     exported = api.handle("export_report", {})
     export_value = exported["value"]
     assert Path(export_value["jsonPath"]).exists()
     assert Path(export_value["csvPath"]).exists()
     export_json = json.loads(Path(export_value["jsonPath"]).read_text(encoding="utf-8"))
     assert export_json["counts"]["accepted"] == 1
+    assert export_json["references"]
+    assert "vector" not in export_json["references"][0]
+    assert "face vector" not in json.dumps(export_json).lower()
     assert export_value["counts"]["candidates"] == 1
+
+    history = api.handle("export_scan_history", {})
+    history_value = history["value"]
+    assert Path(history_value["jsonPath"]).exists()
+    assert Path(history_value["csvPath"]).exists()
+    assert history_value["counts"]["runs"] >= 1
+    assert history_value["counts"]["processed"] >= 1
+
+    inventory = api.handle("export_workspace_inventory", {})
+    inventory_value = inventory["value"]
+    assert Path(inventory_value["jsonPath"]).exists()
+    assert Path(inventory_value["csvPath"]).exists()
+    assert inventory_value["counts"]["sourceFolders"] >= 1
+
+    activity_export = api.handle("export_audit_log", {})
+    activity_value = activity_export["value"]
+    assert Path(activity_value["jsonPath"]).exists()
+    assert Path(activity_value["csvPath"]).exists()
+    assert activity_value["counts"]["events"] >= 1
+
+    consent_receipt = api.handle("export_consent_receipt", {})
+    receipt_value = consent_receipt["value"]
+    assert Path(receipt_value["jsonPath"]).exists()
+    assert Path(receipt_value["csvPath"]).exists()
+    receipt_json = json.loads(Path(receipt_value["jsonPath"]).read_text(encoding="utf-8"))
+    assert receipt_json["consent"]["active"] is True
+    assert receipt_value["counts"]["references"] == 1
+
+    retention = api.handle("retention_policy_report", {})
+    assert retention["counts"]["reviewedCandidates"] == 1
+    assert retention["policy"]["originalMediaIsNeverDeleted"] is True
+    assert "90" in retention["reviewedOlderThanDays"]
+
+    safe_audit = api.handle("export_safe_mode_audit", {})
+    safe_value = safe_audit["value"]
+    assert Path(safe_value["jsonPath"]).exists()
+    assert Path(safe_value["csvPath"]).exists()
+    assert "safeFiltered" in safe_value["counts"]
+
+    drift_clean = api.handle("model_drift_report", {})
+    assert drift_clean["counts"]["staleReferences"] == 0
+    api.project.references[next(iter(api.project.references))].model_name = "legacy-model"
+    api.project.candidates[candidate_id].model_name = "legacy-model"
+    api.project.save()
+    drift_stale = api.handle("model_drift_report", {})
+    assert drift_stale["counts"]["staleReferences"] == 1
+    assert drift_stale["counts"]["staleCandidates"] == 1
+
+    ledger = api.handle("export_review_ledger", {})
+    ledger_value = ledger["value"]
+    assert Path(ledger_value["jsonPath"]).exists()
+    assert Path(ledger_value["csvPath"]).exists()
+    assert ledger_value["counts"]["candidates"] == 1
+    assert ledger_value["counts"]["decisionEvents"] >= 1
+
+    support = api.handle("export_support_bundle", {"includePaths": False})
+    support_value = support["value"]
+    support_path = Path(support_value["zipPath"])
+    assert support_path.exists()
+    assert support_value["fileCount"] >= 8
+    with zipfile.ZipFile(support_path) as archive:
+        assert "workspace-health.json" in archive.namelist()
+        assert "retention-policy-report.json" in archive.namelist()
+        assert "model-drift-report.json" in archive.namelist()
+        support_text = "\n".join(
+            archive.read(name).decode("utf-8")
+            for name in archive.namelist()
+            if name.endswith(".json")
+        )
+        assert str(root) not in support_text
+        assert str(Path.home()) not in support_text
+
+    moved = root / "moved"
+    make_face(moved / "refs" / "person.jpg")
+    make_face(moved / "scan" / "candidate.jpg")
+    relink_preview = api.handle("relink_workspace_paths", {"oldRoot": str(root), "newRoot": str(moved), "dryRun": True})
+    assert relink_preview["value"]["dryRun"] is True
+    assert relink_preview["value"]["relinkedFields"] >= 2
+    relinked = api.handle("relink_workspace_paths", {"oldRoot": str(root), "newRoot": str(moved), "dryRun": False})
+    assert relinked["value"]["relinkedFields"] >= 2
+    assert relinked["value"]["relinkedScanRuns"] >= 1
+    assert relinked["value"]["relinkedScanFiles"] >= 1
+    moved_scan = (moved / "scan").resolve()
+    moved_candidate = moved_scan / "candidate.jpg"
+    resumed_run = api.project.db.latest_scan_run(str(moved_scan), "edge-usecases", str(moved_scan))
+    assert resumed_run
+    assert api.project.db.scan_file_resume_row(resumed_run, moved_candidate, path_signature(moved_candidate)) is not None
+    best_ref_id = api.project.candidates[candidate_id].best_ref_id
+    assert best_ref_id is not None
+    assert str(moved) in api.project.references[best_ref_id].source_path
+
+    media_bundle = api.handle("export_media_bundle", {"statuses": ["accepted"]})
+    bundle_value = media_bundle["value"]
+    assert Path(bundle_value["bundlePath"]).exists()
+    assert Path(bundle_value["manifestPath"]).exists()
+    assert Path(bundle_value["csvPath"]).exists()
+    assert bundle_value["counts"]["selected"] == 1
+    assert bundle_value["counts"]["copied"] == 1
+
+    optimized = api.handle("optimize_workspace", {})
+    optimize_value = optimized["value"]
+    assert optimize_value["totalBytesReclaimed"] >= 0
+    assert "previewFilesRemoved" in optimize_value
+    assert optimized["state"]["workspace"] == str((root / "workspace").resolve())
+
+    current_config = optimized["state"]["config"]
+    budgeted = api.handle(
+        "save_settings",
+        {
+            "thresholds": current_config["thresholds"],
+            "clusterMinSize": current_config["clusterMinSize"],
+            "faceDetectorSize": current_config["faceDetectorSize"],
+            "twoPassScan": current_config["twoPassScan"],
+            "verificationDetectorSize": current_config["verificationDetectorSize"],
+            "safeMode": current_config["safeMode"],
+            "safeModeThreshold": current_config["safeModeThreshold"],
+            "storageBudgetBytes": 1,
+        },
+    )
+    assert budgeted["config"]["storageBudgetBytes"] == 1
+    storage = api.handle("enforce_storage_budget", {})
+    assert "withinBudget" in storage["value"]
+
+    model_integrity = api.handle("model_integrity", {})
+    assert model_integrity["checks"]
+    assert {check["name"] for check in model_integrity["checks"]} >= {"Face model", "Model folder writable", "Image decoder"}
+
+    installer = api.handle("installer_self_diagnostics", {})
+    installer_checks = {check["name"] for check in installer["checks"]}
+    assert {"App folder write", "Model downloader", "Photo formats", "Workspace health"} <= installer_checks
+    assert installer["generatedAt"]
+
+    duplicates = api.handle("duplicate_people", {"threshold": 0.5, "limit": 5})
+    assert duplicates["peopleChecked"] >= 1
+    assert "suggestions" in duplicates
+
+    ruled_candidate_id = next(iter(api.project.candidates))
+    api.project.candidates[ruled_candidate_id].status = "pending"
+    api.project.candidates[ruled_candidate_id].score = 0.01
+    api.project.save()
+    rules_state = api.handle(
+        "save_settings",
+        {
+            "thresholds": current_config["thresholds"],
+            "clusterMinSize": current_config["clusterMinSize"],
+            "faceDetectorSize": current_config["faceDetectorSize"],
+            "twoPassScan": current_config["twoPassScan"],
+            "verificationDetectorSize": current_config["verificationDetectorSize"],
+            "safeMode": current_config["safeMode"],
+            "safeModeThreshold": current_config["safeModeThreshold"],
+            "storageBudgetBytes": 1,
+            "reviewRules": {
+                "autoRejectBelow": 0.2,
+                "autoUncertainLowQuality": True,
+                "autoRejectLowQualityVideo": True,
+            },
+        },
+    )
+    assert rules_state["config"]["reviewRules"]["autoRejectBelow"] == 0.2
+    ruled = api.handle("apply_review_rules", {})
+    assert ruled["value"]["updated"] >= 1
+    assert ruled["state"]["counts"]["pending"] == 0
 
     backup = api.handle("export_workspace_backup", {"includeGenerated": False})
     backup_value = backup["value"]
@@ -442,6 +1439,46 @@ def assert_operational_use_case_commands() -> None:
         manifest = json.loads(archive.read("backup-manifest.json").decode("utf-8"))
         assert manifest["counts"]["references"] == 1
         assert manifest["counts"]["candidates"] == 1
+    verified_backup = api.handle("verify_workspace_backup", {"path": str(backup_path)})
+    assert verified_backup["value"]["ok"] is True
+    assert verified_backup["value"]["fileCount"] == backup_value["fileCount"]
+    latest_verified = api.handle("verify_workspace_backup", {})
+    assert latest_verified["value"]["ok"] is True
+    second_backup = api.handle("export_workspace_backup", {"includeGenerated": False})
+    second_backup_path = Path(second_backup["value"]["zipPath"])
+    pruned_backups = api.handle("prune_workspace_backups", {"keep": 1})
+    assert pruned_backups["value"]["deleted"] >= 1
+    assert pruned_backups["value"]["deletedBytes"] > 0
+    assert any(second_backup_path.parent.glob("vintrace-workspace-backup-*.zip"))
+    bad_backup = backup_path.parent / "vintrace-workspace-backup-bad.zip"
+    bad_backup.write_text("not a zip", encoding="utf-8")
+    bad_verified = api.handle("verify_workspace_backup", {"path": str(bad_backup)})
+    assert bad_verified["value"]["ok"] is False
+    assert bad_verified["value"]["error"]
+    malformed_backup = backup_path.parent / "vintrace-workspace-backup-malformed.zip"
+    with zipfile.ZipFile(malformed_backup, "w") as archive:
+        archive.writestr("backup-manifest.json", json.dumps({"createdAt": "now"}))
+        archive.writestr("config.json", "{not json")
+        archive.writestr("references.json", "[]")
+        archive.writestr("workspace.sqlite3", b"sqlite placeholder")
+        archive.writestr("C:/escape.txt", "nope")
+    malformed_verified = api.handle("verify_workspace_backup", {"path": str(malformed_backup)})
+    assert malformed_verified["value"]["ok"] is False
+    assert "config.json" in malformed_verified["value"]["invalidCoreFiles"]
+    assert "C:/escape.txt" in malformed_verified["value"]["dangerousEntries"]
+
+    api.project.db.create_scan_run("old-run-a", "old A", "test", str(root), total=1)
+    api.project.db.create_scan_run("old-run-b", "old B", "test", str(root), total=1)
+    pruned_manifests = api.handle("prune_scan_manifests", {"keepRuns": 1})
+    assert pruned_manifests["value"]["runsDeleted"] >= 1
+    assert pruned_manifests["value"]["runsAfter"] == 1
+
+    blocked = api.handle("block_false_match", {"candidateId": candidate_id})
+    assert blocked["value"]["blocked"] == 1
+    assert blocked["state"]["calibration"]["falseMatchBlocks"] >= 1
+    reassigned = api.handle("reassign_candidate_person", {"candidateId": candidate_id, "personName": "Other Person"})
+    assert reassigned["value"]["personName"] == "Other Person"
+    assert reassigned["state"]["candidates"][0]["personName"] == "Other Person"
 
     self_test = api.handle("runtime_self_test", {})
     check_names = {check["name"] for check in self_test["checks"]}
@@ -449,9 +1486,9 @@ def assert_operational_use_case_commands() -> None:
     assert self_test["generatedAt"]
     assert self_test["recommendations"]
 
-    audit = api.handle("audit_events", {"limit": 8, "offset": 0})
+    audit = api.handle("audit_events", {"limit": 80, "offset": 0})
     actions = {row.get("action") for row in audit["events"]}
-    assert {"export_workspace_backup", "export_report", "rename_person"} <= actions
+    assert {"export_workspace_backup", "verify_workspace_backup", "export_report", "export_scan_history", "export_workspace_inventory", "export_audit_log", "export_consent_receipt", "export_safe_mode_audit", "export_review_ledger", "export_support_bundle", "prune_workspace_backups", "prune_scan_manifests", "relink_workspace_paths", "rename_person"} <= actions
 
     api.project.candidates[candidate_id].created_at = "2000-01-01T00:00:00Z"
     api.project.save()
@@ -459,10 +1496,234 @@ def assert_operational_use_case_commands() -> None:
     assert purged["purged"] == 1
     assert purged["state"]["counts"]["candidates"] == 0
 
+    api.project.references["ref_missing"] = ReferenceFace(
+        ref_id="ref_missing",
+        person_name="Missing Person",
+        age_bucket="unknown",
+        source_path=str(root / "missing-reference.jpg"),
+        capture_date=None,
+        quality=0.9,
+        model_name="test",
+        vector=[1.0] + [0.0] * 511,
+    )
+    api.project.candidates["cand_missing"] = ReviewCandidate(
+        candidate_id="cand_missing",
+        source_path=str(root / "missing-candidate.jpg"),
+        person_name="Missing Person",
+        best_ref_id="ref_missing",
+        best_ref_path=str(root / "missing-reference.jpg"),
+        score=0.9,
+        band="confident",
+        quality=0.9,
+        model_name="test",
+    )
+    api.project.save()
+    broken_health = api.handle("workspace_health", {})
+    assert broken_health["missingReferences"] == 1
+    assert broken_health["missingCandidates"] == 1
+    assert broken_health["missingReferenceSamples"]
+    repair_preview = api.handle("repair_workspace", {"dryRun": True})
+    assert repair_preview["value"]["dryRun"] is True
+    assert repair_preview["value"]["removedReferences"] == 1
+    repaired = api.handle("repair_workspace", {"dryRun": False})
+    assert repaired["value"]["removedReferences"] == 1
+    assert repaired["value"]["removedCandidates"] == 1
+    assert repaired["value"]["after"]["missingReferences"] == 0
+    assert repaired["state"]["counts"]["references"] == 1
+    assert "ref_missing" not in api.project.references
+    assert "cand_missing" not in api.project.candidates
+
     deleted = api.handle("delete_person", {"personName": "Person Prime"})
     assert deleted["deleted"]["references"] == 1
     assert deleted["state"]["counts"]["references"] == 0
     expect_raises(KeyError, lambda: api.handle("delete_person", {"personName": "Person Prime"}), "Person")
+
+
+def assert_privacy_controls_delete_face_data() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-privacy-"))
+    refs = root / "refs"
+    scan = root / "scan"
+    make_face(refs / "person.jpg")
+    make_face(scan / "candidate.jpg")
+    api = make_api(root / "workspace")
+    api.handle("set_consent", {"value": True})
+    assert api.handle("enroll", {"personName": "Person", "folder": str(refs)})["added"] == 1
+    scanned = api.handle("scan", {"folder": str(scan), "source": "privacy"})
+    assert scanned["state"]["counts"]["candidates"] == 1
+    candidate_id = scanned["state"]["candidates"][0]["candidateId"]
+    blocked = api.handle("block_false_match", {"candidateId": candidate_id})
+    assert blocked["value"]["summary"]["total"] == 1
+    before = api.handle("privacy_report", {})
+    assert before["references"] == 1
+    assert before["candidates"] == 1
+    expect_raises(ValueError, lambda: api.handle("delete_face_data", {"confirm": False}), "confirm=true")
+    deleted = api.handle("delete_face_data", {"confirm": True})
+    assert deleted["value"]["before"]["references"] == 1
+    assert deleted["value"]["dbDeleted"]["blocked_pairs"] == 1
+    assert deleted["state"]["counts"]["references"] == 0
+    assert deleted["state"]["counts"]["candidates"] == 0
+    after = api.handle("privacy_report", {})
+    assert after["references"] == 0
+    assert after["candidates"] == 0
+    assert after["embeddingCacheEntries"] == 0
+
+
+def assert_repair_blocks_likely_disconnected_roots() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-repair-guard-"))
+    missing_root = root / "offline-drive"
+    api = make_api(root / "workspace")
+    for index in range(3):
+        ref_id = f"ref_offline_{index}"
+        candidate_id = f"cand_offline_{index}"
+        api.project.references[ref_id] = ReferenceFace(
+            ref_id=ref_id,
+            person_name=f"Offline {index}",
+            age_bucket="unknown",
+            source_path=str(missing_root / f"ref-{index}.jpg"),
+            capture_date=None,
+            quality=0.9,
+            model_name="test",
+            vector=[1.0] + [0.0] * 511,
+        )
+        api.project.candidates[candidate_id] = ReviewCandidate(
+            candidate_id=candidate_id,
+            source_path=str(missing_root / f"candidate-{index}.jpg"),
+            person_name=f"Offline {index}",
+            best_ref_id=ref_id,
+            best_ref_path=str(missing_root / f"ref-{index}.jpg"),
+            score=0.9,
+            band="confident",
+            quality=0.9,
+            model_name="test",
+        )
+    api.project.save()
+    blocked = api.handle("repair_workspace", {"dryRun": False})
+    assert blocked["value"]["destructiveBlocked"] is True
+    assert blocked["value"]["unavailableRoots"]
+    assert len(api.project.references) == 3
+    assert len(api.project.candidates) == 3
+    forced = api.handle("repair_workspace", {"dryRun": False, "force": True})
+    assert forced["value"]["destructiveBlocked"] is False
+    assert forced["value"]["removedReferences"] == 3
+    assert forced["value"]["removedCandidates"] == 3
+    assert len(api.project.references) == 0
+    assert len(api.project.candidates) == 0
+
+
+def assert_relink_blocks_partial_moves() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-relink-guard-"))
+    old_root = root / "old"
+    new_root = root / "new"
+    make_face(old_root / "a.jpg")
+    make_face(old_root / "b.jpg")
+    make_face(new_root / "a.jpg")
+    api = make_api(root / "workspace")
+    for name in ("a", "b"):
+        api.project.references[f"ref_{name}"] = ReferenceFace(
+            ref_id=f"ref_{name}",
+            person_name=f"Person {name.upper()}",
+            age_bucket="unknown",
+            source_path=str(old_root / f"{name}.jpg"),
+            capture_date=None,
+            quality=0.9,
+            model_name="test",
+            vector=[1.0] + [0.0] * 511,
+        )
+    api.project.save()
+
+    blocked = api.handle("relink_workspace_paths", {"oldRoot": str(old_root), "newRoot": str(new_root), "dryRun": False})
+    assert blocked["value"]["partialBlocked"] is True
+    assert blocked["value"]["missingTargets"]
+    assert api.project.references["ref_a"].source_path == str(old_root / "a.jpg")
+    assert api.project.references["ref_b"].source_path == str(old_root / "b.jpg")
+
+    forced = api.handle("relink_workspace_paths", {"oldRoot": str(old_root), "newRoot": str(new_root), "dryRun": False, "forcePartial": True})
+    assert forced["value"]["partialBlocked"] is False
+    assert api.project.references["ref_a"].source_path == str((new_root / "a.jpg").resolve())
+    assert api.project.references["ref_b"].source_path == str(old_root / "b.jpg")
+
+
+def assert_generated_cache_ownership_guards() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-cache-owner-"))
+    api = make_api(root / "workspace")
+    source = root / "source.tiff"
+    Image.new("RGB", (80, 64), (110, 130, 150)).save(source, format="TIFF")
+
+    external_previews = root / "external-previews"
+    external_previews.mkdir()
+    preview_marker = external_previews / "keep.txt"
+    preview_marker.write_text("keep", encoding="utf-8")
+    shutil.rmtree(api.project.previews_path, ignore_errors=True)
+    try:
+        api.project.previews_path.symlink_to(external_previews, target_is_directory=True)
+    except OSError:
+        api.project.previews_path.mkdir(parents=True, exist_ok=True)
+        preview_marker = api.project.previews_path / "keep.txt"
+        preview_marker.write_text("keep", encoding="utf-8")
+
+    assert api.project.preview_path_for(str(source), create=True) is None
+    assert preview_marker.exists()
+
+    external_frames = root / "external-frames"
+    external_frames.mkdir()
+    frame_marker = external_frames / "keep.txt"
+    frame_marker.write_text("keep", encoding="utf-8")
+    shutil.rmtree(api.project.video_frames_path, ignore_errors=True)
+    try:
+        api.project.video_frames_path.symlink_to(external_frames, target_is_directory=True)
+    except OSError:
+        api.project.video_frames_path.mkdir(parents=True, exist_ok=True)
+        frame_marker = api.project.video_frames_path / "keep.txt"
+        frame_marker.write_text("keep", encoding="utf-8")
+
+    optimized = api.handle("optimize_workspace", {})
+    skipped = set(optimized["value"].get("skippedUnownedGeneratedDirs", []))
+    assert str(api.project.previews_path) in skipped
+    assert str(api.project.video_frames_path) in skipped
+    assert preview_marker.exists()
+    assert frame_marker.exists()
+
+    deleted = api.handle("delete_face_data", {"confirm": True})
+    assert deleted["state"]["counts"]["candidates"] == 0
+    assert preview_marker.exists()
+    assert frame_marker.exists()
+
+    exports_target = root / "external-exports"
+    exports_target.mkdir()
+    exports = api.project.root / "exports"
+    shutil.rmtree(exports, ignore_errors=True)
+    try:
+        exports.symlink_to(exports_target, target_is_directory=True)
+        pruned = api.handle("prune_workspace_backups", {"keep": 1})
+        assert pruned["value"]["blocked"] is True
+    except OSError:
+        pass
+
+
+def assert_retention_skips_undated_candidates() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-retention-date-"))
+    api = make_api(root / "workspace")
+    valid_id = "cand_old"
+    invalid_id = "cand_undated"
+    for candidate_id, created_at in ((valid_id, "2000-01-01T00:00:00Z"), (invalid_id, "not-a-date")):
+        api.project.candidates[candidate_id] = ReviewCandidate(
+            candidate_id=candidate_id,
+            source_path=str(root / f"{candidate_id}.jpg"),
+            person_name="Person",
+            best_ref_id="ref",
+            best_ref_path=str(root / "ref.jpg"),
+            score=0.9,
+            band="confident",
+            quality=0.9,
+            model_name="test",
+            status="accepted",
+            created_at=created_at,
+        )
+    api.project.save()
+    purged = api.handle("purge_old_candidates", {"days": 1, "statuses": ["accepted"]})
+    assert purged["purged"] == 1
+    assert valid_id not in api.project.candidates
+    assert invalid_id in api.project.candidates
 
 
 def assert_review_and_settings_guards() -> None:
@@ -474,7 +1735,26 @@ def assert_review_and_settings_guards() -> None:
     expect_raises(ValueError, lambda: api.handle("save_settings", {"thresholds": "bad"}), "object")
     expect_raises(ValueError, lambda: api.handle("save_settings", {"thresholds": {"confident": 0.1, "likely": 0.5}}), "descending")
     expect_raises(ValueError, lambda: api.handle("save_settings", {"clusterMinSize": 1}), "at least 2")
+    expect_raises(ValueError, lambda: api.handle("save_settings", {"clusterMinSize": MAX_CLUSTER_MIN_SIZE + 1}), "or lower")
+    expect_raises(ValueError, lambda: api.handle("save_settings", {"thresholds": {"qualityMin": float("nan")}}), "between 0 and 1")
     expect_raises(ValueError, lambda: api.handle("save_settings", {"safeModeThreshold": 2}), "between 0 and 1")
+    expect_raises(ValueError, lambda: api.handle("save_settings", {"safeModeThreshold": float("inf")}), "between 0 and 1")
+    expect_raises(ValueError, lambda: api.handle("save_settings", {"reviewRules": "bad"}), "object")
+    expect_raises(ValueError, lambda: api.handle("save_settings", {"reviewRules": {"autoRejectBelow": 2}}), "between 0 and 1")
+    expect_raises(ValueError, lambda: api.handle("save_settings", {"maxMediaFileBytes": -1}), "zero or higher")
+    expect_raises(ValueError, lambda: api.handle("save_settings", {"scanExclusions": "bad"}), "object")
+    expect_raises(ValueError, lambda: api.handle("save_settings", {"scanExclusions": {"dirNames": "bad"}}), "list")
+    expect_raises(ValueError, lambda: api.handle("save_settings", {"faceDetectorSize": 128}), "at least")
+    expect_raises(ValueError, lambda: api.handle("save_settings", {"faceDetectorSize": 2048}), "or lower")
+    expect_raises(ValueError, lambda: api.handle("save_settings", {"verificationDetectorSize": 128}), "at least")
+    expect_raises(ValueError, lambda: api.handle("save_settings", {"verificationDetectorSize": 2048}), "or lower")
+    tuned = api.handle("save_settings", {"faceDetectorSize": 500, "verificationDetectorSize": 630, "twoPassScan": True})
+    assert tuned["config"]["faceDetectorSize"] == 512
+    assert tuned["config"]["verificationDetectorSize"] == 640
+    assert tuned["config"]["twoPassScan"] is True
+    excluded = api.handle("save_settings", {"scanExclusions": {"dirNames": ["skipme"], "pathKeywords": ["private"], "extensions": ["gif"], "filePaths": [str(root / "ignored.jpg")]}})
+    assert excluded["config"]["scanExclusions"]["extensions"] == [".gif"]
+    assert excluded["config"]["scanExclusions"]["filePaths"] == [str(root / "ignored.jpg")]
     expect_raises(ValueError, lambda: api.handle("set_status", {"candidateId": "missing", "status": "bad"}), "Unsupported")
     expect_raises(KeyError, lambda: api.handle("delete_reference", {"refId": "missing"}), "Reference")
     expect_raises(ValueError, lambda: api.handle("rename_person", {"oldName": "", "newName": "A"}), "required")
@@ -527,14 +1807,33 @@ def assert_backend_json_rpc_errors() -> None:
     responses = lines[ready_index + 1:]
     assert responses[0]["ok"] is False
     assert responses[0]["error"]["type"] == "JSONDecodeError"
+    assert responses[0]["error"]["code"] == "E-BACKEND-UNKNOWN"
     assert responses[1]["ok"] is False
     assert "request must be an object" in responses[1]["error"]["message"]
+    assert responses[1]["error"]["code"] == "E-BACKEND-VALIDATION"
     assert responses[2]["id"] == 6
     assert responses[2]["ok"] is False
     assert "parameters must be an object" in responses[2]["error"]["message"]
+    assert responses[2]["error"]["code"] == "E-BACKEND-VALIDATION"
     assert responses[3]["id"] == 7
     assert responses[3]["ok"] is False
     assert "Unknown command" in responses[3]["error"]["message"]
+    assert responses[3]["error"]["code"] == "E-BACKEND-VALIDATION"
+
+
+def assert_structured_backend_error_codes() -> None:
+    validation = structured_error(ValueError("bad folder"), "scan")
+    assert validation["code"] == "E-BACKEND-VALIDATION"
+    assert validation["category"] == "input"
+    assert validation["severity"] == "warn"
+    assert validation["recoverable"] is True
+    permission = structured_error(PermissionError("locked"), "scan")
+    assert permission["code"] == "E-BACKEND-PERMISSION"
+    missing = structured_error(FileNotFoundError("gone"), "scan")
+    assert missing["code"] == "E-FS-NOT-FOUND"
+    unknown = structured_error(RuntimeError("boom"), "scan")
+    assert unknown["code"] == "E-BACKEND-UNKNOWN"
+    assert unknown["recoverable"] is False
 
 
 def main() -> None:
@@ -544,12 +1843,34 @@ def main() -> None:
     assert_command_validation_and_empty_inputs()
     assert_consent_workspace_registry_and_audit_pagination()
     assert_broken_and_sensitive_images_do_not_pollute_queue()
+    assert_image_decompression_guard()
     assert_static_app_contracts()
     assert_model_downloader_integrity_and_safe_extract()
+    assert_corrupt_installed_models_fail_integrity()
+    assert_unmatched_clustering_flushes_in_batches()
+    assert_embedding_cache_reuses_face_work()
+    assert_duplicate_content_is_suppressed_across_paths()
+    assert_scan_candidates_survive_without_json_snapshot()
+    assert_large_store_dedupe_uses_sqlite_lookup()
+    assert_heuristic_fallback_safety_is_not_cached()
+    assert_hashing_can_be_cancelled()
+    assert_external_drive_discovery_edges()
+    assert_mutating_file_is_deferred()
+    assert_scan_exclusions_are_honored()
+    assert_scan_folder_reports_discovery_errors()
+    assert_video_frame_orphans_are_pruned()
+    assert_scan_cancel_and_resume_manifest()
+    assert_stale_candidate_manifest_is_reprocessed()
     assert_operational_use_case_commands()
+    assert_privacy_controls_delete_face_data()
+    assert_repair_blocks_likely_disconnected_roots()
+    assert_relink_blocks_partial_moves()
+    assert_generated_cache_ownership_guards()
+    assert_retention_skips_undated_candidates()
     assert_review_and_settings_guards()
     assert_vector_store_edges()
     assert_backend_json_rpc_errors()
+    assert_structured_backend_error_codes()
     print("edge cases ok")
 
 

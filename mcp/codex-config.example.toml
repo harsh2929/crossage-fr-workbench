@@ -1,10 +1,11 @@
-[mcp_servers.crossage-fr]
-command = "/Users/harshbishnoi/face/.venv/bin/python"
-args = ["-m", "crossage_fr.mcp_server", "--workspace", "/Users/harshbishnoi/face/crossage_project"]
-cwd = "/Users/harshbishnoi/face"
+[mcp_servers.vintrace]
+command = "/absolute/path/to/face/.venv/bin/python"
+args = ["-m", "crossage_fr.mcp_server", "--workspace", "/absolute/path/to/vintrace-workspace"]
+cwd = "/absolute/path/to/face"
 startup_timeout_sec = 20
 tool_timeout_sec = 600
 
-[mcp_servers.crossage-fr.env]
-PYTHONPATH = "/Users/harshbishnoi/face"
-CROSSAGE_WORKSPACE = "/Users/harshbishnoi/face/crossage_project"
+[mcp_servers.vintrace.env]
+PYTHONPATH = "/absolute/path/to/face"
+VINTRACE_WORKSPACE = "/absolute/path/to/vintrace-workspace"
+CROSSAGE_WORKSPACE = "/absolute/path/to/vintrace-workspace"

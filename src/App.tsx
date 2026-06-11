@@ -11,15 +11,21 @@ import {
   ChevronRight,
   Crosshair,
   Database,
+  Download,
   ExternalLink,
   Eye,
   EyeOff,
+  FileText,
   FolderOpen,
   Focus,
   Gauge,
   HardDrive,
   Image as ImageIcon,
+  KeyRound,
+  Lock,
   Loader2,
+  Pause,
+  Play,
   RefreshCcw,
   Save,
   Search,
@@ -31,13 +37,15 @@ import {
   Timer,
   Trash2,
   Undo2,
+  Unlock,
   UserPlus,
   Users,
   Video,
   X
 } from "lucide-react";
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
+import appIconUrl from "../desktop/assets/icon.png";
 import type {
   AgeBucket,
   AgeReferenceGroup,
@@ -46,29 +54,131 @@ import type {
   CameraSaveResult,
   CandidateStatus,
   CommandResult,
+  AccuracyEvaluation,
+  AccuracyLabelsExportValue,
+  AccuracyLabelsImportValue,
+  AuditLogExportValue,
+  ConsentReceiptExportValue,
+  DeleteFaceDataResult,
   ExportReportValue,
   AppCommand,
   ExternalOpenPayload,
   FolderAnalysis,
   FolderWatchStatus,
+  DuplicatePeopleResult,
+  InstallerDiagnosticsResult,
+  MediaBundleExportValue,
+  ModelDriftReport,
+  ModelIntegrityResult,
   ModelDownloadProgress,
+  PrivacyReport,
+  RetentionPolicyReport,
+  ReleaseReadinessResult,
   ReviewCandidate,
+  ReviewLedgerExportValue,
+  ReviewRulesApplyResult,
+  RuntimeBenchmarkResult,
   RuntimeSelfTestResult,
+  SafeModeAuditExportValue,
+  ScanManifestPruneValue,
   ScanProgress,
+  StorageBudgetEnforceResult,
   SystemIntegration,
+  SystemPhotoSource,
   Thresholds,
+  UpdateChannel,
+  ScanHistoryExportValue,
+  SupportBundleValue,
+  WorkspaceInventoryExportValue,
   WorkspaceBackupValue,
-  WorkspaceHealth
+  WorkspaceBackupPruneValue,
+  WorkspaceBackupVerification,
+  WorkspaceLockStatus,
+  WorkspaceHealth,
+  WorkspaceOptimizeResult,
+  WorkspaceRepairResult,
+  WorkspaceRelinkResult,
+  CandidateQueryResult,
+  DiagnosticsReport,
+  UpdateStatus
 } from "./types";
+import { formatErrorMessage, formatUiMessage, languageOptions, localizeDom, normalizeLanguage, translate, translateUiText } from "./i18n";
+import type { LanguageCode, TranslationKey, UiMessageKey } from "./i18n";
 
 type TabKey = "dashboard" | "enroll" | "scan" | "review" | "settings";
+type UiMessageValues = Record<string, string | number>;
+type NoticeState = { tone: "ok" | "warn" | "error"; text: string; messageKey?: UiMessageKey; values?: UiMessageValues; errorCode?: string; action?: string };
 
-const tabs: Array<{ key: TabKey; label: string; icon: typeof Gauge }> = [
-  { key: "dashboard", label: "Home", icon: Gauge },
-  { key: "enroll", label: "People", icon: UserPlus },
-  { key: "scan", label: "Scan", icon: Search },
-  { key: "review", label: "Matches", icon: ShieldCheck },
-  { key: "settings", label: "Settings", icon: Settings }
+const languageStorageKey = "vintrace:language";
+
+let imperativeLanguage: LanguageCode = "en";
+
+function setImperativeLanguage(language: LanguageCode) {
+  imperativeLanguage = language;
+}
+
+function localizeImperativeText(source: string) {
+  return translateUiText(imperativeLanguage, source);
+}
+
+function parseErrorCodeFromText(value: string) {
+  return value.match(/\b([EW]-[A-Z0-9-]{2,})\b/)?.[1] || "";
+}
+
+function stripIpcErrorPrefix(value: string) {
+  return value
+    .replace(/^Error invoking remote method '[^']+':\s*/i, "")
+    .replace(/^Error:\s*/i, "")
+    .replace(/^\[[EW]-[A-Z0-9-]{2,}\]\s*/, "")
+    .trim();
+}
+
+function errorDetails(error: unknown, fallback = "The action failed.") {
+  const raw = error instanceof Error ? error.message : String(error || fallback);
+  const text = stripIpcErrorPrefix(raw) || fallback;
+  const objectError: { code?: unknown; action?: unknown } = error && typeof error === "object" ? error as { code?: unknown; action?: unknown } : {};
+  return {
+    text,
+    code: String(objectError.code || parseErrorCodeFromText(raw) || ""),
+    action: String(objectError.action || "")
+  };
+}
+
+function currentIntlLocale() {
+  const locales: Record<LanguageCode, string> = {
+    en: "en",
+    zh: "zh-CN",
+    es: "es",
+    fr: "fr",
+    ar: "ar",
+    hi: "hi-IN",
+    ja: "ja-JP"
+  };
+  return locales[imperativeLanguage] || "en";
+}
+
+function confirmUi(message: string) {
+  return window.confirm(localizeImperativeText(message));
+}
+
+function promptUi(message: string, defaultValue = "") {
+  return window.prompt(localizeImperativeText(message), defaultValue);
+}
+
+function skippedSummary(count: number) {
+  return count > 0 ? ` ${count} skipped.` : "";
+}
+
+function protectedSummary(count: number) {
+  return count > 0 ? ` Safe Mode protected ${count} file(s).` : "";
+}
+
+const tabs: Array<{ key: TabKey; labelKey: TranslationKey; icon: typeof Gauge }> = [
+  { key: "dashboard", labelKey: "nav.dashboard", icon: Gauge },
+  { key: "enroll", labelKey: "nav.enroll", icon: UserPlus },
+  { key: "scan", labelKey: "nav.scan", icon: Search },
+  { key: "review", labelKey: "nav.review", icon: ShieldCheck },
+  { key: "settings", labelKey: "nav.settings", icon: Settings }
 ];
 
 const ageBuckets: AgeBucket[] = ["child", "adolescent", "adult", "unknown"];
@@ -81,6 +191,25 @@ function reviewStatusLabel(status: CandidateStatus | "all") {
   if (status === "uncertain") return "Not sure";
   if (status === "pending") return "Needs review";
   return "All";
+}
+
+function folderAnalysisIssueCount(analysis: FolderAnalysis | null) {
+  if (!analysis) return 0;
+  const storageIssue = analysis.storage && (!analysis.storage.readable || !analysis.storage.traversable) ? 1 : 0;
+  return (
+    analysis.unreadableSamples.length +
+    analysis.unreadableVideoSamples.length +
+    (analysis.transientErrorCount ?? 0) +
+    (analysis.statErrorCount ?? 0) +
+    (analysis.walkErrorCount ?? 0) +
+    storageIssue
+  );
+}
+
+function isFolderAnalysisReady(analysis: FolderAnalysis | null) {
+  if (!analysis) return false;
+  const mediaCount = analysis.imageCount + analysis.videoCount;
+  return Boolean(analysis.exists && analysis.isDirectory && mediaCount > 0 && folderAnalysisIssueCount(analysis) === 0);
 }
 
 function decisionButtonLabel(status: CandidateStatus) {
@@ -155,8 +284,24 @@ const performanceProfiles: Record<PerformanceMode, PerformanceProfile> = {
 type SettingsDraft = {
   thresholds: Thresholds;
   clusterMinSize: number;
+  faceDetectorSize: number;
+  twoPassScan: boolean;
+  verificationDetectorSize: number;
   safeMode: boolean;
   safeModeThreshold: number;
+  storageBudgetBytes: number;
+  maxMediaFileBytes: number;
+  reviewRules: {
+    autoRejectBelow: number;
+    autoUncertainLowQuality: boolean;
+    autoRejectLowQualityVideo: boolean;
+  };
+  scanExclusions: {
+    dirNames: string[];
+    pathKeywords: string[];
+    extensions: string[];
+    filePaths: string[];
+  };
   mode: SettingsMode;
 };
 
@@ -172,6 +317,13 @@ type SettingsPreset = {
   values: SettingsValues;
 };
 
+const defaultScanExclusions = {
+  dirNames: [".git", ".hg", ".svn", ".cache", ".venv", "__pycache__", "node_modules", "venv"],
+  pathKeywords: [],
+  extensions: [],
+  filePaths: []
+};
+
 const settingsPresets: SettingsPreset[] = [
   {
     key: "recommended",
@@ -181,8 +333,15 @@ const settingsPresets: SettingsPreset[] = [
     values: {
       thresholds: { confident: 0.4, likely: 0.28, relaxedChild: 0.2, qualityMin: 0.15 },
       clusterMinSize: 2,
+      faceDetectorSize: 512,
+      twoPassScan: true,
+      verificationDetectorSize: 640,
       safeMode: true,
-      safeModeThreshold: 0.58
+      safeModeThreshold: 0.58,
+      storageBudgetBytes: 0,
+      maxMediaFileBytes: 0,
+      reviewRules: { autoRejectBelow: 0, autoUncertainLowQuality: false, autoRejectLowQualityVideo: false },
+      scanExclusions: defaultScanExclusions
     }
   },
   {
@@ -193,8 +352,15 @@ const settingsPresets: SettingsPreset[] = [
     values: {
       thresholds: { confident: 0.44, likely: 0.32, relaxedChild: 0.24, qualityMin: 0.2 },
       clusterMinSize: 3,
+      faceDetectorSize: 512,
+      twoPassScan: true,
+      verificationDetectorSize: 640,
       safeMode: true,
-      safeModeThreshold: 0.45
+      safeModeThreshold: 0.45,
+      storageBudgetBytes: 0,
+      maxMediaFileBytes: 0,
+      reviewRules: { autoRejectBelow: 0, autoUncertainLowQuality: false, autoRejectLowQualityVideo: false },
+      scanExclusions: defaultScanExclusions
     }
   },
   {
@@ -205,8 +371,15 @@ const settingsPresets: SettingsPreset[] = [
     values: {
       thresholds: { confident: 0.56, likely: 0.42, relaxedChild: 0.3, qualityMin: 0.24 },
       clusterMinSize: 3,
+      faceDetectorSize: 640,
+      twoPassScan: false,
+      verificationDetectorSize: 640,
       safeMode: true,
-      safeModeThreshold: 0.58
+      safeModeThreshold: 0.58,
+      storageBudgetBytes: 0,
+      maxMediaFileBytes: 0,
+      reviewRules: { autoRejectBelow: 0, autoUncertainLowQuality: false, autoRejectLowQualityVideo: false },
+      scanExclusions: defaultScanExclusions
     }
   },
   {
@@ -217,8 +390,15 @@ const settingsPresets: SettingsPreset[] = [
     values: {
       thresholds: { confident: 0.34, likely: 0.24, relaxedChild: 0.16, qualityMin: 0.1 },
       clusterMinSize: 2,
+      faceDetectorSize: 384,
+      twoPassScan: true,
+      verificationDetectorSize: 640,
       safeMode: true,
-      safeModeThreshold: 0.62
+      safeModeThreshold: 0.62,
+      storageBudgetBytes: 0,
+      maxMediaFileBytes: 0,
+      reviewRules: { autoRejectBelow: 0, autoUncertainLowQuality: false, autoRejectLowQualityVideo: false },
+      scanExclusions: defaultScanExclusions
     }
   }
 ];
@@ -230,7 +410,7 @@ function emptyAgeFolders(): AgeFolderMap {
 }
 
 const initialWatchStatus: FolderWatchStatus = { active: false, folder: null, queued: 0, scanning: false, message: "Not watching." };
-const onboardingStorageKey = "crossage-fr-workbench:onboarding:v1";
+const onboardingStorageKey = "vintrace:onboarding:v1";
 
 type CameraMode = "idle" | "starting" | "live" | "capturing" | "error";
 
@@ -320,6 +500,30 @@ type CameraScanResult = CameraSaveResult & {
   matched?: boolean;
 };
 
+type SavedScanSource = {
+  id: string;
+  label: string;
+  path: string;
+  createdAt: number;
+  lastUsedAt: number;
+};
+
+type ScanQueueItem = SavedScanSource & {
+  status: "queued" | "running" | "done" | "error";
+  message?: string;
+};
+
+type SavedReviewView = {
+  id: string;
+  label: string;
+  statusFilter: CandidateStatus | "all";
+  reviewLane: "all" | "high" | "lowQuality" | "groups" | "video" | "notes";
+  search: string;
+  sort: "score" | "newest" | "quality";
+  createdAt: number;
+  lastUsedAt: number;
+};
+
 type LatencySample = {
   label: string;
   command: string;
@@ -350,6 +554,24 @@ type ReviewUndo = {
 };
 
 type PendingExternalIntent = Extract<ExternalOpenPayload, { type: "scan-files" }>;
+
+function readInitialLanguage(): LanguageCode {
+  try {
+    const saved = window.localStorage.getItem(languageStorageKey);
+    if (saved) return normalizeLanguage(saved);
+  } catch {
+    // Local storage can be unavailable in restricted renderer contexts.
+  }
+  return normalizeLanguage(typeof navigator !== "undefined" ? navigator.language : "en");
+}
+
+function writeLanguage(language: LanguageCode) {
+  try {
+    window.localStorage.setItem(languageStorageKey, language);
+  } catch {
+    // Local storage can be unavailable in restricted renderer contexts.
+  }
+}
 
 function readOnboardingDismissed() {
   try {
@@ -503,8 +725,9 @@ function createSyntheticCameraStream() {
   const context = canvas.getContext("2d");
   let frame = 0;
   let raf = 0;
+  let stopped = false;
   const paint = () => {
-    if (!context) return;
+    if (stopped || !context) return;
     frame += 1;
     const t = frame / 52;
     const drift = Math.sin(t) * 8;
@@ -545,8 +768,19 @@ function createSyntheticCameraStream() {
   };
   paint();
   const stream = canvas.captureStream(30);
+  const stopAnimation = () => {
+    stopped = true;
+    if (raf) {
+      window.cancelAnimationFrame(raf);
+    }
+  };
   stream.getTracks().forEach((track) => {
-    track.addEventListener("ended", () => window.cancelAnimationFrame(raf), { once: true });
+    const originalStop = track.stop.bind(track);
+    track.stop = () => {
+      stopAnimation();
+      originalStop();
+    };
+    track.addEventListener("ended", stopAnimation, { once: true });
   });
   return stream;
 }
@@ -569,6 +803,217 @@ function sameSettingValue(left: number, right: number) {
   return Math.abs(left - right) < 0.005;
 }
 
+function sameStringList(left: string[], right: string[]) {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
+}
+
+function parseListText(value: string) {
+  const seen = new Set<string>();
+  return value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function finiteNumber(value: unknown, fallback: number, min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY) {
+  const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function finiteInteger(value: unknown, fallback: number, min: number, max: number) {
+  return Math.round(finiteNumber(value, fallback, min, max));
+}
+
+function booleanSetting(value: unknown, fallback: boolean) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(normalized)) return true;
+    if (["false", "0", "no", "off"].includes(normalized)) return false;
+  }
+  return fallback;
+}
+
+function stringListSetting(value: unknown, fallback: string[]) {
+  const raw = Array.isArray(value)
+    ? value.map((item) => typeof item === "string" ? item : "").join("\n")
+    : typeof value === "string"
+      ? value
+      : fallback.join("\n");
+  return parseListText(raw).slice(0, 1000);
+}
+
+function listText(value: string[]) {
+  return Array.isArray(value) ? value.join(", ") : "";
+}
+
+function coerceSettingsProfile(incoming: unknown, current: SettingsDraft): SettingsDraft {
+  const profile = asRecord(incoming);
+  if (!profile) {
+    throw new Error("Profile must contain a settings object.");
+  }
+  const thresholds = asRecord(profile.thresholds) ?? {};
+  const reviewRules = asRecord(profile.reviewRules) ?? {};
+  const scanExclusions = asRecord(profile.scanExclusions) ?? {};
+  return {
+    ...current,
+    thresholds: {
+      confident: finiteNumber(thresholds.confident, current.thresholds.confident, 0, 1),
+      likely: finiteNumber(thresholds.likely, current.thresholds.likely, 0, 1),
+      relaxedChild: finiteNumber(thresholds.relaxedChild, current.thresholds.relaxedChild, 0, 1),
+      qualityMin: finiteNumber(thresholds.qualityMin, current.thresholds.qualityMin, 0, 1)
+    },
+    clusterMinSize: finiteInteger(profile.clusterMinSize, current.clusterMinSize, 1, 100),
+    faceDetectorSize: finiteInteger(profile.faceDetectorSize, current.faceDetectorSize, 128, 2048),
+    twoPassScan: booleanSetting(profile.twoPassScan, current.twoPassScan),
+    verificationDetectorSize: finiteInteger(profile.verificationDetectorSize, current.verificationDetectorSize, 128, 2048),
+    safeMode: booleanSetting(profile.safeMode, current.safeMode),
+    safeModeThreshold: finiteNumber(profile.safeModeThreshold, current.safeModeThreshold, 0, 1),
+    storageBudgetBytes: finiteInteger(profile.storageBudgetBytes, current.storageBudgetBytes, 0, 10 * 1024 * 1024 * 1024 * 1024),
+    maxMediaFileBytes: finiteInteger(profile.maxMediaFileBytes, current.maxMediaFileBytes, 0, 1024 * 1024 * 1024 * 1024),
+    reviewRules: {
+      autoRejectBelow: finiteNumber(reviewRules.autoRejectBelow, current.reviewRules.autoRejectBelow, 0, 1),
+      autoUncertainLowQuality: booleanSetting(reviewRules.autoUncertainLowQuality, current.reviewRules.autoUncertainLowQuality),
+      autoRejectLowQualityVideo: booleanSetting(reviewRules.autoRejectLowQualityVideo, current.reviewRules.autoRejectLowQualityVideo)
+    },
+    scanExclusions: {
+      dirNames: stringListSetting(scanExclusions.dirNames, current.scanExclusions.dirNames),
+      pathKeywords: stringListSetting(scanExclusions.pathKeywords, current.scanExclusions.pathKeywords),
+      extensions: stringListSetting(scanExclusions.extensions, current.scanExclusions.extensions),
+      filePaths: stringListSetting(scanExclusions.filePaths, current.scanExclusions.filePaths)
+    },
+    mode: "custom"
+  };
+}
+
+function savedScanSourcesKey(workspace: string | null | undefined) {
+  return `vintrace:scan-sources:${workspace || "default"}`;
+}
+
+function finiteTimestamp(value: unknown, fallback = Date.now()) {
+  const timestamp = Number(value);
+  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : fallback;
+}
+
+function formatTimestampDateTime(value: unknown) {
+  const timestamp = finiteTimestamp(value);
+  return formatDateTime(new Date(timestamp).toISOString());
+}
+
+function readSavedScanSources(workspace: string | null | undefined): SavedScanSource[] {
+  try {
+    const rows = JSON.parse(window.localStorage.getItem(savedScanSourcesKey(workspace)) || "[]");
+    if (!Array.isArray(rows)) return [];
+    return rows
+      .filter((row) => row && typeof row === "object" && typeof row.path === "string")
+      .map((row) => {
+        const createdAt = finiteTimestamp(row.createdAt);
+        return {
+          id: String(row.id || row.path),
+          label: String(row.label || basename(row.path)),
+          path: String(row.path),
+          createdAt,
+          lastUsedAt: finiteTimestamp(row.lastUsedAt, createdAt)
+        };
+      })
+      .slice(0, 40);
+  } catch {
+    return [];
+  }
+}
+
+function writeSavedScanSources(workspace: string | null | undefined, sources: SavedScanSource[]) {
+  try {
+    window.localStorage.setItem(savedScanSourcesKey(workspace), JSON.stringify(sources.slice(0, 40)));
+  } catch {
+    // Saved scan sources are a convenience; storage failures should not block scans.
+  }
+}
+
+function scanQueueKey(workspace: string | null | undefined) {
+  return `vintrace:scan-queue:${workspace || "default"}`;
+}
+
+function readScanQueue(workspace: string | null | undefined): ScanQueueItem[] {
+  try {
+    const rows = JSON.parse(window.localStorage.getItem(scanQueueKey(workspace)) || "[]");
+    if (!Array.isArray(rows)) return [];
+    return rows
+      .filter((row) => row && typeof row === "object" && typeof row.path === "string")
+      .map((row) => {
+        const createdAt = finiteTimestamp(row.createdAt);
+        return {
+          id: String(row.id || row.path),
+          label: String(row.label || basename(row.path)),
+          path: String(row.path),
+          createdAt,
+          lastUsedAt: finiteTimestamp(row.lastUsedAt, createdAt),
+          status: ["queued", "running", "done", "error"].includes(String(row.status)) ? row.status : "queued",
+          message: typeof row.message === "string" ? row.message : undefined
+        };
+      })
+      .slice(0, 80);
+  } catch {
+    return [];
+  }
+}
+
+function writeScanQueue(workspace: string | null | undefined, queue: ScanQueueItem[]) {
+  try {
+    window.localStorage.setItem(scanQueueKey(workspace), JSON.stringify(queue.slice(0, 80)));
+  } catch {
+    // The queue is resumable convenience state. Scanning should still work without it.
+  }
+}
+
+function savedReviewViewsKey(workspace: string | null | undefined) {
+  return `vintrace:review-views:${workspace || "default"}`;
+}
+
+function readSavedReviewViews(workspace: string | null | undefined): SavedReviewView[] {
+  try {
+    const rows = JSON.parse(window.localStorage.getItem(savedReviewViewsKey(workspace)) || "[]");
+    if (!Array.isArray(rows)) return [];
+    return rows
+      .filter((row) => row && typeof row === "object" && typeof row.label === "string")
+      .map((row) => {
+        const createdAt = finiteTimestamp(row.createdAt);
+        return {
+          id: String(row.id || `${row.label}:${createdAt}`),
+          label: String(row.label).slice(0, 60),
+          statusFilter: ["all", "pending", "accepted", "rejected", "uncertain"].includes(String(row.statusFilter)) ? row.statusFilter : "pending",
+          reviewLane: ["all", "high", "lowQuality", "groups", "video", "notes"].includes(String(row.reviewLane)) ? row.reviewLane : "all",
+          search: String(row.search || "").slice(0, 120),
+          sort: ["score", "newest", "quality"].includes(String(row.sort)) ? row.sort : "score",
+          createdAt,
+          lastUsedAt: finiteTimestamp(row.lastUsedAt, createdAt)
+        };
+      })
+      .slice(0, 16);
+  } catch {
+    return [];
+  }
+}
+
+function writeSavedReviewViews(workspace: string | null | undefined, views: SavedReviewView[]) {
+  try {
+    window.localStorage.setItem(savedReviewViewsKey(workspace), JSON.stringify(views.slice(0, 16)));
+  } catch {
+    // Saved review views are optional UI state.
+  }
+}
+
 function settingsValuesEqual(left: SettingsValues, right: SettingsValues) {
   return (
     sameSettingValue(left.thresholds.confident, right.thresholds.confident) &&
@@ -576,8 +1021,20 @@ function settingsValuesEqual(left: SettingsValues, right: SettingsValues) {
     sameSettingValue(left.thresholds.relaxedChild, right.thresholds.relaxedChild) &&
     sameSettingValue(left.thresholds.qualityMin, right.thresholds.qualityMin) &&
     left.clusterMinSize === right.clusterMinSize &&
+    left.faceDetectorSize === right.faceDetectorSize &&
+    left.twoPassScan === right.twoPassScan &&
+    left.verificationDetectorSize === right.verificationDetectorSize &&
     left.safeMode === right.safeMode &&
-    sameSettingValue(left.safeModeThreshold, right.safeModeThreshold)
+    sameSettingValue(left.safeModeThreshold, right.safeModeThreshold) &&
+    left.storageBudgetBytes === right.storageBudgetBytes &&
+    left.maxMediaFileBytes === right.maxMediaFileBytes &&
+    sameSettingValue(left.reviewRules.autoRejectBelow, right.reviewRules.autoRejectBelow) &&
+    left.reviewRules.autoUncertainLowQuality === right.reviewRules.autoUncertainLowQuality &&
+    left.reviewRules.autoRejectLowQualityVideo === right.reviewRules.autoRejectLowQualityVideo &&
+    sameStringList(left.scanExclusions.dirNames, right.scanExclusions.dirNames) &&
+    sameStringList(left.scanExclusions.pathKeywords, right.scanExclusions.pathKeywords) &&
+    sameStringList(left.scanExclusions.extensions, right.scanExclusions.extensions) &&
+    sameStringList(left.scanExclusions.filePaths, right.scanExclusions.filePaths)
   );
 }
 
@@ -586,7 +1043,7 @@ function inferSettingsMode(values: SettingsValues): SettingsMode {
 }
 
 function formatNumber(value: number) {
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
+  return new Intl.NumberFormat(currentIntlLocale(), { maximumFractionDigits: 0 }).format(value);
 }
 
 function formatRate(value: number) {
@@ -595,13 +1052,23 @@ function formatRate(value: number) {
 }
 
 function formatDuration(ms: number) {
-  if (!ms) return "0s";
-  if (ms < 1000) return `${ms}ms`;
+  const units: Record<LanguageCode, { ms: string; sec: string; min: string }> = {
+    en: { ms: "ms", sec: "s", min: "m" },
+    zh: { ms: "毫秒", sec: "秒", min: "分钟" },
+    es: { ms: "ms", sec: "s", min: "min" },
+    fr: { ms: "ms", sec: "s", min: "min" },
+    ar: { ms: "مللي ثانية", sec: "ث", min: "د" },
+    hi: { ms: "मि.से.", sec: "से.", min: "मि." },
+    ja: { ms: "ミリ秒", sec: "秒", min: "分" }
+  };
+  const unit = units[imperativeLanguage] || units.en;
+  if (!ms) return `0${unit.sec}`;
+  if (ms < 1000) return `${formatNumber(ms)}${unit.ms}`;
   const seconds = Math.round(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 60) return `${formatNumber(seconds)}${unit.sec}`;
   const minutes = Math.floor(seconds / 60);
   const remainder = seconds % 60;
-  return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+  return remainder ? `${formatNumber(minutes)}${unit.min} ${formatNumber(remainder)}${unit.sec}` : `${formatNumber(minutes)}${unit.min}`;
 }
 
 function percentileValue(values: number[], percentile: number) {
@@ -626,7 +1093,7 @@ function summarizeLatency(samples: LatencySample[]): LatencySummary {
 }
 
 function formatBytes(bytes: number) {
-  if (!bytes) return "0 B";
+  if (!bytes) return `0 ${imperativeLanguage === "zh" ? "字节" : "B"}`;
   const units = ["B", "KB", "MB", "GB", "TB"];
   let value = bytes;
   let unit = 0;
@@ -634,14 +1101,15 @@ function formatBytes(bytes: number) {
     value /= 1024;
     unit += 1;
   }
-  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+  const formatted = new Intl.NumberFormat(currentIntlLocale(), { maximumFractionDigits: value >= 10 || unit === 0 ? 0 : 1 }).format(value);
+  return `${formatted} ${units[unit]}`;
 }
 
 function formatDateTime(value: string | null | undefined) {
   if (!value) return "No scans yet";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(date);
+  return new Intl.DateTimeFormat(currentIntlLocale(), { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(date);
 }
 
 function toneFor(value: number) {
@@ -729,13 +1197,14 @@ function firstPendingCandidate(state: AppState | null) {
 }
 
 export default function App() {
+  const [language, setLanguage] = useState<LanguageCode>(() => readInitialLanguage());
   const [state, setState] = useState<AppState | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("dashboard");
   const [busy, setBusy] = useState<string | null>("Starting local engine");
   const [bootError, setBootError] = useState<string | null>(null);
   const [bootStartedAt, setBootStartedAt] = useState(() => Date.now());
   const [bootClock, setBootClock] = useState(() => Date.now());
-  const [notice, setNotice] = useState<{ tone: "ok" | "warn" | "error"; text: string } | null>(null);
+  const [notice, setNotice] = useState<NoticeState | null>(null);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
   const [selectedRefId, setSelectedRefId] = useState<string | null>(null);
   const [personName, setPersonName] = useState("");
@@ -745,12 +1214,36 @@ export default function App() {
   const [scanFolder, setScanFolder] = useState("");
   const [settings, setSettings] = useState<SettingsDraft | null>(null);
   const [systemIntegration, setSystemIntegration] = useState<SystemIntegration | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [diagnosticsReport, setDiagnosticsReport] = useState<DiagnosticsReport | null>(null);
+  const [installerDiagnostics, setInstallerDiagnostics] = useState<InstallerDiagnosticsResult | null>(null);
+  const [photoSources, setPhotoSources] = useState<SystemPhotoSource[]>([]);
+  const [workspaceLock, setWorkspaceLock] = useState<WorkspaceLockStatus | null>(null);
+  const [duplicatePeople, setDuplicatePeople] = useState<DuplicatePeopleResult | null>(null);
+  const [reviewRuleResult, setReviewRuleResult] = useState<ReviewRulesApplyResult | null>(null);
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
+  const [localScanMarkers, setLocalScanMarkers] = useState<{ cancelRequested: boolean; paused: boolean } | null>(null);
   const [modelDownloadProgress, setModelDownloadProgress] = useState<ModelDownloadProgress | null>(null);
   const [folderAnalysis, setFolderAnalysis] = useState<FolderAnalysis | null>(null);
+  const [savedScanSources, setSavedScanSources] = useState<SavedScanSource[]>([]);
+  const [scanQueue, setScanQueue] = useState<ScanQueueItem[]>([]);
+  const [scanQueueRunning, setScanQueueRunning] = useState(false);
+  const [backupVerification, setBackupVerification] = useState<WorkspaceBackupVerification | null>(null);
+  const [backupPruneResult, setBackupPruneResult] = useState<WorkspaceBackupPruneValue | null>(null);
   const [workspaceHealth, setWorkspaceHealth] = useState<WorkspaceHealth | null>(null);
+  const [workspaceOptimizeResult, setWorkspaceOptimizeResult] = useState<WorkspaceOptimizeResult | null>(null);
+  const [workspaceRepairResult, setWorkspaceRepairResult] = useState<WorkspaceRepairResult | null>(null);
+  const [workspaceRelinkResult, setWorkspaceRelinkResult] = useState<WorkspaceRelinkResult | null>(null);
+  const [scanManifestPruneResult, setScanManifestPruneResult] = useState<ScanManifestPruneValue | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEventsResult | null>(null);
   const [runtimeSelfTest, setRuntimeSelfTest] = useState<RuntimeSelfTestResult | null>(null);
+  const [modelIntegrity, setModelIntegrity] = useState<ModelIntegrityResult | null>(null);
+  const [runtimeBenchmark, setRuntimeBenchmark] = useState<RuntimeBenchmarkResult | null>(null);
+  const [releaseReadiness, setReleaseReadiness] = useState<ReleaseReadinessResult | null>(null);
+  const [accuracyEvaluation, setAccuracyEvaluation] = useState<AccuracyEvaluation | null>(null);
+  const [privacyReport, setPrivacyReport] = useState<PrivacyReport | null>(null);
+  const [retentionPolicy, setRetentionPolicy] = useState<RetentionPolicyReport | null>(null);
+  const [modelDriftReport, setModelDriftReport] = useState<ModelDriftReport | null>(null);
   const [watchStatus, setWatchStatus] = useState<FolderWatchStatus>(initialWatchStatus);
   const [latencySamples, setLatencySamples] = useState<LatencySample[]>([]);
   const [performanceMode, setPerformanceMode] = useState<PerformanceMode>("balanced");
@@ -763,10 +1256,153 @@ export default function App() {
   const workspaceRef = useRef<HTMLElement | null>(null);
   const watchStatusRef = useRef<FolderWatchStatus>(initialWatchStatus);
   const startupRequestId = useRef(0);
+  const folderAnalysisRequestId = useRef(0);
   const stateReadyRef = useRef(false);
   const settingsDirtyRef = useRef(false);
+  const rendererReadySentRef = useRef(false);
+  const appCommandHandlerRef = useRef<(command: AppCommand) => void | Promise<void>>(() => undefined);
+  const externalOpenHandlerRef = useRef<(payload: ExternalOpenPayload) => void | Promise<void>>(() => undefined);
   const performanceProfile = performanceProfiles[performanceMode];
   const latencySummary = useMemo(() => summarizeLatency(latencySamples), [latencySamples]);
+  const t = useMemo(() => (key: TranslationKey, values?: Record<string, string | number>) => translate(language, key, values), [language]);
+  const uiText = useMemo(() => (source: string) => translateUiText(language, source), [language]);
+
+  function uiMessage(key: UiMessageKey, values: UiMessageValues = {}) {
+    const localizedValues = Object.fromEntries(
+      Object.entries(values).map(([name, value]) => [name, typeof value === "string" ? uiText(value) : value])
+    );
+    return formatUiMessage(language, key, localizedValues);
+  }
+
+  function setNoticeMessage(tone: NoticeState["tone"], messageKey: UiMessageKey, values: UiMessageValues, fallback: string) {
+    setNotice({ tone, messageKey, values, text: fallback });
+  }
+
+  function setErrorNotice(error: unknown, fallback = "The action failed.") {
+    const details = errorDetails(error, fallback);
+    setNotice({ tone: "error", text: details.text, errorCode: details.code, action: details.action });
+  }
+
+  function confirmUiMessage(messageKey: UiMessageKey, values: UiMessageValues, fallback: string) {
+    return window.confirm(language === "en" ? localizeImperativeText(fallback) : uiMessage(messageKey, values));
+  }
+
+  function changeLanguage(nextLanguage: LanguageCode) {
+    setLanguage(nextLanguage);
+    writeLanguage(nextLanguage);
+  }
+
+  function recordRendererDiagnostic(event: Record<string, unknown>) {
+    window.crossAge.recordDiagnosticEvent({
+      url: window.location.href,
+      ...event
+    }).catch(() => undefined);
+  }
+
+  useEffect(() => {
+    document.documentElement.lang = language;
+    document.documentElement.dir = language === "ar" ? "rtl" : "ltr";
+    setImperativeLanguage(language);
+    window.crossAge.setAppLanguage?.(language).catch(() => undefined);
+  }, [language]);
+
+  useEffect(() => {
+    const payloadFromReason = (reason: unknown) => ({
+      message: reason instanceof Error ? reason.message : String(reason || "Unknown renderer failure."),
+      stack: reason instanceof Error ? reason.stack || "" : "",
+      code: typeof reason === "object" && reason && "code" in reason ? String((reason as { code?: unknown }).code || "") : ""
+    });
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      const message = reason instanceof Error ? reason.message : String(reason || "An action failed.");
+      if (reason && typeof reason === "object" && "__crossageDiagnosticRecorded" in reason) {
+        setErrorNotice(reason, message);
+        event.preventDefault();
+        return;
+      }
+      recordRendererDiagnostic({
+        type: "renderer_unhandled_rejection",
+        level: "error",
+        category: "renderer",
+        ...payloadFromReason(reason)
+      });
+      setErrorNotice(reason, message);
+      event.preventDefault();
+    };
+    const handleWindowError = (event: ErrorEvent) => {
+      recordRendererDiagnostic({
+        type: "renderer_runtime_error",
+        level: "error",
+        category: "renderer",
+        message: event.message || "Renderer runtime error.",
+        stack: event.error instanceof Error ? event.error.stack || "" : "",
+        reason: `${event.filename || ""}:${event.lineno || 0}:${event.colno || 0}`
+      });
+    };
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
+    window.addEventListener("error", handleWindowError);
+    return () => {
+      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
+      window.removeEventListener("error", handleWindowError);
+    };
+  }, []);
+
+  useEffect(() => {
+    let frame = 0;
+    let localizing = false;
+    const root = document.getElementById("root") || document.body;
+    const pendingRoots = new Set<ParentNode>();
+    const enqueueLocalizationRoot = (node: Node | null) => {
+      if (!node) return;
+      const target = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+      if (!target || !root.contains(target)) return;
+      pendingRoots.add(target as ParentNode);
+    };
+    const scheduleLocalization = (target?: ParentNode) => {
+      if (target) pendingRoots.add(target);
+      if (frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        localizing = true;
+        try {
+          const validTargets = [...pendingRoots].filter((node) => node === root || root.contains(node as Node));
+          const targets = validTargets.filter((node) => !validTargets.some((other) => other !== node && (other as Node).contains(node as Node)));
+          pendingRoots.clear();
+          for (const targetRoot of targets) {
+            localizeDom(targetRoot, language);
+          }
+        } finally {
+          localizing = false;
+        }
+      });
+    };
+    const observer = new MutationObserver((mutations) => {
+      if (localizing) return;
+      for (const mutation of mutations) {
+        if (mutation.type === "childList") {
+          enqueueLocalizationRoot(mutation.target);
+          mutation.addedNodes.forEach(enqueueLocalizationRoot);
+        } else if (mutation.type === "attributes") {
+          enqueueLocalizationRoot(mutation.target);
+        } else if (mutation.type === "characterData") {
+          enqueueLocalizationRoot(mutation.target.parentNode);
+        }
+      }
+      scheduleLocalization();
+    });
+    scheduleLocalization(root);
+    observer.observe(root, {
+      attributeFilter: ["alt", "aria-label", "placeholder", "title"],
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true
+    });
+    return () => {
+      observer.disconnect();
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [language]);
 
   useEffect(() => {
     if (workspaceRef.current) {
@@ -775,9 +1411,20 @@ export default function App() {
   }, [activeTab]);
 
   useEffect(() => {
+    setSavedScanSources(readSavedScanSources(state?.workspace));
+    setScanQueue(readScanQueue(state?.workspace));
+  }, [state?.workspace]);
+
+  useEffect(() => {
+    if (state?.workspace) {
+      void refreshScanMarkerStatus();
+    }
+  }, [state?.workspace]);
+
+  useEffect(() => {
     const unsubscribeBackend = window.crossAge.onBackendError((message) => {
       setBootError(message);
-      setNotice({ tone: "error", text: message });
+      setErrorNotice(new Error(message), message);
       setBusy(null);
     });
     const unsubscribeStartup = window.crossAge.onBackendStartup((event) => {
@@ -791,6 +1438,9 @@ export default function App() {
         return;
       }
       setScanProgress(event.payload);
+      if (["complete", "cancelled", "error"].includes(String(event.payload.phase))) {
+        setLocalScanMarkers(null);
+      }
       if (event.payload.source === "watch" && event.payload.phase === "complete") {
         applyWatchStatus((current) => ({
           active: current.active,
@@ -813,12 +1463,44 @@ export default function App() {
         setNotice({ tone: "error", text: status.error });
       }
     });
+    const unsubscribeUpdate = window.crossAge.onUpdateStatus((status) => {
+      setUpdateStatus(status);
+    });
+    let diagnosticsRefreshTimer = 0;
+    const unsubscribeDiagnostics = window.crossAge.onDiagnosticsEvent(() => {
+      setDiagnosticsReport((current) => {
+        if (!current) return current;
+        const includePaths = current.privacy.includesFilePaths;
+        if (diagnosticsRefreshTimer) window.clearTimeout(diagnosticsRefreshTimer);
+        diagnosticsRefreshTimer = window.setTimeout(() => {
+          window.crossAge.getDiagnosticsReport(includePaths)
+            .then(setDiagnosticsReport)
+            .catch(() => undefined);
+        }, 150);
+        return current;
+      });
+    });
+    const unsubscribeCommand = window.crossAge.onAppCommand((command) => {
+      Promise.resolve(appCommandHandlerRef.current(command)).catch((error) => {
+        setErrorNotice(error);
+      });
+    });
+    const unsubscribeExternalOpen = window.crossAge.onExternalOpen((payload) => {
+      Promise.resolve(externalOpenHandlerRef.current(payload)).catch((error) => {
+        setErrorNotice(error);
+      });
+    });
     loadInitialState();
     return () => {
       unsubscribeBackend();
       unsubscribeStartup();
       unsubscribeProgress();
       unsubscribeWatch();
+      unsubscribeUpdate();
+      unsubscribeDiagnostics();
+      if (diagnosticsRefreshTimer) window.clearTimeout(diagnosticsRefreshTimer);
+      unsubscribeCommand();
+      unsubscribeExternalOpen();
     };
   }, []);
 
@@ -844,6 +1526,18 @@ export default function App() {
       .getSystemIntegration()
       .then(setSystemIntegration)
       .catch(() => undefined);
+    window.crossAge
+      .getUpdateStatus()
+      .then(setUpdateStatus)
+      .catch(() => undefined);
+    window.crossAge
+      .getPhotoSources()
+      .then(setPhotoSources)
+      .catch(() => undefined);
+    window.crossAge
+      .getWorkspaceLockStatus()
+      .then(setWorkspaceLock)
+      .catch(() => undefined);
     try {
       const next = await window.crossAge.getInitialState();
       if (requestId !== startupRequestId.current) return;
@@ -857,7 +1551,7 @@ export default function App() {
       if (requestId !== startupRequestId.current) return;
       const message = error instanceof Error ? error.message : String(error);
       setBootError(message);
-      setNotice({ tone: "error", text: message });
+      setErrorNotice(error, message);
     } finally {
       if (requestId === startupRequestId.current) {
         setBusy(null);
@@ -893,9 +1587,9 @@ export default function App() {
       if (userVisible) {
         setNotice({ tone: "ok", text: `Prepared ${result.prepared ?? 0} preview(s).` });
       }
-    } catch {
+    } catch (error) {
       if (userVisible) {
-        setNotice({ tone: "error", text: "Preview warmup failed." });
+        setErrorNotice(error, "Preview warmup failed.");
       }
     }
   }
@@ -903,7 +1597,7 @@ export default function App() {
   function copyPerformanceReport() {
     const samples = latencySamples.slice(0, 12);
     copyText([
-      "CrossAge FR performance report",
+      "Vintrace performance report",
       `Mode: ${performanceProfile.label}`,
       `App folder: ${state?.workspace ?? "Unknown"}`,
       `Samples: ${latencySummary.count}`,
@@ -930,14 +1624,34 @@ export default function App() {
     });
   }
 
+  async function refreshScanMarkerStatus() {
+    try {
+      const marker = await window.crossAge.getScanMarkerStatus();
+      setLocalScanMarkers({ cancelRequested: marker.cancelRequested, paused: marker.paused });
+    } catch {
+      // Marker status is advisory. Scan progress events remain the source of truth.
+    }
+  }
+
   function applyState(next: AppState) {
     stateReadyRef.current = true;
     setState(next);
     const nextSettings: SettingsValues = {
       thresholds: next.config.thresholds,
       clusterMinSize: next.config.clusterMinSize,
+      faceDetectorSize: next.config.faceDetectorSize,
+      twoPassScan: next.config.twoPassScan,
+      verificationDetectorSize: next.config.verificationDetectorSize,
       safeMode: next.config.safeMode,
-      safeModeThreshold: next.config.safeModeThreshold
+      safeModeThreshold: next.config.safeModeThreshold,
+      storageBudgetBytes: next.config.storageBudgetBytes ?? 0,
+      maxMediaFileBytes: next.config.maxMediaFileBytes ?? 0,
+      reviewRules: next.config.reviewRules ?? {
+        autoRejectBelow: 0,
+        autoUncertainLowQuality: false,
+        autoRejectLowQualityVideo: false
+      },
+      scanExclusions: { ...defaultScanExclusions, ...(next.config.scanExclusions ?? {}) }
     };
     if (!settingsDirtyRef.current) {
       setSettings({ ...nextSettings, mode: inferSettingsMode(nextSettings) });
@@ -973,12 +1687,134 @@ export default function App() {
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setNotice({ tone: "error", text: message });
+      const details = errorDetails(error, message);
+      recordRendererDiagnostic({
+        type: "renderer_action_failed",
+        level: "error",
+        category: "renderer",
+        actionLabel: label,
+        command,
+        message: details.text,
+        stack: error instanceof Error ? error.stack || "" : "",
+        code: details.code
+      });
+      if (error && typeof error === "object") {
+        (error as { __crossageDiagnosticRecorded?: boolean }).__crossageDiagnosticRecorded = true;
+      }
+      setNotice({ tone: "error", text: details.text, errorCode: details.code, action: details.action });
       throw error;
     } finally {
       recordLatency(label, command, startedAt);
       setBusy(null);
     }
+  }
+
+  async function queryCandidates(params: Record<string, unknown>) {
+    const startedAt = performance.now();
+    try {
+      return await window.crossAge.invoke<CandidateQueryResult>("query_candidates", params);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const details = errorDetails(error, message);
+      recordRendererDiagnostic({
+        type: "renderer_action_failed",
+        level: "error",
+        category: "renderer",
+        actionLabel: "Load matches",
+        command: "query_candidates",
+        message: details.text,
+        stack: error instanceof Error ? error.stack || "" : "",
+        code: details.code
+      });
+      if (error && typeof error === "object") {
+        (error as { __crossageDiagnosticRecorded?: boolean }).__crossageDiagnosticRecorded = true;
+      }
+      setNotice({ tone: "error", text: details.text, errorCode: details.code, action: details.action });
+      throw error;
+    } finally {
+      recordLatency("Load matches", "query_candidates", startedAt);
+    }
+  }
+
+  async function checkForUpdates() {
+    setNotice(null);
+    try {
+      const status = await window.crossAge.checkForUpdates();
+      setUpdateStatus(status);
+      setNotice({ tone: status.error ? "warn" : "ok", text: status.message || "Update check finished." });
+    } catch (error) {
+      setErrorNotice(error);
+    }
+  }
+
+  async function setUpdateChannel(channel: UpdateChannel) {
+    try {
+      const status = await window.crossAge.setUpdateChannel(channel);
+      setUpdateStatus(status);
+      setNotice({ tone: "ok", text: status.message || "Update channel saved." });
+    } catch (error) {
+      setErrorNotice(error);
+    }
+  }
+
+  async function downloadUpdate() {
+    try {
+      const status = await window.crossAge.downloadUpdate();
+      setUpdateStatus(status);
+      setNotice({ tone: status.error ? "warn" : "ok", text: status.message || "Update download started." });
+    } catch (error) {
+      setErrorNotice(error);
+    }
+  }
+
+  async function installUpdate() {
+    try {
+      const status = await window.crossAge.installUpdate();
+      setUpdateStatus(status);
+      setNotice({ tone: status.error ? "warn" : "ok", text: status.message || "Installing update." });
+    } catch (error) {
+      setErrorNotice(error);
+    }
+  }
+
+  async function previewDiagnostics(includePaths = false) {
+    try {
+      const report = await window.crossAge.getDiagnosticsReport(includePaths);
+      setDiagnosticsReport(report);
+      setNotice({ tone: "ok", text: "Diagnostics report preview loaded." });
+    } catch (error) {
+      setErrorNotice(error);
+    }
+  }
+
+  async function exportDiagnostics(includePaths = false) {
+    try {
+      const result = await window.crossAge.exportDiagnosticsReport(includePaths);
+      setDiagnosticsReport(result.report);
+      if (result.cancelled || !result.path) {
+        setNotice({ tone: "warn", text: "Diagnostics export cancelled." });
+        return;
+      }
+      setNotice({ tone: "ok", text: "Diagnostics report exported." });
+      await window.crossAge.revealPath(result.path);
+    } catch (error) {
+      setErrorNotice(error);
+    }
+  }
+
+  async function exportSupportBundle(includePaths = false) {
+    if (includePaths) {
+      const proceed = confirmUi("Include local file paths in the support bundle? Leave this off unless a trusted tester needs exact path details.");
+      if (!proceed) return;
+    }
+    const result = await invoke<CommandResult<SupportBundleValue>>("Exporting support bundle", "export_support_bundle", { includePaths });
+    const value = result.value;
+    if (!value) {
+      setNotice({ tone: "error", text: "Support bundle did not return a zip path." });
+      return;
+    }
+    setNoticeMessage("ok", "notice.supportBundleExported", { bytes: formatBytes(value.bytes) }, `Support bundle exported (${formatBytes(value.bytes)}).`);
+    await window.crossAge.revealPath(value.zipPath);
   }
 
   async function chooseWorkspace() {
@@ -987,6 +1823,7 @@ export default function App() {
     await window.crossAge.stopFolderWatch();
     settingsDirtyRef.current = false;
     await invoke<AppState>("Opening app folder", "set_workspace", { path: folder });
+    await refreshWorkspaceLockStatus();
     setNotice({ tone: "ok", text: "App folder opened. Please confirm permission again." });
   }
 
@@ -1021,7 +1858,8 @@ export default function App() {
         source: "desktop"
       });
       setModelDownloadProgress(null);
-      setNotice({ tone: "ok", text: `Face model ready${result.value && typeof result.value === "object" && "label" in result.value ? `: ${String(result.value.label)}` : "."}` });
+      const label = result.value && typeof result.value === "object" && "label" in result.value ? `: ${String(result.value.label)}` : "";
+      setNoticeMessage("ok", "notice.faceModelReady", { label }, `Face model ready${label}.`);
     } catch {
       setModelDownloadProgress((current) => current ? { ...current, phase: "error", message: "Download failed. Check the connection and try again." } : null);
     }
@@ -1041,7 +1879,7 @@ export default function App() {
       setConsentPrompt({ requestedValue: true, scope: state?.workspace ?? "Current app folder" });
       return;
     }
-    if (state?.consentOnFile && !window.confirm("Remove permission for this app folder? Adding people, matching scans, and folder watching will pause.")) {
+    if (state?.consentOnFile && !confirmUi("Remove permission for this app folder? Adding people, matching scans, and folder watching will pause.")) {
       return;
     }
     await invoke<AppState>("Updating permission", "set_consent", { value, source: "desktop", operator: "desktop user" });
@@ -1074,8 +1912,9 @@ export default function App() {
       ageBucket,
       folder: enrollFolder
     });
-    const skipped = result.errors?.length ? ` ${result.errors.length} skipped.` : "";
-    setNotice({ tone: "ok", text: `Added ${result.added ?? 0} saved face photo${(result.added ?? 0) === 1 ? "" : "s"}.${skipped}` });
+    const added = result.added ?? 0;
+    const skipped = skippedSummary(result.errors?.length ?? 0);
+    setNoticeMessage("ok", "notice.savedFacePhotosAdded", { count: added, skipped }, `Added ${added} saved face photo${added === 1 ? "" : "s"}.${skipped}`);
   }
 
   async function enrollAgeGroups() {
@@ -1094,9 +1933,10 @@ export default function App() {
       personName,
       groups
     });
-    const skipped = result.errors?.length ? ` ${result.errors.length} skipped.` : "";
+    const added = result.added ?? 0;
+    const skipped = skippedSummary(result.errors?.length ?? 0);
     const groupCount = result.value?.groups ?? groups.length;
-    setNotice({ tone: "ok", text: `Added ${result.added ?? 0} saved face photo${(result.added ?? 0) === 1 ? "" : "s"} across ${groupCount} age folder${groupCount === 1 ? "" : "s"}.${skipped}` });
+    setNoticeMessage("ok", "notice.savedFacePhotosAddedAcrossAges", { count: added, groups: groupCount, skipped }, `Added ${added} saved face photo${added === 1 ? "" : "s"} across ${groupCount} age folder${groupCount === 1 ? "" : "s"}.${skipped}`);
   }
 
   async function scan() {
@@ -1107,22 +1947,68 @@ export default function App() {
     const preflightMatches = lastPreflight?.folder === scanFolder.trim();
     const preflightIsFresh = preflightMatches && Date.now() - lastPreflight.at < 10 * 60 * 1000;
     if (!preflightIsFresh) {
-      const proceed = window.confirm("This folder has not been checked recently. Continue scanning now?");
+      const proceed = confirmUi("This folder has not been checked recently. Continue scanning now?");
       if (!proceed) {
         setNotice({ tone: "warn", text: "Check the folder before scanning." });
         return;
       }
     } else if (!lastPreflight.ready) {
-      const proceed = window.confirm("The folder check found issues. Continue and skip files that cannot be read?");
+      const proceed = confirmUi("The folder check found issues. Continue and skip files that cannot be read?");
       if (!proceed) {
         setNotice({ tone: "warn", text: "Review the folder issues before scanning." });
         return;
       }
     }
-    const result = await invoke<CommandResult>("Scanning folder", "scan", { folder: scanFolder, source: "manual" });
-    const skipped = result.errors?.length ? ` ${result.errors.length} skipped.` : "";
-    const protectedText = result.metrics?.safeFiltered ? ` Safe Mode protected ${result.metrics.safeFiltered} file(s).` : "";
-    setNotice({ tone: "ok", text: `Found ${result.added ?? 0} possible match${(result.added ?? 0) === 1 ? "" : "es"}.${skipped}${protectedText}` });
+    const knownTotal = folderAnalysis && folderAnalysis.folder === scanFolder.trim()
+      ? folderAnalysis.imageCount + folderAnalysis.videoCount
+      : 0;
+    const result = await invoke<CommandResult>("Scanning folder", "scan", {
+      folder: scanFolder,
+      source: "manual",
+      resume: true,
+      total: knownTotal
+    });
+    if (savedScanSources.some((source) => source.path === scanFolder.trim())) {
+      persistSavedScanSources(savedScanSources.map((source) => source.path === scanFolder.trim() ? { ...source, lastUsedAt: Date.now() } : source));
+    }
+    const found = result.added ?? 0;
+    const skipped = skippedSummary(result.errors?.length ?? 0);
+    const protectedText = protectedSummary(Number(result.metrics?.safeFiltered || 0));
+    if (result.metrics?.cancelled) {
+      const processed = result.metrics.processed ?? 0;
+      setNoticeMessage("warn", "notice.scanCancelled", { processed }, `Scan cancelled after ${processed} file(s). Resume will skip completed files.`);
+      return;
+    }
+    setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped, protected: protectedText }, `Found ${found} possible match${found === 1 ? "" : "es"}.${skipped}${protectedText}`);
+  }
+
+  async function resumeLastScan() {
+    const latest = state?.scanJob?.latestScan;
+    const folder = typeof latest?.root_path === "string" && latest.root_path
+      ? latest.root_path
+      : typeof latest?.label === "string"
+        ? latest.label
+        : scanFolder;
+    if (!folder.trim()) {
+      setNotice({ tone: "warn", text: "No resumable scan folder was found." });
+      return;
+    }
+    if (!state?.consentOnFile || !state.references.length) {
+      setNotice({ tone: "warn", text: "Confirm permission and add a person before resuming." });
+      return;
+    }
+    setScanFolder(folder);
+    const total = Number(latest?.total || 0) || undefined;
+    const source = typeof latest?.source === "string" && latest.source ? latest.source : "manual";
+    const result = await invoke<CommandResult>("Resuming scan", "scan", {
+      folder,
+      source,
+      resume: true,
+      total
+    });
+    const found = result.added ?? 0;
+    const skipped = result.metrics?.manifestSkipped ? ` Skipped ${result.metrics.manifestSkipped} completed file(s).` : "";
+    setNoticeMessage("ok", "notice.resumeComplete", { count: found, skipped }, `Resume complete. Found ${found} possible match${found === 1 ? "" : "es"}.${skipped}`);
   }
 
   async function scanCameraFrame(dataUrl: string): Promise<CameraScanResult> {
@@ -1133,8 +2019,7 @@ export default function App() {
     try {
       saved = await window.crossAge.saveCameraFrame(dataUrl);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setNotice({ tone: "error", text: message });
+      setErrorNotice(error, "Could not save the camera photo.");
       throw error;
     } finally {
       recordLatency("Saving camera photo", "camera:save-frame", startedAt);
@@ -1150,15 +2035,16 @@ export default function App() {
         : !hasReferences
           ? "Add a person when you want to match it."
           : "Confirm permission when you want to match it.";
-      setNotice({ tone: "ok", text: `Camera photo saved. ${nextStep}` });
+      setNoticeMessage("ok", "notice.cameraSavedNext", { nextStep }, `Camera photo saved. ${nextStep}`);
       return { ...saved, added: 0, errors: [], matched: false };
     }
 
     setBusy(null);
     const result = await invoke<CommandResult>("Scanning camera photo", "scan", { folder: saved.folder, source: "camera" });
-    const skipped = result.errors?.length ? ` ${result.errors.length} skipped.` : "";
-    const protectedText = result.metrics?.safeFiltered ? ` Safe Mode protected ${result.metrics.safeFiltered} file(s).` : "";
-    setNotice({ tone: "ok", text: `Camera photo saved. Found ${result.added ?? 0} possible match${(result.added ?? 0) === 1 ? "" : "es"}.${skipped}${protectedText}` });
+    const found = result.added ?? 0;
+    const skipped = skippedSummary(result.errors?.length ?? 0);
+    const protectedText = protectedSummary(Number(result.metrics?.safeFiltered || 0));
+    setNoticeMessage("ok", "notice.cameraSavedMatches", { count: found, skipped, protected: protectedText }, `Camera photo saved. Found ${found} possible match${found === 1 ? "" : "es"}.${skipped}${protectedText}`);
     return { ...saved, added: result.added ?? 0, errors: result.errors ?? [], matched: true };
   }
 
@@ -1167,17 +2053,28 @@ export default function App() {
       setNotice({ tone: "warn", text: "Scan folder is required." });
       return;
     }
-    const analysis = await invoke<FolderAnalysis>("Checking folder", "analyze_folder", { folder: scanFolder });
+    const folder = scanFolder.trim();
+    const requestId = folderAnalysisRequestId.current + 1;
+    folderAnalysisRequestId.current = requestId;
+    const analysis = await invoke<FolderAnalysis>("Checking folder", "analyze_folder", { folder });
+    if (requestId !== folderAnalysisRequestId.current || scanFolder.trim() !== folder) {
+      return;
+    }
     setFolderAnalysis(analysis);
     const mediaCount = analysis.imageCount + analysis.videoCount;
-    const sampledIssues = analysis.unreadableSamples.length + analysis.unreadableVideoSamples.length;
+    const issueCount = folderAnalysisIssueCount(analysis);
     setLastPreflight({
-      folder: scanFolder.trim(),
+      folder,
       at: Date.now(),
-      ready: analysis.exists && analysis.isDirectory && mediaCount > 0 && sampledIssues === 0
+      ready: isFolderAnalysisReady(analysis)
     });
-    const unreadable = sampledIssues ? ` ${sampledIssues} sampled issue(s).` : "";
-    setNotice({ tone: mediaCount ? "ok" : "warn", text: `Folder check found ${mediaCount} photo or video file${mediaCount === 1 ? "" : "s"}: ${analysis.imageCount} image${analysis.imageCount === 1 ? "" : "s"}, ${analysis.videoCount} video${analysis.videoCount === 1 ? "" : "s"}.${unreadable}` });
+    const issues = issueCount ? ` ${issueCount} issue${issueCount === 1 ? "" : "s"} need attention.` : "";
+    setNoticeMessage(
+      mediaCount && issueCount === 0 ? "ok" : "warn",
+      "notice.folderCheckSummary",
+      { media: mediaCount, images: analysis.imageCount, videos: analysis.videoCount, issues },
+      `Folder check found ${mediaCount} photo or video file${mediaCount === 1 ? "" : "s"}: ${analysis.imageCount} image${analysis.imageCount === 1 ? "" : "s"}, ${analysis.videoCount} video${analysis.videoCount === 1 ? "" : "s"}.${issues}`
+    );
   }
 
   async function startWatchFolder() {
@@ -1185,13 +2082,25 @@ export default function App() {
       setNotice({ tone: "warn", text: "Choose a scan folder before watching." });
       return;
     }
+    if (!state?.consentOnFile) {
+      setNotice({ tone: "warn", text: "Confirm permission before watching a folder." });
+      return;
+    }
     if (!state?.references.length) {
       setNotice({ tone: "warn", text: "Add at least one person before watching a folder." });
       return;
     }
-    const status = await window.crossAge.startFolderWatch(scanFolder);
-    applyWatchStatus(status);
-    setNotice({ tone: "ok", text: "CrossAge will watch this folder for new files." });
+    if (workspaceLocked) {
+      setNotice({ tone: "warn", text: "Unlock the workspace before watching a folder." });
+      return;
+    }
+    try {
+      const status = await window.crossAge.startFolderWatch(scanFolder);
+      applyWatchStatus(status);
+      setNotice({ tone: "ok", text: "Vintrace will watch this folder for new files." });
+    } catch (error) {
+      setErrorNotice(error, "Folder watching could not start.");
+    }
   }
 
   async function startWatchForFolder(folder: string) {
@@ -1201,17 +2110,61 @@ export default function App() {
       setNotice({ tone: "warn", text: "Add a person and confirm permission before watching this folder." });
       return;
     }
+    if (workspaceLocked) {
+      setScanFolder(folder);
+      setActiveTab("scan");
+      setNotice({ tone: "warn", text: "Unlock the workspace before watching this folder." });
+      return;
+    }
     setScanFolder(folder);
     setActiveTab("scan");
-    const status = await window.crossAge.startFolderWatch(folder);
-    applyWatchStatus(status);
-    setNotice({ tone: "ok", text: "CrossAge will watch this folder for new files." });
+    try {
+      const status = await window.crossAge.startFolderWatch(folder);
+      applyWatchStatus(status);
+      setNotice({ tone: "ok", text: "Vintrace will watch this folder for new files." });
+    } catch (error) {
+      setErrorNotice(error, "Folder watching could not start.");
+    }
   }
 
   async function stopWatchFolder() {
-    const status = await window.crossAge.stopFolderWatch();
-    applyWatchStatus(status);
-    setNotice({ tone: "ok", text: "Folder watching stopped." });
+    try {
+      const status = await window.crossAge.stopFolderWatch();
+      applyWatchStatus(status);
+      setNotice({ tone: "ok", text: "Folder watching stopped." });
+    } catch (error) {
+      setErrorNotice(error, "Folder watching could not stop.");
+    }
+  }
+
+  async function cancelActiveScan() {
+    try {
+      const result = await window.crossAge.cancelScan();
+      setLocalScanMarkers((current) => ({ cancelRequested: Boolean(result.cancelled), paused: Boolean(current?.paused) }));
+      setNotice(result.cancelled ? { tone: "warn", text: "Scan cancellation requested. The current file will finish, then the scan will stop." } : { tone: "error", text: "Could not request scan cancellation." });
+    } catch (error) {
+      setErrorNotice(error, "Could not request scan cancellation.");
+    }
+  }
+
+  async function pauseActiveScan() {
+    try {
+      const result = await window.crossAge.pauseScan();
+      setLocalScanMarkers((current) => ({ cancelRequested: Boolean(current?.cancelRequested), paused: Boolean(result.paused) }));
+      setNotice(result.paused ? { tone: "warn", text: "Scan paused. Resume when you are ready." } : { tone: "error", text: "Could not pause the scan." });
+    } catch (error) {
+      setErrorNotice(error, "Could not pause the scan.");
+    }
+  }
+
+  async function resumeActiveScan() {
+    try {
+      const result = await window.crossAge.resumeScan();
+      setLocalScanMarkers((current) => ({ cancelRequested: Boolean(current?.cancelRequested), paused: Boolean(result.paused) }));
+      setNotice(!result.paused ? { tone: "ok", text: "Scan resumed." } : { tone: "error", text: "Could not resume the scan." });
+    } catch (error) {
+      setErrorNotice(error, "Could not resume the scan.");
+    }
   }
 
   async function revealWorkspace() {
@@ -1245,8 +2198,13 @@ export default function App() {
   }
 
   async function setLaunchAtLogin(value: boolean) {
-    const next = await window.crossAge.setLaunchAtLogin(value);
-    setSystemIntegration(next);
+    try {
+      const next = await window.crossAge.setLaunchAtLogin(value);
+      setSystemIntegration(next);
+      setNotice({ tone: "ok", text: value ? "Start at login enabled." : "Start at login disabled." });
+    } catch (error) {
+      setErrorNotice(error, "Could not update the startup setting.");
+    }
   }
 
   async function handleAppCommand(command: AppCommand) {
@@ -1291,9 +2249,13 @@ export default function App() {
 
   async function handleExternalOpen(payload: ExternalOpenPayload) {
     if (payload.type === "workspace") {
+      if (payload.source === "protocol" && !confirmUi(`Open this app folder from an external link?\n\n${payload.path}`)) {
+        return;
+      }
       await window.crossAge.stopFolderWatch();
       settingsDirtyRef.current = false;
       await invoke<AppState>("Opening app folder", "set_workspace", { path: payload.path });
+      await refreshWorkspaceLockStatus();
       setNotice({ tone: "ok", text: "App folder opened from the system." });
       return;
     }
@@ -1304,6 +2266,9 @@ export default function App() {
       return;
     }
     if (payload.type === "watch-folder") {
+      if (payload.source === "protocol" && !confirmUi(`Watch this folder from an external link?\n\n${payload.path}`)) {
+        return;
+      }
       await startWatchForFolder(payload.path);
       return;
     }
@@ -1315,8 +2280,9 @@ export default function App() {
         return;
       }
       const result = await invoke<CommandResult>("Scanning opened files", "scan_paths", { paths: payload.paths, source: "system" });
-      const protectedText = result.metrics?.safeFiltered ? ` Safe Mode protected ${result.metrics.safeFiltered} file(s).` : "";
-      setNotice({ tone: "ok", text: `Found ${result.added ?? 0} possible match${(result.added ?? 0) === 1 ? "" : "es"}.${protectedText}` });
+      const protectedText = protectedSummary(Number(result.metrics?.safeFiltered || 0));
+      const found = result.added ?? 0;
+      setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped: "", protected: protectedText }, `Found ${found} possible match${found === 1 ? "" : "es"}.${protectedText}`);
     }
   }
 
@@ -1331,13 +2297,14 @@ export default function App() {
     setPendingExternalIntent(null);
     setActiveTab("scan");
     const result = await invoke<CommandResult>("Scanning received files", "scan_paths", { paths: payload.paths, source: "system" });
-    const protectedText = result.metrics?.safeFiltered ? ` Safe Mode protected ${result.metrics.safeFiltered} file(s).` : "";
-    setNotice({ tone: "ok", text: `Found ${result.added ?? 0} possible match${(result.added ?? 0) === 1 ? "" : "es"} from received files.${protectedText}` });
+    const protectedText = protectedSummary(Number(result.metrics?.safeFiltered || 0));
+    const found = result.added ?? 0;
+    setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped: " from received files.", protected: protectedText }, `Found ${found} possible match${found === 1 ? "" : "es"} from received files.${protectedText}`);
   }
 
-  async function review(status: CandidateStatus) {
+  async function review(status: CandidateStatus, currentOverride?: ReviewCandidate | null) {
     if (!selectedCandidateId) return;
-    const current = selectedCandidate;
+    const current = currentOverride ?? selectedCandidate;
     await invoke<AppState>("Saving review", "set_status", { candidateId: selectedCandidateId, status });
     if (current && current.status !== status) {
       setReviewUndo({
@@ -1367,7 +2334,8 @@ export default function App() {
       return;
     }
     const result = await invoke<CommandResult>("Saving bulk review", "bulk_set_status", { candidateIds, status });
-    setNotice({ tone: "ok", text: `Updated ${result.updated ?? candidateIds.length} possible match${(result.updated ?? candidateIds.length) === 1 ? "" : "es"}.` });
+    const updated = result.updated ?? candidateIds.length;
+    setNoticeMessage("ok", "notice.updatedPossibleMatches", { count: updated }, `Updated ${updated} possible match${updated === 1 ? "" : "es"}.`);
   }
 
   async function exportSelectedCandidates(candidateIds: string[]) {
@@ -1377,7 +2345,7 @@ export default function App() {
     }
     const result = await invoke<CommandResult<ExportReportValue>>("Exporting selected matches", "export_candidates", { candidateIds });
     const exported = result.value?.counts.candidates ?? candidateIds.length;
-    setNotice({ tone: "ok", text: `Exported ${exported} selected possible match${exported === 1 ? "" : "es"}.` });
+    setNoticeMessage("ok", "notice.exportedSelectedMatches", { count: exported }, `Exported ${exported} selected possible match${exported === 1 ? "" : "es"}.`);
     if (result.value?.jsonPath) {
       await window.crossAge.revealPath(result.value.jsonPath);
     }
@@ -1388,24 +2356,47 @@ export default function App() {
     setNotice({ tone: "ok", text: "Review note saved." });
   }
 
+  async function blockFalseMatch(candidateId: string) {
+    if (!confirmUi("Stop suggesting this exact image/person pair again? The current row will be rejected.")) return;
+    const result = await invoke<CommandResult>("Saving feedback", "block_false_match", { candidateId });
+    const value = result.value as { blocked?: number } | undefined;
+    setNotice({ tone: "ok", text: value?.blocked ? "This false match will be suppressed in future scans." : "Feedback saved." });
+  }
+
+  async function reassignCandidatePerson(candidateId: string, personName: string) {
+    const target = personName.trim();
+    if (!target) {
+      setNotice({ tone: "warn", text: "Enter the person this match belongs to." });
+      return;
+    }
+    const result = await invoke<CommandResult>("Moving match", "reassign_candidate_person", {
+      candidateId,
+      personName: target,
+      clearReference: true
+    });
+    if (result.state) applyState(result.state);
+    setNotice({ tone: "ok", text: `Moved match to ${target}.` });
+  }
+
   async function deleteReference() {
     if (!selectedRefId) return;
     const selected = state?.references.find((ref) => ref.refId === selectedRefId);
-    if (!window.confirm(`Delete this saved photo for ${selected?.personName ?? ""}?`)) return;
+    if (!confirmUiMessage("dialog.deleteSavedPhoto", { person: selected?.personName ?? "" }, `Delete this saved photo for ${selected?.personName ?? ""}?`)) return;
     await invoke<AppState>("Deleting saved photo", "delete_reference", { refId: selectedRefId });
   }
 
   async function clearQueue() {
     if (!state?.candidates.length) return;
-    if (!window.confirm("Clear all possible matches from the review list?")) return;
+    if (!confirmUiMessage("dialog.clearMatches", {}, "Clear all possible matches from the review list?")) return;
     await invoke<AppState>("Clearing matches", "clear_queue");
   }
 
   async function clearReferences() {
     if (!state?.references.length) return;
-    if (!window.confirm("Clear all saved face photos? Activity history is preserved.")) return;
+    if (!confirmUiMessage("dialog.clearSavedPhotos", {}, "Clear all saved face photos? Activity history is preserved.")) return;
     const result = await invoke<CommandResult>("Clearing saved photos", "clear_references");
-    setNotice({ tone: "ok", text: `Cleared ${result.cleared ?? 0} saved face photo${(result.cleared ?? 0) === 1 ? "" : "s"}.` });
+    const cleared = result.cleared ?? 0;
+    setNoticeMessage("ok", "notice.clearedSavedPhotos", { count: cleared }, `Cleared ${cleared} saved face photo${cleared === 1 ? "" : "s"}.`);
   }
 
   async function deletePerson(personName: string) {
@@ -1413,16 +2404,17 @@ export default function App() {
       setNotice({ tone: "warn", text: "Choose a person to delete." });
       return;
     }
-    if (!window.confirm(`Delete saved photos and possible matches for ${personName}? Activity history is preserved.`)) return;
+    if (!confirmUiMessage("dialog.deletePerson", { person: personName }, `Delete saved photos and possible matches for ${personName}? Activity history is preserved.`)) return;
     const result = await invoke<CommandResult>("Deleting person", "delete_person", { personName });
     const deleted = result.deleted ?? { references: 0, candidates: 0 };
-    setNotice({ tone: "ok", text: `Deleted ${deleted.references} saved photo${deleted.references === 1 ? "" : "s"} and ${deleted.candidates} possible match${deleted.candidates === 1 ? "" : "es"}.` });
+    setNoticeMessage("ok", "notice.deletedPersonData", { references: deleted.references, candidates: deleted.candidates }, `Deleted ${deleted.references} saved photo${deleted.references === 1 ? "" : "s"} and ${deleted.candidates} possible match${deleted.candidates === 1 ? "" : "es"}.`);
   }
 
   async function purgeReviewedCandidates() {
-    if (!window.confirm("Remove reviewed possible matches from the active list? Activity history is preserved.")) return;
+    if (!confirmUiMessage("dialog.purgeReviewed", {}, "Remove reviewed possible matches from the active list? Activity history is preserved.")) return;
     const result = await invoke<CommandResult>("Removing reviewed matches", "purge_candidates", { statuses: ["accepted", "rejected", "uncertain"] });
-    setNotice({ tone: "ok", text: `Removed ${result.purged ?? 0} reviewed possible match${(result.purged ?? 0) === 1 ? "" : "es"}.` });
+    const purged = result.purged ?? 0;
+    setNoticeMessage("ok", "notice.removedReviewedMatches", { count: purged }, `Removed ${purged} reviewed possible match${purged === 1 ? "" : "es"}.`);
   }
 
   async function runWorkspaceHealth() {
@@ -1431,26 +2423,164 @@ export default function App() {
     setNotice({ tone: "ok", text: "App folder check complete." });
   }
 
+  async function repairWorkspace() {
+    const preview = await invoke<CommandResult<WorkspaceRepairResult>>("Checking repair", "repair_workspace", { dryRun: true });
+    if (preview.value) {
+      setWorkspaceRepairResult(preview.value);
+      const total = preview.value.removedReferences + preview.value.removedCandidates;
+      if (!total) {
+        setWorkspaceHealth(preview.value.before);
+        setNotice({ tone: "ok", text: "No broken saved photos or match links were found." });
+        return;
+      }
+      const rootWarning = preview.value.unavailableRoots?.length
+        ? `\n\nSeveral missing links share this unavailable location:\n${preview.value.unavailableRoots.slice(0, 3).join("\n")}\n\nReconnect or relink the drive first unless you intentionally want to remove these saved links.`
+        : "";
+      const repairPrompt = `Remove ${preview.value.removedReferences} missing saved photo link(s) and ${preview.value.removedCandidates} missing match row(s)? Original photos are not touched.${rootWarning}`;
+      const proceed = confirmUiMessage(
+        "dialog.repairMissingLinks",
+        { references: preview.value.removedReferences, candidates: preview.value.removedCandidates, rootWarning },
+        repairPrompt
+      );
+      if (!proceed) {
+        setNotice({ tone: "warn", text: "Repair cancelled. No app data changed." });
+        return;
+      }
+    }
+    const result = await invoke<CommandResult<WorkspaceRepairResult>>("Repairing app folder", "repair_workspace", { dryRun: false });
+    if (result.value?.destructiveBlocked) {
+      const roots = result.value.unavailableRoots?.slice(0, 3).join("\n") || "Unavailable photo location";
+      const forcePrompt = `Repair was blocked because several saved links look like a disconnected or moved drive:\n\n${roots}\n\nChoose Cancel, reconnect the drive, then use Relink. Choose OK only if you want to remove these saved links from the app.`;
+      const force = confirmUiMessage("dialog.forceRepairMissingDrive", { roots }, forcePrompt);
+      if (!force) {
+        setWorkspaceRepairResult(result.value);
+        setWorkspaceHealth(result.value.before);
+        setNotice({ tone: "warn", text: "Repair blocked. Reconnect or relink the missing drive before removing saved links." });
+        return;
+      }
+      const forced = await invoke<CommandResult<WorkspaceRepairResult>>("Repairing app folder", "repair_workspace", { dryRun: false, force: true });
+      if (forced.value) {
+        result.value = forced.value;
+        result.state = forced.state;
+      }
+    }
+    if (result.value) {
+      setWorkspaceRepairResult(result.value);
+      setWorkspaceHealth(result.value.after);
+      setNoticeMessage(
+        "ok",
+        "notice.workspaceRepaired",
+        { references: result.value.removedReferences, candidates: result.value.removedCandidates },
+        `Repaired app folder: removed ${result.value.removedReferences} saved photo link${result.value.removedReferences === 1 ? "" : "s"} and ${result.value.removedCandidates} match row${result.value.removedCandidates === 1 ? "" : "s"}.`
+      );
+    }
+    if (result.state) applyState(result.state);
+  }
+
+  async function relinkWorkspacePaths() {
+    const oldRoot = promptUi("Old folder path to replace", "");
+    if (!oldRoot?.trim()) {
+      setNotice({ tone: "warn", text: "Enter the old folder path first." });
+      return;
+    }
+    const newRoot = await window.crossAge.chooseFolder();
+    if (!newRoot) {
+      setNotice({ tone: "warn", text: "Relink cancelled. No new folder selected." });
+      return;
+    }
+    const preview = await invoke<CommandResult<WorkspaceRelinkResult>>("Checking moved folder", "relink_workspace_paths", {
+      oldRoot,
+      newRoot,
+      dryRun: true
+    });
+    if (!preview.value) {
+      setNotice({ tone: "error", text: "Relink preview did not return details." });
+      return;
+    }
+    setWorkspaceRelinkResult(preview.value);
+    if (!preview.value.relinkedFields) {
+      setNotice({ tone: "warn", text: "No saved paths matched that old folder." });
+      return;
+    }
+    const partialWarning = preview.value.missingTargets.length
+      ? `\n\n${preview.value.missingTargets.length} saved path${preview.value.missingTargets.length === 1 ? "" : "s"} could not be found in the selected folder. Cancel and choose a better folder for an all-at-once relink, or OK to update only the paths that were found.`
+      : "";
+    const relinkPrompt = `Update ${preview.value.relinkedFields} saved path${preview.value.relinkedFields === 1 ? "" : "s"} to the selected folder? Original photos are not moved or copied.${partialWarning}`;
+    const proceed = confirmUiMessage(
+      "dialog.relinkSavedPaths",
+      { count: preview.value.relinkedFields, partialWarning },
+      relinkPrompt
+    );
+    if (!proceed) return;
+    const result = await invoke<CommandResult<WorkspaceRelinkResult>>("Relinking moved folder", "relink_workspace_paths", {
+      oldRoot,
+      newRoot,
+      dryRun: false,
+      forcePartial: preview.value.missingTargets.length > 0
+    });
+    if (result.value) {
+      setWorkspaceRelinkResult(result.value);
+      if (result.value.partialBlocked) {
+        setNotice({ tone: "warn", text: "Relink blocked because some target files are missing. Choose the moved folder that contains all files, or confirm a partial relink." });
+        return;
+      }
+      setNoticeMessage("ok", "notice.pathsRelinked", { count: result.value.relinkedFields }, `Relinked ${result.value.relinkedFields} saved path${result.value.relinkedFields === 1 ? "" : "s"}.`);
+    }
+    if (result.state) applyState(result.state);
+    await runWorkspaceHealth();
+  }
+
   async function purgeDuplicateCandidates() {
     const duplicateCount = workspaceHealth?.duplicateCandidateCount ?? 0;
     if (!duplicateCount) {
       setNotice({ tone: "warn", text: "No duplicate match rows found." });
       return;
     }
-    if (!window.confirm(`Remove ${duplicateCount} duplicate match row(s)? The strongest row in each group will be kept.`)) return;
+    if (!confirmUiMessage("dialog.removeDuplicateRows", { count: duplicateCount }, `Remove ${duplicateCount} duplicate match row(s)? The strongest row in each group will be kept.`)) return;
     const result = await invoke<CommandResult<WorkspaceHealth>>("Removing duplicate matches", "purge_duplicate_candidates");
     if (result.value) setWorkspaceHealth(result.value);
-    setNotice({ tone: "ok", text: `Removed ${result.purged ?? 0} duplicate match row${(result.purged ?? 0) === 1 ? "" : "s"}.` });
+    setNoticeMessage("ok", "notice.duplicateRowsRemoved", { count: result.purged ?? 0 }, `Removed ${result.purged ?? 0} duplicate match row${(result.purged ?? 0) === 1 ? "" : "s"}.`);
+  }
+
+  async function optimizeWorkspace() {
+    if (!confirmUiMessage("dialog.optimizeWorkspace", {}, "Optimize generated app-folder data? Original photos and videos will not be touched.")) return;
+    const result = await invoke<CommandResult<WorkspaceOptimizeResult>>("Optimizing app folder", "optimize_workspace");
+    if (result.value) {
+      setWorkspaceOptimizeResult(result.value);
+      setNoticeMessage("ok", "notice.workspaceOptimized", { bytes: formatBytes(result.value.totalBytesReclaimed) }, `Optimized app folder and reclaimed ${formatBytes(result.value.totalBytesReclaimed)}.`);
+    }
+  }
+
+  async function enforceStorageBudget() {
+    try {
+      await saveSettingsDraftIfDirty("Saving storage limit");
+    } catch {
+      return;
+    }
+    const result = await invoke<CommandResult<StorageBudgetEnforceResult>>("Cleaning generated cache", "enforce_storage_budget");
+    if (result.value) {
+      setWorkspaceHealth(result.value.after);
+      if (result.value.optimized) {
+        setWorkspaceOptimizeResult(result.value.optimized);
+      }
+      const over = result.value.after.storageOverBudgetBytes ?? 0;
+      setNotice({
+        tone: result.value.withinBudget ? "ok" : "warn",
+        text: result.value.withinBudget
+          ? "Storage limit is now satisfied."
+          : `Generated cache was cleaned, but the app folder is still ${formatBytes(over)} over the limit.`
+      });
+    }
   }
 
   async function purgeOldCandidates(days: number) {
     const safeDays = Math.max(1, Math.min(3650, Math.round(days || 90)));
-    if (!window.confirm(`Remove reviewed matches older than ${safeDays} day(s)? Activity history is preserved.`)) return;
+    if (!confirmUi(`Remove reviewed matches older than ${safeDays} day(s)? Activity history is preserved.`)) return;
     const result = await invoke<CommandResult>("Removing old reviewed matches", "purge_old_candidates", {
       days: safeDays,
       statuses: ["accepted", "rejected", "uncertain"]
     });
-    setNotice({ tone: "ok", text: `Removed ${result.purged ?? 0} old reviewed possible match${(result.purged ?? 0) === 1 ? "" : "es"}.` });
+    setNoticeMessage("ok", "notice.oldReviewedRemoved", { count: result.purged ?? 0 }, `Removed ${result.purged ?? 0} old reviewed possible match${(result.purged ?? 0) === 1 ? "" : "es"}.`);
   }
 
   async function exportReport() {
@@ -1460,7 +2590,7 @@ export default function App() {
       setNotice({ tone: "error", text: "Export did not return a report path." });
       return;
     }
-    setNotice({ tone: "ok", text: `Exported report for ${value.counts.candidates} possible match${value.counts.candidates === 1 ? "" : "es"}.` });
+    setNoticeMessage("ok", "notice.reportExported", { count: value.counts.candidates }, `Exported report for ${value.counts.candidates} possible match${value.counts.candidates === 1 ? "" : "es"}.`);
     await window.crossAge.revealPath(value.jsonPath);
   }
 
@@ -1471,20 +2601,587 @@ export default function App() {
       setNotice({ tone: "error", text: "Backup did not return a zip path." });
       return;
     }
-    setNotice({ tone: "ok", text: `Backup created: ${basename(value.zipPath)} (${formatBytes(value.bytes)}).` });
-    await window.crossAge.revealPath(value.zipPath);
+    setBackupVerification(null);
+    setNoticeMessage("ok", "notice.backupCreated", { name: basename(value.zipPath), bytes: formatBytes(value.bytes) }, `Backup created: ${basename(value.zipPath)} (${formatBytes(value.bytes)}).`);
+    void window.crossAge.revealPath(value.zipPath);
+  }
+
+  async function verifyLatestWorkspaceBackup() {
+    const result = await invoke<CommandResult<WorkspaceBackupVerification>>("Verifying backup", "verify_workspace_backup");
+    if (result.value) {
+      setBackupVerification(result.value);
+      setNotice({
+        tone: result.value.ok ? "ok" : "warn",
+        text: result.value.ok
+          ? `Backup verified: ${basename(result.value.zipPath)}.`
+          : result.value.error || "Backup verification found issues."
+      });
+    }
+  }
+
+  async function pruneWorkspaceBackups() {
+    if (!confirmUi("Keep the 5 newest app-folder backups and remove older backup ZIPs?")) return;
+    const result = await invoke<CommandResult<WorkspaceBackupPruneValue>>("Cleaning backups", "prune_workspace_backups", { keep: 5 });
+    if (result.value) {
+      setBackupPruneResult(result.value);
+      setNoticeMessage("ok", "notice.oldBackupsRemoved", { count: result.value.deleted, bytes: formatBytes(result.value.deletedBytes) }, `Removed ${result.value.deleted} old backup${result.value.deleted === 1 ? "" : "s"} and reclaimed ${formatBytes(result.value.deletedBytes)}.`);
+    }
+  }
+
+  async function exportScanHistory() {
+    const result = await invoke<CommandResult<ScanHistoryExportValue>>("Exporting scan history", "export_scan_history");
+    const value = result.value;
+    if (!value) {
+      setNotice({ tone: "error", text: "Scan history export did not return a path." });
+      return;
+    }
+    setNoticeMessage("ok", "notice.scanRunsExported", { count: value.counts.runs }, `Exported ${value.counts.runs} scan run${value.counts.runs === 1 ? "" : "s"}.`);
+    await window.crossAge.revealPath(value.jsonPath);
+  }
+
+  async function pruneScanManifests() {
+    if (!confirmUi("Keep the 20 newest resumable scan manifests and remove older scan-manifest rows? Review results and original photos are not touched.")) return;
+    const result = await invoke<CommandResult<ScanManifestPruneValue>>("Cleaning scan manifests", "prune_scan_manifests", { keepRuns: 20 });
+    if (result.value) {
+      setScanManifestPruneResult(result.value);
+      setNoticeMessage("ok", "notice.oldScanRunsRemoved", { runs: result.value.runsDeleted, rows: formatNumber(result.value.filesDeleted) }, `Removed ${result.value.runsDeleted} old scan run${result.value.runsDeleted === 1 ? "" : "s"} and ${formatNumber(result.value.filesDeleted)} manifest row${result.value.filesDeleted === 1 ? "" : "s"}.`);
+    }
+    if (result.state) applyState(result.state);
+  }
+
+  async function exportWorkspaceInventory() {
+    const result = await invoke<CommandResult<WorkspaceInventoryExportValue>>("Exporting inventory", "export_workspace_inventory");
+    const value = result.value;
+    if (!value) {
+      setNotice({ tone: "error", text: "Inventory export did not return a path." });
+      return;
+    }
+    setNoticeMessage("ok", "notice.inventoryExported", { count: value.counts.sourceFolders }, `Exported inventory for ${value.counts.sourceFolders} source folder${value.counts.sourceFolders === 1 ? "" : "s"}.`);
+    await window.crossAge.revealPath(value.jsonPath);
+  }
+
+  async function exportAuditLog() {
+    const result = await invoke<CommandResult<AuditLogExportValue>>("Exporting activity log", "export_audit_log");
+    const value = result.value;
+    if (!value) {
+      setNotice({ tone: "error", text: "Activity log export did not return a path." });
+      return;
+    }
+    setNoticeMessage("ok", "notice.activityEventsExported", { count: value.counts.events }, `Exported ${value.counts.events} activity event${value.counts.events === 1 ? "" : "s"}.`);
+    await window.crossAge.revealPath(value.jsonPath);
+  }
+
+  async function exportConsentReceipt() {
+    const result = await invoke<CommandResult<ConsentReceiptExportValue>>("Exporting consent receipt", "export_consent_receipt");
+    const value = result.value;
+    if (!value) {
+      setNotice({ tone: "error", text: "Consent receipt export did not return a path." });
+      return;
+    }
+    setNoticeMessage("ok", "notice.consentReceiptExported", { count: value.counts.people }, `Consent receipt exported for ${value.counts.people} person label${value.counts.people === 1 ? "" : "s"}.`);
+    await window.crossAge.revealPath(value.jsonPath);
+  }
+
+  async function loadRetentionPolicyReport() {
+    const result = await invoke<RetentionPolicyReport>("Checking retention", "retention_policy_report");
+    setRetentionPolicy(result);
+    setNoticeMessage(
+      result.counts.reviewedCandidates ? "ok" : "warn",
+      result.counts.reviewedCandidates ? "notice.retentionReportLoaded" : "notice.retentionReportEmpty",
+      { count: result.counts.reviewedCandidates },
+      result.counts.reviewedCandidates
+        ? `Retention report loaded for ${result.counts.reviewedCandidates} reviewed match${result.counts.reviewedCandidates === 1 ? "" : "es"}.`
+        : "Retention report loaded; no reviewed matches are ready for cleanup."
+    );
+  }
+
+  async function exportSafeModeAudit() {
+    const result = await invoke<CommandResult<SafeModeAuditExportValue>>("Exporting Safe Mode audit", "export_safe_mode_audit");
+    const value = result.value;
+    if (!value) {
+      setNotice({ tone: "error", text: "Safe Mode audit export did not return a path." });
+      return;
+    }
+    const protectedCount = value.counts.safeFiltered + value.counts.videoProtected;
+    setNoticeMessage("ok", "notice.safeModeAuditExported", { count: formatNumber(protectedCount) }, `Safe Mode audit exported with ${formatNumber(protectedCount)} protected item${protectedCount === 1 ? "" : "s"}.`);
+    await window.crossAge.revealPath(value.jsonPath);
+  }
+
+  async function exportReviewLedger() {
+    const result = await invoke<CommandResult<ReviewLedgerExportValue>>("Exporting review ledger", "export_review_ledger");
+    const value = result.value;
+    if (!value) {
+      setNotice({ tone: "error", text: "Review ledger export did not return a path." });
+      return;
+    }
+    setNoticeMessage("ok", "notice.reviewLedgerExported", { count: value.counts.decisionEvents }, `Review ledger exported with ${value.counts.decisionEvents} decision event${value.counts.decisionEvents === 1 ? "" : "s"}.`);
+    await window.crossAge.revealPath(value.jsonPath);
   }
 
   async function loadAuditEvents() {
     const result = await invoke<AuditEventsResult>("Loading activity history", "audit_events", { limit: 80, offset: 0 });
     setAuditEvents(result);
-    setNotice({ tone: "ok", text: `Loaded ${result.events.length} activity event${result.events.length === 1 ? "" : "s"}.` });
+    setNoticeMessage("ok", "notice.activityEventsLoaded", { count: result.events.length }, `Loaded ${result.events.length} activity event${result.events.length === 1 ? "" : "s"}.`);
   }
 
   async function runRuntimeSelfTest() {
     const result = await invoke<RuntimeSelfTestResult>("Running system check", "runtime_self_test");
     setRuntimeSelfTest(result);
     setNotice({ tone: result.ok ? "ok" : "warn", text: result.ok ? "System check passed." : "System check found items to review." });
+  }
+
+  async function runModelIntegrity() {
+    const result = await invoke<ModelIntegrityResult>("Checking models", "model_integrity");
+    setModelIntegrity(result);
+    setNotice({ tone: result.ok ? "ok" : "warn", text: result.ok ? "Model integrity check passed." : "Model integrity check found items to review." });
+  }
+
+  async function runModelDriftReport() {
+    const result = await invoke<ModelDriftReport>("Checking saved model state", "model_drift_report");
+    setModelDriftReport(result);
+    const stale = result.counts.staleReferences + result.counts.staleCandidates;
+    setNoticeMessage(
+      stale ? "warn" : "ok",
+      stale ? "notice.modelDriftStale" : "notice.modelDriftReady",
+      { count: formatNumber(stale) },
+      stale
+        ? `${formatNumber(stale)} saved item${stale === 1 ? "" : "s"} were created with a different face model.`
+        : "Saved faces and matches use the active face model."
+    );
+  }
+
+  async function runRuntimeBenchmark() {
+    const result = await invoke<RuntimeBenchmarkResult>("Running benchmark", "runtime_benchmark");
+    setRuntimeBenchmark(result);
+    setNotice({ tone: "ok", text: "Benchmark complete." });
+  }
+
+  async function runReleaseReadiness() {
+    const result = await invoke<ReleaseReadinessResult>("Checking release", "release_readiness");
+    setReleaseReadiness(result);
+    setNotice({ tone: result.ok ? "ok" : "warn", text: result.ok ? "Release checklist passed." : "Release checklist has items to finish." });
+  }
+
+  async function runInstallerDiagnostics() {
+    const result = await invoke<InstallerDiagnosticsResult>("Checking installer", "installer_self_diagnostics");
+    setInstallerDiagnostics(result);
+    setNotice({ tone: result.ok ? "ok" : "warn", text: result.ok ? "Installer diagnostics passed." : "Installer diagnostics found items to review." });
+  }
+
+  async function refreshPhotoSources() {
+    try {
+      const sources = await window.crossAge.getPhotoSources();
+      setPhotoSources(sources);
+      setNotice({ tone: "ok", text: "Photo locations refreshed." });
+    } catch (error) {
+      setErrorNotice(error);
+    }
+  }
+
+  function usePhotoSource(source: SystemPhotoSource) {
+    if (!source.available) {
+      setNotice({ tone: "warn", text: `${source.label} is not available on this computer.` });
+      return;
+    }
+    setScanFolder(source.path);
+    setActiveTab("scan");
+    setNotice({ tone: "ok", text: `${source.label} selected for scanning.` });
+  }
+
+  function rerunScanSource(run: AppState["scanHistory"][number]) {
+    const folder = String(run.label || "").trim();
+    if (!folder) {
+      setNotice({ tone: "warn", text: "This scan run does not have a reusable folder path." });
+      return;
+    }
+    setScanFolder(folder);
+    setActiveTab("scan");
+    setNotice({ tone: "ok", text: "Past scan source selected. Check the folder, then scan again." });
+  }
+
+  function persistSavedScanSources(next: SavedScanSource[]) {
+    const sorted = next.sort((a, b) => b.lastUsedAt - a.lastUsedAt).slice(0, 40);
+    setSavedScanSources(sorted);
+    writeSavedScanSources(state?.workspace, sorted);
+  }
+
+  function persistScanQueue(next: ScanQueueItem[]) {
+    const trimmed = next.slice(0, 80);
+    setScanQueue(trimmed);
+    writeScanQueue(state?.workspace, trimmed);
+  }
+
+  function saveCurrentScanSource() {
+    const folder = scanFolder.trim();
+    if (!folder) {
+      setNotice({ tone: "warn", text: "Choose a folder before saving it." });
+      return;
+    }
+    const label = promptUi("Name this scan source", basename(folder) || "Saved source")?.trim();
+    if (!label) return;
+    const now = Date.now();
+    const existing = savedScanSources.filter((source) => source.path !== folder);
+    persistSavedScanSources([
+      {
+        id: `${folder}:${now}`,
+        label,
+        path: folder,
+        createdAt: now,
+        lastUsedAt: now
+      },
+      ...existing
+    ]);
+    setNotice({ tone: "ok", text: "Scan source saved." });
+  }
+
+  function useSavedScanSource(source: SavedScanSource) {
+    setScanFolder(source.path);
+    persistSavedScanSources(savedScanSources.map((item) => item.id === source.id ? { ...item, lastUsedAt: Date.now() } : item));
+    setNotice({ tone: "ok", text: `${source.label} selected.` });
+  }
+
+  function removeSavedScanSource(sourceId: string) {
+    persistSavedScanSources(savedScanSources.filter((source) => source.id !== sourceId));
+    setNotice({ tone: "ok", text: "Saved source removed." });
+  }
+
+  function addCurrentToScanQueue() {
+    const folder = scanFolder.trim();
+    if (!folder) {
+      setNotice({ tone: "warn", text: "Choose a folder before adding it to the queue." });
+      return;
+    }
+    const now = Date.now();
+    const existing = scanQueue.filter((item) => item.path !== folder);
+    persistScanQueue([
+      ...existing,
+      {
+        id: `${folder}:${now}`,
+        label: basename(folder) || "Queued folder",
+        path: folder,
+        createdAt: now,
+        lastUsedAt: now,
+        status: "queued"
+      }
+    ]);
+    setNotice({ tone: "ok", text: "Folder added to the scan queue." });
+  }
+
+  function removeScanQueueItem(itemId: string) {
+    persistScanQueue(scanQueue.filter((item) => item.id !== itemId));
+    setNotice({ tone: "ok", text: "Queue item removed." });
+  }
+
+  function clearScanQueue() {
+    persistScanQueue([]);
+    setNotice({ tone: "ok", text: "Scan queue cleared." });
+  }
+
+  function clearCompletedScanQueueItems() {
+    const next = scanQueue.filter((item) => item.status !== "done");
+    persistScanQueue(next);
+    setNotice({ tone: "ok", text: "Finished queue items cleared." });
+  }
+
+  function retryFailedScanQueueItems() {
+    const failed = scanQueue.filter((item) => item.status === "error").length;
+    if (!failed) {
+      setNotice({ tone: "warn", text: "No failed queue items to retry." });
+      return;
+    }
+    persistScanQueue(scanQueue.map((item) => item.status === "error" ? { ...item, status: "queued", message: "Ready to retry" } : item));
+    setNoticeMessage("ok", "notice.failedFoldersReady", { count: failed }, `${failed} failed folder${failed === 1 ? "" : "s"} ready to retry.`);
+  }
+
+  async function runScanQueue() {
+    if (!state?.consentOnFile || !state.references.length) {
+      setNotice({ tone: "warn", text: "Confirm permission and add a person before running the queue." });
+      return;
+    }
+    let working = scanQueue.map((item) => item.status === "running" ? { ...item, status: "queued" as const } : item);
+    const pending = working.filter((item) => item.status !== "done");
+    if (!pending.length) {
+      setNotice({ tone: "warn", text: "No pending folders are in the queue." });
+      return;
+    }
+    setScanQueueRunning(true);
+    const updateItem = (id: string, patch: Partial<ScanQueueItem>) => {
+      working = working.map((item) => item.id === id ? { ...item, ...patch } : item);
+      persistScanQueue(working);
+    };
+    let completed = 0;
+    try {
+      persistScanQueue(working);
+      for (const item of pending) {
+        setScanFolder(item.path);
+        updateItem(item.id, { status: "running", message: "Scanning" });
+        try {
+          const result = await invoke<CommandResult>("Scanning queued folder", "scan", {
+            folder: item.path,
+            source: "queue",
+            resume: true
+          });
+          if (result.metrics?.cancelled) {
+            updateItem(item.id, { status: "error", message: `Cancelled after ${result.metrics.processed ?? 0} file(s)` });
+            setNotice({ tone: "warn", text: "Queue stopped because the scan was cancelled." });
+            break;
+          }
+          completed += 1;
+          updateItem(item.id, {
+            status: "done",
+            lastUsedAt: Date.now(),
+            message: `Found ${result.added ?? 0} possible match${(result.added ?? 0) === 1 ? "" : "es"}`
+          });
+          if (savedScanSources.some((source) => source.path === item.path)) {
+            persistSavedScanSources(savedScanSources.map((source) => source.path === item.path ? { ...source, lastUsedAt: Date.now() } : source));
+          }
+        } catch (error) {
+          updateItem(item.id, { status: "error", message: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      if (completed) {
+        setNoticeMessage("ok", "notice.scanQueueFinished", { count: completed }, `Scan queue finished ${completed} folder${completed === 1 ? "" : "s"}.`);
+      }
+    } finally {
+      setScanQueueRunning(false);
+    }
+  }
+
+  async function retryIssuePaths(paths: string[]) {
+    const uniquePaths = [...new Set(paths.filter(Boolean))];
+    if (!uniquePaths.length) {
+      setNotice({ tone: "warn", text: "No issue files are available to retry." });
+      return;
+    }
+    if (!state?.consentOnFile || !state.references.length) {
+      setNotice({ tone: "warn", text: "Confirm permission and add a person before retrying files." });
+      return;
+    }
+    const result = await invoke<CommandResult>("Retrying issue files", "scan_paths", {
+      paths: uniquePaths,
+      source: "retry",
+      resume: false
+    });
+    const skipped = result.errors?.length ? ` ${result.errors.length} still need attention.` : "";
+    setNoticeMessage(
+      "ok",
+      "notice.retryFilesComplete",
+      { files: uniquePaths.length, matches: result.added ?? 0, skipped },
+      `Retried ${uniquePaths.length} file${uniquePaths.length === 1 ? "" : "s"} and found ${result.added ?? 0} possible match${(result.added ?? 0) === 1 ? "" : "es"}.${skipped}`
+    );
+  }
+
+  async function loadDuplicatePeople() {
+    const result = await invoke<DuplicatePeopleResult>("Finding duplicate people", "duplicate_people", { threshold: 0.82, limit: 20 });
+    setDuplicatePeople(result);
+    setNotice({
+      tone: result.suggestions.length ? "warn" : "ok",
+      text: result.suggestions.length
+        ? `Found ${result.suggestions.length} possible duplicate person label${result.suggestions.length === 1 ? "" : "s"}.`
+        : "No duplicate person labels found."
+    });
+  }
+
+  async function mergeDuplicatePeople(sourceName: string, targetName: string) {
+    await renamePerson(sourceName, targetName);
+    await loadDuplicatePeople();
+  }
+
+  async function applyReviewRules() {
+    if (!settings) return;
+    const hasRules = settings.reviewRules.autoRejectBelow > 0 ||
+      settings.reviewRules.autoRejectLowQualityVideo ||
+      settings.reviewRules.autoUncertainLowQuality;
+    if (!hasRules) {
+      setNotice({ tone: "warn", text: "Turn on at least one review rule first." });
+      return;
+    }
+    if (!confirmUi("Apply saved review rules to pending matches? You can still review and change any result afterward.")) return;
+    try {
+      await saveSettingsDraftIfDirty("Saving review rules");
+    } catch {
+      return;
+    }
+    const result = await invoke<CommandResult<ReviewRulesApplyResult>>("Applying review rules", "apply_review_rules", { confirm: true });
+    if (result.value) {
+      setReviewRuleResult(result.value);
+      setNotice({ tone: result.value.updated ? "ok" : "warn", text: `Review rules updated ${result.value.updated} possible match${result.value.updated === 1 ? "" : "es"}.` });
+    }
+  }
+
+  async function refreshWorkspaceLockStatus() {
+    try {
+      const status = await window.crossAge.getWorkspaceLockStatus();
+      setWorkspaceLock(status);
+      return status;
+    } catch (error) {
+      setErrorNotice(error);
+      return null;
+    }
+  }
+
+  async function enableWorkspaceLock() {
+    try {
+      const status = await window.crossAge.enableWorkspaceLock();
+      setWorkspaceLock(status);
+      setNotice({ tone: "ok", text: "Workspace Lock is on for this app folder." });
+    } catch (error) {
+      setErrorNotice(error);
+    }
+  }
+
+  async function lockWorkspace() {
+    try {
+      const status = await window.crossAge.lockWorkspace();
+      setWorkspaceLock(status);
+      const next = await window.crossAge.getInitialState();
+      applyState(next);
+      setNotice({ tone: "warn", text: "Workspace locked." });
+    } catch (error) {
+      setErrorNotice(error);
+    }
+  }
+
+  async function unlockWorkspace() {
+    try {
+      const status = await window.crossAge.unlockWorkspace();
+      setWorkspaceLock(status);
+      const next = await window.crossAge.getInitialState();
+      applyState(next);
+      setNotice({ tone: "ok", text: "Workspace unlocked for this session." });
+    } catch (error) {
+      setErrorNotice(error);
+    }
+  }
+
+  async function disableWorkspaceLock() {
+    if (!confirmUi("Turn Workspace Lock off for this app folder?")) return;
+    try {
+      const status = await window.crossAge.disableWorkspaceLock();
+      setWorkspaceLock(status);
+      setNotice({ tone: "ok", text: "Workspace Lock is off." });
+    } catch (error) {
+      setErrorNotice(error);
+    }
+  }
+
+  async function runAccuracyEvaluation() {
+    const result = await invoke<AccuracyEvaluation>("Checking accuracy", "accuracy_evaluation");
+    setAccuracyEvaluation(result);
+    const likely = result.metrics.likely;
+    setNotice({
+      tone: likely?.labeled ? "ok" : "warn",
+      text: likely?.labeled
+        ? `Accuracy check used ${likely.labeled} reviewed item${likely.labeled === 1 ? "" : "s"}.`
+        : "Accept or reject matches to build an accuracy baseline."
+    });
+  }
+
+  async function applyCalibration() {
+    if (!confirmUi("Apply the current review feedback to the matching levels? You can still change settings afterward.")) return;
+    const result = await invoke<CommandResult>("Applying calibration", "apply_calibration");
+    if (result.state) {
+      applyState(result.state);
+    }
+    setNotice({ tone: "ok", text: "Matching levels updated from review feedback." });
+  }
+
+  async function exportAccuracyLabels() {
+    const result = await invoke<CommandResult<AccuracyLabelsExportValue>>("Exporting accuracy labels", "export_accuracy_labels");
+    const value = result.value;
+    if (!value) {
+      setNotice({ tone: "error", text: "Accuracy label export did not return a path." });
+      return;
+    }
+    setNoticeMessage("ok", "notice.accuracyLabelsExported", { count: value.counts.labels }, `Exported ${value.counts.labels} accuracy label${value.counts.labels === 1 ? "" : "s"}.`);
+    await window.crossAge.revealPath(value.jsonPath);
+  }
+
+  function parseAccuracyLabelRows(text: string) {
+    const parsed = JSON.parse(text);
+    const record = asRecord(parsed);
+    if (Array.isArray(parsed)) return parsed.filter((row) => row && typeof row === "object") as Record<string, unknown>[];
+    if (record && Array.isArray(record.labels)) return record.labels.filter((row) => row && typeof row === "object") as Record<string, unknown>[];
+    if (record && Array.isArray(record.rows)) return record.rows.filter((row) => row && typeof row === "object") as Record<string, unknown>[];
+    const value = record ? asRecord(record.value) : null;
+    if (value && Array.isArray(value.labels)) return value.labels.filter((row) => row && typeof row === "object") as Record<string, unknown>[];
+    throw new Error("Paste a Vintrace accuracy-label JSON export with a labels array.");
+  }
+
+  async function importAccuracyLabels(text: string) {
+    const rows = parseAccuracyLabelRows(text);
+    if (!rows.length) {
+      setNotice({ tone: "warn", text: "No accuracy labels were found in the pasted JSON." });
+      return;
+    }
+    const result = await invoke<CommandResult<AccuracyLabelsImportValue>>("Importing accuracy labels", "import_accuracy_labels", { rows });
+    if (result.state) {
+      applyState(result.state);
+    }
+    const imported = result.value?.imported ?? 0;
+    const skipped = result.value?.skipped ?? 0;
+    setNotice({
+      tone: imported ? "ok" : "warn",
+      text: `Imported ${imported} accuracy label${imported === 1 ? "" : "s"}${skipped ? ` and skipped ${skipped}` : ""}.`
+    });
+    void runAccuracyEvaluation();
+  }
+
+  async function addCandidateCalibrationLabel(candidate: ReviewCandidate, isMatch: boolean) {
+    const result = await invoke<{ labelId: string; summary: AppState["calibration"] }>("Saving accuracy label", "add_calibration_label", {
+      row: {
+        candidateId: candidate.candidateId,
+        sourcePath: candidate.sourcePath,
+        sourceHash: candidate.sourceHash,
+        expectedPerson: candidate.personName,
+        actualPerson: isMatch ? candidate.personName : "",
+        matchScore: candidate.score,
+        quality: candidate.quality,
+        isMatch,
+        status: candidate.status,
+        mediaKind: candidate.mediaKind,
+        createdAt: candidate.createdAt
+      }
+    });
+    if (state && result.summary) {
+      applyState({ ...state, calibration: result.summary });
+    }
+    setNotice({ tone: "ok", text: `Accuracy label saved as ${isMatch ? "same person" : "not same person"}.` });
+  }
+
+  async function exportAcceptedMediaBundle() {
+    const result = await invoke<CommandResult<MediaBundleExportValue>>("Exporting media bundle", "export_media_bundle", {
+      statuses: ["accepted"],
+      includeOriginalMedia: true
+    });
+    const value = result.value;
+    if (!value) {
+      setNotice({ tone: "error", text: "Media bundle did not return a folder path." });
+      return;
+    }
+    setNoticeMessage("ok", "notice.mediaFilesExported", { count: value.counts.copied }, `Exported ${value.counts.copied} media file${value.counts.copied === 1 ? "" : "s"} to a shareable folder.`);
+    await window.crossAge.revealPath(value.bundlePath);
+  }
+
+  async function loadPrivacyReport() {
+    const result = await invoke<PrivacyReport>("Checking privacy data", "privacy_report");
+    setPrivacyReport(result);
+    setNotice({ tone: "ok", text: "Privacy data report loaded." });
+  }
+
+  async function deleteFaceData(includeAudit = false) {
+    const text = includeAudit
+      ? "Delete all face data, generated caches, scan history, and activity history? This cannot be undone without a backup."
+      : "Delete all saved faces, possible matches, generated previews, scan history, and model caches? Activity history is preserved.";
+    if (!confirmUi(text)) return;
+    const result = await invoke<CommandResult<DeleteFaceDataResult>>("Deleting face data", "delete_face_data", {
+      confirm: true,
+      includeAudit
+    });
+    if (result.value?.after) {
+      setPrivacyReport(result.value.after);
+    }
+    setNotice({ tone: "ok", text: "Face data deleted from this app folder." });
   }
 
   async function renamePerson(oldName: string, newName: string) {
@@ -1496,10 +3193,15 @@ export default function App() {
     const mergeText = settingsPeople.some((person) => person.toLowerCase() === target.toLowerCase() && person !== oldName)
       ? " This will merge into an existing person label."
       : "";
-    if (!window.confirm(`Rename ${oldName} to ${target}?${mergeText}`)) return;
+    if (!confirmUiMessage("dialog.renamePerson", { oldName, newName: target, mergeText }, `Rename ${oldName} to ${target}?${mergeText}`)) return;
     const result = await invoke<CommandResult>("Renaming person", "rename_person", { oldName, newName: target });
     const renamed = result.renamed ?? { references: 0, candidates: 0 };
-    setNotice({ tone: "ok", text: `Updated ${renamed.references} saved photo${renamed.references === 1 ? "" : "s"} and ${renamed.candidates} possible match${renamed.candidates === 1 ? "" : "es"}.` });
+    setNoticeMessage(
+      "ok",
+      "notice.personRenamed",
+      { references: renamed.references, candidates: renamed.candidates },
+      `Updated ${renamed.references} saved photo${renamed.references === 1 ? "" : "s"} and ${renamed.candidates} possible match${renamed.candidates === 1 ? "" : "es"}.`
+    );
   }
 
   async function copyText(text: string, label = "Summary") {
@@ -1507,21 +3209,104 @@ export default function App() {
     setNotice({ tone: "ok", text: `${label} copied.` });
   }
 
-  async function saveSettings() {
-    if (!settings) return;
+  function settingsPayload(draft: SettingsDraft): Record<string, unknown> {
+    return {
+      thresholds: draft.thresholds,
+      clusterMinSize: draft.clusterMinSize,
+      faceDetectorSize: draft.faceDetectorSize,
+      twoPassScan: draft.twoPassScan,
+      verificationDetectorSize: draft.verificationDetectorSize,
+      safeMode: draft.safeMode,
+      safeModeThreshold: draft.safeModeThreshold,
+      storageBudgetBytes: draft.storageBudgetBytes,
+      maxMediaFileBytes: draft.maxMediaFileBytes,
+      reviewRules: draft.reviewRules,
+      scanExclusions: draft.scanExclusions
+    };
+  }
+
+  async function saveSettingsDraftIfDirty(label = "Saving settings") {
+    if (!settings || !settingsDirtyRef.current) return false;
     const wasDirty = settingsDirtyRef.current;
     settingsDirtyRef.current = false;
     try {
-      await invoke<AppState>("Saving settings", "save_settings", {
-        thresholds: settings.thresholds,
-        clusterMinSize: settings.clusterMinSize,
-        safeMode: settings.safeMode,
-        safeModeThreshold: settings.safeModeThreshold
-      });
+      await invoke<AppState>(label, "save_settings", settingsPayload(settings));
+      return true;
+    } catch (error) {
+      settingsDirtyRef.current = wasDirty;
+      throw error;
+    }
+  }
+
+  async function saveSettings() {
+    if (!settings) return;
+    try {
+      await saveSettingsDraftIfDirty("Saving settings");
       setNotice({ tone: "ok", text: "Settings saved." });
     } catch {
-      settingsDirtyRef.current = wasDirty;
       return;
+    }
+  }
+
+  async function ignoreIssuePaths(paths: string[]) {
+    if (!settings) {
+      setNotice({ tone: "warn", text: "Settings are not loaded yet." });
+      return;
+    }
+    const uniquePaths = [...new Set(paths.filter(Boolean))];
+    if (!uniquePaths.length) {
+      setNotice({ tone: "warn", text: "No issue files are available to ignore." });
+      return;
+    }
+    const existing = settings.scanExclusions.filePaths ?? [];
+    const existingKeys = new Set(existing.map((item) => item.toLowerCase()));
+    const merged = [
+      ...existing,
+      ...uniquePaths.filter((item) => !existingKeys.has(item.toLowerCase()))
+    ];
+    const nextSettings: SettingsDraft = {
+      ...settings,
+      mode: "custom",
+      scanExclusions: { ...settings.scanExclusions, filePaths: merged }
+    };
+    const wasDirty = settingsDirtyRef.current;
+    settingsDirtyRef.current = false;
+    setSettings(nextSettings);
+    try {
+      await invoke<AppState>("Saving ignored files", "save_settings", settingsPayload(nextSettings));
+      setNoticeMessage("ok", "notice.issueFilesIgnored", { count: uniquePaths.length }, `Ignored ${uniquePaths.length} file${uniquePaths.length === 1 ? "" : "s"} for future scans.`);
+    } catch {
+      settingsDirtyRef.current = wasDirty;
+    }
+  }
+
+  function copySettingsProfile() {
+    if (!settings) {
+      setNotice({ tone: "warn", text: "Settings are not loaded yet." });
+      return;
+    }
+    void copyText(JSON.stringify({
+      schemaVersion: 1,
+      app: "Vintrace",
+      exportedAt: new Date().toISOString(),
+      settings: settingsPayload(settings)
+    }, null, 2), "Settings profile");
+  }
+
+  function applySettingsProfile(text: string) {
+    if (!settings) {
+      setNotice({ tone: "warn", text: "Settings are not loaded yet." });
+      return;
+    }
+    try {
+      const parsed = JSON.parse(text);
+      const wrapper = asRecord(parsed);
+      const nextSettings = coerceSettingsProfile(wrapper && "settings" in wrapper ? wrapper.settings : parsed, settings);
+      settingsDirtyRef.current = true;
+      setSettings(nextSettings);
+      setNotice({ tone: "ok", text: "Settings profile applied. Review it, then save settings." });
+    } catch (error) {
+      setErrorNotice(error, "Settings profile could not be read.");
     }
   }
 
@@ -1531,37 +3316,48 @@ export default function App() {
   );
   const selectedCandidate = selectedCandidateId ? candidateById.get(selectedCandidateId) ?? null : null;
   const settingsPeople = useMemo(
-    () => [...new Set((state?.references ?? []).map((ref) => ref.personName))].sort((a, b) => a.localeCompare(b)),
-    [state?.references]
+    () => {
+      const people = new Set<string>();
+      for (const ref of state?.references ?? []) {
+        if (ref.personName.trim()) people.add(ref.personName);
+      }
+      for (const candidate of state?.candidates ?? []) {
+        if (candidate.personName.trim() && !candidate.personName.startsWith("Unmatched cluster")) {
+          people.add(candidate.personName);
+        }
+      }
+      return [...people].sort((a, b) => a.localeCompare(b));
+    },
+    [state?.candidates, state?.references]
   );
 
   const isDemoMode = state?.engine.startsWith("local-image-fingerprint");
-  const canProcess = Boolean(state?.consentOnFile) && !busy;
+  const workspaceLocked = Boolean(workspaceLock?.locked);
+  const canProcess = Boolean(state?.consentOnFile) && !busy && !workspaceLocked;
   const enrollDisabled = !canProcess || !personName.trim() || !enrollFolder.trim();
   const ageGroupDisabled = !canProcess || !personName.trim() || !referenceAgeBuckets.some((bucket) => ageGroupFolders[bucket].trim());
   const scanDisabled = !canProcess || !scanFolder.trim() || !state?.references.length;
 
   useEffect(() => {
+    folderAnalysisRequestId.current += 1;
     setFolderAnalysis(null);
     setLastPreflight((current) => current?.folder === scanFolder.trim() ? current : null);
   }, [scanFolder]);
 
   useEffect(() => {
-    if (!state) {
+    appCommandHandlerRef.current = handleAppCommand;
+    externalOpenHandlerRef.current = handleExternalOpen;
+  });
+
+  useEffect(() => {
+    if (!state || rendererReadySentRef.current) {
       return;
     }
-    const unsubscribeCommand = window.crossAge.onAppCommand((command) => {
-      handleAppCommand(command).catch((error) => setNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) }));
+    rendererReadySentRef.current = true;
+    window.crossAge.rendererReady().catch(() => {
+      rendererReadySentRef.current = false;
     });
-    const unsubscribeExternalOpen = window.crossAge.onExternalOpen((payload) => {
-      handleExternalOpen(payload).catch((error) => setNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) }));
-    });
-    window.crossAge.rendererReady().catch(() => undefined);
-    return () => {
-      unsubscribeCommand();
-      unsubscribeExternalOpen();
-    };
-  }, [state, scanFolder, scanDisabled, watchStatus.active]);
+  }, [state]);
 
   useEffect(() => {
     if (!state || checkedOnboarding) {
@@ -1591,12 +3387,12 @@ export default function App() {
 
   function onboardingConsent() {
     dismissOnboarding();
-    setConsent(true).catch((error) => setNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) }));
+    setConsent(true).catch(setErrorNotice);
   }
 
   function onboardingWorkspace() {
     dismissOnboarding();
-    chooseWorkspace().catch((error) => setNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) }));
+    chooseWorkspace().catch(setErrorNotice);
   }
 
   if (!state) {
@@ -1630,7 +3426,7 @@ export default function App() {
           <div className="boot-caustics" />
           <div className="boot-grain" />
         </div>
-        <section className="boot-stage" aria-label="CrossAge FR startup">
+        <section className="boot-stage" aria-label="Vintrace startup">
           <div className="boot-kicker">
             <span />
             <span />
@@ -1639,10 +3435,10 @@ export default function App() {
           <div className="boot-card" role="status" aria-live="polite">
             <div className="boot-mark">
               <div className="boot-mark-aura" />
-              <ImageIcon size={27} />
+              <img src={appIconUrl} alt="" />
             </div>
             <div className="boot-copy">
-              <strong>CrossAge FR</strong>
+              <strong>Vintrace</strong>
               <span>{bootStatus}</span>
               <small>{bootDetail}</small>
               <div className="boot-progress" aria-hidden="true"><span /></div>
@@ -1678,28 +3474,33 @@ export default function App() {
     settings: { label: state.config.safeMode ? "Safe" : "Open", tone: state.config.safeMode ? "green" : "amber" }
   };
   const shellReadyItems = [
-    { label: "Local", value: isDemoMode ? "Demo" : "Model", tone: isDemoMode ? "amber" : "green" },
-    { label: "Safe Mode", value: state.config.safeMode ? "On" : "Off", tone: state.config.safeMode ? "green" : "amber" },
-    { label: "To review", value: `${state.counts.pending}`, tone: state.counts.pending ? "amber" : "blue" }
+    { label: t("shell.local"), value: isDemoMode ? t("shell.demo") : t("shell.model"), tone: isDemoMode ? "amber" : "green" },
+    { label: t("shell.safeMode"), value: state.config.safeMode ? t("shell.on") : t("shell.off"), tone: state.config.safeMode ? "green" : "amber" },
+    { label: t("shell.toReview"), value: `${state.counts.pending}`, tone: state.counts.pending ? "amber" : "blue" }
   ] as const;
 
   return (
     <main className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark"><ImageIcon size={20} /></div>
+          <div className="brand-mark"><img src={appIconUrl} alt="" /></div>
           <div>
-            <strong>CrossAge FR</strong>
-            <span>Photo Review</span>
+            <strong>Vintrace</strong>
+            <span>{t("app.subtitle")}</span>
           </div>
         </div>
         <nav className="nav-list">
           {tabs.map((tab) => {
             const Icon = tab.icon;
             return (
-              <button key={tab.key} className={activeTab === tab.key ? "active" : ""} onClick={() => setActiveTab(tab.key)}>
+              <button
+                key={tab.key}
+                className={activeTab === tab.key ? "active" : ""}
+                onClick={() => setActiveTab(tab.key)}
+                aria-current={activeTab === tab.key ? "page" : undefined}
+              >
                 <Icon size={18} />
-                <span className="nav-label">{tab.label}</span>
+                <span className="nav-label">{t(tab.labelKey)}</span>
                 {navMeta[tab.key] && <span className={`nav-badge ${navMeta[tab.key]?.tone}`}>{navMeta[tab.key]?.label}</span>}
               </button>
             );
@@ -1717,9 +3518,9 @@ export default function App() {
           <div className="workspace-path">
             <HardDrive size={18} />
             <div>
-              <small>App folder</small>
+              <small>{t("topbar.appFolder")}</small>
               <span title={state.workspace}>{state.workspace}</span>
-              <div className="workspace-meta-strip" aria-label="App folder readiness">
+              <div className="workspace-meta-strip" aria-label={t("topbar.folderReadiness")}>
                 {shellReadyItems.map((item) => (
                   <span key={item.label} className={item.tone}>
                     {item.label}: <strong>{item.value}</strong>
@@ -1731,43 +3532,69 @@ export default function App() {
           <div className="topbar-actions">
             <button className="ghost" onClick={openOnboarding} title="Open first-use guide">
               <BookOpen size={17} />
-              <span>Guide</span>
+              <span>{t("topbar.guide")}</span>
             </button>
             <button className="ghost" onClick={chooseWorkspace} disabled={Boolean(busy)} title="Choose app folder">
               <FolderOpen size={17} />
-              <span>Choose</span>
+              <span>{t("topbar.choose")}</span>
             </button>
             <button className="ghost" onClick={revealWorkspace} disabled={Boolean(busy)} title="Show app folder">
               <HardDrive size={17} />
-              <span>Show</span>
+              <span>{t("topbar.show")}</span>
             </button>
             <button className="ghost" onClick={() => invoke<AppState>("Refreshing", "get_state")} disabled={Boolean(busy)} title="Refresh">
               <RefreshCcw size={17} />
-              <span>Refresh</span>
+              <span>{t("topbar.refresh")}</span>
             </button>
+            {workspaceLock?.enabled && (
+              <button className={workspaceLock.locked ? "ghost danger-text" : "ghost"} onClick={workspaceLock.locked ? unlockWorkspace : lockWorkspace} title={localizeImperativeText(workspaceLock.message)}>
+                {workspaceLock.locked ? <Lock size={17} /> : <Unlock size={17} />}
+                <span>{workspaceLock.locked ? t("topbar.unlock") : t("topbar.lock")}</span>
+              </button>
+            )}
+            <label className="language-picker" title={t("language.title")}>
+              <span>{t("language.label")}</span>
+              <select value={language} onChange={(event) => changeLanguage(normalizeLanguage(event.currentTarget.value))} aria-label={t("language.title")}>
+                {languageOptions.map((option) => (
+                  <option key={option.code} value={option.code}>{option.nativeLabel}</option>
+                ))}
+              </select>
+            </label>
             <label className={`${state.consentOnFile ? "consent on" : "consent"}${busy ? " disabled" : ""}`}>
               <input type="checkbox" checked={state.consentOnFile} disabled={Boolean(busy)} onChange={(event) => setConsent(event.currentTarget.checked)} />
               <ShieldCheck size={17} />
-              <span>Permission</span>
+              <span>{t("topbar.permission")}</span>
             </label>
           </div>
         </header>
 
         <div className="status-row">
           {busy ? (
-            <div className="notice busy"><Loader2 className="spin" size={16} /> {busy}</div>
+            <div className="notice busy" role="status" aria-live="polite" aria-atomic="true"><Loader2 className="spin" size={16} /> {uiText(busy)}</div>
           ) : notice ? (
-            <div className={`notice ${notice.tone}`}>
+            <div className={`notice ${notice.tone}`} role={notice.tone === "error" ? "alert" : "status"} aria-live={notice.tone === "error" ? "assertive" : "polite"} aria-atomic="true">
               {notice.tone === "error" ? <AlertCircle size={16} /> : <Check size={16} />}
-              {notice.text}
+              {notice.errorCode
+                ? formatErrorMessage(language, notice.errorCode, notice.text, notice.action)
+                : notice.messageKey && language !== "en"
+                ? uiMessage(notice.messageKey, notice.values)
+                : uiText(notice.text)}
             </div>
           ) : (
-            <div className="notice neutral">Ready</div>
+            <div className="notice neutral" role="status" aria-live="polite" aria-atomic="true">{t("status.ready")}</div>
           )}
-          {isDemoMode && <div className="notice warn">Simple image matching active</div>}
+          {isDemoMode && <div className="notice warn">{t("status.simpleMatching")}</div>}
         </div>
 
-        {activeTab === "dashboard" && (
+        {workspaceLocked && workspaceLock && (
+          <WorkspaceLockGate
+            status={workspaceLock}
+            unlock={unlockWorkspace}
+            chooseWorkspace={chooseWorkspace}
+          />
+        )}
+
+        {!workspaceLocked && activeTab === "dashboard" && (
           <Dashboard
             state={state}
             scanProgress={scanProgress}
@@ -1777,14 +3604,19 @@ export default function App() {
             performanceProfile={performanceProfile}
             navigate={setActiveTab}
             chooseWorkspace={chooseWorkspace}
-            requestConsent={() => setConsent(true).catch((error) => setNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) }))}
+            requestConsent={() => setConsent(true).catch(setErrorNotice)}
             chooseModelRoot={chooseModelRoot}
             downloadModel={downloadModel}
             modelDownloadProgress={modelDownloadProgress}
+            rerunScanSource={rerunScanSource}
+            cancelScan={cancelActiveScan}
+            pauseScan={pauseActiveScan}
+            resumeScan={resumeActiveScan}
+            localScanMarkers={localScanMarkers}
             busy={Boolean(busy)}
           />
         )}
-        {activeTab === "enroll" && (
+        {!workspaceLocked && activeTab === "enroll" && (
           <EnrollView
             state={state}
             personName={personName}
@@ -1808,18 +3640,23 @@ export default function App() {
             busy={Boolean(busy)}
           />
         )}
-        {activeTab === "scan" && (
+        {!workspaceLocked && activeTab === "scan" && (
           <ScanView
             state={state}
             scanFolder={scanFolder}
             setScanFolder={setScanFolder}
             chooseFolder={() => chooseFolder(setScanFolder)}
             scan={scan}
+            resumeLastScan={resumeLastScan}
             scanCameraFrame={scanCameraFrame}
             analyzeFolder={analyzeScanFolder}
             folderAnalysis={folderAnalysis}
             startWatchFolder={startWatchFolder}
             stopWatchFolder={stopWatchFolder}
+            cancelScan={cancelActiveScan}
+            pauseScan={pauseActiveScan}
+            resumeScan={resumeActiveScan}
+            localScanMarkers={localScanMarkers}
             scanProgress={scanProgress}
             watchStatus={watchStatus}
             clearQueue={clearQueue}
@@ -1833,20 +3670,41 @@ export default function App() {
             copyText={copyText}
             revealPath={revealCandidatePath}
             openPath={openCandidatePath}
+            photoSources={photoSources}
+            refreshPhotoSources={refreshPhotoSources}
+            usePhotoSource={usePhotoSource}
+            savedScanSources={savedScanSources}
+            saveCurrentScanSource={saveCurrentScanSource}
+            useSavedScanSource={useSavedScanSource}
+            removeSavedScanSource={removeSavedScanSource}
+            scanQueue={scanQueue}
+            scanQueueRunning={scanQueueRunning}
+            addCurrentToScanQueue={addCurrentToScanQueue}
+            runScanQueue={runScanQueue}
+            removeScanQueueItem={removeScanQueueItem}
+            clearScanQueue={clearScanQueue}
+            clearCompletedScanQueueItems={clearCompletedScanQueueItems}
+            retryFailedScanQueueItems={retryFailedScanQueueItems}
+            retryIssuePaths={retryIssuePaths}
+            ignoreIssuePaths={ignoreIssuePaths}
             selectCandidate={(id) => {
               setSelectedCandidateId(id);
               setActiveTab("review");
             }}
           />
         )}
-        {activeTab === "review" && (
+        {!workspaceLocked && activeTab === "review" && (
           <ReviewView
             state={state}
             selectedCandidate={selectedCandidate}
             selectedCandidateId={selectedCandidateId}
             setSelectedCandidateId={setSelectedCandidateId}
+            queryCandidates={queryCandidates}
             review={review}
             bulkReview={bulkReview}
+            blockFalseMatch={blockFalseMatch}
+            reassignCandidatePerson={reassignCandidatePerson}
+            addCandidateCalibrationLabel={addCandidateCalibrationLabel}
             exportSelectedCandidates={exportSelectedCandidates}
             saveCandidateNote={saveCandidateNote}
             copyText={copyText}
@@ -1859,7 +3717,7 @@ export default function App() {
             busy={Boolean(busy)}
           />
         )}
-        {activeTab === "settings" && settings && (
+        {!workspaceLocked && activeTab === "settings" && settings && (
           <SettingsView
             state={state}
             settings={settings}
@@ -1869,23 +3727,68 @@ export default function App() {
             platformSummary={state.platform.accelerator_status}
             systemIntegration={systemIntegration}
             setLaunchAtLogin={setLaunchAtLogin}
+            updateStatus={updateStatus}
+            checkForUpdates={checkForUpdates}
+            setUpdateChannel={setUpdateChannel}
+            downloadUpdate={downloadUpdate}
+            installUpdate={installUpdate}
+            diagnosticsReport={diagnosticsReport}
+            previewDiagnostics={previewDiagnostics}
+            exportDiagnostics={exportDiagnostics}
+            exportSupportBundle={exportSupportBundle}
             revealWorkspace={revealWorkspace}
             openWorkspaceFolder={openWorkspaceFolder}
             people={settingsPeople}
             exportReport={exportReport}
+            exportScanHistory={exportScanHistory}
+            exportWorkspaceInventory={exportWorkspaceInventory}
+            exportAuditLog={exportAuditLog}
+            exportConsentReceipt={exportConsentReceipt}
+            loadRetentionPolicyReport={loadRetentionPolicyReport}
+            exportSafeModeAudit={exportSafeModeAudit}
+            exportReviewLedger={exportReviewLedger}
             exportWorkspaceBackup={exportWorkspaceBackup}
+            verifyLatestWorkspaceBackup={verifyLatestWorkspaceBackup}
+            backupVerification={backupVerification}
+            backupPruneResult={backupPruneResult}
+            pruneWorkspaceBackups={pruneWorkspaceBackups}
             copyText={copyText}
+            copySettingsProfile={copySettingsProfile}
+            applySettingsProfile={applySettingsProfile}
             purgeReviewedCandidates={purgeReviewedCandidates}
             purgeOldCandidates={purgeOldCandidates}
             runWorkspaceHealth={runWorkspaceHealth}
+            repairWorkspace={repairWorkspace}
+            workspaceRepairResult={workspaceRepairResult}
+            relinkWorkspacePaths={relinkWorkspacePaths}
+            workspaceRelinkResult={workspaceRelinkResult}
             purgeDuplicateCandidates={purgeDuplicateCandidates}
             workspaceHealth={workspaceHealth}
+            workspaceOptimizeResult={workspaceOptimizeResult}
+            optimizeWorkspace={optimizeWorkspace}
+            pruneScanManifests={pruneScanManifests}
+            scanManifestPruneResult={scanManifestPruneResult}
+            enforceStorageBudget={enforceStorageBudget}
             deletePerson={deletePerson}
             renamePerson={renamePerson}
             auditEvents={auditEvents}
             loadAuditEvents={loadAuditEvents}
             runtimeSelfTest={runtimeSelfTest}
             runRuntimeSelfTest={runRuntimeSelfTest}
+            runtimeBenchmark={runtimeBenchmark}
+            runRuntimeBenchmark={runRuntimeBenchmark}
+            releaseReadiness={releaseReadiness}
+            runReleaseReadiness={runReleaseReadiness}
+            accuracyEvaluation={accuracyEvaluation}
+            runAccuracyEvaluation={runAccuracyEvaluation}
+            applyCalibration={applyCalibration}
+            exportAccuracyLabels={exportAccuracyLabels}
+            importAccuracyLabels={importAccuracyLabels}
+            privacyReport={privacyReport}
+            retentionPolicy={retentionPolicy}
+            loadPrivacyReport={loadPrivacyReport}
+            deleteFaceData={deleteFaceData}
+            exportAcceptedMediaBundle={exportAcceptedMediaBundle}
             performanceMode={performanceMode}
             setPerformanceMode={setPerformanceMode}
             performanceProfile={performanceProfile}
@@ -1897,11 +3800,28 @@ export default function App() {
             chooseModelRoot={chooseModelRoot}
             downloadModel={downloadModel}
             modelDownloadProgress={modelDownloadProgress}
+            installerDiagnostics={installerDiagnostics}
+            runInstallerDiagnostics={runInstallerDiagnostics}
+            modelIntegrity={modelIntegrity}
+            runModelIntegrity={runModelIntegrity}
+            modelDriftReport={modelDriftReport}
+            runModelDriftReport={runModelDriftReport}
+            duplicatePeople={duplicatePeople}
+            loadDuplicatePeople={loadDuplicatePeople}
+            mergeDuplicatePeople={mergeDuplicatePeople}
+            reviewRuleResult={reviewRuleResult}
+            applyReviewRules={applyReviewRules}
+            workspaceLock={workspaceLock}
+            enableWorkspaceLock={enableWorkspaceLock}
+            lockWorkspace={lockWorkspace}
+            unlockWorkspace={unlockWorkspace}
+            disableWorkspaceLock={disableWorkspaceLock}
           />
         )}
         {showOnboarding && (
           <OnboardingGuide
             state={state}
+            t={t}
             onClose={() => dismissOnboarding()}
             onLater={() => dismissOnboarding(false)}
             navigate={onboardingNavigate}
@@ -1912,6 +3832,7 @@ export default function App() {
         {consentPrompt && (
           <ConsentSheet
             scope={consentPrompt.scope}
+            t={t}
             onCancel={() => setConsentPrompt(null)}
             onConfirm={confirmConsent}
           />
@@ -1921,8 +3842,128 @@ export default function App() {
   );
 }
 
+function WorkspaceLockGate({
+  status,
+  unlock,
+  chooseWorkspace
+}: {
+  status: WorkspaceLockStatus;
+  unlock(): void;
+  chooseWorkspace(): void;
+}) {
+  return (
+    <div className="lock-gate">
+      <div className="lock-gate-card">
+        <div className="lock-orb">
+          <Lock size={34} />
+        </div>
+        <span className="eyebrow">Workspace Lock</span>
+        <h2>This app folder is locked</h2>
+        <p>{localizeImperativeText(status.message)} {localizeImperativeText("Vintrace will not show saved people, possible matches, or private review data until it is unlocked.")}</p>
+        <dl className="mini-list">
+          <dt>App folder</dt><dd title={status.workspace}>{status.workspace}</dd>
+          <dt>Protection</dt><dd>{status.usingOsKeychain ? "OS encrypted" : "Unavailable"}</dd>
+        </dl>
+        <div className="button-row center">
+          <button className="primary" onClick={unlock} disabled={!status.supported}>
+            <Unlock size={17} />
+            <span>Unlock on this computer</span>
+          </button>
+          <button className="secondary" onClick={chooseWorkspace}>
+            <FolderOpen size={17} />
+            <span>Choose another folder</span>
+          </button>
+        </div>
+        <small>Workspace Lock controls access inside the app. It does not alter original photo files outside the app folder.</small>
+      </div>
+    </div>
+  );
+}
+
+const modalFocusableSelector = [
+  "a[href]",
+  "button:not([disabled])",
+  "textarea:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])"
+].join(",");
+
+function ModalFrame({
+  titleId,
+  className,
+  onEscape,
+  children
+}: {
+  titleId: string;
+  className: string;
+  onEscape?: () => void;
+  children: ReactNode;
+}) {
+  const sheetRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const sheet = sheetRef.current;
+    const focusables = sheet
+      ? Array.from(sheet.querySelectorAll<HTMLElement>(modalFocusableSelector)).filter((item) => item.offsetParent !== null || item.dataset.autofocus === "true")
+      : [];
+    const target = focusables.find((item) => item.dataset.autofocus === "true") ?? focusables[0] ?? sheet;
+    window.setTimeout(() => target?.focus(), 0);
+    return () => {
+      if (previousFocus && document.contains(previousFocus)) {
+        previousFocus.focus();
+      }
+    };
+  }, []);
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
+    if (event.key === "Escape" && onEscape) {
+      event.preventDefault();
+      onEscape();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const sheet = sheetRef.current;
+    const focusables = sheet
+      ? Array.from(sheet.querySelectorAll<HTMLElement>(modalFocusableSelector)).filter((item) => item.offsetParent !== null || item === document.activeElement)
+      : [];
+    if (!focusables.length) {
+      event.preventDefault();
+      sheet?.focus();
+      return;
+    }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        ref={sheetRef}
+        className={className}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onKeyDown={handleKeyDown}
+      >
+        {children}
+      </section>
+    </div>
+  );
+}
+
 function OnboardingGuide({
   state,
+  t,
   onClose,
   onLater,
   navigate,
@@ -1930,6 +3971,7 @@ function OnboardingGuide({
   requestConsent
 }: {
   state: AppState;
+  t(key: TranslationKey, values?: Record<string, string | number>): string;
   onClose(): void;
   onLater(): void;
   navigate(tab: TabKey): void;
@@ -1953,51 +3995,51 @@ function OnboardingGuide({
     action(): void;
   }> = [
     {
-      title: "Choose an app folder",
-      detail: "This is where CrossAge keeps saved people, possible matches, notes, and exports.",
+      title: t("onboarding.workspace.title"),
+      detail: t("onboarding.workspace.detail"),
       status: hasWorkspace,
       icon: HardDrive,
-      actionLabel: "Choose folder",
+      actionLabel: t("onboarding.workspace.action"),
       action: chooseWorkspace
     },
     {
-      title: "Confirm permission",
-      detail: "Only scan people and photos you have permission to process.",
+      title: t("onboarding.permission.title"),
+      detail: t("onboarding.permission.detail"),
       status: state.consentOnFile,
       icon: ShieldCheck,
-      actionLabel: state.consentOnFile ? "Permission set" : "Confirm",
+      actionLabel: state.consentOnFile ? t("onboarding.permission.done") : t("onboarding.permission.action"),
       action: state.consentOnFile ? () => navigate("enroll") : requestConsent
     },
     {
-      title: "Add the person to find",
-      detail: "Pick clear photos of the person. Add child, teen, and adult photos when you have them.",
+      title: t("onboarding.person.title"),
+      detail: t("onboarding.person.detail"),
       status: hasReferences,
       icon: UserPlus,
-      actionLabel: "Add person",
+      actionLabel: t("onboarding.person.action"),
       action: () => navigate("enroll")
     },
     {
-      title: "Scan a photo folder",
-      detail: "Check the folder first, then search photos and videos for possible matches.",
+      title: t("onboarding.scan.title"),
+      detail: t("onboarding.scan.detail"),
       status: hasScan,
       icon: Search,
-      actionLabel: "Start scan",
+      actionLabel: t("onboarding.scan.action"),
       action: () => navigate("scan")
     },
     {
-      title: "Review possible matches",
-      detail: "CrossAge suggests matches. You make the final decision.",
+      title: t("onboarding.review.title"),
+      detail: t("onboarding.review.detail"),
       status: hasReviewed,
       icon: Eye,
-      actionLabel: "Review",
+      actionLabel: t("onboarding.review.action"),
       action: () => navigate("review")
     },
     {
-      title: "Keep private photos protected",
-      detail: "Safe Mode keeps likely intimate photos out of matching, previews, groups, and exports.",
+      title: t("onboarding.safe.title"),
+      detail: t("onboarding.safe.detail"),
       status: safeModeReady,
       icon: Settings,
-      actionLabel: "See settings",
+      actionLabel: t("onboarding.safe.action"),
       action: () => navigate("settings")
     }
   ];
@@ -2005,25 +4047,22 @@ function OnboardingGuide({
   const firstIncomplete = steps.find((step) => !step.status) ?? steps[2];
 
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="onboarding-sheet" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
+    <ModalFrame titleId="onboarding-title" className="onboarding-sheet" onEscape={onLater}>
         <div className="onboarding-hero">
           <div className="onboarding-mark">
             <BookOpen size={24} />
           </div>
           <div>
-            <small>First use</small>
-            <h2 id="onboarding-title">Set up your first scan</h2>
-            <p>
-              Add a person, choose a folder of photos or videos, and review possible matches. Everything stays local, and Safe Mode stays on.
-            </p>
+            <small>{t("onboarding.eyebrow")}</small>
+            <h2 id="onboarding-title">{t("onboarding.title")}</h2>
+            <p>{t("onboarding.body")}</p>
           </div>
         </div>
 
-        <div className="onboarding-progress" aria-label={`Onboarding ${progress}% complete`}>
+        <div className="onboarding-progress" aria-label={t("onboarding.progress", { progress })}>
           <div>
-            <strong>{completed}/6 ready</strong>
-            <span>{progress}% complete</span>
+            <strong>{t("onboarding.ready", { completed })}</strong>
+            <span>{t("onboarding.complete", { progress })}</span>
           </div>
           <meter min={0} max={100} value={progress} />
         </div>
@@ -2045,69 +4084,66 @@ function OnboardingGuide({
         </div>
 
         <div className="onboarding-guardrails">
-          <span><ShieldCheck size={15} /> Permission required</span>
-          <span><EyeOff size={15} /> Safe Mode on</span>
-          <span><Database size={15} /> Saved locally</span>
+          <span><ShieldCheck size={15} /> {t("onboarding.guard.permission")}</span>
+          <span><EyeOff size={15} /> {t("onboarding.guard.safe")}</span>
+          <span><Database size={15} /> {t("onboarding.guard.local")}</span>
         </div>
 
         <div className="button-row onboarding-actions">
-          <button className="secondary" onClick={onLater} type="button">Remind me later</button>
-          <button className="secondary" onClick={onClose} type="button">Done</button>
-          <button className="primary" onClick={firstIncomplete.action} type="button">
+          <button className="secondary" onClick={onLater} type="button">{t("onboarding.later")}</button>
+          <button className="secondary" onClick={onClose} type="button">{t("onboarding.done")}</button>
+          <button className="primary" onClick={firstIncomplete.action} type="button" data-autofocus="true">
             <ChevronRight size={16} />
-            <span>Continue</span>
+            <span>{t("onboarding.continue")}</span>
           </button>
         </div>
-      </section>
-    </div>
+    </ModalFrame>
   );
 }
 
 function ConsentSheet({
   scope,
+  t,
   onCancel,
   onConfirm
 }: {
   scope: string;
+  t(key: TranslationKey, values?: Record<string, string | number>): string;
   onCancel(): void;
   onConfirm(note: string): void | Promise<void>;
 }) {
   const [note, setNote] = useState("");
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="consent-sheet" role="dialog" aria-modal="true" aria-labelledby="consent-title">
+    <ModalFrame titleId="consent-title" className="consent-sheet" onEscape={onCancel}>
         <div className="panel-title">
           <ShieldCheck size={18} />
-          <span id="consent-title">Confirm permission</span>
+          <span id="consent-title">{t("consent.title")}</span>
         </div>
         <div className="consent-scope">
-          <small>Applies to this app folder</small>
+          <small>{t("consent.scope")}</small>
           <strong title={scope}>{scope}</strong>
         </div>
-        <p className="compact">
-          Confirm that you have permission to scan these people and photos in this local app folder. CrossAge only suggests possible matches; you make the final decision.
-        </p>
-        <label>Optional note
+        <p className="compact">{t("consent.body")}</p>
+        <label>{t("consent.note")}
           <textarea
-            aria-label="Permission note"
+            aria-label={t("consent.note")}
             value={note}
             onChange={(event) => setNote(event.currentTarget.value)}
-            placeholder="Add a case, folder, or operator note"
+            placeholder={t("consent.notePlaceholder")}
             maxLength={800}
           />
         </label>
         <div className="button-row consent-sheet-actions">
           <button className="secondary" type="button" onClick={onCancel}>
             <X size={17} />
-            <span>Cancel</span>
+            <span>{t("consent.cancel")}</span>
           </button>
           <button className="primary" type="button" onClick={() => void onConfirm(note.trim())}>
             <ShieldCheck size={17} />
-            <span>Confirm permission</span>
+            <span>{t("consent.confirm")}</span>
           </button>
         </div>
-      </section>
-    </div>
+    </ModalFrame>
   );
 }
 
@@ -2124,6 +4160,11 @@ function Dashboard({
   chooseModelRoot,
   downloadModel,
   modelDownloadProgress,
+  rerunScanSource,
+  cancelScan,
+  pauseScan,
+  resumeScan,
+  localScanMarkers,
   busy
 }: {
   state: AppState;
@@ -2138,6 +4179,11 @@ function Dashboard({
   chooseModelRoot(): void | Promise<void>;
   downloadModel(pack: string, root?: string, force?: boolean): void | Promise<void>;
   modelDownloadProgress: ModelDownloadProgress | null;
+  rerunScanSource(run: AppState["scanHistory"][number]): void;
+  cancelScan(): void;
+  pauseScan(): void;
+  resumeScan(): void;
+  localScanMarkers: { cancelRequested: boolean; paused: boolean } | null;
   busy: boolean;
 }) {
   const totals = state.scanTotals;
@@ -2259,7 +4305,7 @@ function Dashboard({
               ? `${state.counts.pending} possible match${state.counts.pending === 1 ? "" : "es"} need your decision.`
               : state.counts.candidates
                 ? "All possible matches have decisions."
-                : "Add photos of a person, scan a folder, and review what CrossAge finds."}
+                : "Add photos of a person, scan a folder, and review what Vintrace finds."}
           </p>
         </div>
         <div className="dashboard-visual" style={heroVisualStyle} aria-hidden="true">
@@ -2329,7 +4375,7 @@ function Dashboard({
 
       <div className="panel dashboard-span">
         <div className="panel-title"><Activity size={18} /> Live scan stream</div>
-        <ScanActivity progress={scanProgress} watchStatus={watchStatus} />
+        <ScanActivity progress={scanProgress} watchStatus={watchStatus} cancelScan={cancelScan} pauseScan={pauseScan} resumeScan={resumeScan} scanPaused={Boolean(state.scanJob?.paused || localScanMarkers?.paused)} />
       </div>
 
       <div className="panel">
@@ -2347,6 +4393,10 @@ function Dashboard({
                   <span>{run.metrics.added} matches</span>
                   <span>{run.metrics.safeFiltered} protected</span>
                 </div>
+                <button className="ghost compact-action" onClick={() => rerunScanSource(run)} disabled={busy}>
+                  <RefreshCcw size={15} />
+                  <span>Rerun</span>
+                </button>
               </div>
             ))
           ) : (
@@ -2405,12 +4455,15 @@ function Dashboard({
       <div className="panel">
         <div className="panel-title"><Database size={18} /> System and safety</div>
         <dl className="detail-list dashboard-detail-list">
+          <dt>Stack</dt><dd>{providerSummary(state)}</dd>
           <dt>Platform</dt><dd>{platformLabel(state)}</dd>
           <dt>Provider</dt><dd>{state.platform.primary_provider}</dd>
           <dt>Engine</dt><dd title={state.engine}>{engineLabel(state.engine)}</dd>
           <dt>Precision</dt><dd>{state.platform.precision}</dd>
           <dt>Acceleration</dt><dd>{state.platform.accelerator_status}</dd>
           <dt>Search index</dt><dd>{state.platform.vector_backend || state.vectorStore}</dd>
+          <dt>Face scan detail</dt><dd>{state.config.faceDetectorSize}</dd>
+          <dt>High-detail recheck</dt><dd>{state.config.twoPassScan ? `${state.config.verificationDetectorSize}` : "Off"}</dd>
           <dt>Permission</dt><dd>{state.config.requireConsent ? "Required" : "Optional"}</dd>
           <dt>Safe Mode sensitivity</dt><dd>{state.config.safeModeThreshold.toFixed(2)}</dd>
         </dl>
@@ -2447,7 +4500,7 @@ function FirstScanGuide({
   }> = [
     {
       number: "1",
-      title: "Choose where CrossAge saves its work",
+      title: "Choose where Vintrace saves its work",
       detail: "This folder stores saved people, possible matches, notes, exports, and backups.",
       done: Boolean(state.workspaceMetadata?.workspaceId || state.workspace),
       actionLabel: "Choose folder",
@@ -2472,7 +4525,7 @@ function FirstScanGuide({
     {
       number: "4",
       title: "Scan photos or videos",
-      detail: watchStatus.active ? "CrossAge is watching a folder for new files." : "Choose a folder, check it, then start the scan.",
+      detail: watchStatus.active ? "Vintrace is watching a folder for new files." : "Choose a folder, check it, then start the scan.",
       done: state.scanTotals.runs > 0 || state.candidates.length > 0,
       actionLabel: "Scan folder",
       action: () => navigate("scan")
@@ -2560,7 +4613,7 @@ function ModelSetupCard({
           <h2>{statusLabel}</h2>
           <p>
             {ready
-              ? "CrossAge is using a local face model. Downloads are verified before install and stay on this device."
+              ? "Vintrace is using a local face model. Downloads are verified before install and stay on this device."
               : "Install a local face model once so shared DMG and EXE builds can run the full matching pipeline after first launch."}
           </p>
         </div>
@@ -2602,7 +4655,7 @@ function ModelSetupCard({
       {!ready && !downloading && (
         <div className="model-offline-note">
           <AlertCircle size={16} />
-          <span>{setup?.offlineMessage || "Internet is needed once for the face model. If you are offline, the app can open in simple matching mode and retry later."}</span>
+          <span>{localizeImperativeText(setup?.offlineMessage || "Internet is needed once for the face model. If you are offline, the app can open in simple matching mode and retry later.")}</span>
         </div>
       )}
 
@@ -2656,7 +4709,7 @@ function EnrollView(props: {
     <section className="split-page">
       <div className="panel form-panel">
         <div className="panel-title"><UserPlus size={18} /> Add a person to find</div>
-        <p className="compact">Add a few clear photos of one person. CrossAge saves these as the example photos it compares against during scans.</p>
+        <p className="compact">Add a few clear photos of one person. Vintrace saves these as the example photos it compares against during scans.</p>
         <label>Person name<input aria-label="Person name" placeholder="Name shown in results" value={props.personName} onChange={(event) => props.setPersonName(event.currentTarget.value)} /></label>
         <label>Age range in these photos
           <select value={props.ageBucket} onChange={(event) => props.setAgeBucket(event.currentTarget.value as AgeBucket)}>
@@ -2762,7 +4815,7 @@ function ReferenceCoverageCoach({ references }: { references: AppState["referenc
   return (
     <div className="coverage-coach">
       <div className="section-kicker">Age coverage</div>
-      <p className="compact">More ages can help CrossAge find the same person across old and new photos.</p>
+      <p className="compact">More ages can help Vintrace find the same person across old and new photos.</p>
       {rows.length ? rows.map((row) => (
         <div className="coverage-coach-row" key={row.person}>
           <div>
@@ -2793,11 +4846,16 @@ function ScanView(props: {
   setScanFolder(value: string): void;
   chooseFolder(): void;
   scan(): void;
+  resumeLastScan(): void;
   scanCameraFrame(dataUrl: string): Promise<CameraScanResult>;
   analyzeFolder(): void;
   folderAnalysis: FolderAnalysis | null;
   startWatchFolder(): void;
   stopWatchFolder(): void;
+  cancelScan(): void;
+  pauseScan(): void;
+  resumeScan(): void;
+  localScanMarkers: { cancelRequested: boolean; paused: boolean } | null;
   scanProgress: ScanProgress | null;
   watchStatus: FolderWatchStatus;
   clearQueue(): void;
@@ -2811,8 +4869,26 @@ function ScanView(props: {
   copyText(text: string, label?: string): void;
   revealPath(candidatePath?: string | null): void | Promise<void>;
   openPath(candidatePath?: string | null): void | Promise<void>;
+  photoSources: SystemPhotoSource[];
+  refreshPhotoSources(): void;
+  usePhotoSource(source: SystemPhotoSource): void;
+  savedScanSources: SavedScanSource[];
+  saveCurrentScanSource(): void;
+  useSavedScanSource(source: SavedScanSource): void;
+  removeSavedScanSource(sourceId: string): void;
+  scanQueue: ScanQueueItem[];
+  scanQueueRunning: boolean;
+  addCurrentToScanQueue(): void;
+  runScanQueue(): void;
+  removeScanQueueItem(itemId: string): void;
+  clearScanQueue(): void;
+  clearCompletedScanQueueItems(): void;
+  retryFailedScanQueueItems(): void;
+  retryIssuePaths(paths: string[]): void;
+  ignoreIssuePaths(paths: string[]): void;
   selectCandidate(id: string): void;
 }) {
+  const scanActive = Boolean(props.scanProgress && !["complete", "cancelled", "error"].includes(props.scanProgress.phase));
   const readiness = [
     { label: "Permission", ok: props.state.consentOnFile },
     { label: "Person added", ok: props.state.references.length > 0 },
@@ -2822,7 +4898,7 @@ function ScanView(props: {
     <section className="scan-page">
       <div className="panel form-panel">
         <div className="panel-title"><Search size={18} /> Scan photos and videos</div>
-        <p className="compact">Pick a folder to search. CrossAge adds possible matches to the review list as it works, so you do not have to wait for the whole scan to finish.</p>
+        <p className="compact">Pick a folder to search. Vintrace adds possible matches to the review list as it works, so you do not have to wait for the whole scan to finish.</p>
         <div className="field">
           <label htmlFor="scan-folder">Folder to search</label>
           <div className="path-input">
@@ -2837,6 +4913,18 @@ function ScanView(props: {
         <button className="secondary" onClick={props.analyzeFolder} disabled={!props.scanFolder.trim() || props.busy}>
           <Activity size={17} />
           <span>Check folder</span>
+        </button>
+        <button className="secondary danger" onClick={props.cancelScan} disabled={!scanActive}>
+          <X size={17} />
+          <span>Cancel scan</span>
+        </button>
+        <button className="secondary" onClick={props.pauseScan} disabled={!scanActive || props.state.scanJob?.paused}>
+          <Pause size={17} />
+          <span>Pause</span>
+        </button>
+        <button className="secondary" onClick={props.resumeScan} disabled={!props.state.scanJob?.paused}>
+          <Play size={17} />
+          <span>Resume</span>
         </button>
         <button className="secondary danger" onClick={props.clearQueue} disabled={!props.state.candidates.length || props.busy}>
           <Trash2 size={17} />
@@ -2858,6 +4946,7 @@ function ScanView(props: {
             <span key={item.label} className={item.ok ? "pill green" : "pill neutral"}>{item.label}</span>
           ))}
         </div>
+        <ScanRecoveryPanel state={props.state} busy={props.busy} resumeLastScan={props.resumeLastScan} />
         <PendingExternalBanner
           intent={props.pendingExternalIntent}
           ready={Boolean(props.state.consentOnFile && props.state.references.length)}
@@ -2865,7 +4954,33 @@ function ScanView(props: {
           onDismiss={props.clearPendingExternalIntent}
         />
         <FolderPreflight analysis={props.folderAnalysis} />
-        <ScanActivity progress={props.scanProgress} watchStatus={props.watchStatus} />
+        <SavedScanSourcesPanel
+          sources={props.savedScanSources}
+          busy={props.busy}
+          currentFolder={props.scanFolder}
+          saveCurrent={props.saveCurrentScanSource}
+          useSource={props.useSavedScanSource}
+          removeSource={props.removeSavedScanSource}
+        />
+        <ScanQueuePanel
+          queue={props.scanQueue}
+          busy={props.busy}
+          running={props.scanQueueRunning}
+          currentFolder={props.scanFolder}
+          addCurrent={props.addCurrentToScanQueue}
+          runQueue={props.runScanQueue}
+          removeItem={props.removeScanQueueItem}
+          clearQueue={props.clearScanQueue}
+          clearCompleted={props.clearCompletedScanQueueItems}
+          retryFailed={props.retryFailedScanQueueItems}
+        />
+        <SystemPhotosPanel
+          sources={props.photoSources}
+          busy={props.busy}
+          refresh={props.refreshPhotoSources}
+          useSource={props.usePhotoSource}
+        />
+        <ScanActivity progress={props.scanProgress} watchStatus={props.watchStatus} cancelScan={props.cancelScan} pauseScan={props.pauseScan} resumeScan={props.resumeScan} scanPaused={Boolean(props.state.scanJob?.paused || props.localScanMarkers?.paused)} />
         <ScanIssueCenter
           analysis={props.folderAnalysis}
           scanHistory={props.state.scanHistory}
@@ -2874,6 +4989,8 @@ function ScanView(props: {
           copyText={props.copyText}
           revealPath={props.revealPath}
           openPath={props.openPath}
+          retryPaths={props.retryIssuePaths}
+          ignorePaths={props.ignoreIssuePaths}
         />
       </div>
       <CameraScanner
@@ -2891,6 +5008,229 @@ function ScanView(props: {
   );
 }
 
+function ScanRecoveryPanel({
+  state,
+  busy,
+  resumeLastScan
+}: {
+  state: AppState;
+  busy: boolean;
+  resumeLastScan(): void;
+}) {
+  const latest = state.scanJob?.latestScan;
+  const status = String(latest?.status || "");
+  const canResume = Boolean(state.scanJob?.canResume && latest);
+  if (!canResume) {
+    return null;
+  }
+  const processed = Number(latest?.processed || 0);
+  const total = Number(latest?.total || 0);
+  const folder = String(latest?.root_path || latest?.label || "");
+  const percentDone = total ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+  const skippedText = processed ? `Resume skips ${formatNumber(processed)} completed file${processed === 1 ? "" : "s"}.` : "Resume uses the last scan manifest.";
+  return (
+    <div className="recovery-card">
+      <div>
+        <strong>Resume last scan</strong>
+        <span title={folder}>{folder ? basename(folder) : "Previous scan"}</span>
+      </div>
+      <div className="recovery-progress">
+        <progress max={100} value={percentDone} />
+        <small>{state.scanJob?.progressLabel || `${formatNumber(processed)} processed`} • {status || "paused"}</small>
+      </div>
+      <p>{skippedText} {state.scanJob?.recommendedAction}</p>
+      <button className="secondary" onClick={resumeLastScan} disabled={busy || !state.consentOnFile || !state.references.length}>
+        <Play size={17} />
+        <span>Resume last scan</span>
+      </button>
+    </div>
+  );
+}
+
+function SavedScanSourcesPanel({
+  sources,
+  busy,
+  currentFolder,
+  saveCurrent,
+  useSource,
+  removeSource
+}: {
+  sources: SavedScanSource[];
+  busy: boolean;
+  currentFolder: string;
+  saveCurrent(): void;
+  useSource(source: SavedScanSource): void;
+  removeSource(sourceId: string): void;
+}) {
+  return (
+    <div className="system-photo-panel saved-source-panel">
+      <div className="panel-subtitle">
+        <span>Saved scan sources</span>
+        <button className="mini-button" onClick={saveCurrent} disabled={busy || !currentFolder.trim()} type="button">
+          <Save size={14} />
+          <span>Save current</span>
+        </button>
+      </div>
+      <div className="photo-source-list">
+        {sources.length ? sources.map((source) => (
+          <div className="saved-source-row" key={source.id}>
+            <button
+              className="photo-source-card"
+              onClick={() => useSource(source)}
+              disabled={busy}
+              type="button"
+              title={source.path}
+            >
+              <span>
+                <strong>{source.label}</strong>
+                <small>Last used {formatTimestampDateTime(source.lastUsedAt)}</small>
+                <em>{source.path}</em>
+              </span>
+              <ChevronRight size={17} />
+            </button>
+            <button className="icon-button danger" onClick={() => removeSource(source.id)} disabled={busy} title="Remove saved source" aria-label={`Remove ${source.label}`}>
+              <Trash2 size={15} />
+            </button>
+          </div>
+        )) : (
+          <div className="empty compact-empty">
+            <FolderOpen size={20} />
+            <strong>No saved sources</strong>
+            <span>Save folders you scan often.</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ScanQueuePanel({
+  queue,
+  busy,
+  running,
+  currentFolder,
+  addCurrent,
+  runQueue,
+  removeItem,
+  clearQueue,
+  clearCompleted,
+  retryFailed
+}: {
+  queue: ScanQueueItem[];
+  busy: boolean;
+  running: boolean;
+  currentFolder: string;
+  addCurrent(): void;
+  runQueue(): void;
+  removeItem(itemId: string): void;
+  clearQueue(): void;
+  clearCompleted(): void;
+  retryFailed(): void;
+}) {
+  const pendingCount = queue.filter((item) => item.status !== "done").length;
+  const failedCount = queue.filter((item) => item.status === "error").length;
+  const doneCount = queue.filter((item) => item.status === "done").length;
+  return (
+    <div className="system-photo-panel scan-queue-panel">
+      <div className="panel-subtitle">
+        <span>Scan queue</span>
+        <div className="inline-actions">
+          <button className="mini-button" onClick={addCurrent} disabled={busy || running || !currentFolder.trim()} type="button">
+            <Archive size={14} />
+            <span>Add</span>
+          </button>
+          <button className="mini-button" onClick={runQueue} disabled={busy || running || !pendingCount} type="button">
+            {running ? <Loader2 className="spin" size={14} /> : <Play size={14} />}
+            <span>{running ? "Running" : "Run"}</span>
+          </button>
+          <button className="mini-button" onClick={retryFailed} disabled={busy || running || !failedCount} type="button">
+            <RefreshCcw size={14} />
+            <span>Retry failed</span>
+          </button>
+          <button className="mini-button" onClick={clearCompleted} disabled={busy || running || !doneCount} type="button">
+            <Check size={14} />
+            <span>Clear done</span>
+          </button>
+          <button className="mini-button danger" onClick={clearQueue} disabled={busy || running || !queue.length} type="button">
+            <Trash2 size={14} />
+            <span>Clear</span>
+          </button>
+        </div>
+      </div>
+      <div className="scan-queue-list">
+        {queue.length ? queue.map((item) => (
+          <div className={`scan-queue-row ${item.status}`} key={item.id}>
+            <span>
+              <strong>{item.label}</strong>
+              <small title={item.path}>{item.path}</small>
+              {item.message ? <em>{localizeImperativeText(item.message)}</em> : null}
+            </span>
+            <i>{item.status}</i>
+            <button className="icon-button danger" onClick={() => removeItem(item.id)} disabled={busy || running} title="Remove queued folder" aria-label={`Remove ${item.label}`}>
+              <X size={15} />
+            </button>
+          </div>
+        )) : (
+          <div className="empty compact-empty">
+            <Archive size={20} />
+            <strong>No queued folders</strong>
+            <span>Add folders to scan them one after another.</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SystemPhotosPanel({
+  sources,
+  busy,
+  refresh,
+  useSource
+}: {
+  sources: SystemPhotoSource[];
+  busy: boolean;
+  refresh(): void;
+  useSource(source: SystemPhotoSource): void;
+}) {
+  return (
+    <div className="system-photo-panel">
+      <div className="panel-subtitle">
+        <span>Photo locations</span>
+        <button className="mini-button" onClick={refresh} disabled={busy} type="button">
+          <RefreshCcw size={14} />
+          <span>Refresh</span>
+        </button>
+      </div>
+      <div className="photo-source-list">
+        {sources.length ? sources.map((source) => (
+          <button
+            key={source.id}
+            className={source.available ? "photo-source-card" : "photo-source-card unavailable"}
+            onClick={() => useSource(source)}
+            disabled={busy || !source.available}
+            type="button"
+            title={source.path}
+          >
+            <span>
+              <strong>{source.label}</strong>
+              <small>{source.detail}</small>
+              <em>{source.available ? source.path : "Not found on this computer"}</em>
+            </span>
+            {source.available ? <ChevronRight size={17} /> : <AlertCircle size={17} />}
+          </button>
+        )) : (
+          <div className="empty compact-empty">
+            <FolderOpen size={20} />
+            <strong>No photo locations detected</strong>
+            <span>Use Choose folder to pick a folder manually.</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CameraScanner(props: {
   state: AppState;
   busy: boolean;
@@ -2901,6 +5241,8 @@ function CameraScanner(props: {
   const detectorRef = useRef<FaceDetectorLike | null>(null);
   const stableReadyFrames = useRef(0);
   const lastAutoCaptureAt = useRef(0);
+  const mountedRef = useRef(true);
+  const captureInFlightRef = useRef(false);
   const [mode, setMode] = useState<CameraMode>("idle");
   const [error, setError] = useState("");
   const [diagnostics, setDiagnostics] = useState<CameraDiagnostics>(initialCameraDiagnostics);
@@ -2920,8 +5262,14 @@ function CameraScanner(props: {
           ? diagnostics.status
           : "Camera standby";
 
-  useEffect(() => () => {
-    streamRef.current?.getTracks().forEach((track) => track.stop());
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      captureInFlightRef.current = false;
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
@@ -2988,8 +5336,10 @@ function CameraScanner(props: {
     setMode("starting");
     setError("");
     setLastCapture(null);
+    let stream: MediaStream | null = null;
     try {
-      const stream = window.crossAge.testCamera
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      stream = window.crossAge.testCamera
         ? createSyntheticCameraStream()
         : await navigator.mediaDevices.getUserMedia({
             video: {
@@ -3006,11 +5356,19 @@ function CameraScanner(props: {
         video.srcObject = stream;
         await video.play();
       }
-      setMode("live");
+      if (mountedRef.current) {
+        setMode("live");
+      }
     } catch (captureError) {
+      stream?.getTracks().forEach((track) => track.stop());
+      if (streamRef.current === stream) {
+        streamRef.current = null;
+      }
       const message = captureError instanceof Error ? captureError.message : String(captureError);
-      setError(message || "Camera access was not available.");
-      setMode("error");
+      if (mountedRef.current) {
+        setError(message || "Camera access was not available.");
+        setMode("error");
+      }
     }
   }
 
@@ -3030,18 +5388,25 @@ function CameraScanner(props: {
 
   async function captureFrame(_automatic = false) {
     const video = videoRef.current;
-    if (!video || !live || props.busy || mode === "capturing") return;
+    if (!video || !live || props.busy || mode === "capturing" || captureInFlightRef.current) return;
+    captureInFlightRef.current = true;
     setMode("capturing");
     setError("");
     try {
       const dataUrl = snapshotVideoFrame(video);
       const result = await props.onCapture(dataUrl);
-      setLastCapture(result);
-      setMode(streamRef.current ? "live" : "idle");
+      if (mountedRef.current) {
+        setLastCapture(result);
+        setMode(streamRef.current ? "live" : "idle");
+      }
     } catch (captureError) {
       const message = captureError instanceof Error ? captureError.message : String(captureError);
-      setError(message || "Camera photo could not be saved.");
-      setMode(streamRef.current ? "live" : "error");
+      if (mountedRef.current) {
+        setError(message || "Camera photo could not be saved.");
+        setMode(streamRef.current ? "live" : "error");
+      }
+    } finally {
+      captureInFlightRef.current = false;
     }
   }
 
@@ -3191,7 +5556,9 @@ function ScanIssueCenter({
   busy,
   copyText,
   revealPath,
-  openPath
+  openPath,
+  retryPaths,
+  ignorePaths
 }: {
   analysis: FolderAnalysis | null;
   scanHistory: AppState["scanHistory"];
@@ -3200,6 +5567,8 @@ function ScanIssueCenter({
   copyText(text: string, label?: string): void;
   revealPath(candidatePath?: string | null): void | Promise<void>;
   openPath(candidatePath?: string | null): void | Promise<void>;
+  retryPaths(paths: string[]): void;
+  ignorePaths(paths: string[]): void;
 }) {
   const preflightIssues = [
     ...(analysis?.unreadableSamples ?? []).map((item) => ({ ...item, kind: "image" })),
@@ -3214,7 +5583,7 @@ function ScanIssueCenter({
   ).slice(0, 5);
   const totalIssues = preflightIssues.length + scanIssues.length;
   const issueReport = [
-    "CrossAge FR scan issue report",
+    "Vintrace scan issue report",
     analysis ? `Folder: ${analysis.folder}` : "Folder: Not checked",
     "",
     ...preflightIssues.map((item) => `Folder check | ${item.path} | ${item.error}`),
@@ -3254,6 +5623,14 @@ function ScanIssueCenter({
         <Archive size={16} />
         <span>Copy report</span>
       </button>
+      <button className="ghost compact-action" onClick={() => retryPaths(preflightIssues.map((item) => item.path))} disabled={!preflightIssues.length || busy}>
+        <Search size={16} />
+        <span>Retry files</span>
+      </button>
+      <button className="ghost compact-action danger" onClick={() => ignorePaths(preflightIssues.map((item) => item.path))} disabled={!preflightIssues.length || busy}>
+        <EyeOff size={16} />
+        <span>Ignore files</span>
+      </button>
     </div>
   );
 }
@@ -3268,12 +5645,16 @@ function FolderPreflight({ analysis }: { analysis: FolderAnalysis | null }) {
     );
   }
   const mediaCount = analysis.imageCount + analysis.videoCount;
-  const issueCount = analysis.unreadableSamples.length + analysis.unreadableVideoSamples.length;
-  const ready = analysis.exists && analysis.isDirectory && mediaCount > 0 && issueCount === 0;
+  const issueCount = folderAnalysisIssueCount(analysis);
+  const ready = isFolderAnalysisReady(analysis);
   const metrics = [
+    { label: "Media files", value: formatNumber(mediaCount) },
     { label: "Images", value: formatNumber(analysis.imageCount) },
     { label: "Videos", value: formatNumber(analysis.videoCount) },
     { label: "Other files", value: formatNumber(analysis.nonImageCount) },
+    { label: "Excluded", value: formatNumber((analysis.excludedCount ?? 0) + (analysis.excludedDirectoryCount ?? 0)) },
+    { label: "I/O issues", value: formatNumber((analysis.transientErrorCount ?? 0) + (analysis.statErrorCount ?? 0) + (analysis.walkErrorCount ?? 0)) },
+    { label: "Checked", value: analysis.truncated ? `${formatNumber(analysis.entriesChecked ?? 0)}+` : formatNumber(analysis.entriesChecked ?? 0) },
     { label: "Sampled", value: formatNumber(analysis.checkedImages + analysis.checkedVideos) },
     { label: "Size", value: formatBytes(analysis.totalBytes) }
   ];
@@ -3288,8 +5669,32 @@ function FolderPreflight({ analysis }: { analysis: FolderAnalysis | null }) {
           <span key={metric.label}><small>{metric.label}</small><strong>{metric.value}</strong></span>
         ))}
       </div>
+      {analysis.estimate && (
+        <div className="eta-detail preflight-eta">
+          <span><strong>{analysis.estimate.label}</strong> expected</span>
+          <span><strong>{formatDuration(analysis.estimate.imageSeconds * 1000)}</strong> photos</span>
+          <span><strong>{formatDuration(analysis.estimate.videoSeconds * 1000)}</strong> videos</span>
+          <span><strong>{analysis.estimate.detectorSize}</strong> detail</span>
+        </div>
+      )}
+      {analysis.plan && (
+        <div className="eta-detail preflight-eta">
+          <span><strong>{analysis.plan.mode}</strong> plan</span>
+          <span><strong>{formatBytes(analysis.plan.estimatedWorkspaceBytes)}</strong> app data</span>
+          <span><strong>{formatNumber(analysis.plan.cache.embeddingEntries)}</strong> cached faces</span>
+          <span><strong>{analysis.plan.resumable ? "Yes" : "No"}</strong> resumable</span>
+        </div>
+      )}
+      {analysis.storage && (
+        <div className="eta-detail preflight-eta">
+          <span><strong>{analysis.storage.volumeKind}</strong> drive</span>
+          <span><strong>{formatBytes(analysis.storage.freeBytes)}</strong> free</span>
+          <span><strong>{analysis.storage.externalLikely ? "External" : analysis.storage.networkLikely ? "Network" : "Local"}</strong> source</span>
+          <span><strong>{analysis.storage.sameVolumeAsWorkspace ? "Same drive" : "Separate app drive"}</strong></span>
+        </div>
+      )}
       <div className="preflight-notes">
-        {analysis.recommendations.slice(0, 4).map((item) => <span key={item}>{item}</span>)}
+        {[...(analysis.plan?.warnings ?? []), ...analysis.recommendations].slice(0, 5).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
       </div>
       {analysis.decoder && (
         <div className="decoder-strip">
@@ -3297,6 +5702,13 @@ function FolderPreflight({ analysis }: { analysis: FolderAnalysis | null }) {
           <span className={analysis.decoder.rawAvailable ? "pill green" : "pill neutral"}>RAW {analysis.decoder.rawAvailable ? "ready" : "not ready"}</span>
           {analysis.videoDecoder && <span className={analysis.videoDecoder.opencvAvailable ? "pill green" : "pill neutral"}>Video {analysis.videoDecoder.backend}</span>}
           <span className="pill neutral">{analysis.decoder.extensions.length} file types</span>
+        </div>
+      )}
+      {analysis.excludedSamples?.length > 0 && (
+        <div className="preflight-errors">
+          {analysis.excludedSamples.slice(0, 3).map((item) => (
+            <span key={item.path} title={item.reason}>{basename(item.path)} skipped</span>
+          ))}
         </div>
       )}
       {issueCount > 0 && (
@@ -3310,7 +5722,21 @@ function FolderPreflight({ analysis }: { analysis: FolderAnalysis | null }) {
   );
 }
 
-function ScanActivity({ progress, watchStatus }: { progress: ScanProgress | null; watchStatus: FolderWatchStatus }) {
+function ScanActivity({
+  progress,
+  watchStatus,
+  cancelScan,
+  pauseScan,
+  resumeScan,
+  scanPaused
+}: {
+  progress: ScanProgress | null;
+  watchStatus: FolderWatchStatus;
+  cancelScan(): void;
+  pauseScan(): void;
+  resumeScan(): void;
+  scanPaused: boolean;
+}) {
   const [etaOpen, setEtaOpen] = useState(false);
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [clock, setClock] = useState(Date.now());
@@ -3318,12 +5744,26 @@ function ScanActivity({ progress, watchStatus }: { progress: ScanProgress | null
   const processed = progress?.processed ?? 0;
   const completion = total ? Math.min(1, processed / total) : 0;
   const current = progress?.currentPath ? basename(progress.currentPath) : watchStatus.active ? basename(watchStatus.folder) : "Idle";
-  const phase = watchStatus.scanning ? "Watching" : progress?.phase === "complete" ? "Complete" : progress?.phase ? "Scanning" : "Ready";
-  const scanActive = Boolean(progress && progress.phase !== "complete" && total > 0 && processed < total);
+  const phase = watchStatus.scanning
+    ? "Watching"
+    : watchStatus.sweeping
+      ? "Catch-up"
+    : scanPaused || progress?.phase === "paused"
+      ? "Paused"
+    : progress?.phase === "cancelled"
+      ? "Cancelled"
+      : progress?.phase === "complete"
+        ? "Complete"
+        : progress?.phase === "error"
+          ? "Error"
+        : progress?.phase === "verifying" || progress?.phase === "verified"
+          ? "Rechecking"
+        : progress?.phase ? "Scanning" : "Ready";
+  const scanActive = Boolean(progress && !["complete", "cancelled", "error"].includes(progress.phase) && (!total || processed < total));
   const completedWatchMessage = watchStatus.active && progress?.source === "watch" && progress.phase === "complete" && Number(progress.added ?? 0) > 0
     ? `Processed ${progress.processed ?? progress.total ?? progress.added ?? 0} new file(s).`
     : "";
-  const activityMessage = completedWatchMessage || watchStatus.message || current;
+  const activityMessage = completedWatchMessage || (watchStatus.active ? watchStatus.message : progress?.message) || watchStatus.message || current;
   const elapsedMs = startedAt ? Math.max(0, clock - startedAt) : 0;
   const etaMs = scanActive && startedAt && processed > 0 ? Math.max(0, (elapsedMs / processed) * (total - processed)) : null;
   const rate = elapsedMs > 0 ? (processed / (elapsedMs / 1000)) : 0;
@@ -3354,7 +5794,26 @@ function ScanActivity({ progress, watchStatus }: { progress: ScanProgress | null
             <Timer size={14} />
             <span>{etaMs !== null ? formatDuration(Math.round(etaMs)) : "ETA"}</span>
           </button>
-          <strong>{total ? `${processed}/${total}` : watchStatus.active ? `${watchStatus.queued} waiting` : "No active scan"}</strong>
+          {scanActive && (
+            <>
+              {scanPaused ? (
+                <button className="eta-button" onClick={resumeScan} aria-label="Resume scan">
+                  <Play size={14} />
+                  <span>Resume</span>
+                </button>
+              ) : (
+                <button className="eta-button" onClick={pauseScan} aria-label="Pause scan">
+                  <Pause size={14} />
+                  <span>Pause</span>
+                </button>
+              )}
+            <button className="eta-button danger" onClick={cancelScan} aria-label="Cancel scan">
+              <X size={14} />
+              <span>Cancel</span>
+            </button>
+            </>
+          )}
+          <strong>{total ? `${processed}/${total}` : scanActive ? `${processed} processed` : watchStatus.active ? `${watchStatus.queued} waiting` : "No active scan"}</strong>
         </div>
       </div>
       <progress max={1} value={completion} />
@@ -3371,9 +5830,18 @@ function ScanActivity({ progress, watchStatus }: { progress: ScanProgress | null
         <span><strong>{progress?.clustered ?? 0}</strong> similar groups</span>
         <span><strong>{progress?.safeFiltered ?? 0}</strong> protected</span>
         <span><strong>{progress?.videoFrames ?? 0}</strong> video frames</span>
+        <span><strong>{progress?.manifestSkipped ?? 0}</strong> resumed skips</span>
+        <span><strong>{progress?.excluded ?? 0}</strong> excluded</span>
+        <span><strong>{progress?.embeddingCacheHits ?? 0}</strong> cached faces</span>
+        <span><strong>{progress?.twoPassVerified ?? 0}</strong> rechecked</span>
+        <span><strong>{progress?.twoPassDeferred ?? 0}</strong> recheck queued</span>
+        <span><strong>{progress?.pausedSeconds ?? 0}</strong>s paused</span>
+        <span><strong>{progress?.pathErrors ?? 0}</strong> drive/path issues</span>
+        {watchStatus.active && <span><strong>{watchStatus.mode === "recursive" ? "Recursive" : "Top-level"}</strong> watch</span>}
+        {watchStatus.sweeping && <span><strong>Active</strong> catch-up</span>}
         <span><strong>{progress?.errors ?? 0}</strong> errors</span>
       </div>
-      <small title={progress?.currentPath ?? watchStatus.folder ?? ""}>{activityMessage}</small>
+      <small title={progress?.currentPath ?? watchStatus.folder ?? ""}>{localizeImperativeText(activityMessage)}</small>
     </div>
   );
 }
@@ -3382,9 +5850,13 @@ function ReviewView(props: {
   state: AppState;
   selectedCandidate: ReviewCandidate | null;
   selectedCandidateId: string | null;
-  setSelectedCandidateId(value: string): void;
-  review(status: CandidateStatus): void | Promise<void>;
+  setSelectedCandidateId(value: string | null): void;
+  queryCandidates(params: Record<string, unknown>): Promise<CandidateQueryResult>;
+  review(status: CandidateStatus, current?: ReviewCandidate | null): void | Promise<void>;
   bulkReview(candidateIds: string[], status: CandidateStatus): void | Promise<void>;
+  blockFalseMatch(candidateId: string): void | Promise<void>;
+  reassignCandidatePerson(candidateId: string, personName: string): void | Promise<void>;
+  addCandidateCalibrationLabel(candidate: ReviewCandidate, isMatch: boolean): void | Promise<void>;
   exportSelectedCandidates(candidateIds: string[]): void | Promise<void>;
   saveCandidateNote(candidateId: string, note: string): void | Promise<void>;
   copyText(text: string, label?: string): void;
@@ -3399,18 +5871,44 @@ function ReviewView(props: {
   const [statusFilter, setStatusFilter] = useState<CandidateStatus | "all">("pending");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<"score" | "newest" | "quality">("score");
-  const [reviewLane, setReviewLane] = useState<"all" | "high" | "lowQuality" | "groups" | "notes">("all");
+  const [reviewLane, setReviewLane] = useState<"all" | "high" | "lowQuality" | "groups" | "video" | "notes">("all");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [selectedPeople, setSelectedPeople] = useState<Set<string>>(() => new Set());
   const [groupMinPeople, setGroupMinPeople] = useState(2);
   const [noteDraft, setNoteDraft] = useState("");
+  const [identityTarget, setIdentityTarget] = useState("");
   const [privacyVeil, setPrivacyVeil] = useState(false);
-  const [visibleLimit, setVisibleLimit] = useState(props.renderBatchSize);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [savedViews, setSavedViews] = useState<SavedReviewView[]>([]);
+  const [pagedCandidates, setPagedCandidates] = useState<ReviewCandidate[]>([]);
+  const [pagedTotal, setPagedTotal] = useState(0);
+  const [pagedLoading, setPagedLoading] = useState(false);
+  const [pagedError, setPagedError] = useState<string | null>(null);
+  const [selectReviewedAfterLoad, setSelectReviewedAfterLoad] = useState(false);
+  const pageRequestRef = useRef(0);
   const deferredSearch = useDeferredValue(search);
+  const pageSize = Math.max(25, props.renderBatchSize);
+  const recentDecisionCandidate = useMemo(
+    () => props.reviewUndo
+      ? props.state.candidates.find((candidate) => candidate.candidateId === props.reviewUndo?.candidateId) ?? null
+      : null,
+    [props.reviewUndo, props.state.candidates]
+  );
+  const activeCandidate = useMemo(
+    () => pagedCandidates.find((candidate) => candidate.candidateId === props.selectedCandidateId)
+      ?? (props.selectedCandidate?.candidateId === props.selectedCandidateId ? props.selectedCandidate : null)
+      ?? (recentDecisionCandidate?.candidateId === props.selectedCandidateId ? recentDecisionCandidate : null),
+    [pagedCandidates, props.selectedCandidate, recentDecisionCandidate, props.selectedCandidateId]
+  );
 
   useEffect(() => {
-    setNoteDraft(props.selectedCandidate?.note ?? "");
-  }, [props.selectedCandidate?.candidateId, props.selectedCandidate?.note]);
+    setSavedViews(readSavedReviewViews(props.state.workspace));
+  }, [props.state.workspace]);
+
+  useEffect(() => {
+    setNoteDraft(activeCandidate?.note ?? "");
+    setIdentityTarget("");
+  }, [activeCandidate?.candidateId, activeCandidate?.note]);
 
   const knownPeople = useMemo(() => {
     const people = new Set<string>();
@@ -3481,6 +5979,7 @@ function ReviewView(props: {
     let high = 0;
     let lowQuality = 0;
     let notes = 0;
+    let video = 0;
     let pending = 0;
     let confidencePending = 0;
     let reviewed = 0;
@@ -3493,6 +5992,9 @@ function ReviewView(props: {
       }
       if (candidate.note.trim()) {
         notes += 1;
+      }
+      if (isVideoCandidate(candidate)) {
+        video += 1;
       }
       if (candidate.status === "pending") {
         pending += 1;
@@ -3510,6 +6012,7 @@ function ReviewView(props: {
         { key: "high" as const, label: "Strong matches", count: high },
         { key: "lowQuality" as const, label: "Needs a closer look", count: lowQuality },
         { key: "groups" as const, label: "Groups", count: groupedCandidateIds.size },
+        { key: "video" as const, label: "Video moments", count: video },
         { key: "notes" as const, label: "Notes", count: notes }
       ],
       smartBatches: [
@@ -3517,42 +6020,74 @@ function ReviewView(props: {
         { key: "confidence", label: "Looks strongest", count: confidencePending },
         { key: "quality", label: "Check quality", count: lowQuality },
         { key: "together", label: "People together", count: groupedCandidateIds.size },
+        { key: "video", label: "Video moments", count: video },
         { key: "reviewed", label: "Already reviewed", count: reviewed }
       ] as const
     };
   }, [candidatesByPath, props.state.candidates, props.state.config.thresholds.confident, props.state.config.thresholds.qualityMin]);
 
-  const filteredCandidates = useMemo(() => {
-    const query = deferredSearch.trim().toLowerCase();
-    const lowQualityThreshold = Math.max(0.2, props.state.config.thresholds.qualityMin);
-    const rows: ReviewCandidate[] = [];
-    for (const candidate of props.state.candidates) {
-      let inLane = true;
-      if (reviewLane === "high") {
-        inLane = candidate.score >= props.state.config.thresholds.confident;
-      } else if (reviewLane === "lowQuality") {
-        inLane = candidate.quality < lowQualityThreshold;
-      } else if (reviewLane === "groups") {
-        inLane = reviewSummary.groupedCandidateIds.has(candidate.candidateId);
-      } else if (reviewLane === "notes") {
-        inLane = Boolean(candidate.note.trim());
-      }
-      if (!inLane || (statusFilter !== "all" && candidate.status !== statusFilter)) {
-        continue;
-      }
-      if (query && ![candidate.personName, candidate.band, candidate.sourcePath, candidate.mediaSourcePath ?? "", candidate.note]
-        .some((value) => value.toLowerCase().includes(query))) {
-        continue;
-      }
-      rows.push(candidate);
-    }
-    return rows.sort((a, b) => {
-      if (sort === "newest") return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-      if (sort === "quality") return b.quality - a.quality;
-      return b.score - a.score;
-    });
-  }, [deferredSearch, props.state.candidates, props.state.config.thresholds.confident, props.state.config.thresholds.qualityMin, reviewLane, reviewSummary.groupedCandidateIds, sort, statusFilter]);
+  const querySignature = useMemo(() => JSON.stringify({
+    workspace: props.state.workspaceMetadata?.workspaceId ?? props.state.workspace,
+    statusFilter,
+    reviewLane,
+    search: deferredSearch.trim(),
+    sort,
+    pageSize,
+    candidateCount: props.state.counts.candidates,
+    pendingCount: props.state.counts.pending
+  }), [deferredSearch, pageSize, props.state.counts.candidates, props.state.counts.pending, props.state.workspace, props.state.workspaceMetadata?.workspaceId, reviewLane, sort, statusFilter]);
 
+  async function loadCandidatePage(append = false) {
+    const requestId = pageRequestRef.current + 1;
+    pageRequestRef.current = requestId;
+    const offset = append ? pagedCandidates.length : 0;
+    setPagedLoading(true);
+    setPagedError(null);
+    try {
+      const result = await props.queryCandidates({
+        status: statusFilter,
+        lane: reviewLane,
+        query: deferredSearch.trim(),
+        sort,
+        offset,
+        limit: pageSize,
+        previewBudget: props.showListThumbnails ? Math.min(64, pageSize) : 0
+      });
+      if (requestId !== pageRequestRef.current) return;
+      setPagedTotal(result.total);
+      setPagedCandidates((current) => append ? [...current, ...result.items] : result.items);
+    } catch (error) {
+      if (requestId !== pageRequestRef.current) return;
+      setPagedError(error instanceof Error ? error.message : String(error));
+      if (!append) {
+        setPagedCandidates([]);
+        setPagedTotal(0);
+      }
+    } finally {
+      if (requestId === pageRequestRef.current) {
+        setPagedLoading(false);
+      }
+    }
+  }
+
+  useEffect(() => {
+    setPagedCandidates([]);
+    setPagedTotal(0);
+    setPagedError(null);
+    setSelectedIds(new Set());
+    void loadCandidatePage(false);
+  }, [querySignature]);
+
+  const filteredCandidates = useMemo(() => {
+    if (pagedCandidates.length) {
+      return pagedCandidates;
+    }
+    if (statusFilter === "pending" && recentDecisionCandidate && recentDecisionCandidate.status !== "pending") {
+      return [recentDecisionCandidate];
+    }
+    return pagedCandidates;
+  }, [pagedCandidates, recentDecisionCandidate, statusFilter]);
+  const filteredTotal = Math.max(pagedTotal, filteredCandidates.length);
   const selectedIndex = filteredCandidates.findIndex((candidate) => candidate.candidateId === props.selectedCandidateId);
   const queuePosition = selectedIndex >= 0 ? selectedIndex + 1 : 0;
   const filteredStats = useMemo(() => {
@@ -3568,21 +6103,38 @@ function ReviewView(props: {
       highConfidence
     };
   }, [filteredCandidates, props.state.config.thresholds.confident]);
-  const visibleCandidates = useMemo(
-    () => filteredCandidates.slice(0, visibleLimit),
-    [filteredCandidates, visibleLimit]
-  );
+  const visibleCandidates = filteredCandidates;
 
   useEffect(() => {
-    setVisibleLimit(props.renderBatchSize);
-  }, [deferredSearch, props.renderBatchSize, reviewLane, sort, statusFilter]);
+    if (!filteredCandidates.length) {
+      if (props.selectedCandidateId) {
+        props.setSelectedCandidateId(null);
+      }
+      return;
+    }
+    if (!props.selectedCandidateId || (!filteredCandidates.some((candidate) => candidate.candidateId === props.selectedCandidateId) && !activeCandidate)) {
+      props.setSelectedCandidateId(filteredCandidates[0].candidateId);
+    }
+  }, [activeCandidate, filteredCandidates, props.selectedCandidateId]);
 
   useEffect(() => {
+    if (selectReviewedAfterLoad) {
+      if (pagedLoading) return;
+      const reviewedIds = filteredCandidates
+        .filter((candidate) => candidate.status !== "pending")
+        .map((candidate) => candidate.candidateId);
+      setSelectedIds(new Set(reviewedIds));
+      if (reviewedIds[0]) {
+        props.setSelectedCandidateId(reviewedIds[0]);
+      }
+      setSelectReviewedAfterLoad(false);
+      return;
+    }
     setSelectedIds((current) => {
       const allowed = new Set(filteredCandidates.map((candidate) => candidate.candidateId));
       return new Set([...current].filter((candidateId) => allowed.has(candidateId)));
     });
-  }, [filteredCandidates]);
+  }, [filteredCandidates, pagedLoading, props.setSelectedCandidateId, selectReviewedAfterLoad]);
 
   function editableTarget(target: EventTarget | null) {
     return target instanceof HTMLElement && Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
@@ -3596,19 +6148,30 @@ function ReviewView(props: {
   }
 
   async function decide(status: CandidateStatus) {
-    if (!props.selectedCandidate) return;
+    if (!activeCandidate) return;
     const nextCandidate = filteredCandidates.length > 1 && selectedIndex >= 0
       ? filteredCandidates[(selectedIndex + 1) % filteredCandidates.length]
       : null;
-    await props.review(status);
-    if (nextCandidate && nextCandidate.candidateId !== props.selectedCandidate.candidateId) {
+    await props.review(status, activeCandidate);
+    setPagedCandidates((current) => current.map((candidate) => (
+      candidate.candidateId === activeCandidate.candidateId ? { ...candidate, status } : candidate
+    )));
+    if (nextCandidate && nextCandidate.candidateId !== activeCandidate.candidateId) {
       props.setSelectedCandidateId(nextCandidate.candidateId);
+      void loadCandidatePage(false);
+    } else if (statusFilter === "pending" && status !== "pending") {
+      props.setSelectedCandidateId(activeCandidate.candidateId);
+      setStatusFilter("all");
+    } else {
+      void loadCandidatePage(false);
     }
   }
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      if (props.busy || editableTarget(event.target) || event.metaKey || event.ctrlKey || event.altKey) {
+      const target = event.target instanceof Element ? event.target : null;
+      const interactiveTarget = target?.closest("button, [role='dialog'], input, textarea, select, [contenteditable='true']");
+      if (props.busy || editableTarget(event.target) || interactiveTarget || event.metaKey || event.ctrlKey || event.altKey) {
         return;
       }
       const key = event.key.toLowerCase();
@@ -3621,17 +6184,29 @@ function ReviewView(props: {
       } else if (key === "u") {
         event.preventDefault();
         void decide("uncertain");
-      } else if (key === "arrowdown" || key === "n") {
+      } else if (key === "b") {
+        event.preventDefault();
+        void blockActiveFalseMatch();
+      } else if (key === "v") {
+        event.preventDefault();
+        setPrivacyVeil((value) => !value);
+      } else if (key === "x") {
+        event.preventDefault();
+        if (activeCandidate) toggleCandidate(activeCandidate.candidateId);
+      } else if (key === "?" || key === "/") {
+        event.preventDefault();
+        setShortcutsOpen((value) => !value);
+      } else if (key === "arrowdown" || key === "n" || key === "j") {
         event.preventDefault();
         selectRelativeCandidate(1);
-      } else if (key === "arrowup" || key === "p") {
+      } else if (key === "arrowup" || key === "p" || key === "k") {
         event.preventDefault();
         selectRelativeCandidate(-1);
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [props.busy, props.selectedCandidate?.candidateId, filteredCandidates, selectedIndex]);
+  }, [props.busy, activeCandidate?.candidateId, filteredCandidates, selectedIndex]);
 
   function toggleCandidate(candidateId: string) {
     setSelectedIds((current) => {
@@ -3662,14 +6237,11 @@ function ReviewView(props: {
 
   function selectAllFiltered() {
     if (!filteredCandidates.length) return;
-    if (filteredCandidates.length > visibleCandidates.length) {
-      const proceed = window.confirm(`Select all ${filteredCandidates.length} possible matches that fit this filter, including rows that are not currently shown?`);
-      if (!proceed) return;
-    }
     setSelectedIds(new Set(filteredCandidates.map((candidate) => candidate.candidateId)));
   }
 
   function activateSmartBatch(batch: typeof reviewSummary.smartBatches[number]["key"]) {
+    setSelectReviewedAfterLoad(false);
     if (batch === "decision") {
       setStatusFilter("pending");
       setReviewLane("all");
@@ -3686,21 +6258,85 @@ function ReviewView(props: {
       setStatusFilter("all");
       setReviewLane("groups");
       setSort("score");
+    } else if (batch === "video") {
+      setStatusFilter("all");
+      setReviewLane("video");
+      setSort("score");
     } else {
       setStatusFilter("all");
       setReviewLane("all");
       setSort("newest");
-      setSelectedIds(new Set(props.state.candidates.filter((candidate) => candidate.status !== "pending").map((candidate) => candidate.candidateId)));
+      setSelectedIds(new Set());
+      setSelectReviewedAfterLoad(true);
     }
+  }
+
+  function persistReviewViews(next: SavedReviewView[]) {
+    const sorted = next.sort((a, b) => b.lastUsedAt - a.lastUsedAt).slice(0, 16);
+    setSavedViews(sorted);
+    writeSavedReviewViews(props.state.workspace, sorted);
+  }
+
+  function saveCurrentReviewView() {
+    const defaultLabel = `${reviewLane === "all" ? "All matches" : reviewSummary.reviewLanes.find((lane) => lane.key === reviewLane)?.label ?? "Review view"}${statusFilter === "all" ? "" : `, ${reviewStatusLabel(statusFilter)}`}`;
+    const label = promptUi("Name this review view", defaultLabel)?.trim();
+    if (!label) return;
+    const now = Date.now();
+    const existing = savedViews.filter((view) => view.label.toLowerCase() !== label.toLowerCase());
+    persistReviewViews([
+      {
+        id: `${label}:${now}`,
+        label,
+        statusFilter,
+        reviewLane,
+        search,
+        sort,
+        createdAt: now,
+        lastUsedAt: now
+      },
+      ...existing
+    ]);
+  }
+
+  function applyReviewView(view: SavedReviewView) {
+    setStatusFilter(view.statusFilter);
+    setReviewLane(view.reviewLane);
+    setSearch(view.search);
+    setSort(view.sort);
+    persistReviewViews(savedViews.map((item) => item.id === view.id ? { ...item, lastUsedAt: Date.now() } : item));
+  }
+
+  function removeReviewView(viewId: string) {
+    persistReviewViews(savedViews.filter((view) => view.id !== viewId));
   }
 
   async function bulkStatus(status: CandidateStatus) {
     const ids = [...selectedIds];
-    if (ids.length > 1 && !window.confirm(`Mark ${ids.length} selected possible matches as ${reviewStatusLabel(status)}?`)) {
+    if (ids.length > 1 && !confirmUi(`Mark ${ids.length} selected possible matches as ${reviewStatusLabel(status)}?`)) {
       return;
     }
     await props.bulkReview(ids, status);
     setSelectedIds(new Set());
+    void loadCandidatePage(false);
+  }
+
+  async function saveActiveNote() {
+    if (!activeCandidate) return;
+    await props.saveCandidateNote(activeCandidate.candidateId, noteDraft);
+    void loadCandidatePage(false);
+  }
+
+  async function moveActiveCandidate() {
+    if (!activeCandidate) return;
+    await props.reassignCandidatePerson(activeCandidate.candidateId, identityTarget);
+    setIdentityTarget("");
+    void loadCandidatePage(false);
+  }
+
+  async function blockActiveFalseMatch() {
+    if (!activeCandidate) return;
+    await props.blockFalseMatch(activeCandidate.candidateId);
+    void loadCandidatePage(false);
   }
 
   function copyGroupResults() {
@@ -3786,11 +6422,62 @@ function ReviewView(props: {
           )}
         </div>
       </div>
+      {props.state.videoMoments && props.state.videoMoments.length > 0 && (
+        <div className="panel group-finder-panel video-moments-panel">
+          <div className="panel-title">
+            <Video size={18} /> Video moments
+            <span className="title-count">{props.state.videoMoments.length}</span>
+          </div>
+          <div className="group-results">
+            {props.state.videoMoments.slice(0, 8).map((moment) => (
+              <button
+                key={moment.mediaSourcePath}
+                className="group-result-row"
+                onClick={() => moment.candidateIds[0] && props.setSelectedCandidateId(moment.candidateIds[0])}
+                type="button"
+              >
+                <span className="thumb group-thumb">
+                  {moment.previewUrl ? <img src={moment.previewUrl} alt="" /> : <Video size={18} />}
+                </span>
+                <span className="group-result-main">
+                  <strong>{basename(moment.mediaSourcePath)}</strong>
+                  <span>{formatMediaTimestamp(moment.firstTimestampMs)} - {formatMediaTimestamp(moment.lastTimestampMs)}</span>
+                </span>
+                <span className="group-people">
+                  {moment.people.length ? moment.people.slice(0, 5).map((person) => <span key={person}>{person}</span>) : <span>Similar frames</span>}
+                </span>
+                <span className="group-meta">
+                  <strong>{moment.count}</strong>
+                  <small>{scoreLabel(moment.bestScore)}</small>
+                </span>
+                <ChevronRight size={16} />
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="panel table-panel compact-table review-queue-panel">
         <div className="panel-title">
           <ShieldCheck size={18} /> Possible matches
-          <span className="title-count">{filteredCandidates.length}</span>
+          <span className="title-count">{filteredTotal}</span>
+          {pagedLoading && <span className="subtle-inline"><Loader2 size={14} className="spin" /> Loading</span>}
+          <div className="spacer" />
+          <button className="ghost compact-action" onClick={() => setShortcutsOpen((value) => !value)} type="button">
+            <BookOpen size={16} />
+            <span>Shortcuts</span>
+          </button>
         </div>
+        {shortcutsOpen && (
+          <div className="shortcut-strip">
+            <span><kbd>A</kbd> looks right</span>
+            <span><kbd>R</kbd> not a match</span>
+            <span><kbd>U</kbd> not sure</span>
+            <span><kbd>J</kbd>/<kbd>K</kbd> next/previous</span>
+            <span><kbd>X</kbd> select row</span>
+            <span><kbd>B</kbd> block false match</span>
+            <span><kbd>V</kbd> hide previews</span>
+          </div>
+        )}
         {props.reviewUndo && (
           <div className="undo-strip">
             <span>
@@ -3801,6 +6488,40 @@ function ReviewView(props: {
               <Undo2 size={16} />
               <span>Undo decision</span>
             </button>
+          </div>
+        )}
+        <div className="saved-view-strip" role="group" aria-label="Saved review views">
+          <button className="smart-batch save-view" onClick={saveCurrentReviewView} type="button">
+            <span>Save current view</span>
+            <strong>{filteredTotal}</strong>
+          </button>
+          {savedViews.map((view) => (
+            <span className="saved-view-chip" key={view.id}>
+              <button onClick={() => applyReviewView(view)} type="button" title={`${view.search || "No search"} • ${reviewStatusLabel(view.statusFilter)}`}>
+                {view.label}
+              </button>
+              <button onClick={() => removeReviewView(view.id)} type="button" aria-label={`Remove ${view.label}`}>
+                <X size={12} />
+              </button>
+            </span>
+          ))}
+        </div>
+        {props.state.reviewInsights && (
+          <div className="smart-batch-strip" role="group" aria-label="Review sources">
+            <button className="smart-batch" onClick={() => activateSmartBatch(props.state.reviewInsights!.recommendedOrder === "strongest-first" ? "confidence" : "decision")} type="button">
+              <span>{props.state.reviewInsights.recommendedOrder === "strongest-first" ? "Best next" : "Needs decision"}</span>
+              <strong>{props.state.reviewInsights.pending}</strong>
+            </button>
+            <button className="smart-batch" onClick={() => activateSmartBatch("video")} type="button" disabled={!props.state.reviewInsights.videoPending}>
+              <span>Videos</span>
+              <strong>{props.state.reviewInsights.videoPending}</strong>
+            </button>
+            {props.state.reviewInsights.topFolders.slice(0, 3).map((folder) => (
+              <button key={folder.folder} className="smart-batch" onClick={() => setSearch(folder.folder)} type="button">
+                <span>{basename(folder.folder)}</span>
+                <strong>{folder.count}</strong>
+              </button>
+            ))}
           </div>
         )}
         <div className="smart-batch-strip" role="group" aria-label="Smart review batches">
@@ -3815,6 +6536,7 @@ function ReviewView(props: {
           {reviewSummary.reviewLanes.map((lane) => (
             <button
               key={lane.key}
+              aria-pressed={reviewLane === lane.key}
               className={reviewLane === lane.key ? "lane-button selected" : "lane-button"}
               onClick={() => setReviewLane(lane.key)}
               type="button"
@@ -3839,15 +6561,22 @@ function ReviewView(props: {
         </div>
         <div className="bulk-bar">
           <button className="ghost compact-action" onClick={selectVisible} disabled={!visibleCandidates.length || props.busy}>Select shown</button>
-          <button className="ghost compact-action" onClick={selectAllFiltered} disabled={!filteredCandidates.length || props.busy}>Select all matches</button>
+          <button className="ghost compact-action" onClick={selectAllFiltered} disabled={!filteredCandidates.length || props.busy}>Select loaded</button>
           <span>{selectedIds.size} selected</span>
           <button className="secondary" onClick={() => bulkStatus("accepted")} disabled={!selectedIds.size || props.busy}><Check size={16} /><span>Looks right</span></button>
           <button className="secondary" onClick={() => bulkStatus("rejected")} disabled={!selectedIds.size || props.busy}><X size={16} /><span>Not a match</span></button>
           <button className="secondary" onClick={() => bulkStatus("uncertain")} disabled={!selectedIds.size || props.busy}><AlertCircle size={16} /><span>Not sure</span></button>
           <button className="secondary" onClick={() => props.exportSelectedCandidates([...selectedIds])} disabled={!selectedIds.size || props.busy}><Archive size={16} /><span>Export</span></button>
         </div>
+        {pagedError && (
+          <div className="settings-warning" role="alert">
+            <AlertCircle size={16} />
+            <span>{pagedError}</span>
+            <button className="ghost compact-action" onClick={() => void loadCandidatePage(false)} type="button">Retry</button>
+          </div>
+        )}
         <div className="table">
-          {filteredCandidates.length === 0 ? <EmptyState icon={ShieldCheck} label="No possible matches found" detail="Adjust the filter or scan more photos and videos." /> : (
+          {filteredCandidates.length === 0 && pagedLoading ? <EmptyState icon={Loader2} label="Loading matches" detail="Fetching the next page from the app folder." /> : filteredCandidates.length === 0 ? <EmptyState icon={ShieldCheck} label="No possible matches found" detail="Adjust the filter or scan more photos and videos." /> : (
             <>
               <div className="table-header review-candidate-header" aria-hidden="true">
                 <span />
@@ -3858,10 +6587,18 @@ function ReviewView(props: {
                 <span />
               </div>
               {visibleCandidates.map((candidate) => (
-                <button
+                <div
                   key={candidate.candidateId}
                   className={props.selectedCandidateId === candidate.candidateId ? "row review-candidate-row selected" : "row review-candidate-row"}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => props.setSelectedCandidateId(candidate.candidateId)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      props.setSelectedCandidateId(candidate.candidateId);
+                    }
+                  }}
                 >
                   <input
                     aria-label={`Select ${candidateSourceLabel(candidate)}`}
@@ -3882,20 +6619,21 @@ function ReviewView(props: {
                   </span>
                   <span title={candidateSourceTitle(candidate)}>{candidateSourceLabel(candidate)}</span>
                   <ChevronRight size={16} />
-                </button>
+                </div>
               ))}
-              {visibleCandidates.length < filteredCandidates.length && (
+              {visibleCandidates.length < filteredTotal && (
                 <button
                   className="row load-more-row"
-                  onClick={() => setVisibleLimit((value) => value + props.renderBatchSize)}
+                  onClick={() => void loadCandidatePage(true)}
+                  disabled={pagedLoading}
                   type="button"
                 >
                   <span />
-                  <span>Showing {visibleCandidates.length} of {filteredCandidates.length}</span>
+                  <span>Showing {visibleCandidates.length} of {filteredTotal}</span>
                   <span />
                   <span />
-                  <span>Load more</span>
-                  <ChevronRight size={16} />
+                  <span>{pagedLoading ? "Loading" : "Load more"}</span>
+                  {pagedLoading ? <Loader2 size={16} className="spin" /> : <ChevronRight size={16} />}
                 </button>
               )}
             </>
@@ -3903,7 +6641,7 @@ function ReviewView(props: {
         </div>
       </div>
       <div className="panel preview-panel">
-        {props.selectedCandidate ? (
+        {activeCandidate ? (
           <>
             <div className="panel-title">
               <ShieldCheck size={18} />
@@ -3919,31 +6657,31 @@ function ReviewView(props: {
                 {privacyVeil ? <Eye size={16} /> : <EyeOff size={16} />}
                 <span>{privacyVeil ? "Show previews" : "Hide previews"}</span>
               </button>
-              <button className="ghost compact-action" onClick={() => props.revealPath(candidateMediaPath(props.selectedCandidate))} type="button">
+              <button className="ghost compact-action" onClick={() => props.revealPath(candidateMediaPath(activeCandidate))} type="button">
                 <FolderOpen size={16} />
                 <span>Reveal</span>
               </button>
-              <button className="ghost compact-action" onClick={() => props.openPath(candidateMediaPath(props.selectedCandidate))} type="button">
+              <button className="ghost compact-action" onClick={() => props.openPath(candidateMediaPath(activeCandidate))} type="button">
                 <ExternalLink size={16} />
                 <span>Open</span>
               </button>
-              <span className={`status ${props.selectedCandidate.status}`}>{reviewStatusLabel(props.selectedCandidate.status)}</span>
+              <span className={`status ${activeCandidate.status}`}>{reviewStatusLabel(activeCandidate.status)}</span>
             </div>
             <div className="review-session-bar" aria-label="Review session progress">
               <span>
                 <small>Match position</small>
-                <strong>{queuePosition || "0"} / {filteredCandidates.length}</strong>
+                <strong>{queuePosition || "0"} / {filteredTotal}</strong>
               </span>
               <span>
-                <small>Still to review</small>
+                <small>Loaded to review</small>
                 <strong>{filteredStats.pending}</strong>
               </span>
               <span>
-                <small>Reviewed in view</small>
+                <small>Loaded reviewed</small>
                 <strong>{filteredStats.reviewed}</strong>
               </span>
               <span>
-                <small>Strong matches</small>
+                <small>Loaded strong</small>
                 <strong>{filteredStats.highConfidence}</strong>
               </span>
               <div className="session-nav">
@@ -3956,25 +6694,67 @@ function ReviewView(props: {
               </div>
             </div>
             <div className="preview-grid">
-              <ImagePreview label={isVideoCandidate(props.selectedCandidate) ? "Video frame to check" : "Photo to check"} url={props.selectedCandidate.sourceUrl} fallback={props.selectedCandidate.sourcePath} concealed={privacyVeil} />
-              <ImagePreview label="Saved person photo" url={props.selectedCandidate.bestRefUrl} fallback={props.selectedCandidate.bestRefPath} concealed={privacyVeil} />
+              <ImagePreview label={isVideoCandidate(activeCandidate) ? "Video frame to check" : "Photo to check"} url={activeCandidate.sourceUrl} fallback={activeCandidate.sourcePath} concealed={privacyVeil} />
+              <ImagePreview label="Saved person photo" url={activeCandidate.bestRefUrl} fallback={activeCandidate.bestRefPath} concealed={privacyVeil} />
             </div>
             <div className="candidate-detail">
-              <h2>{props.selectedCandidate.personName}</h2>
+              <h2>{activeCandidate.personName}</h2>
               <div className="bands">
-                <span className="band confident">{matchBandLabel(props.selectedCandidate.band)}</span>
-                <span className="band likely">strength {scoreLabel(props.selectedCandidate.score)}</span>
-                <span className="band maybe">photo quality {scoreLabel(props.selectedCandidate.quality)}</span>
+                <span className="band confident">{matchBandLabel(activeCandidate.band)}</span>
+                <span className="band likely">strength {scoreLabel(activeCandidate.score)}</span>
+                <span className="band maybe">photo quality {scoreLabel(activeCandidate.quality)}</span>
               </div>
-              <p className="source-path" title={candidateSourceTitle(props.selectedCandidate)}>
-                {isVideoCandidate(props.selectedCandidate)
-                  ? `Video ${props.selectedCandidate.mediaSourcePath} at ${formatMediaTimestamp(props.selectedCandidate.videoTimestampMs)}`
-                  : props.selectedCandidate.sourcePath}
-                {isVideoCandidate(props.selectedCandidate) && <span>Extracted frame: {props.selectedCandidate.sourcePath}</span>}
+              <p className="source-path" title={candidateSourceTitle(activeCandidate)}>
+                {isVideoCandidate(activeCandidate)
+                  ? `Video ${activeCandidate.mediaSourcePath} at ${formatMediaTimestamp(activeCandidate.videoTimestampMs)}`
+                  : activeCandidate.sourcePath}
+                {isVideoCandidate(activeCandidate) && <span>Extracted frame: {activeCandidate.sourcePath}</span>}
               </p>
-              {props.selectedCandidate.note && <p className="compact">{props.selectedCandidate.note}</p>}
+              {activeCandidate.note && <p className="compact">{activeCandidate.note}</p>}
             </div>
-            <CandidateExplanation candidate={props.selectedCandidate} state={props.state} />
+            <CandidateExplanation candidate={activeCandidate} state={props.state} />
+            <div className="identity-tools accuracy-teach-tools">
+              <div>
+                <strong>Teach accuracy</strong>
+                <span>Add a local training label for this row without changing its review status.</span>
+              </div>
+              <div className="button-row">
+                <button className="secondary" onClick={() => void props.addCandidateCalibrationLabel(activeCandidate, true)} disabled={props.busy} type="button">
+                  <Check size={17} />
+                  <span>Same person</span>
+                </button>
+                <button className="secondary" onClick={() => void props.addCandidateCalibrationLabel(activeCandidate, false)} disabled={props.busy} type="button">
+                  <X size={17} />
+                  <span>Not same person</span>
+                </button>
+              </div>
+            </div>
+            <div className="identity-tools">
+              <div>
+                <strong>Fix identity</strong>
+                <span>Move this row to another person or stop this false match from returning.</span>
+              </div>
+              <div className="identity-move-row">
+                <input
+                  aria-label="Move match to person"
+                  list="known-people"
+                  placeholder="Person name"
+                  value={identityTarget}
+                  onChange={(event) => setIdentityTarget(event.currentTarget.value)}
+                />
+                <datalist id="known-people">
+                  {knownPeople.map((person) => <option key={person} value={person} />)}
+                </datalist>
+                <button className="secondary" onClick={() => void moveActiveCandidate()} disabled={props.busy || !identityTarget.trim()} type="button">
+                  <Users size={17} />
+                  <span>Move match</span>
+                </button>
+                <button className="secondary danger" onClick={() => void blockActiveFalseMatch()} disabled={props.busy || !activeCandidate.bestRefId} type="button">
+                  <X size={17} />
+                  <span>Don't suggest again</span>
+                </button>
+              </div>
+            </div>
             <label className="note-editor">Review note
               <textarea
                 aria-label="Review note"
@@ -3998,7 +6778,7 @@ function ReviewView(props: {
                   <span>{decisionButtonLabel(status)}</span>
                 </button>
               ))}
-              <button className="secondary" onClick={() => props.saveCandidateNote(props.selectedCandidate!.candidateId, noteDraft)} disabled={props.busy || noteDraft === props.selectedCandidate.note} type="button">
+              <button className="secondary" onClick={() => void saveActiveNote()} disabled={props.busy || noteDraft === activeCandidate.note} type="button">
                 <Save size={17} />
                 <span>Save note</span>
               </button>
@@ -4069,7 +6849,7 @@ function CandidateExplanation({ candidate, state }: { candidate: ReviewCandidate
         ))}
       </div>
       <p className={candidate.quality < thresholds.qualityMin || candidate.score < thresholds.confident ? "evidence-warning active" : "evidence-warning"}>
-        CrossAge suggests possible matches only. Treat this as a lead, not an automatic identification.
+        Vintrace suggests possible matches only. Treat this as a lead, not an automatic identification.
       </p>
     </div>
   );
@@ -4084,23 +6864,68 @@ function SettingsView(props: {
   platformSummary: string;
   systemIntegration: SystemIntegration | null;
   setLaunchAtLogin(value: boolean): void;
+  updateStatus: UpdateStatus | null;
+  checkForUpdates(): void;
+  setUpdateChannel(channel: UpdateChannel): void;
+  downloadUpdate(): void;
+  installUpdate(): void;
+  diagnosticsReport: DiagnosticsReport | null;
+  previewDiagnostics(includePaths?: boolean): void;
+  exportDiagnostics(includePaths?: boolean): void;
+  exportSupportBundle(includePaths?: boolean): void;
   revealWorkspace(): void;
   openWorkspaceFolder(): void;
   people: string[];
   exportReport(): void;
+  exportScanHistory(): void;
+  exportWorkspaceInventory(): void;
+  exportAuditLog(): void;
+  exportConsentReceipt(): void;
+  loadRetentionPolicyReport(): void;
+  exportSafeModeAudit(): void;
+  exportReviewLedger(): void;
   exportWorkspaceBackup(): void;
+  verifyLatestWorkspaceBackup(): void;
+  backupVerification: WorkspaceBackupVerification | null;
+  backupPruneResult: WorkspaceBackupPruneValue | null;
+  pruneWorkspaceBackups(): void;
   copyText(text: string, label?: string): void;
+  copySettingsProfile(): void;
+  applySettingsProfile(text: string): void;
   purgeReviewedCandidates(): void;
   purgeOldCandidates(days: number): void;
   runWorkspaceHealth(): void;
+  repairWorkspace(): void;
+  workspaceRepairResult: WorkspaceRepairResult | null;
+  relinkWorkspacePaths(): void;
+  workspaceRelinkResult: WorkspaceRelinkResult | null;
   purgeDuplicateCandidates(): void;
   workspaceHealth: WorkspaceHealth | null;
+  workspaceOptimizeResult: WorkspaceOptimizeResult | null;
+  optimizeWorkspace(): void;
+  pruneScanManifests(): void;
+  scanManifestPruneResult: ScanManifestPruneValue | null;
+  enforceStorageBudget(): void;
   deletePerson(personName: string): void;
   renamePerson(oldName: string, newName: string): void;
   auditEvents: AuditEventsResult | null;
   loadAuditEvents(): void;
   runtimeSelfTest: RuntimeSelfTestResult | null;
   runRuntimeSelfTest(): void;
+  runtimeBenchmark: RuntimeBenchmarkResult | null;
+  runRuntimeBenchmark(): void;
+  releaseReadiness: ReleaseReadinessResult | null;
+  runReleaseReadiness(): void;
+  accuracyEvaluation: AccuracyEvaluation | null;
+  runAccuracyEvaluation(): void;
+  applyCalibration(): void;
+  exportAccuracyLabels(): void;
+  importAccuracyLabels(text: string): void | Promise<void>;
+  privacyReport: PrivacyReport | null;
+  retentionPolicy: RetentionPolicyReport | null;
+  loadPrivacyReport(): void;
+  deleteFaceData(includeAudit?: boolean): void;
+  exportAcceptedMediaBundle(): void;
   performanceMode: PerformanceMode;
   setPerformanceMode(value: PerformanceMode): void;
   performanceProfile: PerformanceProfile;
@@ -4112,6 +6937,22 @@ function SettingsView(props: {
   chooseModelRoot(): void | Promise<void>;
   downloadModel(pack: string, root?: string, force?: boolean): void | Promise<void>;
   modelDownloadProgress: ModelDownloadProgress | null;
+  installerDiagnostics: InstallerDiagnosticsResult | null;
+  runInstallerDiagnostics(): void;
+  modelIntegrity: ModelIntegrityResult | null;
+  runModelIntegrity(): void;
+  modelDriftReport: ModelDriftReport | null;
+  runModelDriftReport(): void;
+  duplicatePeople: DuplicatePeopleResult | null;
+  loadDuplicatePeople(): void;
+  mergeDuplicatePeople(sourceName: string, targetName: string): void;
+  reviewRuleResult: ReviewRulesApplyResult | null;
+  applyReviewRules(): void;
+  workspaceLock: WorkspaceLockStatus | null;
+  enableWorkspaceLock(): void;
+  lockWorkspace(): void;
+  unlockWorkspace(): void;
+  disableWorkspaceLock(): void;
 }) {
   const [personToDelete, setPersonToDelete] = useState("");
   const [personToRename, setPersonToRename] = useState("");
@@ -4161,6 +7002,12 @@ function SettingsView(props: {
   if (props.settings.clusterMinSize < 2) {
     validationMessages.push("Similar-photo groups need at least 2 photos.");
   }
+  if (props.settings.faceDetectorSize < 320 || props.settings.faceDetectorSize > 1024) {
+    validationMessages.push("Face scan detail must stay between 320 and 1024.");
+  }
+  if (props.settings.verificationDetectorSize < props.settings.faceDetectorSize) {
+    validationMessages.push("High-detail recheck must be at least as detailed as the first pass.");
+  }
   const safeModeRelaxed = props.state.config.safeMode && (
     !props.settings.safeMode ||
     props.settings.safeModeThreshold > props.state.config.safeModeThreshold + 0.001
@@ -4168,7 +7015,7 @@ function SettingsView(props: {
   function requestSaveSettings() {
     if (validationMessages.length) return;
     if (safeModeRelaxed) {
-      const proceed = window.confirm("This change makes Safe Mode less protective. Continue only if you want likely intimate media to be filtered less aggressively.");
+      const proceed = confirmUi("This change makes Safe Mode less protective. Continue only if you want likely intimate media to be filtered less aggressively.");
       if (!proceed) return;
     }
     props.saveSettings();
@@ -4176,7 +7023,7 @@ function SettingsView(props: {
   function copyWorkspaceSummary() {
     const totals = props.state.scanTotals;
     props.copyText([
-      "CrossAge FR app summary",
+      "Vintrace app summary",
       `App folder: ${props.state.workspace}`,
       `Saved person photos: ${props.state.counts.references}`,
       `Possible matches: ${props.state.counts.candidates}`,
@@ -4190,10 +7037,14 @@ function SettingsView(props: {
       `Protected by Safe Mode: ${totals.safeFiltered}`,
       `Engine: ${engineLabel(props.state.engine)}`,
       `Provider: ${props.state.platform.primary_provider}`,
+      `Face scan detail: ${props.state.config.faceDetectorSize}`,
+      `High-detail recheck: ${props.state.config.twoPassScan ? props.state.config.verificationDetectorSize : "Off"}`,
       `Safe Mode: ${props.state.config.safeMode ? "On" : "Off"}`,
       `People: ${props.people.join(", ") || "None"}`
     ].join("\n"), "App summary");
   }
+  const acceptedMediaAvailable = props.state.candidates.some((candidate) => candidate.status === "accepted") ||
+    Boolean(props.state.candidateWindow?.truncated && props.state.counts.reviewed > 0);
   return (
     <section className="page-grid">
       <div className="panel settings-panel primary-settings">
@@ -4278,6 +7129,38 @@ function SettingsView(props: {
                 onChange={(event) => setCustomSettings({ clusterMinSize: Number(event.currentTarget.value) })}
               />
             </label>
+            <label>Face scan detail
+              <input
+                type="number"
+                min={320}
+                max={1024}
+                step={32}
+                value={props.settings.faceDetectorSize}
+                onChange={(event) => setCustomSettings({ faceDetectorSize: Number(event.currentTarget.value) })}
+              />
+            </label>
+            <label className="switch-row">
+              <span>
+                <strong>High-detail recheck</strong>
+                <small>First scan quickly, then re-check possible matches with more detail.</small>
+              </span>
+              <input
+                type="checkbox"
+                checked={props.settings.twoPassScan}
+                onChange={(event) => setCustomSettings({ twoPassScan: event.currentTarget.checked })}
+                aria-label="High-detail recheck"
+              />
+            </label>
+            <label>Recheck detail
+              <input
+                type="number"
+                min={320}
+                max={1024}
+                step={32}
+                value={props.settings.verificationDetectorSize}
+                onChange={(event) => setCustomSettings({ verificationDetectorSize: Number(event.currentTarget.value) })}
+              />
+            </label>
           </div>
         ) : (
           <div className="preset-values">
@@ -4285,6 +7168,8 @@ function SettingsView(props: {
             <span>Likely {percent(props.settings.thresholds.likely)}</span>
             <span>Quality {percent(props.settings.thresholds.qualityMin)}</span>
             <span>Group {props.settings.clusterMinSize}+</span>
+            <span>Detail {props.settings.faceDetectorSize}</span>
+            <span>{props.settings.twoPassScan ? `Recheck ${props.settings.verificationDetectorSize}` : "Single pass"}</span>
           </div>
         )}
         {validationMessages.length > 0 && (
@@ -4326,6 +7211,15 @@ function SettingsView(props: {
         chooseModelRoot={props.chooseModelRoot}
         downloadModel={props.downloadModel}
       />
+      <InstallerDiagnosticsPanel
+        result={props.installerDiagnostics}
+        modelIntegrity={props.modelIntegrity}
+        modelDriftReport={props.modelDriftReport}
+        busy={props.busy}
+        runDiagnostics={props.runInstallerDiagnostics}
+        runModelIntegrity={props.runModelIntegrity}
+        runModelDriftReport={props.runModelDriftReport}
+      />
       <RuntimeSelfTestPanel result={props.runtimeSelfTest} />
       <PerformanceCenter
         mode={props.performanceMode}
@@ -4337,6 +7231,41 @@ function SettingsView(props: {
         warmPreviewsNow={props.warmPreviewsNow}
         copyPerformanceReport={props.copyPerformanceReport}
         clearLatencySamples={props.clearLatencySamples}
+      />
+      <ScaleReadinessPanel state={props.state} pruneScanManifests={props.pruneScanManifests} pruneResult={props.scanManifestPruneResult} busy={props.busy} />
+      <BenchmarkPanel result={props.runtimeBenchmark} busy={props.busy} runBenchmark={props.runRuntimeBenchmark} />
+      <AccuracyLabPanel
+        result={props.accuracyEvaluation}
+        calibration={props.state.calibration}
+        busy={props.busy}
+        runAccuracyEvaluation={props.runAccuracyEvaluation}
+        applyCalibration={props.applyCalibration}
+        exportAccuracyLabels={props.exportAccuracyLabels}
+        importAccuracyLabels={props.importAccuracyLabels}
+      />
+      <ReviewRulesPanel
+        settings={props.settings}
+        setSettings={props.setSettings}
+        saveSettings={props.saveSettings}
+        result={props.reviewRuleResult}
+        busy={props.busy}
+        applyReviewRules={props.applyReviewRules}
+      />
+      <ReleaseReadinessPanel result={props.releaseReadiness} busy={props.busy} runReleaseReadiness={props.runReleaseReadiness} />
+      <UpdateCenterPanel
+        status={props.updateStatus}
+        busy={props.busy}
+        checkForUpdates={props.checkForUpdates}
+        setUpdateChannel={props.setUpdateChannel}
+        downloadUpdate={props.downloadUpdate}
+        installUpdate={props.installUpdate}
+      />
+      <DiagnosticsPanel
+        report={props.diagnosticsReport}
+        busy={props.busy}
+        previewDiagnostics={props.previewDiagnostics}
+        exportDiagnostics={props.exportDiagnostics}
+        exportSupportBundle={props.exportSupportBundle}
       />
       <div className="panel settings-panel">
         <div className="panel-title"><Activity size={18} /> System</div>
@@ -4369,9 +7298,49 @@ function SettingsView(props: {
       </div>
       <WorkspaceHealthPanel
         health={props.workspaceHealth}
+        optimizeResult={props.workspaceOptimizeResult}
         busy={props.busy}
         runWorkspaceHealth={props.runWorkspaceHealth}
+        repairWorkspace={props.repairWorkspace}
+        repairResult={props.workspaceRepairResult}
+        relinkWorkspacePaths={props.relinkWorkspacePaths}
+        relinkResult={props.workspaceRelinkResult}
         purgeDuplicateCandidates={props.purgeDuplicateCandidates}
+        optimizeWorkspace={props.optimizeWorkspace}
+      />
+      <StorageBudgetPanel
+        state={props.state}
+        settings={props.settings}
+        setSettings={props.setSettings}
+        saveSettings={props.saveSettings}
+        health={props.workspaceHealth}
+        busy={props.busy}
+        enforceStorageBudget={props.enforceStorageBudget}
+      />
+      <ScanExclusionsPanel
+        settings={props.settings}
+        setSettings={props.setSettings}
+        saveSettings={props.saveSettings}
+        busy={props.busy}
+      />
+      <SettingsProfilePanel
+        busy={props.busy}
+        copySettingsProfile={props.copySettingsProfile}
+        applySettingsProfile={props.applySettingsProfile}
+      />
+      <DuplicatePeoplePanel
+        result={props.duplicatePeople}
+        busy={props.busy}
+        loadDuplicatePeople={props.loadDuplicatePeople}
+        mergeDuplicatePeople={props.mergeDuplicatePeople}
+      />
+      <WorkspaceLockPanel
+        status={props.workspaceLock}
+        busy={props.busy}
+        enable={props.enableWorkspaceLock}
+        lockNow={props.lockWorkspace}
+        unlock={props.unlockWorkspace}
+        disable={props.disableWorkspaceLock}
       />
       <div className="panel settings-panel data-ops-panel">
         <div className="panel-title"><Database size={18} /> Save and clean up</div>
@@ -4379,14 +7348,64 @@ function SettingsView(props: {
           <Archive size={17} />
           <span>Export review report</span>
         </button>
+        <button className="secondary" onClick={props.exportAcceptedMediaBundle} disabled={props.busy || !acceptedMediaAvailable}>
+          <Archive size={17} />
+          <span>Export accepted media</span>
+        </button>
         <button className="secondary" onClick={copyWorkspaceSummary} disabled={props.busy}>
           <Archive size={17} />
           <span>Copy app summary</span>
+        </button>
+        <button className="secondary" onClick={props.exportScanHistory} disabled={props.busy}>
+          <FileText size={17} />
+          <span>Export scan history</span>
+        </button>
+        <button className="secondary" onClick={props.exportWorkspaceInventory} disabled={props.busy}>
+          <FileText size={17} />
+          <span>Export inventory</span>
+        </button>
+        <button className="secondary" onClick={props.exportAuditLog} disabled={props.busy}>
+          <Archive size={17} />
+          <span>Export activity log</span>
+        </button>
+        <button className="secondary" onClick={props.exportReviewLedger} disabled={props.busy}>
+          <FileText size={17} />
+          <span>Export review ledger</span>
         </button>
         <button className="secondary" onClick={props.exportWorkspaceBackup} disabled={props.busy}>
           <HardDrive size={17} />
           <span>Backup app folder</span>
         </button>
+        <button className="secondary" onClick={props.verifyLatestWorkspaceBackup} disabled={props.busy}>
+          <ShieldCheck size={17} />
+          <span>Verify latest backup</span>
+        </button>
+        {props.backupVerification && (
+          <div className={props.backupVerification.ok ? "backup-verification ok" : "backup-verification warn"}>
+            <strong>{props.backupVerification.ok ? "Backup verified" : "Backup needs attention"}</strong>
+            <span title={props.backupVerification.zipPath}>{basename(props.backupVerification.zipPath) || "No backup found"}</span>
+            <small>
+              {props.backupVerification.exists
+                ? `${props.backupVerification.fileCount} files, ${formatBytes(props.backupVerification.bytes)}`
+                : props.backupVerification.error || "Backup file was not found."}
+            </small>
+            {props.backupVerification.missingCoreFiles.length > 0 && <small>Missing: {props.backupVerification.missingCoreFiles.join(", ")}</small>}
+            {props.backupVerification.corruptEntry && <small>Corrupt entry: {props.backupVerification.corruptEntry}</small>}
+            {props.backupVerification.dangerousEntries.length > 0 && <small>Unsafe entries: {props.backupVerification.dangerousEntries.length}</small>}
+            {props.backupVerification.error && <small>{props.backupVerification.error}</small>}
+          </div>
+        )}
+        <button className="secondary" onClick={props.pruneWorkspaceBackups} disabled={props.busy}>
+          <Trash2 size={17} />
+          <span>Clean old backups</span>
+        </button>
+        {props.backupPruneResult && (
+          <div className="backup-verification ok">
+            <strong>Backup cleanup</strong>
+            <span>Kept {props.backupPruneResult.kept}, removed {props.backupPruneResult.deleted}</span>
+            <small>Reclaimed {formatBytes(props.backupPruneResult.deletedBytes)}</small>
+          </div>
+        )}
         <button className="secondary" onClick={props.purgeReviewedCandidates} disabled={props.busy}>
           <Trash2 size={17} />
           <span>Remove reviewed matches</span>
@@ -4433,6 +7452,16 @@ function SettingsView(props: {
         </div>
         <p className="compact">Exports include JSON and CSV review records. Cleanup keeps the activity history for accountability.</p>
       </div>
+      <PrivacyControlPanel
+        report={props.privacyReport}
+        retentionPolicy={props.retentionPolicy}
+        busy={props.busy}
+        loadPrivacyReport={props.loadPrivacyReport}
+        loadRetentionPolicyReport={props.loadRetentionPolicyReport}
+        exportConsentReceipt={props.exportConsentReceipt}
+        exportSafeModeAudit={props.exportSafeModeAudit}
+        deleteFaceData={props.deleteFaceData}
+      />
       <AuditTrailPanel events={props.auditEvents} busy={props.busy} loadAuditEvents={props.loadAuditEvents} copyText={props.copyText} />
     </section>
   );
@@ -4440,16 +7469,29 @@ function SettingsView(props: {
 
 function WorkspaceHealthPanel({
   health,
+  optimizeResult,
   busy,
   runWorkspaceHealth,
-  purgeDuplicateCandidates
+  repairWorkspace,
+  repairResult,
+  relinkWorkspacePaths,
+  relinkResult,
+  purgeDuplicateCandidates,
+  optimizeWorkspace
 }: {
   health: WorkspaceHealth | null;
+  optimizeResult: WorkspaceOptimizeResult | null;
   busy: boolean;
   runWorkspaceHealth(): void;
+  repairWorkspace(): void;
+  repairResult: WorkspaceRepairResult | null;
+  relinkWorkspacePaths(): void;
+  relinkResult: WorkspaceRelinkResult | null;
   purgeDuplicateCandidates(): void;
+  optimizeWorkspace(): void;
 }) {
   const duplicateCount = health?.duplicateCandidateCount ?? 0;
+  const brokenLinkCount = (health?.missingReferences ?? 0) + (health?.missingCandidates ?? 0) + (health?.missingMediaSources ?? 0);
   const metrics = health ? [
     { label: "Storage", value: formatBytes(health.storageBytes) },
     { label: "Files", value: formatNumber(health.workspaceFileCount) },
@@ -4473,7 +7515,7 @@ function WorkspaceHealthPanel({
             ))}
           </div>
           <div className="health-list">
-            {health.recommendations.slice(0, 4).map((item) => <span key={item}>{item}</span>)}
+            {health.recommendations.slice(0, 4).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
           </div>
           {health.duplicateGroups.length > 0 && (
             <div className="duplicate-list">
@@ -4484,19 +7526,1006 @@ function WorkspaceHealthPanel({
               ))}
             </div>
           )}
+          {brokenLinkCount > 0 && (
+            <div className="duplicate-list">
+              {(health.missingReferenceSamples ?? []).slice(0, 2).map((item) => (
+                <span key={item.refId} title={item.sourcePath}>Missing saved photo • {item.personName} • {basename(item.sourcePath)}</span>
+              ))}
+              {(health.missingCandidateSamples ?? []).slice(0, 2).map((item) => (
+                <span key={item.candidateId} title={item.sourcePath}>Missing match • {item.personName} • {basename(item.sourcePath)}</span>
+              ))}
+              {(health.missingMediaSourceSamples ?? []).slice(0, 2).map((item) => (
+                <span key={item.candidateId} title={item.mediaSourcePath}>Missing video source • {item.personName} • {basename(item.mediaSourcePath)}</span>
+              ))}
+            </div>
+          )}
+          {(health.sourceFolders ?? []).length > 0 && (
+            <div className="duplicate-list">
+              {(health.sourceFolders ?? []).slice(0, 4).map((folder) => (
+                <span key={folder.folder} title={folder.folder}>
+                  {formatNumber(folder.references + folder.candidates)} item(s) • {basename(folder.folder) || folder.folder} • {formatBytes(folder.bytes)}
+                </span>
+              ))}
+            </div>
+          )}
           <small className="compact">Checked {formatDateTime(health.generatedAt)}</small>
         </>
       ) : (
         <p className="compact">Run a check to find missing files, duplicate match rows, activity history size, and cleanup opportunities.</p>
+      )}
+      {repairResult && !repairResult.dryRun && (
+        <div className="health-list">
+          <span>Last repair removed {formatNumber(repairResult.removedReferences)} saved photo link(s) and {formatNumber(repairResult.removedCandidates)} match row(s).</span>
+        </div>
+      )}
+      {relinkResult && (
+        <div className="health-list">
+          <span>{relinkResult.dryRun ? "Relink preview" : "Last relink"} matched {formatNumber(relinkResult.relinkedFields)} saved path(s).</span>
+          {relinkResult.missingTargets.length > 0 && <span>{formatNumber(relinkResult.missingTargets.length)} target path(s) were not found in the new folder.</span>}
+        </div>
+      )}
+      {optimizeResult && (
+        <div className="health-list">
+          <span>Last optimized: reclaimed {formatBytes(optimizeResult.totalBytesReclaimed)}.</span>
+          <span>Removed {formatNumber(optimizeResult.previewFilesRemoved)} preview file(s) and {formatNumber(optimizeResult.orphanVideoFramesRemoved)} orphan video frame(s).</span>
+        </div>
       )}
       <div className="button-row">
         <button className="secondary" onClick={runWorkspaceHealth} disabled={busy}>
           <Activity size={17} />
           <span>Run check</span>
         </button>
+        <button className="secondary" onClick={optimizeWorkspace} disabled={busy}>
+          <Database size={17} />
+          <span>Optimize app folder</span>
+        </button>
+        <button className="secondary danger" onClick={repairWorkspace} disabled={busy || !brokenLinkCount}>
+          <Trash2 size={17} />
+          <span>Repair missing links</span>
+        </button>
+        <button className="secondary" onClick={relinkWorkspacePaths} disabled={busy}>
+          <FolderOpen size={17} />
+          <span>Relink moved folder</span>
+        </button>
         <button className="secondary danger" onClick={purgeDuplicateCandidates} disabled={busy || duplicateCount === 0}>
           <Trash2 size={17} />
           <span>Remove duplicates</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function StorageBudgetPanel({
+  state,
+  settings,
+  setSettings,
+  saveSettings,
+  health,
+  busy,
+  enforceStorageBudget
+}: {
+  state: AppState;
+  settings: SettingsDraft;
+  setSettings(value: SettingsDraft): void;
+  saveSettings(): void;
+  health: WorkspaceHealth | null;
+  busy: boolean;
+  enforceStorageBudget(): void;
+}) {
+  const gib = 1024 ** 3;
+  const budgetBytes = settings.storageBudgetBytes ?? 0;
+  const budgetGb = budgetBytes > 0 ? Math.round((budgetBytes / gib) * 10) / 10 : 0;
+  const storageBytes = health?.storageBytes ?? state.scale?.dbBytes ?? 0;
+  const overBudget = health?.storageOverBudgetBytes ?? Math.max(0, storageBytes - budgetBytes);
+  const budgetPercent = budgetBytes > 0 ? Math.min(1, storageBytes / budgetBytes) : 0;
+  function updateBudgetGb(value: number) {
+    const nextGb = Math.max(0, Math.min(10_240, Number.isFinite(value) ? value : 0));
+    setSettings({
+      ...settings,
+      mode: "custom",
+      storageBudgetBytes: Math.round(nextGb * gib)
+    });
+  }
+  return (
+    <div className={overBudget > 0 ? "panel settings-panel runtime-test-panel warn" : "panel settings-panel runtime-test-panel"}>
+      <div className="panel-title"><HardDrive size={18} /> Storage limit</div>
+      <p className="compact">Set a simple limit for generated app data. Cleanup removes previews, orphan video frames, and compactable database space, never original photos or videos.</p>
+      <div className="storage-budget-row">
+        <label>Use up to
+          <input
+            aria-label="Storage limit in GB"
+            type="number"
+            min={0}
+            max={10240}
+            step={0.5}
+            value={budgetGb}
+            onChange={(event) => updateBudgetGb(Number(event.currentTarget.value))}
+          />
+        </label>
+        <span>GB</span>
+      </div>
+      <div className="model-progress">
+        <div>
+          <strong>{budgetBytes ? `${formatBytes(storageBytes)} used` : "No limit set"}</strong>
+          <span>{budgetBytes ? `${formatBytes(budgetBytes)} limit` : "Set a number above zero to enable warnings."}</span>
+        </div>
+        <progress value={budgetPercent * 100} max={100} aria-label="Storage budget usage" />
+      </div>
+      {overBudget > 0 && (
+        <div className="settings-warning">
+          <AlertCircle size={16} />
+          <span>{formatBytes(overBudget)} over the selected limit.</span>
+        </div>
+      )}
+      <div className="button-row">
+        <button className="secondary" onClick={saveSettings} disabled={busy}>
+          <Save size={17} />
+          <span>Save limit</span>
+        </button>
+        <button className="secondary" onClick={enforceStorageBudget} disabled={busy || budgetBytes <= 0}>
+          <Database size={17} />
+          <span>Clean generated cache</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ScanExclusionsPanel({
+  settings,
+  setSettings,
+  saveSettings,
+  busy
+}: {
+  settings: SettingsDraft;
+  setSettings(value: SettingsDraft): void;
+  saveSettings(): void;
+  busy: boolean;
+}) {
+  function updateExclusions(values: Partial<SettingsDraft["scanExclusions"]>) {
+    setSettings({
+      ...settings,
+      mode: "custom",
+      scanExclusions: { ...settings.scanExclusions, ...values }
+    });
+  }
+  function updateMaxMediaSize(megabytes: number) {
+    const safeMegabytes = Math.max(0, Math.min(10_000_000, Number.isFinite(megabytes) ? megabytes : 0));
+    setSettings({
+      ...settings,
+      mode: "custom",
+      maxMediaFileBytes: Math.round(safeMegabytes * 1024 * 1024)
+    });
+  }
+  const maxMediaMegabytes = Math.round((settings.maxMediaFileBytes || 0) / (1024 * 1024));
+  return (
+    <div className="panel settings-panel scan-exclusions-panel">
+      <div className="panel-title"><EyeOff size={18} /> Scan exclusions</div>
+      <p className="compact">Skip folders and file types that should never be searched. This is especially useful for Downloads, drives with developer folders, and million-file libraries.</p>
+      <label>Skip folder names
+        <textarea
+          aria-label="Excluded folder names"
+          value={listText(settings.scanExclusions.dirNames)}
+          onChange={(event) => updateExclusions({ dirNames: parseListText(event.currentTarget.value) })}
+          rows={3}
+        />
+      </label>
+      <label>Skip paths containing
+        <textarea
+          aria-label="Excluded path keywords"
+          value={listText(settings.scanExclusions.pathKeywords)}
+          onChange={(event) => updateExclusions({ pathKeywords: parseListText(event.currentTarget.value) })}
+          placeholder="Example: /Private/, screenshots-to-ignore"
+          rows={2}
+        />
+      </label>
+      <label>Skip file types
+        <input
+          aria-label="Excluded file extensions"
+          value={listText(settings.scanExclusions.extensions)}
+          onChange={(event) => updateExclusions({ extensions: parseListText(event.currentTarget.value) })}
+          placeholder="Example: gif, webp"
+        />
+      </label>
+      <label>Skip media larger than
+        <div className="inline-number-field">
+          <input
+            aria-label="Maximum media file size in megabytes"
+            type="number"
+            min={0}
+            max={10_000_000}
+            value={maxMediaMegabytes}
+            onChange={(event) => updateMaxMediaSize(Number(event.currentTarget.value))}
+          />
+          <span>MB</span>
+        </div>
+        <small>{settings.maxMediaFileBytes ? `Files above ${formatBytes(settings.maxMediaFileBytes)} are skipped before decoding.` : "Set 0 to scan every supported file size."}</small>
+      </label>
+      <label>Skip exact files
+        <textarea
+          aria-label="Excluded exact file paths"
+          value={listText(settings.scanExclusions.filePaths)}
+          onChange={(event) => updateExclusions({ filePaths: parseListText(event.currentTarget.value) })}
+          placeholder="/Users/name/Downloads/problem-file.jpg"
+          rows={3}
+        />
+      </label>
+      <div className="button-row">
+        <button
+          className="secondary"
+          onClick={() => setSettings({ ...settings, mode: "custom", maxMediaFileBytes: 0, scanExclusions: defaultScanExclusions })}
+          disabled={busy}
+        >
+          <Undo2 size={17} />
+          <span>Reset defaults</span>
+        </button>
+        <button className="primary" onClick={saveSettings} disabled={busy}>
+          <Save size={17} />
+          <span>Save exclusions</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function InstallerDiagnosticsPanel({
+  result,
+  modelIntegrity,
+  modelDriftReport,
+  busy,
+  runDiagnostics,
+  runModelIntegrity,
+  runModelDriftReport
+}: {
+  result: InstallerDiagnosticsResult | null;
+  modelIntegrity: ModelIntegrityResult | null;
+  modelDriftReport: ModelDriftReport | null;
+  busy: boolean;
+  runDiagnostics(): void;
+  runModelIntegrity(): void;
+  runModelDriftReport(): void;
+}) {
+  const staleCount = (modelDriftReport?.counts.staleReferences ?? 0) + (modelDriftReport?.counts.staleCandidates ?? 0);
+  return (
+    <div className={result?.ok ? "panel settings-panel runtime-test-panel ok" : "panel settings-panel runtime-test-panel warn"}>
+      <div className="panel-title"><KeyRound size={18} /> First-run readiness</div>
+      {result ? (
+        <>
+          <div className="self-test-list">
+            {result.checks.map((check) => (
+              <span key={check.name} className={check.ok ? "pass" : "fail"}>
+                {check.ok ? <Check size={16} /> : <AlertCircle size={16} />}
+                <strong>{check.name}</strong>
+                <small>{check.detail}</small>
+              </span>
+            ))}
+          </div>
+          <div className="health-list">
+            {result.recommendations.slice(0, 4).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+          </div>
+          <small className="compact">Checked {formatDateTime(result.generatedAt)}</small>
+        </>
+      ) : (
+        <p className="compact">Check the pieces that matter before sharing an installer: writable app folder, model downloader, photo/video support, Safe Mode, and packaged backend readiness.</p>
+      )}
+      {modelIntegrity && (
+        <div className={modelIntegrity.ok ? "health-list" : "health-list warn"}>
+          {modelIntegrity.recommendations.slice(0, 3).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+        </div>
+      )}
+      {modelDriftReport && (
+        <>
+          <div className="workspace-health-grid">
+            <span><small>Active model</small><strong>{engineLabel(modelDriftReport.currentModel)}</strong></span>
+            <span><small>Saved photos to refresh</small><strong>{formatNumber(modelDriftReport.counts.staleReferences)}</strong></span>
+            <span><small>Matches to recheck</small><strong>{formatNumber(modelDriftReport.counts.staleCandidates)}</strong></span>
+            <span><small>Status</small><strong>{staleCount ? "Review" : "Ready"}</strong></span>
+          </div>
+          <div className={staleCount ? "health-list warn" : "health-list"}>
+            {modelDriftReport.recommendations.slice(0, 3).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+          </div>
+        </>
+      )}
+      <div className="button-row">
+        <button className="secondary" onClick={runDiagnostics} disabled={busy}>
+          <Activity size={17} />
+          <span>Run first-run check</span>
+        </button>
+        <button className="secondary" onClick={runModelIntegrity} disabled={busy}>
+          <ShieldCheck size={17} />
+          <span>Verify models</span>
+        </button>
+        <button className="secondary" onClick={runModelDriftReport} disabled={busy}>
+          <RefreshCcw size={17} />
+          <span>Check saved model</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ReviewRulesPanel({
+  settings,
+  setSettings,
+  saveSettings,
+  result,
+  busy,
+  applyReviewRules
+}: {
+  settings: SettingsDraft;
+  setSettings(value: SettingsDraft): void;
+  saveSettings(): void;
+  result: ReviewRulesApplyResult | null;
+  busy: boolean;
+  applyReviewRules(): void;
+}) {
+  function updateRules(values: Partial<SettingsDraft["reviewRules"]>) {
+    setSettings({
+      ...settings,
+      mode: "custom",
+      reviewRules: { ...settings.reviewRules, ...values }
+    });
+  }
+  const enabled = settings.reviewRules.autoRejectBelow > 0 ||
+    settings.reviewRules.autoUncertainLowQuality ||
+    settings.reviewRules.autoRejectLowQualityVideo;
+  return (
+    <div className="panel settings-panel review-rules-panel">
+      <div className="panel-title"><ShieldCheck size={18} /> Review rules</div>
+      <p className="compact">Use gentle rules to clean obvious review noise. These only affect pending possible matches and every change is saved in activity history.</p>
+      <Slider
+        label="Reject below strength"
+        value={settings.reviewRules.autoRejectBelow}
+        onChange={(value) => updateRules({ autoRejectBelow: value })}
+      />
+      <label className="switch-row">
+        <span>
+          <strong>Mark low-quality photos as not sure</strong>
+          <small>Useful when blurry items should stay visible but not block your main review.</small>
+        </span>
+        <input
+          type="checkbox"
+          checked={settings.reviewRules.autoUncertainLowQuality}
+          onChange={(event) => updateRules({ autoUncertainLowQuality: event.currentTarget.checked })}
+          aria-label="Mark low-quality photos as not sure"
+        />
+      </label>
+      <label className="switch-row">
+        <span>
+          <strong>Reject low-quality video moments</strong>
+          <small>Removes very weak extracted frames from long videos.</small>
+        </span>
+        <input
+          type="checkbox"
+          checked={settings.reviewRules.autoRejectLowQualityVideo}
+          onChange={(event) => updateRules({ autoRejectLowQualityVideo: event.currentTarget.checked })}
+          aria-label="Reject low-quality video moments"
+        />
+      </label>
+      {result && (
+        <div className="workspace-health-grid">
+          <span><small>Checked</small><strong>{formatNumber(result.checked)}</strong></span>
+          <span><small>Updated</small><strong>{formatNumber(result.updated)}</strong></span>
+          <span><small>Low score</small><strong>{formatNumber(result.rejectedLowScore)}</strong></span>
+          <span><small>Low quality</small><strong>{formatNumber(result.uncertainLowQuality + result.rejectedLowQualityVideo)}</strong></span>
+        </div>
+      )}
+      <div className="button-row">
+        <button className="secondary" onClick={saveSettings} disabled={busy}>
+          <Save size={17} />
+          <span>Save rules</span>
+        </button>
+        <button className="primary" onClick={applyReviewRules} disabled={busy || !enabled}>
+          <ShieldCheck size={17} />
+          <span>Apply to pending</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DuplicatePeoplePanel({
+  result,
+  busy,
+  loadDuplicatePeople,
+  mergeDuplicatePeople
+}: {
+  result: DuplicatePeopleResult | null;
+  busy: boolean;
+  loadDuplicatePeople(): void;
+  mergeDuplicatePeople(sourceName: string, targetName: string): void;
+}) {
+  const suggestions = result?.suggestions ?? [];
+  return (
+    <div className="panel settings-panel duplicate-people-panel">
+      <div className="panel-title">
+        <Users size={18} /> Duplicate people
+        <div className="spacer" />
+        {result && <span className="title-count">{suggestions.length}</span>}
+      </div>
+      {suggestions.length ? (
+        <div className="duplicate-person-list">
+          {suggestions.map((item) => (
+            <div key={`${item.personA}-${item.personB}-${item.score}`} className="duplicate-person-row">
+              <div>
+                <strong>{item.personA} and {item.personB}</strong>
+                <small>{percent(item.score)} similar across saved face photos. {item.countA} vs {item.countB} saved photo(s).</small>
+              </div>
+              <div className="button-row">
+                <button className="secondary" onClick={() => mergeDuplicatePeople(item.personB, item.personA)} disabled={busy}>
+                  <Users size={16} />
+                  <span>Merge into {item.personA}</span>
+                </button>
+                <button className="secondary" onClick={() => mergeDuplicatePeople(item.personA, item.personB)} disabled={busy}>
+                  <Users size={16} />
+                  <span>Merge into {item.personB}</span>
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="compact">{result ? "No duplicate person labels found at the current similarity level." : "Find person labels that may represent the same person before a big scan creates more review work."}</p>
+      )}
+      <button className="secondary" onClick={loadDuplicatePeople} disabled={busy}>
+        <Activity size={17} />
+        <span>Find duplicate people</span>
+      </button>
+    </div>
+  );
+}
+
+function SettingsProfilePanel({
+  busy,
+  copySettingsProfile,
+  applySettingsProfile
+}: {
+  busy: boolean;
+  copySettingsProfile(): void;
+  applySettingsProfile(text: string): void;
+}) {
+  const [profileText, setProfileText] = useState("");
+  return (
+    <div className="panel settings-panel settings-profile-panel">
+      <div className="panel-title"><SlidersHorizontal size={18} /> Settings profile</div>
+      <p className="compact">Copy your current scan setup or paste a profile from another computer. It applies as Custom until you save it.</p>
+      <textarea
+        aria-label="Settings profile JSON"
+        value={profileText}
+        onChange={(event) => setProfileText(event.currentTarget.value)}
+        placeholder="Paste a Vintrace settings profile here"
+        rows={5}
+      />
+      <div className="button-row">
+        <button className="secondary" onClick={copySettingsProfile} disabled={busy}>
+          <Archive size={17} />
+          <span>Copy profile</span>
+        </button>
+        <button className="primary" onClick={() => applySettingsProfile(profileText)} disabled={busy || !profileText.trim()}>
+          <Check size={17} />
+          <span>Apply pasted profile</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function WorkspaceLockPanel({
+  status,
+  busy,
+  enable,
+  lockNow,
+  unlock,
+  disable
+}: {
+  status: WorkspaceLockStatus | null;
+  busy: boolean;
+  enable(): void;
+  lockNow(): void;
+  unlock(): void;
+  disable(): void;
+}) {
+  const enabled = Boolean(status?.enabled);
+  const locked = Boolean(status?.locked);
+  return (
+    <div className={locked ? "panel settings-panel runtime-test-panel warn" : "panel settings-panel"}>
+      <div className="panel-title">
+        <Lock size={18} /> Workspace Lock
+        <div className="spacer" />
+        <span className={locked ? "status rejected" : enabled ? "status accepted" : "status pending"}>{locked ? "locked" : enabled ? "on" : "off"}</span>
+      </div>
+      <p className="compact">{localizeImperativeText(status?.message ?? "Add an OS-encrypted app lock to this app folder. Original photos are not modified.")}</p>
+      <dl className="mini-list">
+        <dt>Encryption</dt><dd>{status?.supported ? "Available" : "Not available"}</dd>
+        <dt>Scope</dt><dd title={status?.workspace ?? ""}>{status?.workspace ? basename(status.workspace) : "Current app folder"}</dd>
+      </dl>
+      <div className="button-row">
+        {!enabled ? (
+          <button className="primary" onClick={enable} disabled={busy || status?.supported === false}>
+            <KeyRound size={17} />
+            <span>Turn on lock</span>
+          </button>
+        ) : locked ? (
+          <button className="primary" onClick={unlock} disabled={busy || status?.supported === false}>
+            <Unlock size={17} />
+            <span>Unlock</span>
+          </button>
+        ) : (
+          <button className="secondary" onClick={lockNow} disabled={busy}>
+            <Lock size={17} />
+            <span>Lock now</span>
+          </button>
+        )}
+        <button className="secondary danger" onClick={disable} disabled={busy || !enabled || locked}>
+          <Trash2 size={17} />
+          <span>Turn off</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ScaleReadinessPanel({
+  state,
+  pruneScanManifests,
+  pruneResult,
+  busy
+}: {
+  state: AppState;
+  pruneScanManifests(): void;
+  pruneResult: ScanManifestPruneValue | null;
+  busy: boolean;
+}) {
+  const scale = state.scale;
+  const calibration = state.calibration;
+  const candidateWindow = state.candidateWindow;
+  const rows = [
+    { label: "Manifest files", value: formatNumber(scale?.manifestFiles ?? 0) },
+    { label: "Safe cache", value: formatNumber(scale?.safetyCacheEntries ?? 0) },
+    { label: "Face cache", value: formatNumber(scale?.embeddingCacheEntries ?? 0) },
+    { label: "Review index", value: formatNumber(scale?.reviewCandidateRows ?? 0) },
+    { label: "Calibration labels", value: formatNumber(calibration?.totalLabels ?? 0) },
+    { label: "Scale DB", value: formatBytes(scale?.dbBytes ?? 0) }
+  ];
+  return (
+    <div className="panel settings-panel scale-readiness-panel">
+      <div className="panel-title"><Database size={18} /> Large folder readiness</div>
+      <div className="workspace-health-grid">
+        {rows.map((row) => (
+          <span key={row.label}>
+            <small>{row.label}</small>
+            <strong>{row.value}</strong>
+          </span>
+        ))}
+      </div>
+      <div className="health-list">
+        <span>Folder scans stream from disk and write a resumable manifest.</span>
+        <span>Safe Mode scores are cached by file hash and model version.</span>
+        <span>Face detections are cached per model and scan detail for faster repeated passes.</span>
+        <span>Review decisions build the local calibration set over time.</span>
+        {candidateWindow?.truncated && <span>Showing {formatNumber(candidateWindow.returned)} of {formatNumber(candidateWindow.total)} possible matches to keep the app responsive.</span>}
+      </div>
+      {calibration?.recommendedLikelyThreshold !== null && calibration?.recommendedLikelyThreshold !== undefined && (
+        <small className="compact">Suggested likely level from labels: {scoreLabel(calibration.recommendedLikelyThreshold)}</small>
+      )}
+      {pruneResult && (
+        <div className="health-list">
+          <span>Last manifest cleanup removed {formatNumber(pruneResult.filesDeleted)} file row(s) from {formatNumber(pruneResult.runsDeleted)} old scan run(s).</span>
+        </div>
+      )}
+      <button className="secondary" onClick={pruneScanManifests} disabled={busy || (scale?.scanRuns ?? 0) <= 20}>
+        <Trash2 size={17} />
+        <span>Clean old manifests</span>
+      </button>
+    </div>
+  );
+}
+
+function BenchmarkPanel({ result, busy, runBenchmark }: { result: RuntimeBenchmarkResult | null; busy: boolean; runBenchmark(): void }) {
+  return (
+    <div className="panel settings-panel benchmark-panel">
+      <div className="panel-title"><Gauge size={18} /> Machine benchmark</div>
+      {result ? (
+        <>
+          <div className="workspace-health-grid">
+            <span><small>Vector add</small><strong>{formatNumber(Math.round(result.vectorAddPerSecond))}/s</strong></span>
+            <span><small>Search p50</small><strong>{result.vectorSearchP50MsEstimate.toFixed(3)} ms</strong></span>
+            <span><small>State</small><strong>{result.stateSerializeMs.toFixed(1)} ms</strong></span>
+            <span><small>Backend</small><strong>{result.vectorBackend}</strong></span>
+          </div>
+          <div className="health-list">
+            {result.recommendations.slice(0, 3).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+          </div>
+          <small className="compact">Benchmarked {formatDateTime(result.generatedAt)}</small>
+        </>
+      ) : (
+        <p className="compact">Run a local benchmark to check vector search speed, state serialization, and scale database health on this machine.</p>
+      )}
+      <button className="secondary" onClick={runBenchmark} disabled={busy}>
+        <Activity size={17} />
+        <span>Run benchmark</span>
+      </button>
+    </div>
+  );
+}
+
+function AccuracyLabPanel({
+  result,
+  calibration,
+  busy,
+  runAccuracyEvaluation,
+  applyCalibration,
+  exportAccuracyLabels,
+  importAccuracyLabels
+}: {
+  result: AccuracyEvaluation | null;
+  calibration: AppState["calibration"];
+  busy: boolean;
+  runAccuracyEvaluation(): void;
+  applyCalibration(): void;
+  exportAccuracyLabels(): void;
+  importAccuracyLabels(text: string): void | Promise<void>;
+}) {
+  const [importText, setImportText] = useState("");
+  const likely = result?.metrics.likely;
+  const labelCount = likely?.labeled ?? calibration?.matchLabels ?? 0;
+  const importDisabled = busy || !importText.trim();
+  async function submitImport() {
+    if (!importText.trim()) return;
+    await importAccuracyLabels(importText);
+    setImportText("");
+  }
+  return (
+    <div className="panel settings-panel benchmark-panel">
+      <div className="panel-title"><Crosshair size={18} /> Accuracy lab</div>
+      {result && likely ? (
+        <>
+          <div className="workspace-health-grid">
+            <span><small>Reviewed labels</small><strong>{formatNumber(likely.labeled)}</strong></span>
+            <span><small>Precision</small><strong>{percent(likely.precision)}</strong></span>
+            <span><small>Recall</small><strong>{percent(likely.recall)}</strong></span>
+            <span><small>False positives</small><strong>{formatNumber(likely.falsePositives)}</strong></span>
+          </div>
+          <div className="health-list">
+            {result.recommendations.slice(0, 3).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+          </div>
+          <small className="compact">Checked {formatDateTime(result.generatedAt)}</small>
+        </>
+      ) : (
+        <p className="compact">Use accepted and rejected matches as a local ground-truth set. The app reports precision, recall, and threshold advice without uploading photos.</p>
+      )}
+      <div className="button-row">
+        <button className="secondary" onClick={runAccuracyEvaluation} disabled={busy}>
+          <Activity size={17} />
+          <span>Run accuracy check</span>
+        </button>
+        <button className="secondary" onClick={applyCalibration} disabled={busy || labelCount < 8}>
+          <SlidersHorizontal size={17} />
+          <span>Apply feedback</span>
+        </button>
+        <button className="secondary" onClick={exportAccuracyLabels} disabled={busy || labelCount < 1}>
+          <Archive size={17} />
+          <span>Export labels</span>
+        </button>
+      </div>
+      <details className="accuracy-import">
+        <summary>Import label JSON</summary>
+        <label className="diagnostics-json-label">
+          <span>Paste a Vintrace accuracy-label export or a raw labels array.</span>
+          <textarea
+            value={importText}
+            onChange={(event) => setImportText(event.currentTarget.value)}
+            spellCheck={false}
+            placeholder='{"labels":[{"sourcePath":"...","expectedPerson":"...","isMatch":true}]}'
+          />
+        </label>
+        <div className="button-row">
+          <button className="secondary" onClick={() => void submitImport()} disabled={importDisabled} type="button">
+            <Archive size={17} />
+            <span>Import labels</span>
+          </button>
+          <button className="ghost compact-action" onClick={() => setImportText("")} disabled={!importText.trim()} type="button">
+            <X size={16} />
+            <span>Clear</span>
+          </button>
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function ReleaseReadinessPanel({
+  result,
+  busy,
+  runReleaseReadiness
+}: {
+  result: ReleaseReadinessResult | null;
+  busy: boolean;
+  runReleaseReadiness(): void;
+}) {
+  return (
+    <div className={result?.ok ? "panel settings-panel runtime-test-panel ok" : "panel settings-panel runtime-test-panel warn"}>
+      <div className="panel-title"><Archive size={18} /> Release readiness</div>
+      {result ? (
+        <>
+          <div className="self-test-list">
+            {result.checks.map((check) => (
+              <span key={check.name} className={check.ok ? "pass" : "fail"}>
+                {check.ok ? <Check size={16} /> : <AlertCircle size={16} />}
+                <strong>{check.name}</strong>
+                <small>{check.detail}</small>
+              </span>
+            ))}
+          </div>
+          <small className="compact">Checked {formatDateTime(result.generatedAt)}</small>
+        </>
+      ) : (
+        <p className="compact">Check model readiness, Safe Mode, signing, updates, and release operations before sharing installers broadly.</p>
+      )}
+      <button className="secondary" onClick={runReleaseReadiness} disabled={busy}>
+        <Activity size={17} />
+        <span>Run release check</span>
+      </button>
+    </div>
+  );
+}
+
+function UpdateCenterPanel({
+  status,
+  busy,
+  checkForUpdates,
+  setUpdateChannel,
+  downloadUpdate,
+  installUpdate
+}: {
+  status: UpdateStatus | null;
+  busy: boolean;
+  checkForUpdates(): void;
+  setUpdateChannel(channel: UpdateChannel): void;
+  downloadUpdate(): void;
+  installUpdate(): void;
+}) {
+  const progress = status?.progress;
+  const percentValue = Math.round(progress?.percent ?? 0);
+  const stateLabel = !status
+    ? "Not checked"
+    : status.downloaded
+      ? "Ready"
+      : status.downloading
+        ? "Downloading"
+        : status.checking
+          ? "Checking"
+          : status.available
+            ? "Available"
+            : status.error
+              ? "Needs setup"
+              : "Current";
+  return (
+    <div className={status?.error ? "panel settings-panel runtime-test-panel warn" : "panel settings-panel runtime-test-panel"}>
+      <div className="panel-title">
+        <Download size={18} /> Updates
+        <div className="spacer" />
+        <span className={status?.available || status?.downloaded ? "status uncertain" : "status accepted"}>{stateLabel}</span>
+      </div>
+      <p className="compact">{localizeImperativeText(status?.message ?? "Check for signed app updates without leaving the app.")}</p>
+      <dl className="mini-list">
+        <dt>Installed</dt><dd>{status?.appVersion ?? "Unknown"}</dd>
+        <dt>Latest</dt><dd>{status?.latestVersion ?? "Not checked"}</dd>
+        <dt>Feed</dt><dd>{status?.provider ?? "Unknown"}</dd>
+      </dl>
+      <div className="channel-picker" role="group" aria-label="Update channel">
+        {(["stable", "beta", "internal"] as UpdateChannel[]).map((channel) => (
+          <button
+            key={channel}
+            className={status?.channel === channel ? "segmented selected" : "segmented"}
+            onClick={() => setUpdateChannel(channel)}
+            disabled={busy || status?.checking || status?.downloading}
+            type="button"
+          >
+            <span>{channel === "stable" ? "Stable" : channel === "beta" ? "Beta" : "Internal"}</span>
+          </button>
+        ))}
+      </div>
+      {progress && (
+        <div className="model-progress">
+          <div>
+            <strong>{percentValue}% downloaded</strong>
+            <span>{formatBytes(progress.transferred)} / {formatBytes(progress.total)}</span>
+          </div>
+          <progress value={percentValue} max={100} aria-label="Update download progress" />
+        </div>
+      )}
+      {status?.error && (
+        <div className="settings-warning">
+          <AlertCircle size={16} />
+          <span>{status.error}</span>
+        </div>
+      )}
+      <div className="button-row">
+        <button className="secondary" onClick={checkForUpdates} disabled={busy || status?.checking || status?.downloading || status?.canCheck === false}>
+          {status?.checking ? <Loader2 size={17} className="spin" /> : <RefreshCcw size={17} />}
+          <span>Check updates</span>
+        </button>
+        <button className="secondary" onClick={downloadUpdate} disabled={busy || !status?.available || status.downloading || status.downloaded}>
+          {status?.downloading ? <Loader2 size={17} className="spin" /> : <Download size={17} />}
+          <span>Download</span>
+        </button>
+        <button className="primary" onClick={installUpdate} disabled={busy || !status?.downloaded}>
+          <Archive size={17} />
+          <span>Restart to install</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DiagnosticsPanel({
+  report,
+  busy,
+  previewDiagnostics,
+  exportDiagnostics,
+  exportSupportBundle
+}: {
+  report: DiagnosticsReport | null;
+  busy: boolean;
+  previewDiagnostics(includePaths?: boolean): void;
+  exportDiagnostics(includePaths?: boolean): void;
+  exportSupportBundle(includePaths?: boolean): void;
+}) {
+  const [includePaths, setIncludePaths] = useState(false);
+  const latestEvents = report?.diagnostics.events.slice(0, 5) ?? [];
+  const summary = report?.diagnostics.summary;
+  const topCodes = summary
+    ? Object.entries(summary.byCode || {}).sort((left, right) => right[1] - left[1]).slice(0, 4)
+    : [];
+  const reportPreview = report ? JSON.stringify(report, null, 2) : "";
+  const trimmedPreview = reportPreview.length > 12000 ? `${reportPreview.slice(0, 12000)}\n... preview trimmed; exported JSON contains the full report ...` : reportPreview;
+  return (
+    <div className="panel settings-panel diagnostics-panel">
+      <div className="panel-title"><FileText size={18} /> Error reports</div>
+      <p className="compact">Create a local report for crashes, hangs, backend errors, and update problems. It never includes photos or face vectors.</p>
+      <label className="switch-row">
+        <span>
+          <strong>Include file paths</strong>
+          <small>Off hides home-folder paths in the preview and export.</small>
+        </span>
+        <input
+          type="checkbox"
+          checked={includePaths}
+          onChange={(event) => setIncludePaths(event.currentTarget.checked)}
+          aria-label="Include file paths in diagnostics"
+        />
+      </label>
+      {report ? (
+        <>
+          <div className="workspace-health-grid">
+            <span><small>Events</small><strong>{formatNumber(report.diagnostics.eventCount)}</strong></span>
+            <span><small>Backend</small><strong>{report.backend.ready ? "Ready" : "Starting"}</strong></span>
+            <span><small>Paths</small><strong>{report.privacy.includesFilePaths ? "Included" : "Hidden"}</strong></span>
+            <span><small>Latest code</small><strong>{summary?.latestFailureCode || "None"}</strong></span>
+          </div>
+          {topCodes.length > 0 && (
+            <div className="diagnostics-code-strip" aria-label="Top diagnostic codes">
+              {topCodes.map(([code, count]) => (
+                <span key={code}><strong>{code}</strong><small>{formatNumber(count)} event{count === 1 ? "" : "s"}</small></span>
+              ))}
+            </div>
+          )}
+          <div className="diagnostics-preview" aria-label="Diagnostics preview">
+            {latestEvents.length ? latestEvents.map((event, index) => (
+              <span key={`${String(event.at)}-${index}`}>
+                <strong>{String(event.code || event.type || "event").replace(/_/g, " ")}</strong>
+                <small>{String(event.message || event.reason || event.at || "No detail")}</small>
+              </span>
+            )) : <span><strong>No error events</strong><small>The report still includes app, update, and backend status.</small></span>}
+          </div>
+          <label className="diagnostics-json-label">Report JSON preview
+            <textarea
+              aria-label="Diagnostics JSON preview"
+              readOnly
+              value={trimmedPreview}
+            />
+          </label>
+          <small className="compact">Preview generated {formatDateTime(report.generatedAt)}. Export only after reviewing it.</small>
+        </>
+      ) : (
+        <p className="compact">Preview first, then export a JSON report you can share manually with a developer or tester.</p>
+      )}
+      <div className="button-row">
+        <button className="secondary" onClick={() => previewDiagnostics(includePaths)} disabled={busy}>
+          <Eye size={17} />
+          <span>Preview report</span>
+        </button>
+        <button className="primary" onClick={() => exportDiagnostics(includePaths)} disabled={busy || !report}>
+          <Archive size={17} />
+          <span>Export report</span>
+        </button>
+        <button className="secondary" onClick={() => exportSupportBundle(includePaths)} disabled={busy}>
+          <HardDrive size={17} />
+          <span>Support bundle</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PrivacyControlPanel({
+  report,
+  retentionPolicy,
+  busy,
+  loadPrivacyReport,
+  loadRetentionPolicyReport,
+  exportConsentReceipt,
+  exportSafeModeAudit,
+  deleteFaceData
+}: {
+  report: PrivacyReport | null;
+  retentionPolicy: RetentionPolicyReport | null;
+  busy: boolean;
+  loadPrivacyReport(): void;
+  loadRetentionPolicyReport(): void;
+  exportConsentReceipt(): void;
+  exportSafeModeAudit(): void;
+  deleteFaceData(includeAudit?: boolean): void;
+}) {
+  return (
+    <div className="panel settings-panel data-ops-panel">
+      <div className="panel-title"><EyeOff size={18} /> Privacy controls</div>
+      {report ? (
+        <>
+          <div className="workspace-health-grid">
+            <span><small>Saved faces</small><strong>{formatNumber(report.references)}</strong></span>
+            <span><small>Matches</small><strong>{formatNumber(report.candidates)}</strong></span>
+            <span><small>Generated files</small><strong>{formatNumber(report.generatedFiles)}</strong></span>
+            <span><small>Generated size</small><strong>{formatBytes(report.generatedBytes)}</strong></span>
+          </div>
+          <div className="health-list">
+            {report.recommendations.slice(0, 2).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+          </div>
+          <small className="compact">Privacy report {formatDateTime(report.generatedAt)}</small>
+        </>
+      ) : (
+        <p className="compact">See exactly how much local face data, generated preview data, cached matching data, and audit history is in this app folder.</p>
+      )}
+      {retentionPolicy && (
+        <>
+          <div className="workspace-health-grid">
+            <span><small>Reviewed</small><strong>{formatNumber(retentionPolicy.counts.reviewedCandidates)}</strong></span>
+            <span><small>90+ days</small><strong>{formatNumber(retentionPolicy.reviewedOlderThanDays["90"] ?? 0)}</strong></span>
+            <span><small>Oldest</small><strong>{formatNumber(retentionPolicy.oldestReviewedAgeDays)}d</strong></span>
+            <span><small>Generated size</small><strong>{formatBytes(retentionPolicy.counts.generatedBytes)}</strong></span>
+          </div>
+          <div className="health-list">
+            {retentionPolicy.recommendations.slice(0, 2).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+          </div>
+          <small className="compact">Retention report {formatDateTime(retentionPolicy.generatedAt)}</small>
+        </>
+      )}
+      <div className="button-row">
+        <button className="secondary" onClick={loadPrivacyReport} disabled={busy}>
+          <Activity size={17} />
+          <span>Check privacy data</span>
+        </button>
+        <button className="secondary" onClick={loadRetentionPolicyReport} disabled={busy}>
+          <Timer size={17} />
+          <span>Check retention</span>
+        </button>
+        <button className="secondary" onClick={exportConsentReceipt} disabled={busy}>
+          <FileText size={17} />
+          <span>Consent receipt</span>
+        </button>
+        <button className="secondary" onClick={exportSafeModeAudit} disabled={busy}>
+          <ShieldCheck size={17} />
+          <span>Safe Mode audit</span>
+        </button>
+        <button className="secondary danger" onClick={() => deleteFaceData(false)} disabled={busy}>
+          <Trash2 size={17} />
+          <span>Delete face data</span>
+        </button>
+        <button className="secondary danger" onClick={() => deleteFaceData(true)} disabled={busy}>
+          <Trash2 size={17} />
+          <span>Delete face data and history</span>
         </button>
       </div>
     </div>
@@ -4529,7 +8558,7 @@ function RuntimeSelfTestPanel({ result }: { result: RuntimeSelfTestResult | null
         ))}
       </div>
       <div className="health-list">
-        {result.recommendations.slice(0, 4).map((item) => <span key={item}>{item}</span>)}
+        {result.recommendations.slice(0, 4).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
       </div>
       <small className="compact">Checked {formatDateTime(result.generatedAt)}</small>
     </div>

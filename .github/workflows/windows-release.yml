@@ -2,6 +2,24 @@ name: Windows Release
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional GitHub Release tag to publish installer/update metadata to, for example v0.1.0"
+        required: false
+        type: string
+      draft:
+        description: "Create or update the release as a draft"
+        required: false
+        default: true
+        type: boolean
+      prerelease:
+        description: "Mark the release as a prerelease"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
 
 jobs:
   build-windows-installer:
@@ -67,9 +85,23 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: CrossAge-FR-Windows-Installer
+          name: Vintrace-Windows-Installer
           if-no-files-found: error
           path: |
+            dist/*.exe
+            dist/*.blockmap
+            dist/latest*.yml
+
+      - name: Publish installer to GitHub Release
+        if: ${{ inputs.release_tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: Vintrace ${{ inputs.release_tag }}
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          fail_on_unmatched_files: true
+          files: |
             dist/*.exe
             dist/*.blockmap
             dist/latest*.yml

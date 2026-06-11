@@ -148,7 +148,10 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
             self.det_model = self._load_model(model_zoo, model_dir, "detection", ["CPUExecutionProvider"], None)
             self.rec_model = self._load_model(model_zoo, model_dir, "recognition", ["CPUExecutionProvider"], None)
             ctx_id = -1
-        self.det_model.prepare(ctx_id, input_size=(640, 640), det_thresh=0.5)
+        detector_size = max(320, min(1024, int(getattr(config, "face_detector_size", 640))))
+        detector_size = int(round(detector_size / 32) * 32)
+        self.detector_size = detector_size
+        self.det_model.prepare(ctx_id, input_size=(detector_size, detector_size), det_thresh=0.5)
         self.rec_model.prepare(ctx_id)
 
     def embed_loaded_image(self, image: Image.Image, path: Path | None = None) -> list[EmbeddingResult]:

@@ -64,6 +64,7 @@ class ReviewCandidate:
     video_timestamp_ms: int | None = None
     video_frame_index: int | None = None
     video_duration_ms: int | None = None
+    source_hash: str = ""
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat(timespec="seconds") + "Z")
 
 

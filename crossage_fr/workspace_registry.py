@@ -8,8 +8,10 @@ import os
 import uuid
 
 
-REGISTRY_ENV = "CROSSAGE_REGISTRY_HOME"
-WORKSPACE_ENV = "CROSSAGE_WORKSPACE"
+REGISTRY_ENV = "VINTRACE_REGISTRY_HOME"
+LEGACY_REGISTRY_ENV = "CROSSAGE_REGISTRY_HOME"
+WORKSPACE_ENV = "VINTRACE_WORKSPACE"
+LEGACY_WORKSPACE_ENV = "CROSSAGE_WORKSPACE"
 
 
 def now_iso() -> str:
@@ -17,10 +19,10 @@ def now_iso() -> str:
 
 
 def registry_root() -> Path:
-    configured = os.environ.get(REGISTRY_ENV)
+    configured = os.environ.get(REGISTRY_ENV) or os.environ.get(LEGACY_REGISTRY_ENV)
     if configured:
         return Path(configured).expanduser().resolve()
-    return (Path.home() / ".crossage-fr-workbench").resolve()
+    return (Path.home() / ".vintrace").resolve()
 
 
 def active_workspace_path() -> Path:
@@ -28,6 +30,10 @@ def active_workspace_path() -> Path:
 
 
 def workspace_marker_path(workspace: Path) -> Path:
+    return workspace.expanduser().resolve() / ".vintrace-workspace.json"
+
+
+def legacy_workspace_marker_path(workspace: Path) -> Path:
     return workspace.expanduser().resolve() / ".crossage-workspace.json"
 
 
@@ -51,6 +57,8 @@ def ensure_workspace_metadata(workspace: Path, actor: str = "backend") -> dict[s
     resolved.mkdir(parents=True, exist_ok=True)
     marker = workspace_marker_path(resolved)
     existing = read_json_object(marker)
+    if not existing:
+        existing = read_json_object(legacy_workspace_marker_path(resolved))
     created_at = str(existing.get("createdAt") or now_iso())
     workspace_id = str(existing.get("workspaceId") or f"ws_{uuid.uuid4().hex[:12]}")
     metadata = {
@@ -78,7 +86,7 @@ def write_active_workspace(workspace: Path, actor: str, metadata: dict[str, Any]
 
 
 def read_active_workspace() -> Path | None:
-    configured = os.environ.get(WORKSPACE_ENV)
+    configured = os.environ.get(WORKSPACE_ENV) or os.environ.get(LEGACY_WORKSPACE_ENV)
     if configured:
         return Path(configured).expanduser().resolve()
     payload = read_json_object(active_workspace_path())
@@ -88,7 +96,7 @@ def read_active_workspace() -> Path | None:
     return None
 
 
-def resolve_workspace(value: str | Path | None, fallback: str | Path = "crossage_project") -> Path:
+def resolve_workspace(value: str | Path | None, fallback: str | Path = "vintrace_project") -> Path:
     if value:
         return Path(value).expanduser().resolve()
     active = read_active_workspace()

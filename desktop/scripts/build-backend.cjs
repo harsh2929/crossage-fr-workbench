@@ -27,6 +27,7 @@ const meanShapeLookup = spawnSync(
 const meanShapePath = meanShapeLookup.status === 0 ? meanShapeLookup.stdout.trim() : "";
 const reportPath = path.join(root, "report.md");
 
+fs.rmSync(outputDir, { recursive: true, force: true });
 fs.mkdirSync(outputDir, { recursive: true });
 
 const args = [
@@ -34,7 +35,7 @@ const args = [
   "PyInstaller",
   "--clean",
   "--noconfirm",
-  "--onefile",
+  "--onedir",
   "--collect-submodules",
   "mcp",
   "--collect-data",
