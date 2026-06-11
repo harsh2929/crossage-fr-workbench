@@ -30,6 +30,13 @@ def safe_resolve(path: Path) -> Path:
         return path.expanduser().absolute()
 
 
+def safe_is_mount(path: Path) -> bool:
+    try:
+        return path.is_mount()
+    except (OSError, NotImplementedError):
+        return False
+
+
 def _path_device(path: Path) -> int | None:
     current = path
     while True:
@@ -69,10 +76,7 @@ def _posix_mount_root(path: Path) -> Path:
     except OSError:
         current = path.parent
     while current != current.parent:
-        try:
-            if current.is_mount():
-                return current
-        except OSError:
+        if safe_is_mount(current):
             return current
         current = current.parent
     return current

@@ -26,7 +26,7 @@ from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS
 from crossage_fr.ingest.safety import SafetyAssessment, assess_image_safety, safety_model_report
 from crossage_fr.match import group_hits
 from crossage_fr.models import EmbeddingResult, ReferenceFace, ReviewCandidate, new_id
-from crossage_fr.storage import safe_resolve
+from crossage_fr.storage import safe_is_mount, safe_resolve
 from crossage_fr.store import VectorStore
 from crossage_fr.store.workspace_db import WorkspaceDb, path_signature
 from crossage_fr.workspace_registry import ensure_workspace_metadata, now_iso, write_active_workspace
@@ -142,7 +142,7 @@ class ProjectState:
 
     def _ensure_generated_dir_sentinel(self, path: Path) -> None:
         try:
-            if path.exists() and (path.is_symlink() or path.is_mount()):
+            if path.exists() and (path.is_symlink() or safe_is_mount(path)):
                 return
             path.mkdir(parents=True, exist_ok=True)
             sentinel = self._generated_dir_sentinel(path)
@@ -165,7 +165,7 @@ class ProjectState:
 
     def _generated_dir_is_owned(self, path: Path) -> bool:
         try:
-            if path.is_symlink() or path.is_mount():
+            if path.is_symlink() or safe_is_mount(path):
                 return False
             sentinel = self._generated_dir_sentinel(path)
             payload = json.loads(sentinel.read_text(encoding="utf-8"))
@@ -2403,7 +2403,7 @@ class ProjectState:
     def prune_workspace_backups(self, keep: int = 5) -> dict[str, Any]:
         keep = max(1, min(100, int(keep)))
         export_root = self.root / "exports"
-        if export_root.exists() and (export_root.is_symlink() or export_root.is_mount()):
+        if export_root.exists() and (export_root.is_symlink() or safe_is_mount(export_root)):
             return {
                 "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
                 "keep": keep,
