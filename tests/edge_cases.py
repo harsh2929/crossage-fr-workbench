@@ -1351,7 +1351,7 @@ def assert_operational_use_case_commands() -> None:
     assert api.project.db.scan_file_resume_row(resumed_run, moved_candidate, path_signature(moved_candidate)) is not None
     best_ref_id = api.project.candidates[candidate_id].best_ref_id
     assert best_ref_id is not None
-    assert str(moved) in api.project.references[best_ref_id].source_path
+    assert Path(api.project.references[best_ref_id].source_path).resolve().is_relative_to(moved.resolve())
 
     media_bundle = api.handle("export_media_bundle", {"statuses": ["accepted"]})
     bundle_value = media_bundle["value"]
