@@ -3298,6 +3298,32 @@ kbd {
   font-size: 13px;
 }
 
+.memory-pressure-banner {
+  background: rgba(191, 91, 0, 0.09);
+  border: 1px solid rgba(191, 91, 0, 0.24);
+  border-radius: 8px;
+  display: grid;
+  gap: 3px;
+  padding: 8px 10px;
+}
+
+.memory-pressure-banner strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.memory-pressure-banner span {
+  color: var(--secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.memory-pressure-banner.high,
+.memory-pressure-banner.critical {
+  background: rgba(215, 0, 21, 0.08);
+  border-color: rgba(215, 0, 21, 0.22);
+}
+
 .activity-head span,
 .scan-activity small {
   color: var(--secondary);
@@ -4462,7 +4488,7 @@ textarea:focus {
 .performance-mode-grid {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .performance-mode {
@@ -4511,6 +4537,48 @@ textarea:focus {
   align-self: end;
   color: var(--accent);
   justify-self: end;
+}
+
+.performance-hardware {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.performance-hardware span {
+  background: var(--control-bg);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  min-height: 68px;
+  padding: 10px;
+}
+
+.performance-hardware small,
+.performance-notes span {
+  color: var(--secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.performance-hardware strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.performance-notes {
+  display: grid;
+  gap: 6px;
+}
+
+.performance-notes span {
+  background: rgba(0, 122, 255, 0.08);
+  border: 1px solid rgba(0, 122, 255, 0.18);
+  border-radius: 8px;
+  padding: 8px 10px;
 }
 
 .performance-stats {
@@ -5112,6 +5180,7 @@ input[type="range"] {
   }
 
   .performance-mode-grid,
+  .performance-hardware,
   .performance-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -5294,6 +5363,7 @@ input[type="range"] {
   .page-grid,
   .settings-presets,
   .performance-mode-grid,
+  .performance-hardware,
   .performance-stats,
   .settings-summary {
     grid-template-columns: 1fr;

@@ -49,6 +49,7 @@ EXPECTED_TOOLS = {
     "rename_person",
     "clear_references",
     "save_settings",
+    "set_performance_mode",
     "export_review_report",
     "export_workspace_inventory",
     "export_audit_log",
@@ -203,6 +204,11 @@ async def smoke() -> None:
             assert not duplicate_people.isError
             assert duplicate_people.structuredContent
             assert "suggestions" in duplicate_people.structuredContent
+
+            performance_mode = await session.call_tool("set_performance_mode", {"mode": "fast"})
+            assert not performance_mode.isError
+            assert performance_mode.structuredContent["performanceMode"] == "fast"
+            assert performance_mode.structuredContent["effectivePerformanceMode"] == "fast"
 
             await expect_tool_error(session, "rename_person", {"old_name": "A", "new_name": "B"}, "confirm=True")
             await expect_tool_error(session, "purge_old_candidates", {"days": 1}, "confirm=True")

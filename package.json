@@ -28,6 +28,7 @@
     "test:edge": "PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/edge_cases.py",
     "test:mcp": ".venv/bin/python tests/mcp_smoke.py",
     "test:e2e": "playwright test",
+    "bench:scale": "PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/scale_benchmark.py",
     "test": "npm run build && npm run test:pipeline && npm run test:edge && npm run test:mcp && npm run test:e2e"
   },
   "dependencies": {

@@ -4,8 +4,11 @@ from dataclasses import dataclass
 import importlib.util
 import os
 import platform
+import re
 import struct
 import subprocess
+import ctypes
+import resource
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +28,11 @@ class PlatformReport:
     precision: str
     vector_backend: str
     platform_notes: list[str]
+    cpu_logical_count: int
+    memory_total_bytes: int
+    performance_tier: str
+    recommended_performance_mode: str
+    performance_notes: list[str]
     insightface_available: bool
     faiss_available: bool
     hdbscan_available: bool
@@ -32,6 +40,114 @@ class PlatformReport:
 
 def _module_available(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
+
+
+def logical_cpu_count() -> int:
+    return max(1, int(os.cpu_count() or 1))
+
+
+def memory_total_bytes() -> int:
+    system = platform.system().lower()
+    if system == "windows":
+        class MemoryStatusEx(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MemoryStatusEx()
+        status.dwLength = ctypes.sizeof(status)
+        try:
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullTotalPhys)
+        except Exception:
+            return 0
+        return 0
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        if isinstance(pages, int) and isinstance(page_size, int):
+            return int(pages * page_size)
+    except (AttributeError, OSError, ValueError):
+        return 0
+    return 0
+
+
+def memory_available_bytes() -> int:
+    try:
+        import psutil  # type: ignore
+
+        return int(psutil.virtual_memory().available)
+    except Exception:
+        pass
+    system = platform.system().lower()
+    if system == "windows":
+        class MemoryStatusEx(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MemoryStatusEx()
+        status.dwLength = ctypes.sizeof(status)
+        try:
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullAvailPhys)
+        except Exception:
+            return 0
+        return 0
+    if system == "linux":
+        try:
+            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+        except (OSError, IndexError, ValueError):
+            return 0
+    if system == "darwin":
+        try:
+            output = subprocess.check_output(["vm_stat"], text=True, stderr=subprocess.DEVNULL)
+            page_size = 4096
+            first = output.splitlines()[0] if output else ""
+            match = re.search(r"page size of (\d+) bytes", first)
+            if match:
+                page_size = int(match.group(1))
+            pages = 0
+            wanted = ("Pages free", "Pages inactive", "Pages speculative")
+            for line in output.splitlines():
+                if line.startswith(wanted):
+                    pages += int(re.sub(r"[^0-9]", "", line.split(":", 1)[1]) or "0")
+            return int(pages * page_size)
+        except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+            return 0
+    return 0
+
+
+def process_memory_bytes() -> int:
+    try:
+        import psutil  # type: ignore
+
+        return int(psutil.Process(os.getpid()).memory_info().rss)
+    except Exception:
+        pass
+    try:
+        rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        return rss if platform.system().lower() == "darwin" else rss * 1024
+    except Exception:
+        return 0
 
 
 def available_onnx_providers() -> list[str]:
@@ -193,11 +309,38 @@ def platform_notes(platform_key: str, providers: list[str], selected: list[Any])
     return notes
 
 
+def performance_profile(platform_key: str, providers: list[str], selected: list[Any]) -> tuple[str, str, list[str]]:
+    cpu_count = logical_cpu_count()
+    memory_bytes = memory_total_bytes()
+    memory_gb = memory_bytes / (1024 ** 3) if memory_bytes else 0.0
+    primary = provider_label(selected[0]) if selected else ""
+    accelerated = primary and primary != "CPUExecutionProvider" and platform_key != "cpu"
+    notes: list[str] = []
+    if memory_bytes and memory_gb < 8:
+        notes.append("Less than 8 GB RAM detected; Fast mode reduces thumbnails, page sizes, and scan detail.")
+    if cpu_count <= 4:
+        notes.append("4 or fewer logical CPU cores detected; Fast mode keeps scans responsive on lower-end PCs.")
+    if not accelerated:
+        notes.append("No active accelerator provider detected; CPU-friendly defaults are recommended.")
+    if platform_key == "apple_silicon_rosetta":
+        notes.append("Rosetta translation detected; use Fast or Balanced until native acceleration is available.")
+    if not providers:
+        notes.append("ONNX Runtime providers are unavailable; fallback matching should keep UI work conservative.")
+    if (memory_bytes and memory_gb < 8) or (cpu_count <= 4 and not accelerated) or platform_key == "apple_silicon_rosetta":
+        return "low", "fast", notes
+    if accelerated and (not memory_bytes or memory_gb >= 16) and cpu_count >= 8:
+        notes.append("Accelerated hardware with comfortable memory detected; Quality mode is available for maximum detail.")
+        return "high", "quality", notes
+    notes.append("Balanced performance profile selected for this machine.")
+    return "standard", "balanced", notes
+
+
 def build_platform_report() -> PlatformReport:
     key = detect_platform()
     providers = available_onnx_providers()
     selected = get_providers(key)
     primary = provider_label(selected[0]) if selected else "none"
+    tier, recommended_mode, perf_notes = performance_profile(key, providers, selected)
     if not providers:
         status = "ONNX Runtime not installed; using local review/demo engine."
     elif key in {"apple_silicon", "apple_silicon_rosetta"} and "CoreMLExecutionProvider" not in providers:
@@ -226,6 +369,11 @@ def build_platform_report() -> PlatformReport:
         precision=expected_precision(key),
         vector_backend=expected_vector_backend(key),
         platform_notes=platform_notes(key, providers, selected),
+        cpu_logical_count=logical_cpu_count(),
+        memory_total_bytes=memory_total_bytes(),
+        performance_tier=tier,
+        recommended_performance_mode=recommended_mode,
+        performance_notes=perf_notes,
         insightface_available=_module_available("insightface"),
         faiss_available=_module_available("faiss"),
         hdbscan_available=_module_available("hdbscan"),

@@ -21,7 +21,7 @@ from time import monotonic
 from typing import Any
 
 from crossage_fr import __version__
-from crossage_fr.config import MAX_CLUSTER_MIN_SIZE, MAX_FACE_DETECTOR_SIZE, MIN_FACE_DETECTOR_SIZE
+from crossage_fr.config import MAX_CLUSTER_MIN_SIZE, MAX_FACE_DETECTOR_SIZE, MIN_FACE_DETECTOR_SIZE, PERFORMANCE_MODES
 from crossage_fr.embed import EmbeddingEngine, create_embedding_engine
 from crossage_fr.enroll import ProjectState
 from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, image_decoder_report, load_image
@@ -29,7 +29,7 @@ from crossage_fr.ingest.safety import safety_model_report
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, probe_video, video_decoder_report
 from crossage_fr.model_manager import download_model_pack, model_pack_ready, model_root_for_config, model_roots_for_engine, model_status, set_model_root
 from crossage_fr.models import ReviewCandidate, new_id
-from crossage_fr.platform_detect import build_platform_report
+from crossage_fr.platform_detect import build_platform_report, memory_available_bytes, process_memory_bytes
 from crossage_fr.storage import inspect_storage_path, safe_resolve
 from crossage_fr.store import VectorStore
 from crossage_fr.workspace_registry import resolve_workspace
@@ -65,6 +65,8 @@ class DesktopApi:
         self.platform_report = build_platform_report()
         self._last_progress_state_at = 0.0
         self._last_progress_state_added = 0
+        self._last_resource_status_at = 0.0
+        self._last_resource_status: dict[str, Any] = {}
         self._startup("ready", "Backend ready")
 
     def _startup(self, phase: str, message: str) -> None:
@@ -79,7 +81,7 @@ class DesktopApi:
         if self._engine is None:
             self._startup("engine", "Loading recognition engine")
             with redirect_stdout(sys.stderr):
-                self._engine = create_embedding_engine(self.project.config)
+                self._engine = create_embedding_engine(self._effective_engine_config())
             self._engine_model_name = self._engine.model_name
             self._startup("engine", f"Recognition engine ready: {self._engine_model_name}")
         return self._engine
@@ -101,6 +103,24 @@ class DesktopApi:
                 return f"insightface-{pack}"
         return "local-image-fingerprint (face model download needed)"
 
+    def _effective_performance_mode(self) -> str:
+        mode = str(getattr(self.project.config, "performance_mode", "auto") or "auto").lower()
+        if mode == "auto":
+            mode = str(getattr(self.platform_report, "recommended_performance_mode", "balanced") or "balanced").lower()
+        return mode if mode in {"fast", "balanced", "quality"} else "balanced"
+
+    def _effective_engine_config(self) -> Any:
+        config = deepcopy(self.project.config)
+        mode = self._effective_performance_mode()
+        if mode == "fast":
+            config.face_detector_size = min(int(config.face_detector_size), 384)
+            config.two_pass_scan = False
+            config.verification_detector_size = config.face_detector_size
+        elif mode == "balanced":
+            config.face_detector_size = min(int(config.face_detector_size), 512)
+            config.verification_detector_size = min(max(int(config.verification_detector_size), int(config.face_detector_size)), 640)
+        return config
+
     def handle(self, command: str, params: dict[str, Any], progress: Any | None = None) -> Any:
         if not isinstance(params, dict):
             raise ValueError("Command parameters must be an object.")
@@ -113,6 +133,17 @@ class DesktopApi:
             )
         if command == "model_status":
             return model_status(self.project.config, self.engine_name)
+        if command == "set_performance_mode":
+            mode = str(params.get("mode", "auto")).strip().lower()
+            if mode not in PERFORMANCE_MODES:
+                raise ValueError("Performance mode must be auto, fast, balanced, or quality.")
+            previous_effective = self._effective_performance_mode()
+            self.project.config.performance_mode = mode
+            self.project._append_audit({"action": "set_performance_mode", "mode": mode, "source": str(params.get("source", "desktop"))})
+            self.project.save()
+            if self._effective_performance_mode() != previous_effective:
+                self._reset_engine()
+            return self.state()
         if command == "set_model_root":
             root_value = str(params.get("root", "")).strip()
             if not root_value:
@@ -491,6 +522,9 @@ class DesktopApi:
             verification_detector_size = int(round(verification_detector_size / 32) * 32)
             if verification_detector_size < face_detector_size:
                 verification_detector_size = face_detector_size
+            performance_mode = str(params.get("performanceMode", self.project.config.performance_mode)).strip().lower()
+            if performance_mode not in PERFORMANCE_MODES:
+                raise ValueError("Performance mode must be auto, fast, balanced, or quality.")
             storage_budget_bytes = int(params.get("storageBudgetBytes", self.project.config.storage_budget_bytes))
             if storage_budget_bytes < 0:
                 raise ValueError("Storage limit must be zero or higher.")
@@ -525,6 +559,7 @@ class DesktopApi:
             self.project.config.face_detector_size = face_detector_size
             self.project.config.two_pass_scan = two_pass_scan
             self.project.config.verification_detector_size = verification_detector_size
+            self.project.config.performance_mode = performance_mode
             self.project.config.storage_budget_bytes = storage_budget_bytes
             self.project.config.max_media_file_bytes = max_media_file_bytes
             self.project.config.auto_reject_below = auto_reject_below
@@ -549,6 +584,7 @@ class DesktopApi:
                     "face_detector_size": face_detector_size,
                     "two_pass_scan": two_pass_scan,
                     "verification_detector_size": verification_detector_size,
+                    "performance_mode": performance_mode,
                     "storage_budget_bytes": storage_budget_bytes,
                     "max_media_file_bytes": max_media_file_bytes,
                     "review_rules": {
@@ -574,12 +610,12 @@ class DesktopApi:
         raise ValueError(f"Unknown command: {command}")
 
     def _verification_engine(self) -> Any | None:
-        if not self.project.config.two_pass_scan:
+        config = self._effective_engine_config()
+        if not config.two_pass_scan:
             return None
-        if self.project.config.verification_detector_size <= self.project.config.face_detector_size:
+        if config.verification_detector_size <= config.face_detector_size:
             return None
-        config = deepcopy(self.project.config)
-        config.face_detector_size = self.project.config.verification_detector_size
+        config.face_detector_size = config.verification_detector_size
         with redirect_stdout(sys.stderr):
             return create_embedding_engine(config)
 
@@ -834,7 +870,8 @@ class DesktopApi:
         video_count = int(analysis.get("videoCount", 0) or 0)
         extension_counts = analysis.get("extensionCounts", {})
         heic_count = int(extension_counts.get(".heic", 0) + extension_counts.get(".heif", 0)) if isinstance(extension_counts, dict) else 0
-        detector_size = max(MIN_FACE_DETECTOR_SIZE, min(MAX_FACE_DETECTOR_SIZE, self.project.config.face_detector_size))
+        config = self._effective_engine_config()
+        detector_size = max(MIN_FACE_DETECTOR_SIZE, min(MAX_FACE_DETECTOR_SIZE, config.face_detector_size))
         base_rate = 3.6 if detector_size <= 512 else 3.1
         if detector_size <= 384:
             base_rate = 4.2
@@ -842,10 +879,12 @@ class DesktopApi:
         image_seconds = image_count / max(base_rate, 0.1) + heic_penalty_seconds
         sampled_video_frames = video_count * 9
         video_seconds = sampled_video_frames / 2.8
-        two_pass_seconds = image_count * 0.04 if self.project.config.two_pass_scan and self.project.config.verification_detector_size > detector_size else 0.0
+        two_pass_seconds = image_count * 0.04 if config.two_pass_scan and config.verification_detector_size > detector_size else 0.0
         total_seconds = image_seconds + video_seconds + two_pass_seconds
         return {
             "detectorSize": detector_size,
+            "performanceMode": self.project.config.performance_mode,
+            "effectivePerformanceMode": self._effective_performance_mode(),
             "imagesPerSecond": round(base_rate, 2),
             "imageSeconds": int(image_seconds),
             "videoSeconds": int(video_seconds),
@@ -868,6 +907,8 @@ class DesktopApi:
         estimate = analysis.get("estimate", {}) if isinstance(analysis.get("estimate"), dict) else {}
         storage = analysis.get("storage", {}) if isinstance(analysis.get("storage"), dict) else {}
         scale = self.project.scale_summary()
+        config = self._effective_engine_config()
+        effective_mode = self._effective_performance_mode()
         mode = "Balanced"
         if media_count >= 250_000:
             mode = "Large library"
@@ -875,7 +916,7 @@ class DesktopApi:
             mode = "External drive"
         elif video_count > image_count * 0.1 and video_count > 50:
             mode = "Video aware"
-        elif self.project.config.face_detector_size <= 384:
+        elif config.face_detector_size <= 384:
             mode = "Fast discovery"
         warnings: list[str] = []
         if media_count >= 1_000_000:
@@ -915,7 +956,11 @@ class DesktopApi:
             },
             "resumable": True,
             "safeMode": bool(self.project.config.safe_mode),
-            "twoPass": bool(self.project.config.two_pass_scan),
+            "performanceMode": self.project.config.performance_mode,
+            "effectivePerformanceMode": effective_mode,
+            "effectiveFaceDetectorSize": config.face_detector_size,
+            "twoPass": bool(config.two_pass_scan),
+            "effectiveVerificationDetectorSize": config.verification_detector_size,
             "cache": {
                 "safetyEntries": int(scale.get("safetyCacheEntries", 0) or 0),
                 "embeddingEntries": int(scale.get("embeddingCacheEntries", 0) or 0),
@@ -926,7 +971,7 @@ class DesktopApi:
                 "Skip completed files from previous manifest",
                 "Run Safe Mode before matching",
                 "Cache face detections by file hash",
-                "Recheck likely matches at higher detail" if self.project.config.two_pass_scan else "Use one-pass matching",
+                "Recheck likely matches at higher detail" if config.two_pass_scan else "Use one-pass matching",
                 "Show review results while scanning continues",
             ],
             "warnings": warnings,
@@ -1021,6 +1066,10 @@ class DesktopApi:
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "durationMs": int((monotonic() - started) * 1000),
             "vectorBackend": vector_store.backend_name,
+            "performanceTier": self.platform_report.performance_tier,
+            "performanceMode": self.project.config.performance_mode,
+            "effectivePerformanceMode": self._effective_performance_mode(),
+            "resourceStatus": self._resource_status(force=True),
             "vectorAddPerSecond": round(add_count / max(add_ms / 1000, 0.001), 2),
             "vectorSearchP50MsEstimate": round(search_ms / max(search_count, 1), 4),
             "stateSerializeMs": round(state_ms, 2),
@@ -1031,12 +1080,55 @@ class DesktopApi:
         self.project.db.add_benchmark_run(str(result["runId"]), result)
         return result
 
+    def _resource_status(self, force: bool = False) -> dict[str, Any]:
+        now = monotonic()
+        if not force and self._last_resource_status and now - self._last_resource_status_at < 1.0:
+            return self._last_resource_status
+        total = int(getattr(self.platform_report, "memory_total_bytes", 0) or 0)
+        available = int(memory_available_bytes() or 0)
+        process_bytes = int(process_memory_bytes() or 0)
+        available_ratio = available / total if total and available else 0.0
+        process_ratio = process_bytes / total if total and process_bytes else 0.0
+        pressure = "normal"
+        message = "Memory is within the expected range."
+        if total and available:
+            if available < 512 * 1024 * 1024 or available_ratio < 0.06:
+                pressure = "critical"
+                message = "Memory is critically low; preview work is reduced until the scan settles."
+            elif available < 1024 * 1024 * 1024 or available_ratio < 0.12:
+                pressure = "high"
+                message = "Memory is tight; preview work is reduced during the scan."
+            elif available_ratio < 0.2:
+                pressure = "elevated"
+                message = "Memory is lower than ideal; the app is monitoring scan workload."
+        elif total and process_ratio > 0.7:
+            pressure = "high"
+            message = "The app is using a large share of system memory; preview work is reduced."
+        status = {
+            "memoryPressure": pressure,
+            "memoryMessage": message,
+            "memoryAvailableBytes": available,
+            "memoryTotalBytes": total,
+            "processMemoryBytes": process_bytes,
+        }
+        self._last_resource_status_at = now
+        self._last_resource_status = status
+        return status
+
+    def _with_resource_status(self, payload: dict[str, Any], force: bool = False) -> dict[str, Any]:
+        return {**payload, **self._resource_status(force=force)}
+
     def _benchmark_recommendations(self, state_ms: float, scale: dict[str, Any]) -> list[str]:
         recommendations: list[str] = []
         if state_ms > 500:
             recommendations.append("State serialization is getting heavy; keep candidate windows small and use review filters.")
-        if int(scale.get("manifestFiles", 0)) > 100_000:
+        if int(scale.get("manifestFiles", 0)) >= 100_000:
             recommendations.append("Large scan manifest active; resumable scans and cached Safe Mode scores are enabled.")
+        resource_status = self._resource_status()
+        if resource_status.get("memoryPressure") in {"high", "critical"}:
+            recommendations.append(str(resource_status.get("memoryMessage") or "Memory pressure is high; keep Fast mode enabled during large scans."))
+        if self._effective_performance_mode() == "fast":
+            recommendations.append("Fast mode is active; scan detail and preview workload are already reduced for responsiveness.")
         if not recommendations:
             recommendations.append("Local benchmark is within the expected range for this workspace.")
         return recommendations
@@ -1646,6 +1738,8 @@ class DesktopApi:
         else:
             video_moments = self.project.video_moments(limit=80)
             review_insights = self.project.review_insights()
+        effective_config = self._effective_engine_config()
+        effective_performance_mode = self._effective_performance_mode()
 
         return {
             "version": __version__,
@@ -1682,6 +1776,11 @@ class DesktopApi:
                 "faceDetectorSize": self.project.config.face_detector_size,
                 "twoPassScan": self.project.config.two_pass_scan,
                 "verificationDetectorSize": self.project.config.verification_detector_size,
+                "performanceMode": self.project.config.performance_mode,
+                "effectivePerformanceMode": effective_performance_mode,
+                "effectiveFaceDetectorSize": effective_config.face_detector_size,
+                "effectiveTwoPassScan": effective_config.two_pass_scan,
+                "effectiveVerificationDetectorSize": effective_config.verification_detector_size,
                 "safeMode": self.project.config.safe_mode,
                 "safeModeThreshold": self.project.config.safe_mode_threshold,
                 "storageBudgetBytes": self.project.config.storage_budget_bytes,
@@ -1798,6 +1897,7 @@ class DesktopApi:
         if progress is None:
             return
         phase = str(payload.get("phase", ""))
+        payload = self._with_resource_status(payload, force=phase in {"started", "complete", "cancelled", "error"})
         if phase in {"complete", "cancelled"}:
             self._last_progress_state_at = 0.0
             self._last_progress_state_added = 0

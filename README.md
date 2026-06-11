@@ -150,6 +150,8 @@ The MCP smoke test starts a real MCP stdio session, lists tools/resources/prompt
 
 The scan pipeline is designed to work toward 100k-1M file folders without building one giant in-memory path list. Folder scans stream media paths, write a SQLite/WAL scan manifest at `workspace.sqlite3`, and can be cancelled from the UI. A resumed scan skips files already completed in the previous manifest when their path, size, and mtime match.
 
+For local scale checks without using personal photos, run `npm run bench:scale`. It seeds a temporary synthetic 100k-row scan manifest, verifies low-spec Auto performance selection, runs the backend benchmark, and prints JSON with state serialization time, vector backend speed, effective performance mode, and memory-pressure status. Set `VINTRACE_SCALE_BENCH_FILES=1000000` to stress a million synthetic rows.
+
 Safe Mode decisions are cached by file hash, model version, and threshold so repeated scans do not repeatedly score the same content. Accepted/rejected review decisions automatically build a local calibration label set, and Settings includes large-folder readiness, benchmark, and release-readiness panels.
 
 Face scan detail is configurable for large libraries. The recommended default uses a 512px detector input for better throughput, High confidence uses 640px for maximum detection detail, and Custom mode accepts validated 320-1024 values in 32px steps. Optional two-pass scanning runs the first pass at the selected detail and rechecks only queued candidates at higher detail.

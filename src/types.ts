@@ -15,6 +15,11 @@ export interface PlatformReport {
   precision: string;
   vector_backend: string;
   platform_notes: string[];
+  cpu_logical_count: number;
+  memory_total_bytes: number;
+  performance_tier: string;
+  recommended_performance_mode: string;
+  performance_notes: string[];
   insightface_available: boolean;
   faiss_available: boolean;
   hdbscan_available: boolean;
@@ -48,6 +53,11 @@ export interface AppConfig {
   faceDetectorSize: number;
   twoPassScan: boolean;
   verificationDetectorSize: number;
+  performanceMode?: string;
+  effectivePerformanceMode?: string;
+  effectiveFaceDetectorSize?: number;
+  effectiveTwoPassScan?: boolean;
+  effectiveVerificationDetectorSize?: number;
   safeMode: boolean;
   safeModeThreshold: number;
   storageBudgetBytes: number;
@@ -207,6 +217,11 @@ export interface ScanMetrics {
   twoPassVerified?: number;
   twoPassChanged?: number;
   twoPassDeferred?: number;
+  memoryPressure?: "normal" | "elevated" | "high" | "critical" | string;
+  memoryMessage?: string;
+  memoryAvailableBytes?: number;
+  memoryTotalBytes?: number;
+  processMemoryBytes?: number;
 }
 
 export interface ScanRun {
@@ -804,6 +819,16 @@ export interface RuntimeBenchmarkResult {
   generatedAt: string;
   durationMs: number;
   vectorBackend: string;
+  performanceTier?: string;
+  performanceMode?: string;
+  effectivePerformanceMode?: string;
+  resourceStatus?: {
+    memoryPressure?: string;
+    memoryMessage?: string;
+    memoryAvailableBytes?: number;
+    memoryTotalBytes?: number;
+    processMemoryBytes?: number;
+  };
   vectorAddPerSecond: number;
   vectorSearchP50MsEstimate: number;
   stateSerializeMs: number;

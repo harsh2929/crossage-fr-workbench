@@ -170,6 +170,10 @@
       "description": "Update thresholds, clustering minimum, Safe Mode settings, storage budget, large-file guard, scan exclusions, and review rules."
     },
     {
+      "name": "set_performance_mode",
+      "description": "Set the scan and UI performance profile to auto, fast, balanced, or quality."
+    },
+    {
       "name": "apply_review_rules",
       "description": "Apply saved auto-triage review rules to pending candidates, requiring confirm=true."
     },

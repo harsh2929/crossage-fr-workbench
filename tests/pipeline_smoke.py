@@ -234,9 +234,26 @@ def assert_pipeline_state() -> None:
     assert state["scanHistory"][0]["source"] == "pipeline-smoke"
     assert state["config"]["reviewOnly"] is True
     assert state["config"]["safeMode"] is True
+    assert all("memoryPressure" in event for event in progress_events)
+    assert all("processMemoryBytes" in event for event in progress_events)
     assert any(event["phase"] == "candidate" and "state" in event for event in progress_events)
     assert any(event["phase"] == "complete" and "state" in event for event in progress_events)
     assert all("state" not in event for event in progress_events if event["phase"] in {"started", "processing", "processed", "protected"})
+
+
+def assert_memory_pressure_progress() -> None:
+    os.environ["CROSSAGE_FORCE_FALLBACK"] = "1"
+    root = Path(tempfile.mkdtemp(prefix="crossage-memory-pressure-"))
+    os.environ["CROSSAGE_REGISTRY_HOME"] = str(root / "registry")
+    api = DesktopApi(root / "workspace")
+    events: list[dict] = []
+    with patch("crossage_fr.api_server.memory_available_bytes", return_value=320 * 1024 * 1024):
+        with patch("crossage_fr.api_server.process_memory_bytes", return_value=700 * 1024 * 1024):
+            api._progress(events.append, {"phase": "processing", "total": 10, "processed": 1})
+    assert events, "Memory pressure progress should emit an event."
+    assert events[-1]["memoryPressure"] in {"high", "critical"}
+    assert events[-1]["memoryAvailableBytes"] == 320 * 1024 * 1024
+    assert events[-1]["processMemoryBytes"] == 700 * 1024 * 1024
 
 
 def assert_video_pipeline_state() -> None:
@@ -281,6 +298,7 @@ def main() -> None:
     assert_safe_mode_model_bundle()
     assert_face_model_setup_status()
     assert_pipeline_state()
+    assert_memory_pressure_progress()
     assert_video_pipeline_state()
     print("pipeline smoke ok")
 

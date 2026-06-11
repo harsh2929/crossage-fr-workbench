@@ -67,6 +67,7 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "optimize_workspace",
   "enforce_storage_budget",
   "add_calibration_label",
+  "set_performance_mode",
   "save_settings",
   "audit_events"
 ]);

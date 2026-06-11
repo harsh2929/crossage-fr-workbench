@@ -8,6 +8,7 @@ import math
 MAX_CLUSTER_MIN_SIZE = 20
 MIN_FACE_DETECTOR_SIZE = 320
 MAX_FACE_DETECTOR_SIZE = 1024
+PERFORMANCE_MODES = {"auto", "fast", "balanced", "quality"}
 DEFAULT_EXCLUDED_DIR_NAMES = [
     ".git",
     ".hg",
@@ -43,6 +44,7 @@ class RuntimeConfig:
     face_detector_size: int = 512
     two_pass_scan: bool = True
     verification_detector_size: int = 640
+    performance_mode: str = "auto"
     max_flat_vectors: int = 1_000_000
     cluster_min_size: int = 2
     storage_budget_bytes: int = 0
@@ -123,6 +125,13 @@ def _normalize_extensions(value: object) -> list[str]:
     return result
 
 
+def _require_performance_mode(value: object) -> str:
+    mode = str(value or "auto").strip().lower()
+    if mode not in PERFORMANCE_MODES:
+        raise ValueError("performance_mode must be auto, fast, balanced, or quality.")
+    return mode
+
+
 def _validate_config(config: RuntimeConfig) -> RuntimeConfig:
     config.model_pack = str(config.model_pack)
     config.model_root = str(config.model_root)
@@ -133,6 +142,7 @@ def _validate_config(config: RuntimeConfig) -> RuntimeConfig:
     config.face_detector_size = _require_detector_size(config.face_detector_size)
     config.two_pass_scan = _require_bool(config.two_pass_scan, "two_pass_scan")
     config.verification_detector_size = _require_detector_size(config.verification_detector_size)
+    config.performance_mode = _require_performance_mode(config.performance_mode)
     if config.verification_detector_size < config.face_detector_size:
         config.verification_detector_size = config.face_detector_size
     config.max_flat_vectors = _require_int(config.max_flat_vectors, "max_flat_vectors")

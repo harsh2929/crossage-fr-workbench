@@ -71,6 +71,7 @@ import type {
   ModelDriftReport,
   ModelIntegrityResult,
   ModelDownloadProgress,
+  PlatformReport,
   PrivacyReport,
   RetentionPolicyReport,
   ReleaseReadinessResult,
@@ -236,6 +237,7 @@ function matchBandLabel(band: string) {
 }
 
 type PerformanceMode = "quality" | "balanced" | "fast";
+type PerformanceChoice = PerformanceMode | "auto";
 
 type PerformanceProfile = {
   label: string;
@@ -280,6 +282,29 @@ const performanceProfiles: Record<PerformanceMode, PerformanceProfile> = {
     slowCommandMs: 1200
   }
 };
+
+const performanceChoiceOrder: PerformanceChoice[] = ["auto", "fast", "balanced", "quality"];
+
+function normalizePerformanceMode(value: unknown): PerformanceMode {
+  const mode = String(value || "").toLowerCase();
+  return mode === "fast" || mode === "quality" || mode === "balanced" ? mode : "balanced";
+}
+
+function normalizePerformanceChoice(value: unknown): PerformanceChoice {
+  const mode = String(value || "").toLowerCase();
+  return mode === "auto" ? "auto" : normalizePerformanceMode(mode);
+}
+
+function resolvePerformanceMode(choice: PerformanceChoice, platform?: PlatformReport | null): PerformanceMode {
+  if (choice !== "auto") return choice;
+  return normalizePerformanceMode(platform?.recommended_performance_mode);
+}
+
+function performanceTierLabel(value?: string) {
+  if (value === "low") return "Low-spec";
+  if (value === "high") return "High-performance";
+  return "Standard";
+}
 
 type SettingsDraft = {
   thresholds: Thresholds;
@@ -1246,7 +1271,7 @@ export default function App() {
   const [modelDriftReport, setModelDriftReport] = useState<ModelDriftReport | null>(null);
   const [watchStatus, setWatchStatus] = useState<FolderWatchStatus>(initialWatchStatus);
   const [latencySamples, setLatencySamples] = useState<LatencySample[]>([]);
-  const [performanceMode, setPerformanceMode] = useState<PerformanceMode>("balanced");
+  const [performanceChoice, setPerformanceChoiceState] = useState<PerformanceChoice>("auto");
   const [consentPrompt, setConsentPrompt] = useState<ConsentPrompt | null>(null);
   const [reviewUndo, setReviewUndo] = useState<ReviewUndo | null>(null);
   const [pendingExternalIntent, setPendingExternalIntent] = useState<PendingExternalIntent | null>(null);
@@ -1260,9 +1285,13 @@ export default function App() {
   const stateReadyRef = useRef(false);
   const settingsDirtyRef = useRef(false);
   const rendererReadySentRef = useRef(false);
+  const memoryPressureNoticeRef = useRef("");
   const appCommandHandlerRef = useRef<(command: AppCommand) => void | Promise<void>>(() => undefined);
   const externalOpenHandlerRef = useRef<(payload: ExternalOpenPayload) => void | Promise<void>>(() => undefined);
+  const performanceMode = useMemo(() => resolvePerformanceMode(performanceChoice, state?.platform), [performanceChoice, state?.platform]);
   const performanceProfile = performanceProfiles[performanceMode];
+  const memoryPressureActive = scanProgress?.memoryPressure === "high" || scanProgress?.memoryPressure === "critical";
+  const runtimePerformanceProfile = memoryPressureActive ? performanceProfiles.fast : performanceProfile;
   const latencySummary = useMemo(() => summarizeLatency(latencySamples), [latencySamples]);
   const t = useMemo(() => (key: TranslationKey, values?: Record<string, string | number>) => translate(language, key, values), [language]);
   const uiText = useMemo(() => (source: string) => translateUiText(language, source), [language]);
@@ -1438,6 +1467,16 @@ export default function App() {
         return;
       }
       setScanProgress(event.payload);
+      const pressure = String(event.payload.memoryPressure || "");
+      if ((pressure === "high" || pressure === "critical") && memoryPressureNoticeRef.current !== pressure) {
+        memoryPressureNoticeRef.current = pressure;
+        setNotice({
+          tone: pressure === "critical" ? "error" : "warn",
+          text: event.payload.memoryMessage || "Memory is tight, so preview work is reduced during this scan."
+        });
+      } else if (pressure === "normal" && memoryPressureNoticeRef.current) {
+        memoryPressureNoticeRef.current = "";
+      }
       if (["complete", "cancelled", "error"].includes(String(event.payload.phase))) {
         setLocalScanMarkers(null);
       }
@@ -1544,8 +1583,10 @@ export default function App() {
       recordLatency("Startup", "initial_state", startedAt);
       applyState(next);
       setNotice({ tone: "ok", text: "Backend ready." });
-      if (performanceProfile.previewWarmupLimit > 0) {
-        window.setTimeout(() => warmPreviewCache(), 240);
+      const startupMode = resolvePerformanceMode(normalizePerformanceChoice(next.config.performanceMode), next.platform);
+      const startupPreviewLimit = performanceProfiles[startupMode].previewWarmupLimit;
+      if (startupPreviewLimit > 0) {
+        window.setTimeout(() => warmPreviewCache(startupPreviewLimit), 240);
       }
     } catch (error) {
       if (requestId !== startupRequestId.current) return;
@@ -1565,12 +1606,12 @@ export default function App() {
       command,
       durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
       at: Date.now(),
-      budgetMs: performanceProfile.slowCommandMs
+      budgetMs: runtimePerformanceProfile.slowCommandMs
     };
     setLatencySamples((current) => [sample, ...current].slice(0, 40));
   }
 
-  async function warmPreviewCache(limit = performanceProfile.previewWarmupLimit, userVisible = false) {
+  async function warmPreviewCache(limit = runtimePerformanceProfile.previewWarmupLimit, userVisible = false) {
     if (limit <= 0) {
       if (userVisible) {
         setNotice({ tone: "warn", text: "Preview warmup is off in Fast mode." });
@@ -1596,9 +1637,18 @@ export default function App() {
 
   function copyPerformanceReport() {
     const samples = latencySamples.slice(0, 12);
+    const hardwareTier = state?.platform ? performanceTierLabel(state.platform.performance_tier) : "Unknown";
+    const effectiveDetail = [
+      state?.config.effectiveFaceDetectorSize ? `detector ${state.config.effectiveFaceDetectorSize}` : "",
+      (state?.config.effectiveTwoPassScan ?? state?.config.twoPassScan) ? "two-pass" : "one-pass"
+    ].filter(Boolean).join(", ");
     copyText([
       "Vintrace performance report",
-      `Mode: ${performanceProfile.label}`,
+      `Mode: ${performanceChoice === "auto" ? `Auto (${performanceProfile.label})` : performanceProfile.label}`,
+      `Hardware tier: ${hardwareTier}`,
+      `CPU cores: ${state?.platform.cpu_logical_count ?? "Unknown"}`,
+      `Memory: ${state?.platform.memory_total_bytes ? formatBytes(state.platform.memory_total_bytes) : "Unknown"}`,
+      `Effective scan: ${effectiveDetail || "Default"}`,
       `App folder: ${state?.workspace ?? "Unknown"}`,
       `Samples: ${latencySummary.count}`,
       `p50: ${formatDuration(latencySummary.p50)}`,
@@ -1614,6 +1664,25 @@ export default function App() {
   function clearLatencySamples() {
     setLatencySamples([]);
     setNotice({ tone: "ok", text: "Latency samples cleared." });
+  }
+
+  async function setPerformanceChoice(nextChoice: PerformanceChoice) {
+    const previousChoice = performanceChoice;
+    const normalized = normalizePerformanceChoice(nextChoice);
+    setPerformanceChoiceState(normalized);
+    try {
+      const nextState = await invoke<AppState>("Updating performance mode", "set_performance_mode", { mode: normalized });
+      const resolved = resolvePerformanceMode(normalized, nextState.platform);
+      setNotice({
+        tone: "ok",
+        text: normalized === "auto"
+          ? `Auto performance is using ${performanceProfiles[resolved].label}.`
+          : `${performanceProfiles[resolved].label} performance mode is on.`
+      });
+    } catch (error) {
+      setPerformanceChoiceState(previousChoice);
+      setErrorNotice(error, "Performance mode could not be updated.");
+    }
   }
 
   function applyWatchStatus(next: FolderWatchStatus | ((current: FolderWatchStatus) => FolderWatchStatus)) {
@@ -1636,6 +1705,7 @@ export default function App() {
   function applyState(next: AppState) {
     stateReadyRef.current = true;
     setState(next);
+    setPerformanceChoiceState(normalizePerformanceChoice(next.config.performanceMode));
     const nextSettings: SettingsValues = {
       thresholds: next.config.thresholds,
       clusterMinSize: next.config.clusterMinSize,
@@ -3216,6 +3286,7 @@ export default function App() {
       faceDetectorSize: draft.faceDetectorSize,
       twoPassScan: draft.twoPassScan,
       verificationDetectorSize: draft.verificationDetectorSize,
+      performanceMode: performanceChoice,
       safeMode: draft.safeMode,
       safeModeThreshold: draft.safeModeThreshold,
       storageBudgetBytes: draft.storageBudgetBytes,
@@ -3601,6 +3672,7 @@ export default function App() {
             watchStatus={watchStatus}
             latencySamples={latencySamples}
             latencySummary={latencySummary}
+            performanceChoice={performanceChoice}
             performanceProfile={performanceProfile}
             navigate={setActiveTab}
             chooseWorkspace={chooseWorkspace}
@@ -3662,8 +3734,8 @@ export default function App() {
             clearQueue={clearQueue}
             disabled={scanDisabled}
             busy={Boolean(busy)}
-            candidateBatchSize={performanceProfile.candidateBatchSize}
-            showListThumbnails={performanceProfile.showListThumbnails}
+            candidateBatchSize={runtimePerformanceProfile.candidateBatchSize}
+            showListThumbnails={runtimePerformanceProfile.showListThumbnails}
             pendingExternalIntent={pendingExternalIntent}
             resumePendingExternalIntent={resumePendingExternalIntent}
             clearPendingExternalIntent={() => setPendingExternalIntent(null)}
@@ -3712,8 +3784,8 @@ export default function App() {
             openPath={openCandidatePath}
             reviewUndo={reviewUndo}
             undoReview={undoLastReview}
-            renderBatchSize={performanceProfile.reviewBatchSize}
-            showListThumbnails={performanceProfile.showListThumbnails}
+            renderBatchSize={runtimePerformanceProfile.reviewBatchSize}
+            showListThumbnails={runtimePerformanceProfile.showListThumbnails}
             busy={Boolean(busy)}
           />
         )}
@@ -3789,14 +3861,15 @@ export default function App() {
             loadPrivacyReport={loadPrivacyReport}
             deleteFaceData={deleteFaceData}
             exportAcceptedMediaBundle={exportAcceptedMediaBundle}
-            performanceMode={performanceMode}
-            setPerformanceMode={setPerformanceMode}
+            performanceMode={performanceChoice}
+            effectivePerformanceMode={performanceMode}
+            setPerformanceMode={(value) => void setPerformanceChoice(value)}
             performanceProfile={performanceProfile}
             latencySamples={latencySamples}
             latencySummary={latencySummary}
             clearLatencySamples={clearLatencySamples}
             copyPerformanceReport={copyPerformanceReport}
-            warmPreviewsNow={() => warmPreviewCache(performanceProfile.manualPreviewLimit, true)}
+            warmPreviewsNow={() => warmPreviewCache(runtimePerformanceProfile.manualPreviewLimit, true)}
             chooseModelRoot={chooseModelRoot}
             downloadModel={downloadModel}
             modelDownloadProgress={modelDownloadProgress}
@@ -4153,6 +4226,7 @@ function Dashboard({
   watchStatus,
   latencySamples,
   latencySummary,
+  performanceChoice,
   performanceProfile,
   navigate,
   chooseWorkspace,
@@ -4172,6 +4246,7 @@ function Dashboard({
   watchStatus: FolderWatchStatus;
   latencySamples: LatencySample[];
   latencySummary: LatencySummary;
+  performanceChoice: PerformanceChoice;
   performanceProfile: PerformanceProfile;
   navigate(tab: TabKey): void;
   chooseWorkspace(): void;
@@ -4234,7 +4309,7 @@ function Dashboard({
     { label: "Private photos protected", value: formatNumber(totals.safeFiltered), detail: `${formatRate(protectedRate)} kept out`, tone: "rose" },
     { label: "Match strength", value: scoreLabel(averageScore), detail: `${percent(averageQuality)} photo quality`, tone: toneFor(averageScore) },
     { label: "Command p95", value: latencySummary.count ? formatDuration(latencySummary.p95) : "Live", detail: lastLatency ? `${lastLatency.label}: ${formatDuration(lastLatency.durationMs)}` : `Budget ${formatDuration(performanceProfile.slowCommandMs)}`, tone: latencySummary.p95 > performanceProfile.slowCommandMs ? "amber" : "blue" },
-    { label: "Perf mode", value: performanceProfile.label, detail: `${performanceProfile.reviewBatchSize} review rows per batch`, tone: performanceProfile.showListThumbnails ? "green" : "blue" },
+    { label: "Perf mode", value: performanceChoice === "auto" ? `Auto: ${performanceProfile.label}` : performanceProfile.label, detail: `${performanceProfile.reviewBatchSize} review rows per batch`, tone: performanceProfile.showListThumbnails ? "green" : "blue" },
     { label: "Last scan", value: totals.lastCompletedAt ? formatDateTime(totals.lastCompletedAt) : "None", detail: `${formatDuration(totals.durationMs)} total runtime`, tone: "neutral" }
   ];
   const heroVisualStyle = {
@@ -5767,6 +5842,16 @@ function ScanActivity({
   const elapsedMs = startedAt ? Math.max(0, clock - startedAt) : 0;
   const etaMs = scanActive && startedAt && processed > 0 ? Math.max(0, (elapsedMs / processed) * (total - processed)) : null;
   const rate = elapsedMs > 0 ? (processed / (elapsedMs / 1000)) : 0;
+  const memoryPressure = String(progress?.memoryPressure || "normal");
+  const showMemoryPressure = ["elevated", "high", "critical"].includes(memoryPressure);
+  const memoryLabel = memoryPressure === "critical" ? "Critical memory pressure" : memoryPressure === "high" ? "High memory pressure" : "Memory being watched";
+  const memoryDetail = progress?.memoryMessage || "Preview work is adjusted while scan load is high.";
+  const memoryUsageDetail = progress?.memoryAvailableBytes || progress?.processMemoryBytes
+    ? [
+      progress.memoryAvailableBytes ? `${formatBytes(progress.memoryAvailableBytes)} free` : "",
+      progress.processMemoryBytes ? `${formatBytes(progress.processMemoryBytes)} app` : ""
+    ].filter(Boolean).join(" • ")
+    : "";
 
   useEffect(() => {
     if (progress?.phase === "started" || (progress && total > 0 && processed === 0 && startedAt === null)) {
@@ -5822,6 +5907,12 @@ function ScanActivity({
           <span><strong>{etaMs !== null ? formatDuration(Math.round(etaMs)) : "Calculating"}</strong> remaining</span>
           <span><strong>{formatDuration(Math.round(elapsedMs))}</strong> elapsed</span>
           <span><strong>{rate ? rate.toFixed(2) : "0.00"}</strong> files/s</span>
+        </div>
+      )}
+      {showMemoryPressure && (
+        <div className={`memory-pressure-banner ${memoryPressure}`}>
+          <strong>{memoryLabel}</strong>
+          <span>{memoryDetail}{memoryUsageDetail ? ` ${memoryUsageDetail}` : ""}</span>
         </div>
       )}
       <div className="activity-stats">
@@ -6926,8 +7017,9 @@ function SettingsView(props: {
   loadPrivacyReport(): void;
   deleteFaceData(includeAudit?: boolean): void;
   exportAcceptedMediaBundle(): void;
-  performanceMode: PerformanceMode;
-  setPerformanceMode(value: PerformanceMode): void;
+  performanceMode: PerformanceChoice;
+  effectivePerformanceMode: PerformanceMode;
+  setPerformanceMode(value: PerformanceChoice): void;
   performanceProfile: PerformanceProfile;
   latencySamples: LatencySample[];
   latencySummary: LatencySummary;
@@ -7222,7 +7314,9 @@ function SettingsView(props: {
       />
       <RuntimeSelfTestPanel result={props.runtimeSelfTest} />
       <PerformanceCenter
+        state={props.state}
         mode={props.performanceMode}
+        effectiveMode={props.effectivePerformanceMode}
         setMode={props.setPerformanceMode}
         profile={props.performanceProfile}
         latencySamples={props.latencySamples}
@@ -8133,6 +8227,8 @@ function BenchmarkPanel({ result, busy, runBenchmark }: { result: RuntimeBenchma
             <span><small>Search p50</small><strong>{result.vectorSearchP50MsEstimate.toFixed(3)} ms</strong></span>
             <span><small>State</small><strong>{result.stateSerializeMs.toFixed(1)} ms</strong></span>
             <span><small>Backend</small><strong>{result.vectorBackend}</strong></span>
+            <span><small>Mode</small><strong>{result.performanceMode === "auto" ? `Auto: ${result.effectivePerformanceMode ?? "balanced"}` : result.effectivePerformanceMode ?? result.performanceMode ?? "balanced"}</strong></span>
+            <span><small>Memory</small><strong>{result.resourceStatus?.memoryPressure ?? "normal"}</strong></span>
           </div>
           <div className="health-list">
             {result.recommendations.slice(0, 3).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
@@ -8625,7 +8721,9 @@ function AuditTrailPanel({
 }
 
 function PerformanceCenter({
+  state,
   mode,
+  effectiveMode,
   setMode,
   profile,
   latencySamples,
@@ -8635,8 +8733,10 @@ function PerformanceCenter({
   copyPerformanceReport,
   clearLatencySamples
 }: {
-  mode: PerformanceMode;
-  setMode(value: PerformanceMode): void;
+  state: AppState;
+  mode: PerformanceChoice;
+  effectiveMode: PerformanceMode;
+  setMode(value: PerformanceChoice): void;
   profile: PerformanceProfile;
   latencySamples: LatencySample[];
   latencySummary: LatencySummary;
@@ -8647,27 +8747,74 @@ function PerformanceCenter({
 }) {
   const recent = latencySamples.slice(0, 5);
   const budgetLabel = formatDuration(profile.slowCommandMs);
+  const platform = state.platform;
+  const autoMode = resolvePerformanceMode("auto", platform);
+  const effectiveScanDetail = [
+    `${state.config.effectiveFaceDetectorSize ?? state.config.faceDetectorSize}px detector`,
+    (state.config.effectiveTwoPassScan ?? state.config.twoPassScan) ? "two-pass recheck" : "one-pass scan"
+  ].join(" • ");
+  const choices = performanceChoiceOrder.map((key) => {
+    if (key === "auto") {
+      return {
+        key,
+        label: "Auto",
+        detail: `Uses ${performanceProfiles[autoMode].label} for this PC.`,
+        small: `${performanceTierLabel(platform.performance_tier)} hardware • switches with app folder state`
+      };
+    }
+    const item = performanceProfiles[key];
+    return {
+      key,
+      label: item.label,
+      detail: item.detail,
+      small: `${item.showListThumbnails ? "Thumbnails on" : "Thumbnails off"} • ${item.reviewBatchSize} rows`
+    };
+  });
   return (
     <div className="panel settings-panel performance-center">
       <div className="panel-title"><Gauge size={18} /> Performance center</div>
       <div className="performance-mode-grid" role="group" aria-label="Performance modes">
-        {(Object.keys(performanceProfiles) as PerformanceMode[]).map((key) => {
-          const item = performanceProfiles[key];
+        {choices.map((item) => {
           return (
             <button
-              key={key}
-              className={mode === key ? "performance-mode selected" : "performance-mode"}
-              onClick={() => setMode(key)}
+              key={item.key}
+              className={mode === item.key ? "performance-mode selected" : "performance-mode"}
+              onClick={() => setMode(item.key)}
               type="button"
             >
-              <strong>{item.label}</strong>
+              <strong>{item.label}{item.key === "auto" && mode === "auto" ? `: ${performanceProfiles[effectiveMode].label}` : ""}</strong>
               <span>{item.detail}</span>
-              <small>{item.showListThumbnails ? "Thumbnails on" : "Thumbnails off"} • {item.reviewBatchSize} rows</small>
-              {mode === key ? <Check size={16} /> : <ChevronRight size={16} />}
+              <small>{item.small}</small>
+              {mode === item.key ? <Check size={16} /> : <ChevronRight size={16} />}
             </button>
           );
         })}
       </div>
+      <div className="performance-hardware" aria-label="Detected performance profile">
+        <span>
+          <small>Hardware profile</small>
+          <strong>{performanceTierLabel(platform.performance_tier)}</strong>
+        </span>
+        <span>
+          <small>CPU</small>
+          <strong>{platform.cpu_logical_count ? `${platform.cpu_logical_count} cores` : "Unknown"}</strong>
+        </span>
+        <span>
+          <small>Memory</small>
+          <strong>{platform.memory_total_bytes ? formatBytes(platform.memory_total_bytes) : "Unknown"}</strong>
+        </span>
+        <span>
+          <small>Effective scan</small>
+          <strong>{effectiveScanDetail}</strong>
+        </span>
+      </div>
+      {platform.performance_notes?.length ? (
+        <div className="performance-notes">
+          {platform.performance_notes.slice(0, 3).map((note) => (
+            <span key={note}>{note}</span>
+          ))}
+        </div>
+      ) : null}
       <div className="performance-stats">
         <span>
           <small>p50</small>

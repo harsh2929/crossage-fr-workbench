@@ -367,6 +367,7 @@ def assert_static_app_contracts() -> None:
     assert "applyBootLanguage(language)" in main_tsx
 
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    assert package["scripts"]["bench:scale"].endswith("tests/scale_benchmark.py")
     resources = {entry["from"] for entry in package["build"]["extraResources"]}
     assert {"models/safety", "mcp", "report.md", "crossage_fr"} <= resources
     backend_resource = next(entry for entry in package["build"]["extraResources"] if entry["from"] == "backend-dist")
@@ -447,6 +448,7 @@ def assert_static_app_contracts() -> None:
         "optimize_workspace",
         "enforce_storage_budget",
         "add_calibration_label",
+        "set_performance_mode",
         "save_settings",
         "audit_events",
     }
@@ -463,6 +465,8 @@ def assert_static_app_contracts() -> None:
     assert "Teach accuracy" in app_tsx
     assert "getScanMarkerStatus" in app_tsx
     assert "saveSettingsDraftIfDirty" in app_tsx
+    assert "memory-pressure-banner" in app_tsx
+    assert "runtimePerformanceProfile" in app_tsx
     assert "Saving storage limit" in app_tsx
     assert "Saving review rules" in app_tsx
     assert "acceptedMediaAvailable" in app_tsx
@@ -484,6 +488,7 @@ def assert_static_app_contracts() -> None:
         "delete_face_data",
         "runtime_benchmark",
         "release_readiness",
+        "set_performance_mode",
     } <= manifest_tools
 
 
@@ -1748,10 +1753,20 @@ def assert_review_and_settings_guards() -> None:
     expect_raises(ValueError, lambda: api.handle("save_settings", {"faceDetectorSize": 2048}), "or lower")
     expect_raises(ValueError, lambda: api.handle("save_settings", {"verificationDetectorSize": 128}), "at least")
     expect_raises(ValueError, lambda: api.handle("save_settings", {"verificationDetectorSize": 2048}), "or lower")
+    expect_raises(ValueError, lambda: api.handle("save_settings", {"performanceMode": "turbo"}), "Performance mode")
+    expect_raises(ValueError, lambda: api.handle("set_performance_mode", {"mode": "turbo"}), "Performance mode")
     tuned = api.handle("save_settings", {"faceDetectorSize": 500, "verificationDetectorSize": 630, "twoPassScan": True})
     assert tuned["config"]["faceDetectorSize"] == 512
     assert tuned["config"]["verificationDetectorSize"] == 640
     assert tuned["config"]["twoPassScan"] is True
+    fast = api.handle("set_performance_mode", {"mode": "fast"})
+    assert fast["config"]["performanceMode"] == "fast"
+    assert fast["config"]["effectivePerformanceMode"] == "fast"
+    assert fast["config"]["effectiveFaceDetectorSize"] <= 384
+    assert fast["config"]["effectiveTwoPassScan"] is False
+    auto = api.handle("set_performance_mode", {"mode": "auto"})
+    assert auto["config"]["performanceMode"] == "auto"
+    assert auto["config"]["effectivePerformanceMode"] in {"fast", "balanced", "quality"}
     excluded = api.handle("save_settings", {"scanExclusions": {"dirNames": ["skipme"], "pathKeywords": ["private"], "extensions": ["gif"], "filePaths": [str(root / "ignored.jpg")]}})
     assert excluded["config"]["scanExclusions"]["extensions"] == [".gif"]
     assert excluded["config"]["scanExclusions"]["filePaths"] == [str(root / "ignored.jpg")]

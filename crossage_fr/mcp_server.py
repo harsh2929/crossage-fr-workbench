@@ -593,6 +593,7 @@ def save_settings(
     verification_detector_size: int,
     safe_mode: bool,
     safe_mode_threshold: float,
+    performance_mode: str | None = None,
     storage_budget_bytes: int = 0,
     max_media_file_bytes: int | None = None,
     excluded_dir_names: list[str] | None = None,
@@ -628,6 +629,7 @@ def save_settings(
             "faceDetectorSize": face_detector_size,
             "twoPassScan": two_pass_scan,
             "verificationDetectorSize": verification_detector_size,
+            "performanceMode": performance_mode if performance_mode is not None else current.performance_mode,
             "safeMode": safe_mode,
             "safeModeThreshold": safe_mode_threshold,
             "storageBudgetBytes": storage_budget_bytes,
@@ -643,6 +645,20 @@ def save_settings(
         },
     )
     return {**_state_summary(state), "confirmed": confirm, "reason": reason}
+
+
+@mcp.tool()
+def set_performance_mode(mode: str = "auto") -> dict[str, Any]:
+    """Set the scan and UI performance profile to auto, fast, balanced, or quality."""
+    state = _call("set_performance_mode", {"mode": mode, "source": "mcp"})
+    config = state.get("config", {})
+    return {
+        **_state_summary(state),
+        "performanceMode": config.get("performanceMode", mode),
+        "effectivePerformanceMode": config.get("effectivePerformanceMode", mode),
+        "effectiveFaceDetectorSize": config.get("effectiveFaceDetectorSize", config.get("faceDetectorSize")),
+        "effectiveTwoPassScan": config.get("effectiveTwoPassScan", config.get("twoPassScan")),
+    }
 
 
 @mcp.tool()
