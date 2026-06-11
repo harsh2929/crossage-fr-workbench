@@ -8,9 +8,13 @@ import re
 import struct
 import subprocess
 import ctypes
-import resource
 from pathlib import Path
 from typing import Any
+
+try:
+    import resource
+except ModuleNotFoundError:  # Windows
+    resource = None  # type: ignore[assignment]
 
 
 @dataclass(slots=True)
@@ -143,6 +147,8 @@ def process_memory_bytes() -> int:
         return int(psutil.Process(os.getpid()).memory_info().rss)
     except Exception:
         pass
+    if resource is None:
+        return 0
     try:
         rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
         return rss if platform.system().lower() == "darwin" else rss * 1024
