@@ -69,9 +69,12 @@ jobs:
           CROSSAGE_FORCE_FALLBACK: "1"
           CROSSAGE_WORKSPACE: ${{ runner.temp }}\crossage-workspace
         run: |
-          $backend = Join-Path $PWD "backend-dist\crossage-backend.exe"
+          $backend = Join-Path $PWD "backend-dist\crossage-backend\crossage-backend.exe"
           if (!(Test-Path $backend)) {
-            throw "Missing packaged backend at $backend"
+            $backend = Get-ChildItem -Path (Join-Path $PWD "backend-dist") -Filter "crossage-backend.exe" -Recurse -File | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (!$backend -or !(Test-Path $backend)) {
+            throw "Missing packaged backend under backend-dist"
           }
           $line = "" | & $backend | Select-Object -Last 1
           $json = $line | ConvertFrom-Json
