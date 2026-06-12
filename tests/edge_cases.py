@@ -330,6 +330,12 @@ def assert_static_app_contracts() -> None:
     assert "softprops/action-gh-release@v2" in release_workflow
     assert "dist/latest*.yml" in release_workflow
     assert "contents: write" in release_workflow
+    assert "npm run release:verify" in release_workflow
+    mac_workflow = (root / ".github" / "workflows" / "macos-release.yml").read_text(encoding="utf-8")
+    assert "macOS Unsigned Release" in mac_workflow
+    assert "npm run dist:mac:unsigned" in mac_workflow
+    assert "Vintrace-macOS-Unsigned" in mac_workflow
+    assert "npm run release:verify" in mac_workflow
 
     i18n = (root / "src" / "i18n.ts").read_text(encoding="utf-8")
     for code in ('"en"', '"zh"', '"es"', '"fr"', '"ar"', '"hi"', '"ja"'):
@@ -377,10 +383,15 @@ def assert_static_app_contracts() -> None:
     main_tsx = (root / "src" / "main.tsx").read_text(encoding="utf-8")
     assert 'bootT("boot.couldNotLoad")' in main_tsx
     assert "applyBootLanguage(language)" in main_tsx
+    assert "StartupRecoveryGate" in main_tsx
+    assert "vintrace:startup-recovery:v1" in main_tsx
+    assert "Reset UI state" in main_tsx
+    assert "Repair app folder" in main_tsx
 
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
     assert package["scripts"]["bench:scale"].endswith("tests/scale_benchmark.py")
     assert package["scripts"]["bench:accuracy"].endswith("tests/accuracy_benchmark.py")
+    assert package["scripts"]["release:verify"].endswith("desktop/scripts/verify-release-assets.cjs")
     resources = {entry["from"] for entry in package["build"]["extraResources"]}
     assert {"models/safety", "mcp", "report.md", "crossage_fr"} <= resources
     backend_resource = next(entry for entry in package["build"]["extraResources"] if entry["from"] == "backend-dist")
@@ -507,9 +518,19 @@ def assert_static_app_contracts() -> None:
     assert "Saving review rules" in app_tsx
     assert "acceptedMediaAvailable" in app_tsx
     assert "Delete face data and history" in app_tsx
+    assert "TesterModePanel" in app_tsx
+    assert "Friend test mode" in app_tsx
+    assert "Simple setup for a first test" in app_tsx
     mcp_bundle_builder = (root / "desktop" / "scripts" / "build-mcp-bundle.cjs").read_text(encoding="utf-8")
     assert 'path.join(serverDir, "crossage-backend")' in mcp_bundle_builder
     assert 'path.join(fallbackDir, backendName)' in mcp_bundle_builder
+    release_verifier = (root / "desktop" / "scripts" / "verify-release-assets.cjs").read_text(encoding="utf-8")
+    assert "installer download is public" in release_verifier
+    assert "sha256" in release_verifier
+    releases_doc = (root / "RELEASES.md").read_text(encoding="utf-8")
+    assert "Windows installer" in releases_doc
+    assert "macOS" in releases_doc
+    assert "release:verify" in releases_doc
     assert {
         "get_project_state",
         "mark_consent",

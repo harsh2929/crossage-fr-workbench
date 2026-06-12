@@ -4825,6 +4825,15 @@ function Dashboard({
 
       <FirstScanGuide state={state} watchStatus={watchStatus} navigate={navigate} chooseWorkspace={chooseWorkspace} requestConsent={requestConsent} />
 
+      <TesterModePanel
+        state={state}
+        navigate={navigate}
+        requestConsent={requestConsent}
+        downloadModel={downloadModel}
+        modelDownloadProgress={modelDownloadProgress}
+        busy={busy}
+      />
+
       <ModelSetupCard
         state={state}
         progress={modelDownloadProgress}
@@ -4981,6 +4990,97 @@ function Dashboard({
         )}
       </div>
     </section>
+  );
+}
+
+function TesterModePanel({
+  state,
+  navigate,
+  requestConsent,
+  downloadModel,
+  modelDownloadProgress,
+  busy
+}: {
+  state: AppState;
+  navigate(tab: TabKey): void;
+  requestConsent(): void;
+  downloadModel(pack: string, root?: string, force?: boolean): void | Promise<void>;
+  modelDownloadProgress: ModelDownloadProgress | null;
+  busy: boolean;
+}) {
+  const modelReady = Boolean(state.modelSetup?.ready) && !state.modelSetup?.fallbackActive;
+  const modelPack = state.modelSetup?.currentPack || state.modelSetup?.packages?.[0]?.pack || "antelopev2";
+  const modelRoot = state.modelSetup?.modelRoot || state.config.modelRoot || undefined;
+  const modelBusy = Boolean(modelDownloadProgress && !["complete", "error"].includes(modelDownloadProgress.phase));
+  const steps = [
+    {
+      label: "Face model",
+      value: modelReady ? "Ready" : modelBusy ? "Downloading" : "Install once",
+      done: modelReady,
+      action: () => void downloadModel(modelPack, modelRoot),
+      actionLabel: modelReady ? "Ready" : "Install model",
+      disabled: busy || modelBusy || modelReady
+    },
+    {
+      label: "Permission",
+      value: state.consentOnFile ? "Confirmed" : "Needed",
+      done: state.consentOnFile,
+      action: requestConsent,
+      actionLabel: state.consentOnFile ? "Confirmed" : "Confirm",
+      disabled: busy || state.consentOnFile
+    },
+    {
+      label: "Person photos",
+      value: state.references.length ? `${state.references.length} saved` : "Add one",
+      done: state.references.length > 0,
+      action: () => navigate("enroll"),
+      actionLabel: "Add person",
+      disabled: false
+    },
+    {
+      label: "Camera check",
+      value: "Optional",
+      done: false,
+      action: () => navigate("scan"),
+      actionLabel: "Open camera",
+      disabled: false
+    },
+    {
+      label: "Scan folder",
+      value: state.scanTotals.runs ? "Done" : "Choose folder",
+      done: state.scanTotals.runs > 0 || state.candidates.length > 0,
+      action: () => navigate("scan"),
+      actionLabel: "Scan",
+      disabled: false
+    }
+  ];
+  const next = steps.find((step) => !step.done && !step.disabled) ?? steps[2];
+  return (
+    <div className="panel tester-mode-panel">
+      <div className="tester-mode-copy">
+        <span className="section-kicker">Friend test mode</span>
+        <h2>Simple setup for a first test</h2>
+        <p>Use this path when sharing Vintrace with someone who only needs to install, add a person, scan a folder, and review results.</p>
+      </div>
+      <div className="tester-mode-steps">
+        {steps.map((step) => (
+          <button key={step.label} className={step.done ? "tester-step done" : "tester-step"} onClick={step.action} disabled={step.disabled} type="button">
+            <span>{step.done ? <Check size={15} /> : <ChevronRight size={15} />}</span>
+            <strong>{step.label}</strong>
+            <small>{step.value}</small>
+            <em>{step.actionLabel}</em>
+          </button>
+        ))}
+      </div>
+      <div className="tester-mode-note">
+        <ShieldCheck size={16} />
+        <span>Vintrace will not change original photos during scan. It stores review data locally and waits for manual decisions.</span>
+      </div>
+      <button className="primary tester-mode-next" onClick={next.action} disabled={next.disabled} type="button">
+        <ChevronRight size={16} />
+        <span>{next.actionLabel}</span>
+      </button>
+    </div>
   );
 }
 

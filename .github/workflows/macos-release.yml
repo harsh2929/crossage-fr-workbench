@@ -1,10 +1,10 @@
-name: Windows Release
+name: macOS Unsigned Release
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Optional GitHub Release tag to publish installer/update metadata to, for example v0.1.0"
+        description: "Optional GitHub Release tag to publish the unsigned DMG/ZIP to, for example v0.1.0"
         required: false
         type: string
       draft:
@@ -15,16 +15,16 @@ on:
       prerelease:
         description: "Mark the release as a prerelease"
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions:
   contents: write
 
 jobs:
-  build-windows-installer:
-    name: Build Windows installer
-    runs-on: windows-latest
+  build-macos-unsigned:
+    name: Build unsigned macOS DMG
+    runs-on: macos-latest
     env:
       VINTRACE_BUILD_SHA: ${{ github.sha }}
       VINTRACE_BUILD_REF: ${{ github.ref_name }}
@@ -60,11 +60,10 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           python tests/pipeline_smoke.py
-          python tests/edge_cases.py
           python tests/clean_workspace_smoke.py
           python tests/accuracy_benchmark.py
 
-      - name: Validate update feed and release checks
+      - name: Validate release checks
         env:
           CROSSAGE_FORCE_FALLBACK: "1"
           PYTHONPATH: ${{ github.workspace }}
@@ -72,50 +71,49 @@ jobs:
           npm run update:dry-run
           npm run release:check
 
-      - name: Build Windows installer
+      - name: Build unsigned macOS installer
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: npm run dist:win
+        run: npm run dist:mac:unsigned
 
       - name: Validate packaged artifacts
         env:
           VINTRACE_PACKAGE_REQUIRED: "1"
-          VINTRACE_PACKAGE_PLATFORM: "win32"
+          VINTRACE_PACKAGE_PLATFORM: "darwin"
         run: npm run package:check
 
       - name: Smoke test packaged backend sidecar
-        shell: pwsh
         env:
           CROSSAGE_FORCE_FALLBACK: "1"
-          CROSSAGE_WORKSPACE: ${{ runner.temp }}\crossage-workspace
+          CROSSAGE_WORKSPACE: ${{ runner.temp }}/vintrace-workspace
         run: |
-          $backend = Join-Path $PWD "backend-dist\crossage-backend\crossage-backend.exe"
-          if (!(Test-Path $backend)) {
-            $backend = Get-ChildItem -Path (Join-Path $PWD "backend-dist") -Filter "crossage-backend.exe" -Recurse -File | Select-Object -First 1 -ExpandProperty FullName
-          }
-          if (!$backend -or !(Test-Path $backend)) {
-            throw "Missing packaged backend under backend-dist"
-          }
-          $line = "" | & $backend | Select-Object -Last 1
-          $json = $line | ConvertFrom-Json
-          if ($json.ready -ne $true) {
-            throw "Packaged backend did not report ready=true"
-          }
-          if (!$json.state.modelSetup.packages -or $json.state.modelSetup.packages.Count -lt 2) {
-            throw "Model setup packages were not exposed by packaged backend"
-          }
+          backend="$PWD/backend-dist/crossage-backend/crossage-backend"
+          if [ ! -x "$backend" ]; then
+            backend="$(find "$PWD/backend-dist" -type f -name crossage-backend | head -n 1)"
+          fi
+          test -n "$backend"
+          chmod +x "$backend"
+          line="$(printf '\n' | "$backend" | tail -n 1)"
+          python - <<'PY' "$line"
+          import json
+          import sys
+          payload = json.loads(sys.argv[1])
+          assert payload["ready"] is True
+          assert len(payload["state"]["modelSetup"]["packages"]) >= 2
+          PY
 
-      - name: Upload installer
+      - name: Upload unsigned macOS installer
         uses: actions/upload-artifact@v4
         with:
-          name: Vintrace-Windows-Installer
+          name: Vintrace-macOS-Unsigned
           if-no-files-found: error
           path: |
-            dist/*.exe
+            dist/*.dmg
+            dist/*.zip
             dist/*.blockmap
             dist/latest*.yml
 
-      - name: Publish installer to GitHub Release
+      - name: Publish unsigned macOS installer to GitHub Release
         if: ${{ inputs.release_tag != '' }}
         uses: softprops/action-gh-release@v2
         with:
@@ -125,7 +123,8 @@ jobs:
           prerelease: ${{ inputs.prerelease }}
           fail_on_unmatched_files: true
           files: |
-            dist/*.exe
+            dist/*.dmg
+            dist/*.zip
             dist/*.blockmap
             dist/latest*.yml
 
@@ -133,4 +132,4 @@ jobs:
         if: ${{ inputs.release_tag != '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run release:verify -- --repo "${{ github.repository }}" --tag "${{ inputs.release_tag }}" --platform win32 --full
+        run: npm run release:verify -- --repo "${{ github.repository }}" --tag "${{ inputs.release_tag }}" --platform darwin --full

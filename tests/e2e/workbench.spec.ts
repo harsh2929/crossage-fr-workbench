@@ -546,6 +546,8 @@ test("desktop workbench renders and every primary control path works", async () 
 
   await page.locator(".nav-list").getByRole("button", { name: "Dashboard" }).click();
   await expect(page.getByText("First scan checklist")).toBeVisible();
+  await expect(page.getByText("Friend test mode")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Open camera/ })).toBeVisible();
   await expect(page.getByText("Top 7 current priorities")).toBeVisible();
   await expect(page.locator(".dashboard-metrics").getByText("Files scanned", { exact: true })).toBeVisible();
   await expect(page.getByText("Recent scan runs")).toBeVisible();

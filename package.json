@@ -33,6 +33,7 @@
     "bench:accuracy": "PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/accuracy_benchmark.py",
     "update:dry-run": "node desktop/scripts/check-update-feed.cjs",
     "package:check": "node desktop/scripts/check-package-artifacts.cjs",
+    "release:verify": "node desktop/scripts/verify-release-assets.cjs",
     "release:check": "node desktop/scripts/run-python.cjs tests/release_check.py",
     "test": "npm run build && npm run test:pipeline && npm run test:edge && npm run test:mcp && npm run test:e2e"
   },

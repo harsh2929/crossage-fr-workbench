@@ -7,6 +7,8 @@ import type { LanguageCode, TranslationKey } from "./i18n";
 import "./styles.css";
 
 const languageStorageKey = "vintrace:language";
+const startupIssueStorageKey = "vintrace:startup-recovery:v1";
+const startupSafeModeStorageKey = "vintrace:startup-safe-mode:v1";
 
 function readBootLanguage(): LanguageCode {
   try {
@@ -34,7 +36,55 @@ function escapeHtml(value: string) {
     .replaceAll("'", "&#39;");
 }
 
-function BootDiagnostic({ title, message }: { title: string; message: string }) {
+function readStartupIssue(): { message: string; stack?: string; at: string; count: number } | null {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(startupIssueStorageKey) || "null");
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStartupIssue(error: Error) {
+  try {
+    const previous = readStartupIssue();
+    window.localStorage.setItem(startupIssueStorageKey, JSON.stringify({
+      message: error.message || "Renderer startup failed.",
+      stack: error.stack || "",
+      at: new Date().toISOString(),
+      count: Math.min(99, (previous?.count || 0) + 1)
+    }));
+  } catch {
+    // Recovery state is best effort.
+  }
+}
+
+function clearStartupIssue() {
+  try {
+    window.localStorage.removeItem(startupIssueStorageKey);
+  } catch {
+    // Recovery state is best effort.
+  }
+}
+
+function resetLocalUiState() {
+  try {
+    const preservedLanguage = window.localStorage.getItem(languageStorageKey);
+    for (const key of Object.keys(window.localStorage)) {
+      if (key.startsWith("vintrace:")) {
+        window.localStorage.removeItem(key);
+      }
+    }
+    if (preservedLanguage) {
+      window.localStorage.setItem(languageStorageKey, preservedLanguage);
+    }
+    window.sessionStorage.clear();
+  } catch {
+    // Reset is best effort.
+  }
+}
+
+function BootDiagnostic({ title, message, children }: { title: string; message: string; children?: React.ReactNode }) {
   const language = readBootLanguage();
   applyBootLanguage(language);
   const t = (key: TranslationKey) => translate(language, key);
@@ -55,8 +105,70 @@ function BootDiagnostic({ title, message }: { title: string; message: string }) 
             {t("boot.exportDiagnostics")}
           </button>
         )}
+        {children}
       </section>
     </main>
+  );
+}
+
+function StartupRecoveryGate({ children }: { children: React.ReactNode }) {
+  const [issue, setIssue] = React.useState(() => readStartupIssue());
+  const [status, setStatus] = React.useState("");
+  const bridge = (window as Window & {
+    crossAge?: {
+      invoke?: (command: string, params?: Record<string, unknown>) => Promise<unknown>;
+      exportDiagnosticsReport?: (includePaths?: boolean) => Promise<unknown>;
+      recordDiagnosticEvent?: (event: Record<string, unknown>) => Promise<boolean>;
+    };
+  }).crossAge;
+
+  if (!issue) return <>{children}</>;
+
+  async function repairWorkspace() {
+    setStatus("Checking and repairing the app folder...");
+    try {
+      await bridge?.invoke?.("repair_workspace", { dryRun: false });
+      await bridge?.recordDiagnosticEvent?.({
+        type: "startup_recovery_repair",
+        level: "info",
+        category: "renderer",
+        message: "Startup recovery repair workspace completed."
+      });
+      setStatus("App folder repair completed. Continue in safe mode or reopen Vintrace.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "App folder repair failed.");
+    }
+  }
+
+  function continueSafely() {
+    resetLocalUiState();
+    try {
+      window.localStorage.setItem(startupSafeModeStorageKey, new Date().toISOString());
+    } catch {
+      // Best effort.
+    }
+    clearStartupIssue();
+    setIssue(null);
+  }
+
+  function resetAndReload() {
+    resetLocalUiState();
+    clearStartupIssue();
+    window.location.reload();
+  }
+
+  return (
+    <BootDiagnostic
+      title="Vintrace startup recovery"
+      message={`The previous launch failed before the interface was ready. Last error: ${issue.message}`}
+    >
+      <div className="boot-recovery-actions">
+        <button type="button" onClick={continueSafely}>Continue in safe mode</button>
+        <button type="button" onClick={resetAndReload}>Reset UI state</button>
+        <button type="button" onClick={() => void repairWorkspace()}>Repair app folder</button>
+      </div>
+      <p className="muted">{status || "Safe mode clears local UI preferences for this launch. It does not delete original photos."}</p>
+    </BootDiagnostic>
   );
 }
 
@@ -69,6 +181,7 @@ class RendererBoundary extends React.Component<{ children: React.ReactNode }, { 
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     console.error("Renderer failed", error);
+    writeStartupIssue(error);
     const bridge = (window as Window & {
       crossAge?: {
         recordDiagnosticEvent?: (event: Record<string, unknown>) => Promise<boolean>;
@@ -87,7 +200,20 @@ class RendererBoundary extends React.Component<{ children: React.ReactNode }, { 
 
   render() {
     if (this.state.error) {
-      return <BootDiagnostic title={bootT("boot.couldNotLoad")} message={this.state.error.message || bootT("boot.interfaceFailed")} />;
+      return (
+        <BootDiagnostic title={bootT("boot.couldNotLoad")} message={this.state.error.message || bootT("boot.interfaceFailed")}>
+          <div className="boot-recovery-actions">
+            <button type="button" onClick={() => {
+              resetLocalUiState();
+              clearStartupIssue();
+              window.location.reload();
+            }}>
+              Reset UI state
+            </button>
+            <button type="button" onClick={() => window.location.reload()}>Retry</button>
+          </div>
+        </BootDiagnostic>
+      );
     }
     return this.props.children;
   }
@@ -110,7 +236,9 @@ if (!rootElement) {
   createRoot(rootElement).render(
   <React.StrictMode>
       <RendererBoundary>
-        <App />
+        <StartupRecoveryGate>
+          <App />
+        </StartupRecoveryGate>
       </RendererBoundary>
   </React.StrictMode>
   );

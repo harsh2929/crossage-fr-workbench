@@ -81,15 +81,19 @@ Release checks:
 npm run test:clean
 npm run update:dry-run
 npm run release:check
+npm run release:verify -- --repo harsh2929/crossage-fr-workbench --tag v0.1.0 --platform win32
 ```
 
 `release:check` aggregates runtime diagnostics, database integrity, storage I/O, model distribution metadata, clean-workspace boot, benchmark history, and update-feed dry-run validation into one JSON report. Use `docs/tester-checklist.md` for manual tester verification before broad sharing.
 
-Windows release artifact:
+Release artifacts:
 
 - From a Windows machine: install Node 24 and Python 3.11, then run `npm ci`, `python -m pip install -r requirements-production.txt`, and `npm run dist:win`. Share the generated NSIS `.exe` from `dist/`.
 - From GitHub Actions: run the `Windows Release` workflow manually. It builds the Windows backend sidecar, runs backend smoke tests, packages the NSIS installer, smoke-tests the packaged backend, and uploads `Vintrace-Windows-Installer`. To make in-app updates work for testers, provide `release_tag` such as `v0.1.0`; the workflow will attach the `.exe`, `.blockmap`, and `latest*.yml` updater metadata to that GitHub Release.
+- For Mac testers without signing credentials, run the `macOS Unsigned Release` workflow manually. It builds an unsigned DMG/ZIP pair, validates the packaged backend, uploads `Vintrace-macOS-Unsigned`, and can attach `.dmg`, `.zip`, `.blockmap`, and `latest*.yml` assets to a GitHub Release when `release_tag` is provided.
 - The Windows installer is unsigned unless a code-signing certificate is configured, so Windows SmartScreen may warn first-time recipients.
+- The unsigned macOS DMG is for trusted testers only. Gatekeeper may require **Privacy & Security > Open Anyway**.
+- `npm run release:verify` checks published assets after release upload: installer/update metadata presence, public downloadability, sane asset size, and SHA-256 digest matching when `--full` is passed.
 - Before sharing broad test builds, run Settings -> Release readiness, Settings -> Machine benchmark, `npm run release:check`, and the tester checklist. These checks now include model license/checksum manifest status, SQLite database integrity, writable local storage, update-feed setup, crash diagnostics, benchmark history, and signing-environment detection. The checks intentionally stay red for code signing and model redistribution until real certificates and final license approvals are configured.
 
 First-run face model setup is now handled inside the desktop app. The DMG/EXE can be shared without pre-installing Python, npm, or InsightFace models. On first launch, the app shows a Face model card that lets the user choose a writable download folder, pick the model package, download with progress, validate the pinned SHA-256 checksum, extract safely, and retry with clear offline messaging. Partial `.part` downloads are preserved and resumed with HTTP range requests when the server supports them. If the user is offline, the app opens in simple matching mode and keeps the download action available.
