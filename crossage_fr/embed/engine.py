@@ -9,7 +9,7 @@ import os
 import os.path as osp
 
 import numpy as np
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 from crossage_fr.config import RuntimeConfig
 from crossage_fr.ingest import load_image
@@ -27,6 +27,9 @@ class EmbeddingEngine(ABC):
     @abstractmethod
     def embed_loaded_image(self, image: Image.Image, path: Path | None = None) -> list[EmbeddingResult]:
         raise NotImplementedError
+
+    def embed_loaded_image_rescue(self, image: Image.Image, path: Path | None = None) -> list[EmbeddingResult]:
+        return []
 
 
 def _l2_normalize(vector: np.ndarray) -> np.ndarray:
@@ -52,6 +55,7 @@ class FallbackEmbeddingEngine(EmbeddingEngine):
                 bbox=(0, 0, image.width, image.height),
                 model_name=self.model_name,
                 note="Fallback mode compares whole-image fingerprints, not biometric face embeddings.",
+                pose_bucket="unknown",
             )
         ]
 
@@ -151,31 +155,131 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
         detector_size = max(320, min(1024, int(getattr(config, "face_detector_size", 640))))
         detector_size = int(round(detector_size / 32) * 32)
         self.detector_size = detector_size
+        self.rescue_detector_size = min(1024, max(detector_size, 768))
         self.det_model.prepare(ctx_id, input_size=(detector_size, detector_size), det_thresh=0.5)
         self.rec_model.prepare(ctx_id)
 
     def embed_loaded_image(self, image: Image.Image, path: Path | None = None) -> list[EmbeddingResult]:
+        return self._embed_with_detector(image, path=path, rescue=False)
+
+    def embed_loaded_image_rescue(self, image: Image.Image, path: Path | None = None) -> list[EmbeddingResult]:
+        return self._embed_with_detector(image, path=path, rescue=True)
+
+    def _embed_with_detector(self, image: Image.Image, path: Path | None = None, *, rescue: bool) -> list[EmbeddingResult]:
         rgb = np.asarray(image)
         bgr = rgb[:, :, ::-1]
-        bboxes, kpss = self.det_model.detect(bgr, max_num=0)
-        if bboxes.shape[0] == 0:
-            return []
+        if rescue:
+            detections = self._rescue_detections(image)
+            if not detections:
+                return []
+        else:
+            bboxes, kpss = self.det_model.detect(bgr, max_num=0)
+            if bboxes.shape[0] == 0:
+                return []
+            detections = [(bgr, bboxes, kpss, "normal")]
         results: list[EmbeddingResult] = []
-        for index in range(bboxes.shape[0]):
-            face = self._face_cls(bbox=bboxes[index, 0:4], kps=None if kpss is None else kpss[index], det_score=bboxes[index, 4])
-            self.rec_model.get(bgr, face)
-            vector = _l2_normalize(np.asarray(face.embedding, dtype="float32"))
-            bbox_values = tuple(int(round(v)) for v in face.bbox.tolist())
-            quality = float(np.linalg.norm(face.embedding))
-            results.append(
-                EmbeddingResult(
-                    vector=vector.tolist(),
-                    quality=quality,
-                    bbox=bbox_values,
-                    model_name=self.model_name,
+        seen: set[tuple[int, ...]] = set()
+        for source_bgr, bboxes, kpss, variant in detections:
+            for index in range(bboxes.shape[0]):
+                face = self._face_cls(bbox=bboxes[index, 0:4], kps=None if kpss is None else kpss[index], det_score=bboxes[index, 4])
+                self.rec_model.get(source_bgr, face)
+                vector = _l2_normalize(np.asarray(face.embedding, dtype="float32"))
+                fingerprint = tuple(int(round(float(value) * 1000)) for value in vector[:16])
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                bbox_values = tuple(int(round(v)) for v in face.bbox.tolist())
+                quality = float(np.linalg.norm(face.embedding))
+                pose_bucket = "profile" if rescue else self._pose_bucket_for_detection(source_bgr, face.bbox, None if kpss is None else kpss[index])
+                results.append(
+                    EmbeddingResult(
+                        vector=vector.tolist(),
+                        quality=quality,
+                        bbox=bbox_values,
+                        model_name=self.model_name,
+                        note=f"profile-rescue:{variant}" if rescue else "",
+                        pose_bucket=pose_bucket,
+                    )
                 )
-            )
+                if rescue and len(results) >= 3:
+                    return results
         return results
+
+    def _rescue_detections(self, image: Image.Image) -> list[tuple[np.ndarray, np.ndarray, np.ndarray | None, str]]:
+        variants = self._rescue_variants(image)
+        detections: list[tuple[np.ndarray, np.ndarray, np.ndarray | None, str]] = []
+        old_threshold = float(getattr(self.det_model, "det_thresh", 0.5))
+        try:
+            self.det_model.det_thresh = min(old_threshold, 0.22)
+            for name, variant_image in variants:
+                bgr = np.asarray(variant_image.convert("RGB"))[:, :, ::-1]
+                bboxes, kpss = self.det_model.detect(
+                    bgr,
+                    input_size=(self.rescue_detector_size, self.rescue_detector_size),
+                    max_num=3,
+                )
+                if bboxes.shape[0] == 0:
+                    continue
+                order = np.argsort(-bboxes[:, 4])
+                detections.append((bgr, bboxes[order[:3]], None if kpss is None else kpss[order[:3]], name))
+                if detections:
+                    break
+        finally:
+            self.det_model.det_thresh = old_threshold
+        return detections
+
+    def _rescue_variants(self, image: Image.Image) -> list[tuple[str, Image.Image]]:
+        rgb = image.convert("RGB")
+        padded = ImageOps.pad(rgb, (max(rgb.width, rgb.height), max(rgb.width, rgb.height)), color=(0, 0, 0), method=Image.Resampling.BICUBIC)
+        contrast = ImageEnhance.Contrast(ImageOps.autocontrast(rgb)).enhance(1.18)
+        context = self._context_pad(rgb, scale=2.3, min_size=384)
+        large_context = self._context_pad(rgb, scale=3.0, min_size=512)
+        contrast_context = self._context_pad(contrast, scale=2.3, min_size=384)
+        return [
+            ("low-threshold", rgb),
+            ("square-pad", padded),
+            ("context-pad", context),
+            ("large-context-pad", large_context),
+            ("autocontrast", contrast),
+            ("autocontrast-context-pad", contrast_context),
+        ]
+
+    def _context_pad(self, image: Image.Image, *, scale: float, min_size: int) -> Image.Image:
+        rgb = image.convert("RGB")
+        side = max(int(round(max(rgb.width, rgb.height) * max(1.0, scale))), int(min_size))
+        side = min(1024, max(side, rgb.width, rgb.height))
+        try:
+            pixels = np.asarray(rgb)
+            corners = np.array([pixels[0, 0], pixels[0, -1], pixels[-1, 0], pixels[-1, -1]], dtype=np.float32)
+            color = tuple(int(round(float(value))) for value in np.median(corners, axis=0))
+        except Exception:
+            color = (0, 0, 0)
+        canvas = Image.new("RGB", (side, side), color=color)
+        canvas.paste(rgb, ((side - rgb.width) // 2, (side - rgb.height) // 2))
+        return canvas
+
+    def _pose_bucket_for_detection(self, image_bgr: np.ndarray, bbox: np.ndarray, kps: np.ndarray | None) -> str:
+        try:
+            x1, y1, x2, y2 = [float(value) for value in bbox[:4]]
+            width = max(1.0, x2 - x1)
+            image_width = max(1.0, float(image_bgr.shape[1]))
+            face_center = (x1 + x2) / 2.0 / image_width
+            if face_center < 0.08 or face_center > 0.92:
+                return "edge-face"
+            if kps is None or len(kps) < 3:
+                return "unknown"
+            left_eye = kps[0]
+            right_eye = kps[1]
+            nose = kps[2]
+            eye_span = abs(float(right_eye[0]) - float(left_eye[0])) / width
+            nose_offset = abs(float(nose[0]) - ((x1 + x2) / 2.0)) / width
+            if eye_span < 0.18 or nose_offset >= 0.24:
+                return "profile"
+            if nose_offset >= 0.14:
+                return "three-quarter"
+            return "frontal"
+        except Exception:
+            return "unknown"
 
     def _load_model(
         self,

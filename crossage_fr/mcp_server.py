@@ -722,6 +722,12 @@ def model_drift_report() -> dict[str, Any]:
 
 
 @mcp.tool()
+def reference_gap_report() -> dict[str, Any]:
+    """Report which saved people need clearer, side-angle, multi-age, or refreshed reference photos."""
+    return _call("reference_gap_report")
+
+
+@mcp.tool()
 def export_review_ledger() -> dict[str, Any]:
     """Export review decision metadata and audit events without media, thumbnails, vectors, or model files."""
     result = _call("export_review_ledger")
@@ -749,6 +755,14 @@ def verify_workspace_backup(path: str = "") -> dict[str, Any]:
     """Verify a Vintrace workspace backup ZIP before sharing or archiving it."""
     result = _call("verify_workspace_backup", {"path": path})
     return {"verification": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@mcp.tool()
+def restore_workspace_backup(path: str = "", target: str = "", confirm: bool = False) -> dict[str, Any]:
+    """Restore a verified Vintrace workspace backup ZIP into an empty target folder. Requires confirm=true."""
+    _confirmed(confirm, "restore a workspace backup into an empty target folder")
+    result = _call("restore_workspace_backup", {"path": path, "target": target})
+    return {"restore": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
 @mcp.tool()
@@ -825,6 +839,14 @@ def model_distribution_audit() -> dict[str, Any]:
 
 
 @mcp.tool()
+def backfill_model_references(confirm: bool = False, limit: int = 0) -> dict[str, Any]:
+    """Create active-model embeddings for saved person photos that were enrolled with another recognizer. Requires confirm=true."""
+    _confirmed(confirm, "backfill saved references for the active face model")
+    result = _call("backfill_model_references", {"limit": max(0, int(limit))})
+    return {"backfill": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@mcp.tool()
 def export_support_bundle(include_paths: bool = False) -> dict[str, Any]:
     """Export a diagnostics-only support bundle without photos, videos, thumbnails, vectors, or model files."""
     result = _call("export_support_bundle", {"includePaths": include_paths})
@@ -835,6 +857,82 @@ def export_support_bundle(include_paths: bool = False) -> dict[str, Any]:
 def installer_self_diagnostics() -> dict[str, Any]:
     """Run first-run diagnostics for installers: model downloader, decoders, Safe Mode, workspace, and packaged backend readiness."""
     return _call("installer_self_diagnostics")
+
+
+@mcp.tool()
+def public_dataset_catalog() -> dict[str, Any]:
+    """List supported public benchmark datasets and how Vintrace uses them safely."""
+    return _call("public_dataset_catalog")
+
+
+@mcp.tool()
+def inspect_public_dataset(dataset_id: str, folder: str, include_videos: bool = True) -> dict[str, Any]:
+    """Inspect a local public-dataset folder laid out as identity subfolders."""
+    return _call("inspect_public_dataset", {"datasetId": dataset_id, "folder": folder, "includeVideos": include_videos})
+
+
+@mcp.tool()
+def run_public_dataset_benchmark(
+    dataset_id: str,
+    folder: str = "",
+    max_identities: int = 12,
+    candidate_images: int = 3,
+    download_lfw: bool = False,
+    download_dataset: bool | None = None,
+    include_videos: bool = False,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Run an isolated public-dataset benchmark. Auto-downloading LFW/CFP or running without a local folder requires confirm=true."""
+    should_download = bool(download_lfw if download_dataset is None else download_dataset)
+    if should_download or not folder:
+        _confirmed(confirm, "download/reuse a public benchmark cache or run a dataset benchmark without a local folder")
+    result = _call(
+        "run_public_dataset_benchmark",
+        {
+            "datasetId": dataset_id,
+            "folder": folder,
+            "maxIdentities": max_identities,
+            "candidateImages": candidate_images,
+            "downloadIfMissing": should_download,
+            "includeVideos": include_videos,
+        },
+    )
+    return {"benchmark": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@mcp.tool()
+def compare_public_dataset_models(
+    dataset_id: str,
+    folder: str = "",
+    max_identities: int = 12,
+    candidate_images: int = 3,
+    download_dataset: bool = False,
+    include_videos: bool = False,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Compare installed face model packs on the same isolated public-dataset benchmark slice."""
+    if download_dataset or not folder:
+        _confirmed(confirm, "download/reuse a public benchmark cache or compare model packs without a local folder")
+    result = _call(
+        "compare_public_dataset_models",
+        {
+            "datasetId": dataset_id,
+            "folder": folder,
+            "maxIdentities": max_identities,
+            "candidateImages": candidate_images,
+            "downloadIfMissing": download_dataset,
+            "includeVideos": include_videos,
+        },
+    )
+    return {"comparison": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@mcp.tool()
+def apply_model_recommendation(pack: str, backfill: bool = True, confirm: bool = False) -> dict[str, Any]:
+    """Apply a model pack recommended by model comparison. Requires confirm=true because it changes settings and can backfill references."""
+    _confirmed(confirm, "apply the recommended model pack and backfill saved references")
+    result = _call("apply_model_recommendation", {"pack": pack, "backfill": backfill})
+    return {"application": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
 @mcp.tool()

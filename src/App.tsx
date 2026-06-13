@@ -8,6 +8,7 @@ import {
   BookOpen,
   Camera,
   Check,
+  ChevronLeft,
   ChevronRight,
   Copy as CopyIcon,
   Crosshair,
@@ -46,8 +47,11 @@ import {
   X
 } from "lucide-react";
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
-import appIconUrl from "../desktop/assets/icon.png";
+import type { CSSProperties, ReactNode } from "react";
+// H9: the 1024px/1.46MB icon.png is the OS app-icon master (still read at
+// runtime by the Electron main process). The renderer only paints a ~40px logo,
+// so it imports a 192px (~8KB) variant to keep the master off the boot path.
+import appIconUrl from "../desktop/assets/icon-192.webp";
 import type {
   AgeBucket,
   AgeReferenceGroup,
@@ -82,10 +86,18 @@ import type {
   MediaTrashCleanupValue,
   MediaTrashReportValue,
   ModelDriftReport,
+  ModelCompatibilityReport,
+  ModelSwitchDryRun,
   ModelIntegrityResult,
   ModelDownloadProgress,
   PlatformReport,
   PrivacyReport,
+  PublicDatasetBenchmarkResult,
+  PublicDatasetCatalog,
+  PublicDatasetCatalogEntry,
+  PublicDatasetInspection,
+  PublicDatasetModelComparisonResult,
+  ReferenceGapReport,
   RetentionPolicyReport,
   ReleaseReadinessResult,
   ReviewCandidate,
@@ -107,6 +119,7 @@ import type {
   WorkspaceInventoryExportValue,
   WorkspaceBackupValue,
   WorkspaceBackupPruneValue,
+  WorkspaceBackupRestoreValue,
   WorkspaceBackupVerification,
   WorkspaceLockStatus,
   WorkspaceHealth,
@@ -172,8 +185,30 @@ function currentIntlLocale() {
   return locales[imperativeLanguage] || "en";
 }
 
-function confirmUi(message: string) {
-  return window.confirm(localizeImperativeText(message));
+// H5: promise-based in-app confirmation. Synchronous window.confirm froze the
+// renderer (animations/scroll stop) and ignored the app theme/localized layout.
+// A single ConfirmHost (mounted in App) registers this controller and renders a
+// themed, focus-trapped ModalFrame dialog instead.
+type ConfirmRequest = {
+  message: string;
+  resolve: (confirmed: boolean) => void;
+};
+
+let confirmController: ((request: ConfirmRequest) => void) | null = null;
+
+function requestConfirm(finalMessage: string): Promise<boolean> {
+  // Fall back to the native dialog if the host isn't mounted yet (very early
+  // boot) so a confirmation is never silently skipped.
+  if (!confirmController) {
+    return Promise.resolve(window.confirm(finalMessage));
+  }
+  return new Promise<boolean>((resolve) => {
+    confirmController?.({ message: finalMessage, resolve });
+  });
+}
+
+function confirmDialog(message: string): Promise<boolean> {
+  return requestConfirm(localizeImperativeText(message));
 }
 
 function promptUi(message: string, defaultValue = "") {
@@ -328,6 +363,7 @@ function performanceTierLabel(value?: string) {
 }
 
 type SettingsDraft = {
+  modelPack: string;
   thresholds: Thresholds;
   clusterMinSize: number;
   faceDetectorSize: number;
@@ -352,7 +388,7 @@ type SettingsDraft = {
   mode: SettingsMode;
 };
 
-type SettingsValues = Omit<SettingsDraft, "mode">;
+type SettingsValues = Omit<SettingsDraft, "mode" | "modelPack">;
 type SettingsMode = "recommended" | "privacy" | "precision" | "discovery" | "custom";
 type PresetMode = Exclude<SettingsMode, "custom">;
 
@@ -889,6 +925,12 @@ function isUnmatchedClusterName(value: unknown) {
   return safeText(value).startsWith("Unmatched cluster");
 }
 
+function modelPackFromModelName(value: unknown) {
+  const text = safeText(value).trim().toLowerCase();
+  const match = text.match(/insightface-([^/\s(]+)/);
+  return match?.[1] ?? "";
+}
+
 function finiteNumber(value: unknown, fallback: number, min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY) {
   const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
   if (!Number.isFinite(parsed)) return fallback;
@@ -933,6 +975,7 @@ function coerceSettingsProfile(incoming: unknown, current: SettingsDraft): Setti
   const videoDecoder = asRecord(profile.videoDecoder) ?? {};
   return {
     ...current,
+    modelPack: safeText(profile.modelPack, current.modelPack),
     thresholds: {
       confident: finiteNumber(thresholds.confident, current.thresholds.confident, 0, 1),
       likely: finiteNumber(thresholds.likely, current.thresholds.likely, 0, 1),
@@ -1362,6 +1405,26 @@ function normalizeAppState(incoming: AppState, previous: AppState | null): AppSt
     videoFrames: finiteInteger(rawTotals.videoFrames, previousTotals?.videoFrames ?? 0, 0, Number.MAX_SAFE_INTEGER),
     videoProtected: finiteInteger(rawTotals.videoProtected, previousTotals?.videoProtected ?? 0, 0, Number.MAX_SAFE_INTEGER),
     excluded: finiteInteger(rawTotals.excluded, previousTotals?.excluded ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    noFaceDetected: finiteInteger(rawTotals.noFaceDetected, previousTotals?.noFaceDetected ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    lowQualityFaces: finiteInteger(rawTotals.lowQualityFaces, previousTotals?.lowQualityFaces ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    blockedPairs: finiteInteger(rawTotals.blockedPairs, previousTotals?.blockedPairs ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    duplicateCandidates: finiteInteger(rawTotals.duplicateCandidates, previousTotals?.duplicateCandidates ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    videoCandidateCap: finiteInteger(rawTotals.videoCandidateCap, previousTotals?.videoCandidateCap ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    profileRescueAttempted: finiteInteger(rawTotals.profileRescueAttempted, previousTotals?.profileRescueAttempted ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    profileRescueFound: finiteInteger(rawTotals.profileRescueFound, previousTotals?.profileRescueFound ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    profileRescueMatched: finiteInteger(rawTotals.profileRescueMatched, previousTotals?.profileRescueMatched ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    profileRescueUnmatched: finiteInteger(rawTotals.profileRescueUnmatched, previousTotals?.profileRescueUnmatched ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    poseFrontal: finiteInteger(rawTotals.poseFrontal, previousTotals?.poseFrontal ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    poseThreeQuarter: finiteInteger(rawTotals.poseThreeQuarter, previousTotals?.poseThreeQuarter ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    poseProfile: finiteInteger(rawTotals.poseProfile, previousTotals?.poseProfile ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    poseUnknown: finiteInteger(rawTotals.poseUnknown, previousTotals?.poseUnknown ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    poseRelaxedReviews: finiteInteger(rawTotals.poseRelaxedReviews, previousTotals?.poseRelaxedReviews ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    poseRelaxedProfile: finiteInteger(rawTotals.poseRelaxedProfile, previousTotals?.poseRelaxedProfile ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    poseRelaxedThreeQuarter: finiteInteger(rawTotals.poseRelaxedThreeQuarter, previousTotals?.poseRelaxedThreeQuarter ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    poseReranked: finiteInteger(rawTotals.poseReranked, previousTotals?.poseReranked ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    poseAmbiguous: finiteInteger(rawTotals.poseAmbiguous, previousTotals?.poseAmbiguous ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    hardPoseUnsupported: finiteInteger(rawTotals.hardPoseUnsupported, previousTotals?.hardPoseUnsupported ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    safeModeFaceCropAllowed: finiteInteger(rawTotals.safeModeFaceCropAllowed, previousTotals?.safeModeFaceCropAllowed ?? 0, 0, Number.MAX_SAFE_INTEGER),
     durationMs: finiteNumber(rawTotals.durationMs, previousTotals?.durationMs ?? 0, 0),
     lastCompletedAt: typeof rawTotals.lastCompletedAt === "string" || rawTotals.lastCompletedAt === null ? rawTotals.lastCompletedAt : previousTotals?.lastCompletedAt ?? null
   };
@@ -1420,6 +1483,7 @@ export default function App() {
   const [scanQueueRunning, setScanQueueRunning] = useState(false);
   const [backupVerification, setBackupVerification] = useState<WorkspaceBackupVerification | null>(null);
   const [backupPruneResult, setBackupPruneResult] = useState<WorkspaceBackupPruneValue | null>(null);
+  const [backupRestoreResult, setBackupRestoreResult] = useState<WorkspaceBackupRestoreValue | null>(null);
   const [workspaceHealth, setWorkspaceHealth] = useState<WorkspaceHealth | null>(null);
   const [workspaceOptimizeResult, setWorkspaceOptimizeResult] = useState<WorkspaceOptimizeResult | null>(null);
   const [workspaceRepairResult, setWorkspaceRepairResult] = useState<WorkspaceRepairResult | null>(null);
@@ -1433,11 +1497,17 @@ export default function App() {
   const [releaseReadiness, setReleaseReadiness] = useState<ReleaseReadinessResult | null>(null);
   const [accuracyEvaluation, setAccuracyEvaluation] = useState<AccuracyEvaluation | null>(null);
   const [accuracyValidationPack, setAccuracyValidationPack] = useState<AccuracyValidationPackValue | null>(null);
+  const [publicDatasetCatalog, setPublicDatasetCatalog] = useState<PublicDatasetCatalog | null>(null);
+  const [publicDatasetInspection, setPublicDatasetInspection] = useState<PublicDatasetInspection | null>(null);
+  const [publicDatasetBenchmark, setPublicDatasetBenchmark] = useState<PublicDatasetBenchmarkResult | null>(null);
+  const [publicDatasetModelComparison, setPublicDatasetModelComparison] = useState<PublicDatasetModelComparisonResult | null>(null);
   const [privacyReport, setPrivacyReport] = useState<PrivacyReport | null>(null);
   const [mediaTrashReport, setMediaTrashReport] = useState<MediaTrashReportValue | null>(null);
   const [mediaTrashCleanup, setMediaTrashCleanup] = useState<MediaTrashCleanupValue | null>(null);
   const [retentionPolicy, setRetentionPolicy] = useState<RetentionPolicyReport | null>(null);
   const [modelDriftReport, setModelDriftReport] = useState<ModelDriftReport | null>(null);
+  const [referenceGapReport, setReferenceGapReport] = useState<ReferenceGapReport | null>(null);
+  const [modelSwitchPlan, setModelSwitchPlan] = useState<ModelSwitchDryRun | null>(null);
   const [watchStatus, setWatchStatus] = useState<FolderWatchStatus>(initialWatchStatus);
   const [latencySamples, setLatencySamples] = useState<LatencySample[]>([]);
   const [performanceChoice, setPerformanceChoiceState] = useState<PerformanceChoice>("auto");
@@ -1445,6 +1515,7 @@ export default function App() {
   const [reviewUndo, setReviewUndo] = useState<ReviewUndo | null>(null);
   const [pendingExternalIntent, setPendingExternalIntent] = useState<PendingExternalIntent | null>(null);
   const [lastPreflight, setLastPreflight] = useState<{ folder: string; at: number; ready: boolean } | null>(null);
+  const [dismissedRecoveryRunId, setDismissedRecoveryRunId] = useState("");
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [checkedOnboarding, setCheckedOnboarding] = useState(false);
   const workspaceRef = useRef<HTMLElement | null>(null);
@@ -1481,8 +1552,9 @@ export default function App() {
     setNotice({ tone: "error", text: details.text, errorCode: details.code, action: details.action });
   }
 
-  function confirmUiMessage(messageKey: UiMessageKey, values: UiMessageValues, fallback: string) {
-    return window.confirm(language === "en" ? localizeImperativeText(fallback) : uiMessage(messageKey, values));
+  function confirmDialogMessage(messageKey: UiMessageKey, values: UiMessageValues, fallback: string): Promise<boolean> {
+    // H5: route the localized confirmation through the in-app dialog host.
+    return requestConfirm(language === "en" ? localizeImperativeText(fallback) : uiMessage(messageKey, values));
   }
 
   function changeLanguage(nextLanguage: LanguageCode) {
@@ -1620,6 +1692,20 @@ export default function App() {
   }, [state?.workspace]);
 
   useEffect(() => {
+    if (!state?.workspace || publicDatasetCatalog) return;
+    window.crossAge.invoke<PublicDatasetCatalog>("public_dataset_catalog", {})
+      .then((catalog) => setPublicDatasetCatalog(catalog))
+      .catch((error) => {
+        recordRendererDiagnostic({
+          type: "renderer_dataset_catalog_failed",
+          level: "warn",
+          category: "renderer",
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
+  }, [state?.workspace, publicDatasetCatalog]);
+
+  useEffect(() => {
     const unsubscribeBackend = window.crossAge.onBackendError((message) => {
       setBootError(message);
       setErrorNotice(new Error(message), message);
@@ -1630,6 +1716,18 @@ export default function App() {
         setBusy(event.message || `Starting ${event.phase}`);
       }
     });
+    // H1: the scan-progress stream fires faster than the display can paint. Hold
+    // the latest payload and flush it at most once per animation frame so a burst
+    // of ticks collapses to a single re-render instead of a per-event storm.
+    let scanProgressRaf = 0;
+    let pendingScanProgress: ScanProgress | null = null;
+    const flushScanProgress = () => {
+      scanProgressRaf = 0;
+      if (pendingScanProgress) {
+        setScanProgress(pendingScanProgress);
+        pendingScanProgress = null;
+      }
+    };
     const unsubscribeProgress = window.crossAge.onScanProgress((event) => {
       if (event.name === "model_download") {
         setModelDownloadProgress(event.payload);
@@ -1642,7 +1740,10 @@ export default function App() {
         }
         return;
       }
-      setScanProgress(event.payload);
+      pendingScanProgress = event.payload;
+      if (!scanProgressRaf) {
+        scanProgressRaf = window.requestAnimationFrame(flushScanProgress);
+      }
       const pressure = String(event.payload.memoryPressure || "");
       if ((pressure === "high" || pressure === "critical") && memoryPressureNoticeRef.current !== pressure) {
         memoryPressureNoticeRef.current = pressure;
@@ -1714,6 +1815,7 @@ export default function App() {
       unsubscribeUpdate();
       unsubscribeDiagnostics();
       if (diagnosticsRefreshTimer) window.clearTimeout(diagnosticsRefreshTimer);
+      if (scanProgressRaf) window.cancelAnimationFrame(scanProgressRaf);
       unsubscribeCommand();
       unsubscribeExternalOpen();
     };
@@ -1903,7 +2005,7 @@ export default function App() {
       scanExclusions: { ...defaultScanExclusions, ...(next.config.scanExclusions ?? {}) }
     };
     if (!settingsDirtyRef.current) {
-      setSettings({ ...nextSettings, mode: inferSettingsMode(nextSettings) });
+      setSettings({ ...nextSettings, modelPack: next.config.modelPack ?? "antelopev2", mode: inferSettingsMode(nextSettings) });
     }
     setSelectedCandidateId((current) => {
       if (current && next.candidates.some((candidate) => candidate.candidateId === current)) return current;
@@ -1920,9 +2022,11 @@ export default function App() {
     setSettings(value);
   }
 
-  async function invoke<T = unknown>(label: string, command: string, params: Record<string, unknown> = {}) {
+  async function invoke<T = unknown>(label: string, command: string, params: Record<string, unknown> = {}, options: { quiet?: boolean } = {}) {
     const startedAt = performance.now();
-    setBusy(label);
+    // H4: a "quiet" invoke skips the global busy spinner and keyboard-block so
+    // the rapid review-triage loop stays responsive while the write is in flight.
+    if (!options.quiet) setBusy(label);
     setNotice(null);
     try {
       const result = await window.crossAge.invoke<T>(command, params);
@@ -1954,7 +2058,7 @@ export default function App() {
       throw error;
     } finally {
       recordLatency(label, command, startedAt);
-      setBusy(null);
+      if (!options.quiet) setBusy(null);
     }
   }
 
@@ -2053,7 +2157,7 @@ export default function App() {
 
   async function exportSupportBundle(includePaths = false) {
     if (includePaths) {
-      const proceed = confirmUi("Include local file paths in the support bundle? Leave this off unless a trusted tester needs exact path details.");
+      const proceed = await confirmDialog("Include local file paths in the support bundle? Leave this off unless a trusted tester needs exact path details.");
       if (!proceed) return;
     }
     const result = await invoke<CommandResult<SupportBundleValue>>("Exporting support bundle", "export_support_bundle", { includePaths });
@@ -2114,6 +2218,52 @@ export default function App() {
     }
   }
 
+  async function backfillModelReferences() {
+    try {
+      const result = await invoke<CommandResult<Record<string, unknown>>>("Backfilling saved photos", "backfill_model_references", {});
+      const value = result.value ?? {};
+      const added = Number(value.added ?? 0);
+      const skipped = Number(value.skipped ?? 0);
+      setNotice({ tone: "ok", text: `Backfilled ${formatNumber(added)} saved photo embedding${added === 1 ? "" : "s"}${skipped ? `; skipped ${formatNumber(skipped)}` : ""}.` });
+    } catch (error) {
+      setErrorNotice(error, "Saved photos could not be backfilled for this model.");
+    }
+  }
+
+  async function runModelSwitchDryRun(targetPack = settings?.modelPack || state?.config.modelPack || "antelopev2", userVisible = true) {
+    try {
+      const plan = await invoke<ModelSwitchDryRun>("Checking model switch", "model_switch_dry_run", { targetPack });
+      setModelSwitchPlan(plan);
+      if (userVisible) {
+        setNotice({
+          tone: plan.blockers.length ? "warn" : "ok",
+          text: plan.summary || "Model switch dry run complete."
+        });
+      }
+      return plan;
+    } catch (error) {
+      setModelSwitchPlan(null);
+      setErrorNotice(error, "Model switch dry run failed.");
+      return null;
+    }
+  }
+
+  async function scanCompatibilityParams(): Promise<Record<string, unknown> | null> {
+    const compatibility = state?.modelCompatibility;
+    if (!compatibility?.needsBackfill) {
+      return {};
+    }
+    const proceed = await confirmDialog(
+      "Saved person photos need a model backfill before this scan. Continue anyway? This can miss matches until saved photos are backfilled."
+    );
+    if (!proceed) {
+      setActiveTab("settings");
+      setNotice({ tone: "warn", text: "Scan paused. Backfill saved photos in Settings before scanning with this model." });
+      return null;
+    }
+    return { allowIncompatibleModel: true };
+  }
+
   function setAgeGroupFolder(ageBucket: AgeBucket, folder: string) {
     setAgeGroupFolders((current) => ({ ...current, [ageBucket]: folder }));
   }
@@ -2128,7 +2278,7 @@ export default function App() {
       setConsentPrompt({ requestedValue: true, scope: state?.workspace ?? "Current app folder" });
       return;
     }
-    if (state?.consentOnFile && !confirmUi("Remove permission for this app folder? Adding people, matching scans, and folder watching will pause.")) {
+    if (state?.consentOnFile && !await confirmDialog("Remove permission for this app folder? Adding people, matching scans, and folder watching will pause.")) {
       return;
     }
     await invoke<AppState>("Updating permission", "set_consent", { value, source: "desktop", operator: "desktop user" });
@@ -2196,13 +2346,13 @@ export default function App() {
     const preflightMatches = lastPreflight?.folder === scanFolder.trim();
     const preflightIsFresh = preflightMatches && Date.now() - lastPreflight.at < 10 * 60 * 1000;
     if (!preflightIsFresh) {
-      const proceed = confirmUi("This folder has not been checked recently. Continue scanning now?");
+      const proceed = await confirmDialog("This folder has not been checked recently. Continue scanning now?");
       if (!proceed) {
         setNotice({ tone: "warn", text: "Check the folder before scanning." });
         return;
       }
     } else if (!lastPreflight.ready) {
-      const proceed = confirmUi("The folder check found issues. Continue and skip files that cannot be read?");
+      const proceed = await confirmDialog("The folder check found issues. Continue and skip files that cannot be read?");
       if (!proceed) {
         setNotice({ tone: "warn", text: "Review the folder issues before scanning." });
         return;
@@ -2217,17 +2367,20 @@ export default function App() {
         setNotice({ tone: "warn", text: `Large scan is blocked: ${readiness.blockers[0] || readiness.recommendedAction}` });
         return;
       }
-      const proceed = confirmUi("Large scan readiness has warnings. Continue scanning anyway?");
+      const proceed = await confirmDialog("Large scan readiness has warnings. Continue scanning anyway?");
       if (!proceed) {
         setNotice({ tone: "warn", text: "Resolve readiness warnings before starting the large scan." });
         return;
       }
     }
+    const compatibilityParams = await scanCompatibilityParams();
+    if (!compatibilityParams) return;
     const result = await invoke<CommandResult>("Scanning folder", "scan", {
       folder: scanFolder,
       source: "manual",
       resume: true,
-      total: knownTotal
+      total: knownTotal,
+      ...compatibilityParams
     });
     if (savedScanSources.some((source) => source.path === scanFolder.trim())) {
       persistSavedScanSources(savedScanSources.map((source) => source.path === scanFolder.trim() ? { ...source, lastUsedAt: Date.now() } : source));
@@ -2261,15 +2414,53 @@ export default function App() {
     setScanFolder(folder);
     const total = Number(latest?.total || 0) || undefined;
     const source = typeof latest?.source === "string" && latest.source ? latest.source : "manual";
+    const compatibilityParams = await scanCompatibilityParams();
+    if (!compatibilityParams) return;
     const result = await invoke<CommandResult>("Resuming scan", "scan", {
       folder,
       source,
       resume: true,
-      total
+      total,
+      ...compatibilityParams
     });
     const found = result.added ?? 0;
     const skipped = result.metrics?.manifestSkipped ? ` Skipped ${result.metrics.manifestSkipped} completed file(s).` : "";
     setNoticeMessage("ok", "notice.resumeComplete", { count: found, skipped }, `Resume complete. Found ${found} possible match${found === 1 ? "" : "es"}.${skipped}`);
+  }
+
+  async function restartLastScan() {
+    const latest = state?.scanJob?.latestScan;
+    const folder = typeof latest?.root_path === "string" && latest.root_path
+      ? latest.root_path
+      : typeof latest?.label === "string"
+        ? latest.label
+        : scanFolder;
+    if (!folder.trim()) {
+      setNotice({ tone: "warn", text: "No interrupted scan folder was found." });
+      return;
+    }
+    if (!state?.consentOnFile || !state.references.length) {
+      setNotice({ tone: "warn", text: "Confirm permission and add a person before restarting." });
+      return;
+    }
+    const proceed = await confirmDialog(`Restart this scan from the beginning?\n\n${folder}\n\nCompleted-file skipping from the interrupted run will not be used.`);
+    if (!proceed) return;
+    setScanFolder(folder);
+    const compatibilityParams = await scanCompatibilityParams();
+    if (!compatibilityParams) return;
+    const total = Number(latest?.total || 0) || undefined;
+    const source = typeof latest?.source === "string" && latest.source ? latest.source : "manual";
+    const result = await invoke<CommandResult>("Restarting scan", "scan", {
+      folder,
+      source,
+      resume: false,
+      total,
+      ...compatibilityParams
+    });
+    const found = result.added ?? 0;
+    const protectedText = protectedSummary(Number(result.metrics?.safeFiltered || 0));
+    setDismissedRecoveryRunId(String(latest?.run_id || latest?.runId || ""));
+    setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped: "", protected: protectedText }, `Restart complete. Found ${found} possible match${found === 1 ? "" : "es"}.${protectedText}`);
   }
 
   async function scanCameraFrame(dataUrl: string): Promise<CameraScanResult> {
@@ -2301,7 +2492,9 @@ export default function App() {
     }
 
     setBusy(null);
-    const result = await invoke<CommandResult>("Scanning camera photo", "scan", { folder: saved.folder, source: "camera" });
+    const compatibilityParams = await scanCompatibilityParams();
+    if (!compatibilityParams) return { ...saved, added: 0, errors: [], matched: false };
+    const result = await invoke<CommandResult>("Scanning camera photo", "scan", { folder: saved.folder, source: "camera", ...compatibilityParams });
     const found = result.added ?? 0;
     const skipped = skippedSummary(result.errors?.length ?? 0);
     const protectedText = protectedSummary(Number(result.metrics?.safeFiltered || 0));
@@ -2510,7 +2703,7 @@ export default function App() {
 
   async function handleExternalOpen(payload: ExternalOpenPayload) {
     if (payload.type === "workspace") {
-      if (payload.source === "protocol" && !confirmUi(`Open this app folder from an external link?\n\n${payload.path}`)) {
+      if (payload.source === "protocol" && !await confirmDialog(`Open this app folder from an external link?\n\n${payload.path}`)) {
         return;
       }
       await window.crossAge.stopFolderWatch();
@@ -2527,7 +2720,7 @@ export default function App() {
       return;
     }
     if (payload.type === "watch-folder") {
-      if (payload.source === "protocol" && !confirmUi(`Watch this folder from an external link?\n\n${payload.path}`)) {
+      if (payload.source === "protocol" && !await confirmDialog(`Watch this folder from an external link?\n\n${payload.path}`)) {
         return;
       }
       await startWatchForFolder(payload.path);
@@ -2540,7 +2733,12 @@ export default function App() {
         setNotice({ tone: "warn", text: "Files received. Add a person and confirm permission before scanning." });
         return;
       }
-      const result = await invoke<CommandResult>("Scanning opened files", "scan_paths", { paths: payload.paths, source: "system" });
+      const compatibilityParams = await scanCompatibilityParams();
+      if (!compatibilityParams) {
+        setPendingExternalIntent(payload);
+        return;
+      }
+      const result = await invoke<CommandResult>("Scanning opened files", "scan_paths", { paths: payload.paths, source: "system", ...compatibilityParams });
       const protectedText = protectedSummary(Number(result.metrics?.safeFiltered || 0));
       const found = result.added ?? 0;
       setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped: "", protected: protectedText }, `Found ${found} possible match${found === 1 ? "" : "es"}.${protectedText}`);
@@ -2557,16 +2755,39 @@ export default function App() {
     const payload = pendingExternalIntent;
     setPendingExternalIntent(null);
     setActiveTab("scan");
-    const result = await invoke<CommandResult>("Scanning received files", "scan_paths", { paths: payload.paths, source: "system" });
+    const compatibilityParams = await scanCompatibilityParams();
+    if (!compatibilityParams) {
+      setPendingExternalIntent(payload);
+      return;
+    }
+    const result = await invoke<CommandResult>("Scanning received files", "scan_paths", { paths: payload.paths, source: "system", ...compatibilityParams });
     const protectedText = protectedSummary(Number(result.metrics?.safeFiltered || 0));
     const found = result.added ?? 0;
     setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped: " from received files.", protected: protectedText }, `Found ${found} possible match${found === 1 ? "" : "es"} from received files.${protectedText}`);
   }
 
-  async function review(status: CandidateStatus, currentOverride?: ReviewCandidate | null) {
-    if (!selectedCandidateId) return;
+  function startReferenceFix(targetPersonName: string) {
+    const target = safeText(targetPersonName).trim();
+    if (target) {
+      setPersonName(target);
+    }
+    setAgeBucket("unknown");
+    setEnrollFolder("");
+    setAgeGroupFolders(emptyAgeFolders());
+    setActiveTab("enroll");
+    setNotice({
+      tone: "ok",
+      text: target ? `Add clearer, angled, side, or age-range photos for ${target}.` : "Add clearer saved-person photos."
+    });
+  }
+
+  async function review(status: CandidateStatus, currentOverride?: ReviewCandidate | null, quiet = false) {
     const current = currentOverride ?? selectedCandidate;
-    await invoke<AppState>("Saving review", "set_status", { candidateId: selectedCandidateId, status });
+    // H4: target the explicit candidate (not the live selection) so the caller
+    // can advance the selection optimistically before this write resolves.
+    const candidateId = current?.candidateId ?? selectedCandidateId;
+    if (!candidateId) return;
+    await invoke<AppState>("Saving review", "set_status", { candidateId, status }, { quiet });
     if (current && current.status !== status) {
       setReviewUndo({
         candidateId: current.candidateId,
@@ -2690,7 +2911,7 @@ export default function App() {
   }
 
   async function cleanupMediaTrash(days: number, dryRun = false) {
-    if (!dryRun && !confirmUi(`Permanently remove files in Vintrace app trash older than ${days} days? Restoring those trash entries will no longer be possible.`)) {
+    if (!dryRun && !await confirmDialog(`Permanently remove files in Vintrace app trash older than ${days} days? Restoring those trash entries will no longer be possible.`)) {
       return null;
     }
     const result = await invoke<CommandResult<MediaTrashCleanupValue>>(dryRun ? "Previewing app trash cleanup" : "Cleaning app trash", "cleanup_media_trash", { days, dryRun });
@@ -2720,10 +2941,10 @@ export default function App() {
   }
 
   async function blockFalseMatch(candidateId: string) {
-    if (!confirmUi("Stop suggesting this exact image/person pair again? The current row will be rejected.")) return;
+    if (!await confirmDialog("Stop suggesting this image for this person again, even if another saved photo triggers it? The current row will be rejected.")) return;
     const result = await invoke<CommandResult>("Saving feedback", "block_false_match", { candidateId });
     const value = result.value as { blocked?: number } | undefined;
-    setNotice({ tone: "ok", text: value?.blocked ? "This false match will be suppressed in future scans." : "Feedback saved." });
+    setNotice({ tone: "ok", text: value?.blocked ? "This image/person false match will be suppressed in future scans." : "Feedback saved." });
   }
 
   async function reassignCandidatePerson(candidateId: string, personName: string) {
@@ -2744,19 +2965,19 @@ export default function App() {
   async function deleteReference() {
     if (!selectedRefId) return;
     const selected = state?.references.find((ref) => ref.refId === selectedRefId);
-    if (!confirmUiMessage("dialog.deleteSavedPhoto", { person: selected?.personName ?? "" }, `Delete this saved photo for ${selected?.personName ?? ""}?`)) return;
+    if (!await confirmDialogMessage("dialog.deleteSavedPhoto", { person: selected?.personName ?? "" }, `Delete this saved photo for ${selected?.personName ?? ""}?`)) return;
     await invoke<AppState>("Deleting saved photo", "delete_reference", { refId: selectedRefId });
   }
 
   async function clearQueue() {
     if (!state?.candidates.length) return;
-    if (!confirmUiMessage("dialog.clearMatches", {}, "Clear all possible matches from the review list?")) return;
+    if (!await confirmDialogMessage("dialog.clearMatches", {}, "Clear all possible matches from the review list?")) return;
     await invoke<AppState>("Clearing matches", "clear_queue");
   }
 
   async function clearReferences() {
     if (!state?.references.length) return;
-    if (!confirmUiMessage("dialog.clearSavedPhotos", {}, "Clear all saved face photos? Activity history is preserved.")) return;
+    if (!await confirmDialogMessage("dialog.clearSavedPhotos", {}, "Clear all saved face photos? Activity history is preserved.")) return;
     const result = await invoke<CommandResult>("Clearing saved photos", "clear_references");
     const cleared = result.cleared ?? 0;
     setNoticeMessage("ok", "notice.clearedSavedPhotos", { count: cleared }, `Cleared ${cleared} saved face photo${cleared === 1 ? "" : "s"}.`);
@@ -2767,14 +2988,14 @@ export default function App() {
       setNotice({ tone: "warn", text: "Choose a person to delete." });
       return;
     }
-    if (!confirmUiMessage("dialog.deletePerson", { person: personName }, `Delete saved photos and possible matches for ${personName}? Activity history is preserved.`)) return;
+    if (!await confirmDialogMessage("dialog.deletePerson", { person: personName }, `Delete saved photos and possible matches for ${personName}? Activity history is preserved.`)) return;
     const result = await invoke<CommandResult>("Deleting person", "delete_person", { personName });
     const deleted = result.deleted ?? { references: 0, candidates: 0 };
     setNoticeMessage("ok", "notice.deletedPersonData", { references: deleted.references, candidates: deleted.candidates }, `Deleted ${deleted.references} saved photo${deleted.references === 1 ? "" : "s"} and ${deleted.candidates} possible match${deleted.candidates === 1 ? "" : "es"}.`);
   }
 
   async function purgeReviewedCandidates() {
-    if (!confirmUiMessage("dialog.purgeReviewed", {}, "Remove reviewed possible matches from the active list? Activity history is preserved.")) return;
+    if (!await confirmDialogMessage("dialog.purgeReviewed", {}, "Remove reviewed possible matches from the active list? Activity history is preserved.")) return;
     const result = await invoke<CommandResult>("Removing reviewed matches", "purge_candidates", { statuses: ["accepted", "rejected", "uncertain"] });
     const purged = result.purged ?? 0;
     setNoticeMessage("ok", "notice.removedReviewedMatches", { count: purged }, `Removed ${purged} reviewed possible match${purged === 1 ? "" : "es"}.`);
@@ -2800,7 +3021,7 @@ export default function App() {
         ? `\n\nSeveral missing links share this unavailable location:\n${preview.value.unavailableRoots.slice(0, 3).join("\n")}\n\nReconnect or relink the drive first unless you intentionally want to remove these saved links.`
         : "";
       const repairPrompt = `Remove ${preview.value.removedReferences} missing saved photo link(s) and ${preview.value.removedCandidates} missing match row(s)? Original photos are not touched.${rootWarning}`;
-      const proceed = confirmUiMessage(
+      const proceed = await confirmDialogMessage(
         "dialog.repairMissingLinks",
         { references: preview.value.removedReferences, candidates: preview.value.removedCandidates, rootWarning },
         repairPrompt
@@ -2814,7 +3035,7 @@ export default function App() {
     if (result.value?.destructiveBlocked) {
       const roots = result.value.unavailableRoots?.slice(0, 3).join("\n") || "Unavailable photo location";
       const forcePrompt = `Repair was blocked because several saved links look like a disconnected or moved drive:\n\n${roots}\n\nChoose Cancel, reconnect the drive, then use Relink. Choose OK only if you want to remove these saved links from the app.`;
-      const force = confirmUiMessage("dialog.forceRepairMissingDrive", { roots }, forcePrompt);
+      const force = await confirmDialogMessage("dialog.forceRepairMissingDrive", { roots }, forcePrompt);
       if (!force) {
         setWorkspaceRepairResult(result.value);
         setWorkspaceHealth(result.value.before);
@@ -2848,11 +3069,11 @@ export default function App() {
     }
     setDatabaseRepairResult(preview.value);
     if (preview.value.before.ok) {
-      if (!confirmUi("Database integrity is already healthy. Optimize the SQLite index now? A snapshot will be saved first.")) {
+      if (!await confirmDialog("Database integrity is already healthy. Optimize the SQLite index now? A snapshot will be saved first.")) {
         setNotice({ tone: "ok", text: "Database integrity passed. No repair needed." });
         return;
       }
-    } else if (!confirmUi("Database integrity needs repair. Vintrace will snapshot the current SQLite files, rebuild the local index from saved app state, and keep original photos untouched. Continue?")) {
+    } else if (!await confirmDialog("Database integrity needs repair. Vintrace will snapshot the current SQLite files, rebuild the local index from saved app state, and keep original photos untouched. Continue?")) {
       setNotice({ tone: "warn", text: "Database repair cancelled. No app data changed." });
       return;
     }
@@ -2904,7 +3125,7 @@ export default function App() {
       ? `\n\n${preview.value.missingTargets.length} saved path${preview.value.missingTargets.length === 1 ? "" : "s"} could not be found in the selected folder. Cancel and choose a better folder for an all-at-once relink, or OK to update only the paths that were found.`
       : "";
     const relinkPrompt = `Update ${preview.value.relinkedFields} saved path${preview.value.relinkedFields === 1 ? "" : "s"} to the selected folder? Original photos are not moved or copied.${partialWarning}`;
-    const proceed = confirmUiMessage(
+    const proceed = await confirmDialogMessage(
       "dialog.relinkSavedPaths",
       { count: preview.value.relinkedFields, partialWarning },
       relinkPrompt
@@ -2934,14 +3155,14 @@ export default function App() {
       setNotice({ tone: "warn", text: "No duplicate match rows found." });
       return;
     }
-    if (!confirmUiMessage("dialog.removeDuplicateRows", { count: duplicateCount }, `Remove ${duplicateCount} duplicate match row(s)? The strongest row in each group will be kept.`)) return;
+    if (!await confirmDialogMessage("dialog.removeDuplicateRows", { count: duplicateCount }, `Remove ${duplicateCount} duplicate match row(s)? The strongest row in each group will be kept.`)) return;
     const result = await invoke<CommandResult<WorkspaceHealth>>("Removing duplicate matches", "purge_duplicate_candidates");
     if (result.value) setWorkspaceHealth(result.value);
     setNoticeMessage("ok", "notice.duplicateRowsRemoved", { count: result.purged ?? 0 }, `Removed ${result.purged ?? 0} duplicate match row${(result.purged ?? 0) === 1 ? "" : "s"}.`);
   }
 
   async function optimizeWorkspace() {
-    if (!confirmUiMessage("dialog.optimizeWorkspace", {}, "Optimize generated app-folder data? Original photos and videos will not be touched.")) return;
+    if (!await confirmDialogMessage("dialog.optimizeWorkspace", {}, "Optimize generated app-folder data? Original photos and videos will not be touched.")) return;
     const result = await invoke<CommandResult<WorkspaceOptimizeResult>>("Optimizing app folder", "optimize_workspace");
     if (result.value) {
       setWorkspaceOptimizeResult(result.value);
@@ -2973,7 +3194,7 @@ export default function App() {
 
   async function purgeOldCandidates(days: number) {
     const safeDays = Math.max(1, Math.min(3650, Math.round(days || 90)));
-    if (!confirmUi(`Remove reviewed matches older than ${safeDays} day(s)? Activity history is preserved.`)) return;
+    if (!await confirmDialog(`Remove reviewed matches older than ${safeDays} day(s)? Activity history is preserved.`)) return;
     const result = await invoke<CommandResult>("Removing old reviewed matches", "purge_old_candidates", {
       days: safeDays,
       statuses: ["accepted", "rejected", "uncertain"]
@@ -3000,6 +3221,7 @@ export default function App() {
       return;
     }
     setBackupVerification(null);
+    setBackupRestoreResult(null);
     setNoticeMessage("ok", "notice.backupCreated", { name: basename(value.zipPath), bytes: formatBytes(value.bytes) }, `Backup created: ${basename(value.zipPath)} (${formatBytes(value.bytes)}).`);
     void window.crossAge.revealPath(value.zipPath);
   }
@@ -3017,8 +3239,23 @@ export default function App() {
     }
   }
 
+  async function restoreLatestWorkspaceBackup() {
+    const folder = await window.crossAge.chooseFolder();
+    if (!folder) return;
+    if (!await confirmDialog("Restore the latest verified app-folder backup into this empty folder? Existing files are not allowed.")) return;
+    const result = await invoke<CommandResult<WorkspaceBackupRestoreValue>>("Restoring backup", "restore_workspace_backup", { target: folder });
+    if (result.value) {
+      setBackupRestoreResult(result.value);
+      setNotice({
+        tone: "ok",
+        text: `Backup restored to ${basename(result.value.targetRoot) || result.value.targetRoot}.`
+      });
+      void window.crossAge.revealPath(result.value.targetRoot);
+    }
+  }
+
   async function pruneWorkspaceBackups() {
-    if (!confirmUi("Keep the 5 newest app-folder backups and remove older backup ZIPs?")) return;
+    if (!await confirmDialog("Keep the 5 newest app-folder backups and remove older backup ZIPs?")) return;
     const result = await invoke<CommandResult<WorkspaceBackupPruneValue>>("Cleaning backups", "prune_workspace_backups", { keep: 5 });
     if (result.value) {
       setBackupPruneResult(result.value);
@@ -3038,7 +3275,7 @@ export default function App() {
   }
 
   async function pruneScanManifests() {
-    if (!confirmUi("Keep the 20 newest resumable scan manifests and remove older scan-manifest rows? Review results and original photos are not touched.")) return;
+    if (!await confirmDialog("Keep the 20 newest resumable scan manifests and remove older scan-manifest rows? Review results and original photos are not touched.")) return;
     const result = await invoke<CommandResult<ScanManifestPruneValue>>("Cleaning scan manifests", "prune_scan_manifests", { keepRuns: 20 });
     if (result.value) {
       setScanManifestPruneResult(result.value);
@@ -3146,6 +3383,17 @@ export default function App() {
         ? `${formatNumber(stale)} saved item${stale === 1 ? "" : "s"} were created with a different face model.`
         : "Saved faces and matches use the active face model."
     );
+  }
+
+  async function runReferenceGapReport() {
+    const result = await invoke<ReferenceGapReport>("Checking saved people", "reference_gap_report");
+    setReferenceGapReport(result);
+    setNotice({
+      tone: result.needsAttention ? "warn" : "ok",
+      text: result.needsAttention
+        ? `${formatNumber(result.needsAttention)} saved person${result.needsAttention === 1 ? "" : "s"} need stronger reference photos.`
+        : "Saved people have strong reference coverage."
+    });
   }
 
   async function runRuntimeBenchmark() {
@@ -3302,6 +3550,8 @@ export default function App() {
       setNotice({ tone: "warn", text: "No pending folders are in the queue." });
       return;
     }
+    const compatibilityParams = await scanCompatibilityParams();
+    if (!compatibilityParams) return;
     setScanQueueRunning(true);
     const updateItem = (id: string, patch: Partial<ScanQueueItem>) => {
       working = working.map((item) => item.id === id ? { ...item, ...patch } : item);
@@ -3317,7 +3567,8 @@ export default function App() {
           const result = await invoke<CommandResult>("Scanning queued folder", "scan", {
             folder: item.path,
             source: "queue",
-            resume: true
+            resume: true,
+            ...compatibilityParams
           });
           if (result.metrics?.cancelled) {
             updateItem(item.id, { status: "error", message: `Cancelled after ${result.metrics.processed ?? 0} file(s)` });
@@ -3355,10 +3606,13 @@ export default function App() {
       setNotice({ tone: "warn", text: "Confirm permission and add a person before retrying files." });
       return;
     }
+    const compatibilityParams = await scanCompatibilityParams();
+    if (!compatibilityParams) return;
     const result = await invoke<CommandResult>("Retrying issue files", "scan_paths", {
       paths: uniquePaths,
       source: "retry",
-      resume: false
+      resume: false,
+      ...compatibilityParams
     });
     const skipped = result.errors?.length ? ` ${result.errors.length} still need attention.` : "";
     setNoticeMessage(
@@ -3394,7 +3648,7 @@ export default function App() {
       setNotice({ tone: "warn", text: "Turn on at least one review rule first." });
       return;
     }
-    if (!confirmUi("Apply saved review rules to pending matches? You can still review and change any result afterward.")) return;
+    if (!await confirmDialog("Apply saved review rules to pending matches? You can still review and change any result afterward.")) return;
     try {
       await saveSettingsDraftIfDirty("Saving review rules");
     } catch {
@@ -3453,7 +3707,7 @@ export default function App() {
   }
 
   async function disableWorkspaceLock() {
-    if (!confirmUi("Turn Workspace Lock off for this app folder?")) return;
+    if (!await confirmDialog("Turn Workspace Lock off for this app folder?")) return;
     try {
       const status = await window.crossAge.disableWorkspaceLock();
       setWorkspaceLock(status);
@@ -3494,8 +3748,121 @@ export default function App() {
     });
   }
 
+  async function choosePublicDatasetFolder() {
+    return window.crossAge.chooseFolder();
+  }
+
+  async function inspectPublicDataset(options: { datasetId: string; folder: string; includeVideos?: boolean }) {
+    const result = await invoke<PublicDatasetInspection>("Inspecting dataset", "inspect_public_dataset", {
+      datasetId: options.datasetId,
+      folder: options.folder,
+      includeVideos: Boolean(options.includeVideos)
+    });
+    setPublicDatasetInspection(result);
+    setNotice({
+      tone: result.usableIdentityCount >= 2 ? "ok" : "warn",
+      text: `Dataset inspection found ${formatNumber(result.usableIdentityCount)} usable identities.`
+    });
+  }
+
+  async function runPublicDatasetBenchmark(options: {
+    datasetId: string;
+    folder: string;
+    maxIdentities: number;
+    candidateImages: number;
+    downloadIfMissing?: boolean;
+    includeVideos?: boolean;
+  }) {
+    const autoDownloadDatasets = new Set(["lfw", "cfp"]);
+    if (!options.folder && !autoDownloadDatasets.has(options.datasetId)) {
+      setNotice({ tone: "warn", text: "Choose a local dataset folder first." });
+      return;
+    }
+    if (!options.folder && options.datasetId === "lfw" && !await confirmDialog("Download or reuse the LFW benchmark cache and run an isolated local benchmark?")) return;
+    if (!options.folder && options.datasetId === "cfp" && !await confirmDialog("Download or reuse the official CFP benchmark archive and run an isolated local benchmark?")) return;
+    const result = await invoke<CommandResult<PublicDatasetBenchmarkResult>>("Running dataset benchmark", "run_public_dataset_benchmark", {
+      datasetId: options.datasetId,
+      folder: options.folder,
+      maxIdentities: options.maxIdentities,
+      candidateImages: options.candidateImages,
+      downloadIfMissing: Boolean(options.downloadIfMissing),
+      includeVideos: Boolean(options.includeVideos),
+      includeDistractors: true
+    });
+    if (result.value) {
+      setPublicDatasetBenchmark(result.value);
+      setPublicDatasetInspection(result.value.inspection);
+      setNotice({
+        tone: result.value.metrics.falsePositives || result.value.metrics.falseNegatives ? "warn" : "ok",
+        text: `Dataset benchmark finished: ${percent(result.value.metrics.precision)} precision, ${percent(result.value.metrics.recall)} recall.`
+      });
+      void window.crossAge.revealPath(result.value.reportPath);
+    }
+  }
+
+  async function runPublicDatasetModelComparison(options: {
+    datasetId: string;
+    folder: string;
+    maxIdentities: number;
+    candidateImages: number;
+    downloadIfMissing?: boolean;
+    includeVideos?: boolean;
+  }) {
+    const autoDownloadDatasets = new Set(["lfw", "cfp"]);
+    if (!options.folder && !autoDownloadDatasets.has(options.datasetId)) {
+      setNotice({ tone: "warn", text: "Choose a local dataset folder first." });
+      return;
+    }
+    if (!options.folder && !await confirmDialog("Run an isolated model-pack comparison using the selected public dataset cache/download?")) return;
+    const result = await invoke<CommandResult<PublicDatasetModelComparisonResult>>("Comparing model packs", "compare_public_dataset_models", {
+      datasetId: options.datasetId,
+      folder: options.folder,
+      maxIdentities: options.maxIdentities,
+      candidateImages: options.candidateImages,
+      downloadIfMissing: Boolean(options.downloadIfMissing),
+      includeVideos: Boolean(options.includeVideos),
+      includeDistractors: true
+    });
+    if (result.value) {
+      setPublicDatasetModelComparison(result.value);
+      const completed = result.value.packs.filter((pack) => pack.status === "complete").length;
+      setNotice({
+        tone: completed ? "ok" : "warn",
+        text: completed
+          ? `Compared ${completed} installed model pack${completed === 1 ? "" : "s"}.`
+          : "No installed model packs were available for comparison."
+      });
+      void window.crossAge.revealPath(result.value.reportPath);
+    }
+  }
+
+  async function applyModelRecommendation(pack: string) {
+    const target = pack.trim();
+    if (!target) {
+      setNotice({ tone: "warn", text: "Run model comparison first, then choose a recommended model." });
+      return;
+    }
+    if (!await confirmDialog(`Apply ${target} as the active face model and backfill saved person photos now?`)) return;
+    try {
+      const result = await invoke<CommandResult<Record<string, unknown>>>("Applying model recommendation", "apply_model_recommendation", {
+        pack: target,
+        backfill: true
+      });
+      const value = result.value ?? {};
+      const backfill = asRecord(value.backfill) ?? {};
+      const added = Number(backfill.added ?? 0);
+      const changed = Boolean(value.changed);
+      setNotice({
+        tone: "ok",
+        text: `${changed ? "Switched" : "Kept"} active model ${target}${added ? ` and backfilled ${formatNumber(added)} saved photo embedding${added === 1 ? "" : "s"}` : ""}.`
+      });
+    } catch (error) {
+      setErrorNotice(error, "Recommended model could not be applied.");
+    }
+  }
+
   async function applyCalibration() {
-    if (!confirmUi("Apply the current review feedback to the matching levels? You can still change settings afterward.")) return;
+    if (!await confirmDialog("Apply the current review feedback to the matching levels? You can still change settings afterward.")) return;
     const result = await invoke<CommandResult>("Applying calibration", "apply_calibration");
     if (result.state) {
       applyState(result.state);
@@ -3590,7 +3957,7 @@ export default function App() {
     const text = includeAudit
       ? "Delete all face data, generated caches, scan history, and activity history? This cannot be undone without a backup."
       : "Delete all saved faces, possible matches, generated previews, scan history, and model caches? Activity history is preserved.";
-    if (!confirmUi(text)) return;
+    if (!await confirmDialog(text)) return;
     const result = await invoke<CommandResult<DeleteFaceDataResult>>("Deleting face data", "delete_face_data", {
       confirm: true,
       includeAudit
@@ -3610,7 +3977,7 @@ export default function App() {
     const mergeText = settingsPeople.some((person) => person.toLowerCase() === target.toLowerCase() && person !== oldName)
       ? " This will merge into an existing person label."
       : "";
-    if (!confirmUiMessage("dialog.renamePerson", { oldName, newName: target, mergeText }, `Rename ${oldName} to ${target}?${mergeText}`)) return;
+    if (!await confirmDialogMessage("dialog.renamePerson", { oldName, newName: target, mergeText }, `Rename ${oldName} to ${target}?${mergeText}`)) return;
     const result = await invoke<CommandResult>("Renaming person", "rename_person", { oldName, newName: target });
     const renamed = result.renamed ?? { references: 0, candidates: 0 };
     setNoticeMessage(
@@ -3629,6 +3996,7 @@ export default function App() {
   function settingsPayload(draft: SettingsDraft): Record<string, unknown> {
     return {
       thresholds: draft.thresholds,
+      modelPack: draft.modelPack,
       clusterMinSize: draft.clusterMinSize,
       faceDetectorSize: draft.faceDetectorSize,
       twoPassScan: draft.twoPassScan,
@@ -4031,7 +4399,12 @@ export default function App() {
             requestConsent={() => setConsent(true).catch(setErrorNotice)}
             chooseModelRoot={chooseModelRoot}
             downloadModel={downloadModel}
+            backfillModelReferences={backfillModelReferences}
             modelDownloadProgress={modelDownloadProgress}
+            updateStatus={updateStatus}
+            mediaActionProgress={mediaActionProgress}
+            scanQueue={scanQueue}
+            scanQueueRunning={scanQueueRunning}
             rerunScanSource={rerunScanSource}
             cancelScan={cancelActiveScan}
             pauseScan={pauseActiveScan}
@@ -4072,6 +4445,9 @@ export default function App() {
             chooseFolder={() => chooseFolder(setScanFolder)}
             scan={scan}
             resumeLastScan={resumeLastScan}
+            restartLastScan={restartLastScan}
+            dismissedRecoveryRunId={dismissedRecoveryRunId}
+            dismissRecovery={(runId) => setDismissedRecoveryRunId(runId)}
             scanCameraFrame={scanCameraFrame}
             analyzeFolder={analyzeScanFolder}
             folderAnalysis={folderAnalysis}
@@ -4182,7 +4558,9 @@ export default function App() {
             exportReviewLedger={exportReviewLedger}
             exportWorkspaceBackup={exportWorkspaceBackup}
             verifyLatestWorkspaceBackup={verifyLatestWorkspaceBackup}
+            restoreLatestWorkspaceBackup={restoreLatestWorkspaceBackup}
             backupVerification={backupVerification}
+            backupRestoreResult={backupRestoreResult}
             backupPruneResult={backupPruneResult}
             pruneWorkspaceBackups={pruneWorkspaceBackups}
             copyText={copyText}
@@ -4216,8 +4594,17 @@ export default function App() {
             runReleaseReadiness={runReleaseReadiness}
             accuracyEvaluation={accuracyEvaluation}
             accuracyValidationPack={accuracyValidationPack}
+            publicDatasetCatalog={publicDatasetCatalog}
+            publicDatasetInspection={publicDatasetInspection}
+            publicDatasetBenchmark={publicDatasetBenchmark}
+            publicDatasetModelComparison={publicDatasetModelComparison}
             runAccuracyEvaluation={runAccuracyEvaluation}
             generateAccuracyValidationPack={generateAccuracyValidationPack}
+            choosePublicDatasetFolder={choosePublicDatasetFolder}
+            inspectPublicDataset={inspectPublicDataset}
+            runPublicDatasetBenchmark={runPublicDatasetBenchmark}
+            runPublicDatasetModelComparison={runPublicDatasetModelComparison}
+            applyModelRecommendation={applyModelRecommendation}
             applyCalibration={applyCalibration}
             exportAccuracyLabels={exportAccuracyLabels}
             importAccuracyLabels={importAccuracyLabels}
@@ -4236,11 +4623,15 @@ export default function App() {
             performanceProfile={performanceProfile}
             latencySamples={latencySamples}
             latencySummary={latencySummary}
+            scanProgress={scanProgress}
             clearLatencySamples={clearLatencySamples}
             copyPerformanceReport={copyPerformanceReport}
             warmPreviewsNow={() => warmPreviewCache(runtimePerformanceProfile.manualPreviewLimit, true)}
             chooseModelRoot={chooseModelRoot}
             downloadModel={downloadModel}
+            backfillModelReferences={backfillModelReferences}
+            modelSwitchPlan={modelSwitchPlan}
+            runModelSwitchDryRun={(targetPack) => runModelSwitchDryRun(targetPack)}
             modelDownloadProgress={modelDownloadProgress}
             installerDiagnostics={installerDiagnostics}
             runInstallerDiagnostics={runInstallerDiagnostics}
@@ -4248,6 +4639,9 @@ export default function App() {
             runModelIntegrity={runModelIntegrity}
             modelDriftReport={modelDriftReport}
             runModelDriftReport={runModelDriftReport}
+            referenceGapReport={referenceGapReport}
+            runReferenceGapReport={runReferenceGapReport}
+            startReferenceFix={startReferenceFix}
             duplicatePeople={duplicatePeople}
             loadDuplicatePeople={loadDuplicatePeople}
             mergeDuplicatePeople={mergeDuplicatePeople}
@@ -4279,6 +4673,7 @@ export default function App() {
             onConfirm={confirmConsent}
           />
         )}
+        <ConfirmHost />
       </section>
     </main>
   );
@@ -4345,6 +4740,16 @@ function ModalFrame({
   const sheetRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
+    // L1: lock background scroll while a dialog is open so the page behind it
+    // can't scroll out from under the user.
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, []);
+
+  useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const sheet = sheetRef.current;
     const focusables = sheet
@@ -4359,35 +4764,63 @@ function ModalFrame({
     };
   }, []);
 
-  function handleKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
-    if (event.key === "Escape" && onEscape) {
-      event.preventDefault();
-      onEscape();
-      return;
+  useEffect(() => {
+    function focusablesFor(sheet: HTMLElement) {
+      return Array.from(sheet.querySelectorAll<HTMLElement>(modalFocusableSelector)).filter(
+        (item) => item.offsetParent !== null || item.dataset.autofocus === "true" || item === document.activeElement
+      );
     }
-    if (event.key !== "Tab") return;
-    const sheet = sheetRef.current;
-    const focusables = sheet
-      ? Array.from(sheet.querySelectorAll<HTMLElement>(modalFocusableSelector)).filter((item) => item.offsetParent !== null || item === document.activeElement)
-      : [];
-    if (!focusables.length) {
-      event.preventDefault();
-      sheet?.focus();
-      return;
+
+    function handleDocumentKeyDown(event: KeyboardEvent) {
+      const sheet = sheetRef.current;
+      if (!sheet) return;
+      if (event.key === "Escape" && onEscape) {
+        event.preventDefault();
+        event.stopPropagation();
+        onEscape();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusables = focusablesFor(sheet);
+      if (!focusables.length) {
+        event.preventDefault();
+        event.stopPropagation();
+        sheet.focus();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      if (!active || !sheet.contains(active)) {
+        event.preventDefault();
+        event.stopPropagation();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && active === first) {
+        event.preventDefault();
+        event.stopPropagation();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        event.stopPropagation();
+        first.focus();
+      }
     }
-    const first = focusables[0];
-    const last = focusables[focusables.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  }
+
+    document.addEventListener("keydown", handleDocumentKeyDown, true);
+    return () => document.removeEventListener("keydown", handleDocumentKeyDown, true);
+  }, [onEscape]);
 
   return (
-    <div className="modal-backdrop" role="presentation">
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        // L1: dismiss when the backdrop itself (not the dialog) is clicked.
+        if (event.target === event.currentTarget && onEscape) {
+          onEscape();
+        }
+      }}
+    >
       <section
         ref={sheetRef}
         className={className}
@@ -4395,11 +4828,45 @@ function ModalFrame({
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        onKeyDown={handleKeyDown}
       >
         {children}
       </section>
     </div>
+  );
+}
+
+// H5: single mounted host for the promise-based confirm dialog. Registers the
+// module-level controller and renders a themed, focus-trapped ModalFrame.
+function ConfirmHost() {
+  const [request, setRequest] = useState<ConfirmRequest | null>(null);
+
+  useEffect(() => {
+    confirmController = (next) => setRequest(next);
+    return () => {
+      confirmController = null;
+    };
+  }, []);
+
+  if (!request) return null;
+
+  const settle = (confirmed: boolean) => {
+    request.resolve(confirmed);
+    setRequest(null);
+  };
+
+  return (
+    <ModalFrame titleId="confirm-dialog-title" className="confirm-sheet" onEscape={() => settle(false)}>
+      <h2 id="confirm-dialog-title">{localizeImperativeText("Please confirm")}</h2>
+      <p className="confirm-message">{request.message}</p>
+      <div className="confirm-actions">
+        <button className="secondary" type="button" onClick={() => settle(false)}>
+          {localizeImperativeText("Cancel")}
+        </button>
+        <button className="primary" type="button" data-autofocus="true" onClick={() => settle(true)}>
+          {localizeImperativeText("Continue")}
+        </button>
+      </div>
+    </ModalFrame>
   );
 }
 
@@ -4605,6 +5072,10 @@ function Dashboard({
   chooseModelRoot,
   downloadModel,
   modelDownloadProgress,
+  updateStatus,
+  mediaActionProgress,
+  scanQueue,
+  scanQueueRunning,
   rerunScanSource,
   cancelScan,
   pauseScan,
@@ -4626,7 +5097,12 @@ function Dashboard({
   requestConsent(): void;
   chooseModelRoot(): void | Promise<void>;
   downloadModel(pack: string, root?: string, force?: boolean): void | Promise<void>;
+  backfillModelReferences(): void | Promise<void>;
   modelDownloadProgress: ModelDownloadProgress | null;
+  updateStatus: UpdateStatus | null;
+  mediaActionProgress: MediaActionProgress | null;
+  scanQueue: ScanQueueItem[];
+  scanQueueRunning: boolean;
   rerunScanSource(run: AppState["scanHistory"][number]): void;
   cancelScan(): void;
   pauseScan(): void;
@@ -4714,6 +5190,7 @@ function Dashboard({
     { label: "Needs review", value: formatNumber(state.counts.pending), detail: `${formatRate(reviewCompletion)} reviewed`, tone: "amber" },
     { label: "Files scanned", value: formatNumber(totals.processed), detail: `${formatNumber(totals.runs)} scans`, tone: "blue" },
     { label: "Video frames", value: formatNumber(totals.videoFrames ?? 0), detail: `${formatNumber(totals.videoFiles ?? 0)} video files`, tone: "blue" },
+    { label: "Hard-angle checks", value: formatNumber(totals.poseReranked ?? 0), detail: `${formatNumber(totals.poseAmbiguous ?? 0)} close identity scores`, tone: (totals.poseAmbiguous ?? 0) ? "amber" : "blue" },
     { label: "Possible matches", value: formatNumber(totals.added), detail: `${formatRate(matchRate)} search yield`, tone: "green" },
     { label: "Private photos protected", value: formatNumber(totals.safeFiltered), detail: `${formatRate(protectedRate)} kept out`, tone: "rose" },
     { label: "Match strength", value: scoreLabel(averageScore), detail: `${percent(averageQuality)} photo quality`, tone: toneFor(averageScore) },
@@ -4840,6 +5317,23 @@ function Dashboard({
         busy={busy}
         chooseModelRoot={chooseModelRoot}
         downloadModel={downloadModel}
+      />
+
+      <BackgroundJobCenter
+        state={state}
+        scanProgress={scanProgress}
+        watchStatus={watchStatus}
+        modelDownloadProgress={modelDownloadProgress}
+        updateStatus={updateStatus}
+        mediaActionProgress={mediaActionProgress}
+        scanQueue={scanQueue}
+        scanQueueRunning={scanQueueRunning}
+        navigate={navigate}
+        cancelScan={cancelScan}
+        pauseScan={pauseScan}
+        resumeScan={resumeScan}
+        scanPaused={Boolean(state.scanJob?.paused || localScanMarkers?.paused)}
+        busy={busy}
       />
 
       <div className="metrics dashboard-metrics">
@@ -5176,6 +5670,255 @@ function FirstScanGuide({
   );
 }
 
+function ModelSwitchWizard({
+  state,
+  settings,
+  modelPackages,
+  modelCompatibility,
+  modelDownloadProgress,
+  modelDriftReport,
+  referenceGapReport,
+  busy,
+  validationBlocked,
+  setModelPack,
+  saveSettings,
+  downloadModel,
+  backfillModelReferences,
+  dryRunPlan,
+  runDryRun,
+  runModelDriftReport,
+  runReferenceGapReport
+}: {
+  state: AppState;
+  settings: SettingsDraft;
+  modelPackages: NonNullable<AppState["modelSetup"]>["packages"];
+  modelCompatibility: ModelCompatibilityReport | null | undefined;
+  modelDownloadProgress: ModelDownloadProgress | null;
+  modelDriftReport: ModelDriftReport | null;
+  referenceGapReport: ReferenceGapReport | null;
+  busy: boolean;
+  validationBlocked: boolean;
+  setModelPack(value: string): void;
+  saveSettings(): void;
+  downloadModel(pack: string, root?: string, force?: boolean): void | Promise<void>;
+  backfillModelReferences(): void | Promise<void>;
+  dryRunPlan: ModelSwitchDryRun | null;
+  runDryRun(targetPack?: string): void | Promise<ModelSwitchDryRun | null>;
+  runModelDriftReport(): void | Promise<void>;
+  runReferenceGapReport(): void | Promise<void>;
+}) {
+  const currentPack = state.config.modelPack || state.modelSetup?.currentPack || "antelopev2";
+  const targetPack = settings.modelPack || currentPack;
+  const currentPackage = modelPackages.find((item) => item.pack === currentPack);
+  const targetPackage = modelPackages.find((item) => item.pack === targetPack);
+  const stagedSwitch = targetPack !== currentPack;
+  const hasReferences = state.counts.references > 0;
+  const targetInstalled = Boolean(targetPackage?.available || (state.modelSetup?.ready && state.modelSetup.currentPack === targetPack));
+  const targetDownloading = Boolean(
+    modelDownloadProgress?.pack === targetPack
+    && !["complete", "error"].includes(String(modelDownloadProgress.phase))
+  );
+  const needsBackfill = !stagedSwitch && Boolean(modelCompatibility?.needsBackfill);
+  const totalReferences = stagedSwitch ? state.counts.references : modelCompatibility?.totalReferences ?? state.counts.references;
+  const compatibleReferences = stagedSwitch ? 0 : modelCompatibility?.compatibleReferences ?? 0;
+  const backfillCount = stagedSwitch && hasReferences
+    ? state.counts.references
+    : needsBackfill
+      ? modelCompatibility?.otherModelReferences ?? 0
+      : 0;
+  const staleReferences = modelDriftReport?.counts.staleReferences ?? null;
+  const staleCandidates = modelDriftReport?.counts.staleCandidates ?? null;
+  const referenceGaps = referenceGapReport?.needsAttention ?? null;
+  const previousPack = Object.keys(modelCompatibility?.modelCounts ?? {})
+    .map(modelPackFromModelName)
+    .find((pack) => pack && pack !== currentPack && modelPackages.some((item) => item.pack === pack));
+  const rollbackPack = stagedSwitch ? currentPack : previousPack;
+  const rollbackLabel = modelPackages.find((item) => item.pack === rollbackPack)?.label ?? rollbackPack;
+  const targetLabel = targetPackage?.label ?? targetPack;
+  const currentLabel = currentPackage?.label ?? currentPack;
+  const validationReady = !stagedSwitch && staleReferences !== null;
+  const modelRoot = state.config.modelRoot || state.modelSetup?.modelRoot || state.modelSetup?.defaultRoot || "";
+  const activeDryRun = dryRunPlan?.targetPack === targetPack ? dryRunPlan : null;
+  const dryRunOk = Boolean(activeDryRun && !activeDryRun.blockers.length);
+  const stepItems = [
+    {
+      label: "Choose model",
+      detail: stagedSwitch ? `${currentLabel} -> ${targetLabel}` : `${targetLabel} is active`,
+      state: targetPack ? "done" : "active"
+    },
+    {
+      label: "Install files",
+      detail: targetInstalled ? "Model files are available" : targetDownloading ? `${Math.round(modelDownloadProgress?.percent ?? 0)}% downloaded` : "Download before saving",
+      state: targetInstalled ? "done" : targetDownloading ? "active" : "warn"
+    },
+    {
+      label: "Save switch",
+      detail: stagedSwitch ? "Save to make this the active recognizer" : "Active recognizer is saved",
+      state: stagedSwitch ? "active" : "done"
+    },
+    {
+      label: "Backfill saved photos",
+      detail: !hasReferences ? "No saved people yet" : backfillCount ? `${formatNumber(backfillCount)} saved photo${backfillCount === 1 ? "" : "s"} need embeddings` : `${formatNumber(compatibleReferences)} / ${formatNumber(totalReferences)} compatible`,
+      state: backfillCount ? "warn" : "done"
+    },
+    {
+      label: "Validate",
+      detail: validationReady
+        ? `${formatNumber(staleReferences ?? 0)} stale saved photo${staleReferences === 1 ? "" : "s"}${referenceGaps !== null ? `, ${formatNumber(referenceGaps)} reference gap${referenceGaps === 1 ? "" : "s"}` : ""}`
+        : "Run validation after save/backfill",
+      state: validationReady && (staleReferences || staleCandidates) ? "warn" : validationReady ? "done" : "active"
+    }
+  ];
+
+  function validateModelState() {
+    void Promise.resolve(runModelDriftReport()).then(() => Promise.resolve(runReferenceGapReport()));
+  }
+
+  return (
+    <div className={stagedSwitch || needsBackfill ? "model-switch-wizard warn" : "model-switch-wizard"}>
+      <div className="panel-title compact-title">
+        <HardDrive size={18} />
+        <span>Model switch guide</span>
+        <div className="spacer" />
+        <small>{stagedSwitch ? "Pending save" : needsBackfill ? "Backfill needed" : "Ready"}</small>
+      </div>
+      <div className="model-switch-summary">
+        <span>
+          <small>Current</small>
+          <strong>{currentLabel}</strong>
+        </span>
+        <ChevronRight size={17} />
+        <span>
+          <small>Selected</small>
+          <strong>{targetLabel}</strong>
+        </span>
+        <span>
+          <small>Saved people</small>
+          <strong>{formatNumber(totalReferences)}</strong>
+        </span>
+        <span>
+          <small>Compatible now</small>
+          <strong>{stagedSwitch ? "After save" : `${formatNumber(compatibleReferences)} / ${formatNumber(totalReferences)}`}</strong>
+        </span>
+      </div>
+      <div className="model-switch-steps" aria-label="Model switch steps">
+        {stepItems.map((step, index) => (
+          <span className={`model-switch-step ${step.state}`} key={step.label}>
+            <i>{index + 1}</i>
+            <strong>{step.label}</strong>
+            <small>{step.detail}</small>
+          </span>
+        ))}
+      </div>
+      <div className={activeDryRun?.blockers.length ? "model-dry-run-card warn" : "model-dry-run-card"}>
+        <div className="panel-title compact-title">
+          <Timer size={17} />
+          <span>Dry run</span>
+          <div className="spacer" />
+          <small>{activeDryRun ? activeDryRun.summary : "Not checked"}</small>
+        </div>
+        {activeDryRun ? (
+          <>
+            <div className="model-dry-run-grid">
+              <span>
+                <small>Download</small>
+                <strong>{activeDryRun.downloadBytes ? formatBytes(activeDryRun.downloadBytes) : "None"}</strong>
+              </span>
+              <span>
+                <small>Disk impact</small>
+                <strong>{formatBytes(activeDryRun.estimatedDiskImpactBytes)}</strong>
+              </span>
+              <span>
+                <small>Backfill</small>
+                <strong>{formatNumber(activeDryRun.referencesNeedingBackfill)}</strong>
+              </span>
+              <span>
+                <small>ETA</small>
+                <strong>{activeDryRun.estimatedBackfillSeconds ? formatDuration(activeDryRun.estimatedBackfillSeconds * 1000) : "None"}</strong>
+              </span>
+              <span>
+                <small>Review rows</small>
+                <strong>{formatNumber(activeDryRun.affectedCandidates)}</strong>
+              </span>
+              <span>
+                <small>Save status</small>
+                <strong>{activeDryRun.safeToSave ? "Safe" : "Blocked"}</strong>
+              </span>
+            </div>
+            {activeDryRun.blockers.length ? (
+              <div className="health-list error-list">
+                {activeDryRun.blockers.map((item) => <span key={item}>{item}</span>)}
+              </div>
+            ) : null}
+            {activeDryRun.warnings.length ? (
+              <div className="health-list">
+                {activeDryRun.warnings.slice(0, 4).map((item) => <span key={item}>{item}</span>)}
+              </div>
+            ) : null}
+            <div className="health-list action-list">
+              {activeDryRun.actions.slice(0, 4).map((item) => <span key={item}>{item}</span>)}
+            </div>
+          </>
+        ) : (
+          <p className="compact">Run this before saving to see download size, backfill work, review impact, and rollback target.</p>
+        )}
+        <button className="secondary compact-action" onClick={() => void runDryRun(targetPack)} disabled={busy || !targetPack} type="button">
+          <Activity size={16} />
+          <span>{activeDryRun ? "Refresh dry run" : "Run dry run"}</span>
+        </button>
+      </div>
+      {targetPackage?.pose_aware && (
+        <div className="settings-warning soft-warning">
+          <Focus size={16} />
+          <span>This pack is better suited for profile and three-quarter review. Keep human review on for final decisions.</span>
+        </div>
+      )}
+      <div className="button-row">
+        <button
+          className="secondary"
+          onClick={() => void downloadModel(targetPack, modelRoot)}
+          disabled={busy || !targetPackage || targetInstalled || targetDownloading}
+          type="button"
+        >
+          {targetDownloading ? <Loader2 className="spin" size={17} /> : <Download size={17} />}
+          <span>{targetDownloading ? "Downloading" : "Download selected model"}</span>
+        </button>
+        <button
+          className="primary"
+          onClick={saveSettings}
+          disabled={busy || validationBlocked || !stagedSwitch || !targetInstalled || (activeDryRun ? !dryRunOk : false)}
+          type="button"
+        >
+          <Save size={17} />
+          <span>Save model choice</span>
+        </button>
+        <button
+          className="secondary"
+          onClick={() => void backfillModelReferences()}
+          disabled={busy || stagedSwitch || !needsBackfill || !state.modelSetup?.ready}
+          type="button"
+        >
+          <RefreshCcw size={17} />
+          <span>Backfill saved photos</span>
+        </button>
+        <button className="secondary" onClick={validateModelState} disabled={busy || stagedSwitch} type="button">
+          <Activity size={17} />
+          <span>Validate switch</span>
+        </button>
+        {rollbackPack && (
+          <button className="ghost compact-action" onClick={() => setModelPack(rollbackPack)} disabled={busy} type="button">
+            <Undo2 size={16} />
+            <span>{stagedSwitch ? "Undo selection" : `Prepare rollback to ${rollbackLabel}`}</span>
+          </button>
+        )}
+      </div>
+      {!targetInstalled && (
+        <small className="compact">Saving is disabled until the selected model files are installed. This avoids a switch that cannot run offline.</small>
+      )}
+    </div>
+  );
+}
+
 function ModelSetupCard({
   state,
   progress,
@@ -5247,6 +5990,8 @@ function ModelSetupCard({
           <span>Download: {formatBytes(selected.size_bytes)}</span>
           <span>Checksum: SHA-256</span>
           <span>{selected.available ? "Installed" : selected.missing.slice(0, 1).join(", ") || "Ready to download"}</span>
+          {selected.pose_aware && <span>Pose-aware: profile and three-quarter checks</span>}
+          {selected.thresholds && <span>Suggested likely threshold: {percent(selected.thresholds.likely ?? selected.thresholds.review ?? 0)}</span>}
           {governance && <span>Use: {governance.humanReviewRequired ? "Review-assisted" : "Automated"} • {governance.accuracyTier}</span>}
           {governance && <span>Release: {governance.redistributionRisk === "needs-license-review" ? "License review needed" : governance.redistributionRisk}</span>}
         </div>
@@ -5465,6 +6210,9 @@ function ScanView(props: {
   chooseFolder(): void;
   scan(): void;
   resumeLastScan(): void;
+  restartLastScan(): void;
+  dismissedRecoveryRunId: string;
+  dismissRecovery(runId: string): void;
   scanCameraFrame(dataUrl: string): Promise<CameraScanResult>;
   analyzeFolder(): void;
   folderAnalysis: FolderAnalysis | null;
@@ -5564,7 +6312,14 @@ function ScanView(props: {
             <span key={item.label} className={item.ok ? "pill green" : "pill neutral"}>{item.label}</span>
           ))}
         </div>
-        <ScanRecoveryPanel state={props.state} busy={props.busy} resumeLastScan={props.resumeLastScan} />
+        <ScanRecoveryPanel
+          state={props.state}
+          busy={props.busy}
+          resumeLastScan={props.resumeLastScan}
+          restartLastScan={props.restartLastScan}
+          dismissedRunId={props.dismissedRecoveryRunId}
+          dismissRecovery={props.dismissRecovery}
+        />
         <PendingExternalBanner
           intent={props.pendingExternalIntent}
           ready={Boolean(props.state.consentOnFile && props.state.references.length)}
@@ -5629,21 +6384,29 @@ function ScanView(props: {
 function ScanRecoveryPanel({
   state,
   busy,
-  resumeLastScan
+  resumeLastScan,
+  restartLastScan,
+  dismissedRunId,
+  dismissRecovery
 }: {
   state: AppState;
   busy: boolean;
   resumeLastScan(): void;
+  restartLastScan(): void;
+  dismissedRunId: string;
+  dismissRecovery(runId: string): void;
 }) {
   const latest = state.scanJob?.latestScan;
   const status = String(latest?.status || "");
   const canResume = Boolean(state.scanJob?.canResume && latest);
-  if (!canResume) {
-    return null;
-  }
   const processed = Number(latest?.processed || 0);
   const total = Number(latest?.total || 0);
   const folder = String(latest?.root_path || latest?.label || "");
+  const runId = String(latest?.run_id || latest?.runId || "");
+  const recoveryKey = runId || `${folder}:${status}:${processed}:${total}`;
+  if (!canResume || dismissedRunId === recoveryKey) {
+    return null;
+  }
   const percentDone = total ? Math.min(100, Math.round((processed / total) * 100)) : 0;
   const skippedText = processed ? `Resume skips ${formatNumber(processed)} completed file${processed === 1 ? "" : "s"}.` : "Resume uses the last scan manifest.";
   return (
@@ -5657,10 +6420,20 @@ function ScanRecoveryPanel({
         <small>{state.scanJob?.progressLabel || `${formatNumber(processed)} processed`} • {status || "paused"}</small>
       </div>
       <p>{skippedText} {state.scanJob?.recommendedAction}</p>
-      <button className="secondary" onClick={resumeLastScan} disabled={busy || !state.consentOnFile || !state.references.length}>
-        <Play size={17} />
-        <span>Resume last scan</span>
-      </button>
+      <div className="button-row recovery-actions">
+        <button className="secondary" onClick={resumeLastScan} disabled={busy || !state.consentOnFile || !state.references.length}>
+          <Play size={17} />
+          <span>Resume</span>
+        </button>
+        <button className="secondary" onClick={restartLastScan} disabled={busy || !state.consentOnFile || !state.references.length}>
+          <RefreshCcw size={17} />
+          <span>Restart clean</span>
+        </button>
+        <button className="ghost compact-action" onClick={() => dismissRecovery(recoveryKey)} disabled={busy} type="button">
+          <X size={16} />
+          <span>Ignore</span>
+        </button>
+      </div>
     </div>
   );
 }
@@ -6059,6 +6832,11 @@ function CameraScanner(props: {
             }}
           />
         )}
+        {/* H10: only mount the 34-petal field while the camera is live. It was
+            previously always mounted, animating left/top on an infinite loop
+            even when idle (hidden behind the .scanner-idle overlay) — a permanent
+            background layout/paint loop with no visual payoff. */}
+        {live && (
         <div className="sakura-face-field" aria-hidden="true">
           <div className="sakura-canopy" />
           <div className="sakura-breeze" />
@@ -6079,6 +6857,7 @@ function CameraScanner(props: {
             />
           ))}
         </div>
+        )}
         {!live && (
           <div className="scanner-idle">
             <Camera size={34} />
@@ -6400,6 +7179,8 @@ function ScanActivity({
           ? "Error"
         : progress?.phase === "verifying" || progress?.phase === "verified"
           ? "Rechecking"
+        : progress?.phase === "model_backfill"
+          ? "Backfilling"
         : progress?.phase ? "Scanning" : "Ready";
   const scanActive = Boolean(progress && !["complete", "cancelled", "error"].includes(progress.phase) && (!total || processed < total));
   const completedWatchMessage = watchStatus.active && progress?.source === "watch" && progress.phase === "complete" && Number(progress.added ?? 0) > 0
@@ -6493,6 +7274,10 @@ function ScanActivity({
         <span><strong>{progress?.embeddingCacheHits ?? 0}</strong> cached faces</span>
         <span><strong>{progress?.twoPassVerified ?? 0}</strong> rechecked</span>
         <span><strong>{progress?.twoPassDeferred ?? 0}</strong> recheck queued</span>
+        <span><strong>{progress?.profileRescueFound ?? 0}</strong> side faces recovered</span>
+        <span><strong>{progress?.noFaceDetected ?? 0}</strong> no face found</span>
+        <span><strong>{progress?.lowQualityFaces ?? 0}</strong> low quality</span>
+        <span><strong>{progress?.safeModeFaceCropAllowed ?? 0}</strong> face crops allowed</span>
         <span><strong>{progress?.pausedSeconds ?? 0}</strong>s paused</span>
         <span><strong>{progress?.pathErrors ?? 0}</strong> drive/path issues</span>
         {watchStatus.active && <span><strong>{watchStatus.mode === "recursive" ? "Recursive" : "Top-level"}</strong> watch</span>}
@@ -6504,13 +7289,222 @@ function ScanActivity({
   );
 }
 
+function BackgroundJobCenter({
+  state,
+  scanProgress,
+  watchStatus,
+  modelDownloadProgress,
+  updateStatus,
+  mediaActionProgress,
+  scanQueue,
+  scanQueueRunning,
+  navigate,
+  cancelScan,
+  pauseScan,
+  resumeScan,
+  scanPaused,
+  busy
+}: {
+  state: AppState;
+  scanProgress: ScanProgress | null;
+  watchStatus: FolderWatchStatus;
+  modelDownloadProgress: ModelDownloadProgress | null;
+  updateStatus: UpdateStatus | null;
+  mediaActionProgress: MediaActionProgress | null;
+  scanQueue: ScanQueueItem[];
+  scanQueueRunning: boolean;
+  navigate(tab: TabKey): void;
+  cancelScan(): void;
+  pauseScan(): void;
+  resumeScan(): void;
+  scanPaused: boolean;
+  busy: boolean;
+}) {
+  const scanActive = Boolean(scanProgress && !["complete", "cancelled", "error"].includes(scanProgress.phase));
+  const scanTotal = Math.max(0, scanProgress?.total ?? 0);
+  const scanProcessed = Math.max(0, scanProgress?.processed ?? 0);
+  const scanPercent = scanTotal ? Math.min(100, Math.round((scanProcessed / scanTotal) * 100)) : scanActive ? 12 : 0;
+  const modelActive = Boolean(modelDownloadProgress && !["complete", "error"].includes(modelDownloadProgress.phase));
+  const mediaActive = Boolean(mediaActionProgress && !["complete", "error", "cancelled"].includes(mediaActionProgress.phase));
+  const updateActive = Boolean(updateStatus?.checking || updateStatus?.downloading || updateStatus?.available || updateStatus?.downloaded || updateStatus?.error);
+  const queueQueued = scanQueue.filter((item) => item.status === "queued").length;
+  const queueRunning = scanQueue.filter((item) => item.status === "running").length;
+  const queueErrors = scanQueue.filter((item) => item.status === "error").length;
+  const queueDone = scanQueue.filter((item) => item.status === "done").length;
+  const queueActive = scanQueueRunning || queueQueued > 0 || queueRunning > 0 || queueErrors > 0;
+  const resumable = Boolean(state.scanJob?.canResume && state.scanJob.latestScan);
+  const jobs: Array<{
+    key: string;
+    icon: typeof Activity;
+    label: string;
+    detail: string;
+    percent?: number;
+    tone: "green" | "amber" | "rose" | "blue" | "neutral";
+    actionLabel?: string;
+    action?: () => void;
+    disabled?: boolean;
+    secondaryLabel?: string;
+    secondaryAction?: () => void;
+    secondaryDisabled?: boolean;
+  }> = [];
+
+  if (scanActive || watchStatus.active) {
+    jobs.push({
+      key: "scan",
+      icon: Search,
+      label: scanPaused || scanProgress?.phase === "paused" ? "Scan paused" : watchStatus.scanning ? "Folder watch scanning" : "Scan running",
+      detail: scanTotal ? `${formatNumber(scanProcessed)} of ${formatNumber(scanTotal)} files` : (scanProgress?.message || watchStatus.message || "Working through the selected folder"),
+      percent: scanPercent,
+      tone: scanPaused || scanProgress?.phase === "paused" ? "amber" : "blue",
+      actionLabel: scanPaused || scanProgress?.phase === "paused" ? "Resume" : "Pause",
+      action: scanPaused || scanProgress?.phase === "paused" ? resumeScan : pauseScan,
+      disabled: busy,
+      secondaryLabel: "Cancel",
+      secondaryAction: cancelScan,
+      secondaryDisabled: busy
+    });
+  }
+  if (modelActive && modelDownloadProgress) {
+    jobs.push({
+      key: "model",
+      icon: Download,
+      label: "Model download",
+      detail: `${modelDownloadProgress.label || modelDownloadProgress.pack} • ${modelDownloadProgress.message || modelDownloadProgress.phase}`,
+      percent: Math.max(0, Math.min(100, Math.round(modelDownloadProgress.percent || 0))),
+      tone: "blue",
+      actionLabel: "Open setup",
+      action: () => navigate("settings")
+    });
+  }
+  if (mediaActive && mediaActionProgress) {
+    const total = Math.max(1, mediaActionProgress.total || 1);
+    const processed = Math.max(0, mediaActionProgress.processed || 0);
+    jobs.push({
+      key: "media-action",
+      icon: Scissors,
+      label: `File ${mediaActionProgress.action || "action"}`,
+      detail: `${formatNumber(processed)} of ${formatNumber(total)} files${mediaActionProgress.etaMs ? ` • ${formatDuration(Math.round(mediaActionProgress.etaMs))} left` : ""}`,
+      percent: Math.min(100, Math.round((processed / total) * 100)),
+      tone: "blue",
+      actionLabel: "Open review",
+      action: () => navigate("review")
+    });
+  }
+  if (queueActive) {
+    jobs.push({
+      key: "scan-queue",
+      icon: Activity,
+      label: scanQueueRunning ? "Scan queue running" : queueErrors ? "Scan queue needs attention" : "Scan queue ready",
+      detail: `${queueRunning} running • ${queueQueued} queued • ${queueDone} done • ${queueErrors} failed`,
+      percent: scanQueue.length ? Math.round(((queueDone + queueErrors) / scanQueue.length) * 100) : 0,
+      tone: queueErrors ? "rose" : scanQueueRunning ? "blue" : "amber",
+      actionLabel: "Open scan",
+      action: () => navigate("scan")
+    });
+  }
+  if (updateActive && updateStatus) {
+    jobs.push({
+      key: "update",
+      icon: RefreshCcw,
+      label: updateStatus.error ? "Update issue" : updateStatus.downloading ? "Update downloading" : updateStatus.downloaded ? "Update ready" : updateStatus.available ? "Update available" : "Checking update",
+      detail: updateStatus.message || updateStatus.error || (updateStatus.latestVersion ? `Version ${updateStatus.latestVersion}` : "Updater is checking"),
+      percent: updateStatus.progress ? Math.round(updateStatus.progress.percent || 0) : updateStatus.downloaded ? 100 : undefined,
+      tone: updateStatus.error ? "rose" : updateStatus.downloaded || updateStatus.available ? "green" : "blue",
+      actionLabel: "Open updates",
+      action: () => navigate("settings")
+    });
+  }
+  if (resumable && !scanActive) {
+    jobs.push({
+      key: "resumable",
+      icon: Play,
+      label: "Interrupted scan can resume",
+      detail: state.scanJob?.progressLabel || state.scanJob?.recommendedAction || "Resume from the scan tab without redoing completed files.",
+      tone: "amber",
+      actionLabel: "Open scan",
+      action: () => navigate("scan")
+    });
+  }
+  if (!jobs.length) {
+    jobs.push({
+      key: "idle",
+      icon: Check,
+      label: "No background work",
+      detail: "Scans, downloads, updates, and file actions are idle.",
+      tone: "green",
+      actionLabel: "Start scan",
+      action: () => navigate("scan")
+    });
+  }
+
+  return (
+    <div className="panel dashboard-span job-center">
+      <div className="panel-title"><Activity size={18} /> Background work</div>
+      <div className="job-list">
+        {jobs.map((job) => {
+          const Icon = job.icon;
+          return (
+            <div className={`job-row ${job.tone}`} key={job.key}>
+              <div className="job-icon"><Icon size={17} /></div>
+              <div className="job-main">
+                <strong>{job.label}</strong>
+                <small>{job.detail}</small>
+                {typeof job.percent === "number" && (
+                  <div className="job-progress" aria-label={`${job.label} ${job.percent}%`}>
+                    <span style={{ width: `${Math.max(2, Math.min(100, job.percent))}%` }} />
+                  </div>
+                )}
+              </div>
+              {job.actionLabel && (
+                <button className="ghost compact-action" onClick={job.action} disabled={job.disabled} type="button">
+                  {job.actionLabel}
+                </button>
+              )}
+              {job.secondaryLabel && (
+                <button className="ghost compact-action danger" onClick={job.secondaryAction} disabled={job.secondaryDisabled} type="button">
+                  {job.secondaryLabel}
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// M13: cap on how many person chips render at once in the group finder.
+const PEOPLE_CHIP_CAP = 60;
+
+// M4: small session-scoped store for the review filter context (kept separate
+// from workspace recognition state; cleared on app restart like other UI prefs).
+function readReviewPref<T>(key: string, fallback: T): T {
+  try {
+    const raw = window.sessionStorage.getItem(`vintrace:review:${key}`);
+    if (raw == null) return fallback;
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeReviewPref(values: Record<string, unknown>) {
+  try {
+    for (const [key, value] of Object.entries(values)) {
+      window.sessionStorage.setItem(`vintrace:review:${key}`, JSON.stringify(value));
+    }
+  } catch {
+    // Persisting review prefs is best effort.
+  }
+}
+
 function ReviewView(props: {
   state: AppState;
   selectedCandidate: ReviewCandidate | null;
   selectedCandidateId: string | null;
   setSelectedCandidateId(value: string | null): void;
   queryCandidates(params: Record<string, unknown>): Promise<CandidateQueryResult>;
-  review(status: CandidateStatus, current?: ReviewCandidate | null): void | Promise<void>;
+  review(status: CandidateStatus, current?: ReviewCandidate | null, quiet?: boolean): void | Promise<void>;
   bulkReview(candidateIds: string[], status: CandidateStatus): void | Promise<void>;
   blockFalseMatch(candidateId: string): void | Promise<void>;
   reassignCandidatePerson(candidateId: string, personName: string): void | Promise<void>;
@@ -6535,15 +7529,23 @@ function ReviewView(props: {
   showListThumbnails: boolean;
   busy: boolean;
 }) {
-  const [statusFilter, setStatusFilter] = useState<CandidateStatus | "all">("pending");
-  const [search, setSearch] = useState("");
-  const [sort, setSort] = useState<"score" | "newest" | "quality">("score");
-  const [reviewLane, setReviewLane] = useState<"all" | "high" | "lowQuality" | "groups" | "video" | "notes">("all");
+  // M4: seed the review filter context from sessionStorage so navigating away
+  // from Review and back doesn't force the user to re-filter (the view unmounts
+  // on tab switch). Persisted by the effect below.
+  const [statusFilter, setStatusFilter] = useState<CandidateStatus | "all">(() => readReviewPref<CandidateStatus | "all">("statusFilter", "pending"));
+  const [search, setSearch] = useState(() => readReviewPref("search", ""));
+  const [sort, setSort] = useState<"score" | "newest" | "quality">(() => readReviewPref<"score" | "newest" | "quality">("sort", "score"));
+  const [reviewLane, setReviewLane] = useState<"all" | "high" | "lowQuality" | "groups" | "video" | "notes">(() => readReviewPref<"all" | "high" | "lowQuality" | "groups" | "video" | "notes">("lane", "all"));
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
-  const [selectedPeople, setSelectedPeople] = useState<Set<string>>(() => new Set());
+  const [selectedPeople, setSelectedPeople] = useState<Set<string>>(() => new Set(readReviewPref<string[]>("people", [])));
   const [groupMinPeople, setGroupMinPeople] = useState(2);
+  const [peopleFilter, setPeopleFilter] = useState("");
   const [noteDraft, setNoteDraft] = useState("");
   const [identityTarget, setIdentityTarget] = useState("");
+  // M4: persist the filter context whenever it changes so it survives unmount.
+  useEffect(() => {
+    writeReviewPref({ statusFilter, search, sort, lane: reviewLane, people: [...selectedPeople] });
+  }, [statusFilter, search, sort, reviewLane, selectedPeople]);
   const [privacyVeil, setPrivacyVeil] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [savedViews, setSavedViews] = useState<SavedReviewView[]>([]);
@@ -6560,6 +7562,8 @@ function ReviewView(props: {
   const [mediaActionHistoryOpen, setMediaActionHistoryOpen] = useState(false);
   const [pagedCandidates, setPagedCandidates] = useState<ReviewCandidate[]>([]);
   const [pagedTotal, setPagedTotal] = useState(0);
+  const [pageOffset, setPageOffset] = useState(0);
+  const [jumpRow, setJumpRow] = useState("");
   const [pagedLoading, setPagedLoading] = useState(false);
   const [pagedError, setPagedError] = useState<string | null>(null);
   const [selectReviewedAfterLoad, setSelectReviewedAfterLoad] = useState(false);
@@ -6622,6 +7626,19 @@ function ReviewView(props: {
       return new Set([...current].filter((person) => allowed.has(person)));
     });
   }, [knownPeople]);
+
+  // M13: the group-finder rendered one button per distinct person with no bound.
+  // Filter + cap the rendered chips (selected people are always kept) so a large
+  // roster can't mount hundreds of buttons at once.
+  const visiblePeople = useMemo(() => {
+    const query = peopleFilter.trim().toLowerCase();
+    const matched = query ? knownPeople.filter((person) => person.toLowerCase().includes(query)) : knownPeople;
+    const ordered = query
+      ? [...new Set([...knownPeople.filter((person) => selectedPeople.has(person)), ...matched])]
+      : matched;
+    return ordered.slice(0, PEOPLE_CHIP_CAP);
+  }, [knownPeople, peopleFilter, selectedPeople]);
+  const hiddenPeopleCount = knownPeople.length - visiblePeople.length;
 
   const candidatesByPath = useMemo(() => {
     const byPath = new Map<string, ReviewCandidate[]>();
@@ -6730,10 +7747,10 @@ function ReviewView(props: {
     pendingCount: props.state.counts.pending
   }), [deferredSearch, pageSize, props.state.counts.candidates, props.state.counts.pending, props.state.workspace, props.state.workspaceMetadata?.workspaceId, reviewLane, sort, statusFilter]);
 
-  async function loadCandidatePage(append = false) {
+  async function loadCandidatePage(append = false, requestedOffset?: number) {
     const requestId = pageRequestRef.current + 1;
     pageRequestRef.current = requestId;
-    const offset = append ? pagedCandidates.length : 0;
+    const offset = append ? pageOffset + pagedCandidates.length : Math.max(0, requestedOffset ?? pageOffset);
     setPagedLoading(true);
     setPagedError(null);
     try {
@@ -6748,6 +7765,9 @@ function ReviewView(props: {
       });
       if (requestId !== pageRequestRef.current) return;
       setPagedTotal(result.total);
+      if (!append) {
+        setPageOffset(offset);
+      }
       setPagedCandidates((current) => append ? [...current, ...result.items] : result.items);
     } catch (error) {
       if (requestId !== pageRequestRef.current) return;
@@ -6766,9 +7786,11 @@ function ReviewView(props: {
   useEffect(() => {
     setPagedCandidates([]);
     setPagedTotal(0);
+    setPageOffset(0);
+    setJumpRow("");
     setPagedError(null);
     setSelectedIds(new Set());
-    void loadCandidatePage(false);
+    void loadCandidatePage(false, 0);
   }, [querySignature]);
 
   const filteredCandidates = useMemo(() => {
@@ -6797,6 +7819,22 @@ function ReviewView(props: {
     };
   }, [filteredCandidates, props.state.config.thresholds.confident]);
   const visibleCandidates = filteredCandidates;
+  const visibleStart = filteredTotal && visibleCandidates.length ? pageOffset + 1 : 0;
+  const visibleEnd = visibleCandidates.length ? Math.min(filteredTotal, pageOffset + visibleCandidates.length) : 0;
+  const canPageBack = pageOffset > 0 && !pagedLoading;
+  const canPageForward = pageOffset + pageSize < filteredTotal && !pagedLoading;
+
+  function goToReviewOffset(offset: number) {
+    const bounded = Math.max(0, Math.min(Math.max(0, filteredTotal - 1), offset));
+    setSelectedIds(new Set());
+    props.setSelectedCandidateId(null);
+    void loadCandidatePage(false, Math.floor(bounded / pageSize) * pageSize);
+  }
+
+  function jumpToReviewRow() {
+    const row = Math.max(1, Math.floor(Number(jumpRow) || 1));
+    goToReviewOffset(row - 1);
+  }
 
   useEffect(() => {
     if (!filteredCandidates.length) {
@@ -6842,20 +7880,36 @@ function ReviewView(props: {
 
   async function decide(status: CandidateStatus) {
     if (!activeCandidate) return;
+    const target = activeCandidate;
+    const previousStatus = target.status;
     const nextCandidate = filteredCandidates.length > 1 && selectedIndex >= 0
       ? filteredCandidates[(selectedIndex + 1) % filteredCandidates.length]
       : null;
-    await props.review(status, activeCandidate);
+    const advanced = Boolean(nextCandidate && nextCandidate.candidateId !== target.candidateId);
+    // H4: turn the row over and advance the selection IMMEDIATELY, then persist
+    // the decision with a quiet write (no global spinner, shortcuts stay live).
+    // The decision is rolled back if the backend rejects it; the undo strip
+    // remains as a second safety net.
     setPagedCandidates((current) => current.map((candidate) => (
-      candidate.candidateId === activeCandidate.candidateId ? { ...candidate, status } : candidate
+      candidate.candidateId === target.candidateId ? { ...candidate, status } : candidate
     )));
-    if (nextCandidate && nextCandidate.candidateId !== activeCandidate.candidateId) {
-      props.setSelectedCandidateId(nextCandidate.candidateId);
-      void loadCandidatePage(false);
+    if (advanced) {
+      props.setSelectedCandidateId(nextCandidate!.candidateId);
     } else if (statusFilter === "pending" && status !== "pending") {
-      props.setSelectedCandidateId(activeCandidate.candidateId);
+      props.setSelectedCandidateId(target.candidateId);
       setStatusFilter("all");
-    } else {
+    }
+    try {
+      await props.review(status, target, true);
+    } catch {
+      setPagedCandidates((current) => current.map((candidate) => (
+        candidate.candidateId === target.candidateId ? { ...candidate, status: previousStatus } : candidate
+      )));
+      return;
+    }
+    // Reconcile with the backend list except when the filter change above already
+    // triggers its own reload (preserves the original navigation semantics).
+    if (advanced || !(statusFilter === "pending" && status !== "pending")) {
       void loadCandidatePage(false);
     }
   }
@@ -6863,7 +7917,12 @@ function ReviewView(props: {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       const target = event.target instanceof Element ? event.target : null;
-      const interactiveTarget = target?.closest("button, [role='dialog'], input, textarea, select, [contenteditable='true']");
+      // L4: also ignore focused links and any element opted out via
+      // data-no-shortcuts so a stray letter can't fire an action there. NOTE:
+      // candidate rows are role=button but are intentionally NOT ignored — the
+      // a/r/u shortcuts act on the *selected* candidate and must keep working
+      // while a row is focused (the common rapid-review case).
+      const interactiveTarget = target?.closest("button, a[href], [data-no-shortcuts], [role='dialog'], input, textarea, select, [contenteditable='true']");
       if (props.busy || editableTarget(event.target) || interactiveTarget || event.metaKey || event.ctrlKey || event.altKey) {
         return;
       }
@@ -7005,7 +8064,7 @@ function ReviewView(props: {
 
   async function bulkStatus(status: CandidateStatus) {
     const ids = [...selectedIds];
-    if (ids.length > 1 && !confirmUi(`Mark ${ids.length} selected possible matches as ${reviewStatusLabel(status)}?`)) {
+    if (ids.length > 1 && !await confirmDialog(`Mark ${ids.length} selected possible matches as ${reviewStatusLabel(status)}?`)) {
       return;
     }
     await props.bulkReview(ids, status);
@@ -7158,8 +8217,18 @@ function ReviewView(props: {
               onChange={(event) => setGroupMinPeople(Math.max(2, selectedPeople.size, Number(event.currentTarget.value) || 2))}
             />
           </label>
+          {knownPeople.length > PEOPLE_CHIP_CAP && (
+            <input
+              className="person-chip-filter"
+              type="search"
+              value={peopleFilter}
+              onChange={(event) => setPeopleFilter(event.currentTarget.value)}
+              placeholder="Filter people"
+              aria-label="Filter people to find together"
+            />
+          )}
           <div className="person-chip-list" role="group" aria-label="People to find together">
-            {knownPeople.length ? knownPeople.map((person) => (
+            {knownPeople.length ? visiblePeople.map((person) => (
               <button
                 key={person}
                 className={selectedPeople.has(person) ? "person-chip selected" : "person-chip"}
@@ -7170,6 +8239,9 @@ function ReviewView(props: {
                 {selectedPeople.has(person) && <Check size={14} />}
               </button>
             )) : <span className="compact">Add people and scan photos to find group photos.</span>}
+            {hiddenPeopleCount > 0 && (
+              <span className="compact person-chip-overflow">+{hiddenPeopleCount} more — filter to narrow.</span>
+            )}
           </div>
           <button className="ghost compact-action" onClick={() => setSelectedPeople(new Set())} disabled={!selectedPeople.size}>
             Clear
@@ -7358,6 +8430,42 @@ function ReviewView(props: {
           <button className="secondary" onClick={() => void prepareCandidateMediaAction([...selectedIds], "move")} disabled={!selectedIds.size || props.busy}><Scissors size={16} /><span>Move files</span></button>
           <button className="secondary danger" onClick={() => void prepareCandidateMediaAction([...selectedIds], "trash")} disabled={!selectedIds.size || props.busy}><Trash2 size={16} /><span>Trash files</span></button>
         </div>
+        <div className="review-page-controls" aria-label="Review page navigation">
+          <span>
+            Showing <strong>{formatNumber(visibleStart)}</strong>-<strong>{formatNumber(visibleEnd)}</strong> of <strong>{formatNumber(filteredTotal)}</strong>
+          </span>
+          <button className="ghost compact-action" onClick={() => goToReviewOffset(pageOffset - pageSize)} disabled={!canPageBack} type="button">
+            <ChevronLeft size={16} />
+            <span>Previous</span>
+          </button>
+          <button className="ghost compact-action" onClick={() => goToReviewOffset(pageOffset + pageSize)} disabled={!canPageForward} type="button">
+            <span>Next</span>
+            <ChevronRight size={16} />
+          </button>
+          <button className="ghost compact-action" onClick={() => void loadCandidatePage(false)} disabled={pagedLoading} type="button">
+            <RefreshCcw size={16} />
+            <span>Refresh</span>
+          </button>
+          <label>
+            <span>Jump to row</span>
+            <input
+              aria-label="Jump to review row"
+              inputMode="numeric"
+              min={1}
+              max={Math.max(1, filteredTotal)}
+              type="number"
+              value={jumpRow}
+              onChange={(event) => setJumpRow(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  jumpToReviewRow();
+                }
+              }}
+            />
+          </label>
+          <button className="secondary compact-action" onClick={jumpToReviewRow} disabled={pagedLoading || !filteredTotal} type="button">Go</button>
+        </div>
         {mediaActionPreview && (
           <div className="media-action-preview" role="region" aria-label="File action preview">
             <div className="panel-title">
@@ -7463,7 +8571,22 @@ function ReviewView(props: {
           </div>
         )}
         <div className="table">
-          {filteredCandidates.length === 0 && pagedLoading ? <EmptyState icon={Loader2} label="Loading matches" detail="Fetching the next page from the app folder." /> : filteredCandidates.length === 0 ? <EmptyState icon={ShieldCheck} label="No possible matches found" detail="Adjust the filter or scan more photos and videos." /> : (
+          {filteredCandidates.length === 0 && pagedLoading ? (
+            /* M5: row-shaped skeletons (instead of a single centered spinner)
+               so the loading state previews the layout that's about to appear. */
+            <div className="skeleton-list" role="status" aria-busy="true" aria-label="Loading matches">
+              {Array.from({ length: 6 }, (_, index) => (
+                <div className="row review-candidate-row skeleton-row" key={`skeleton-${index}`} aria-hidden="true">
+                  <span className="skeleton-cell skeleton-check" />
+                  <span className="skeleton-cell skeleton-strong" />
+                  <span className="skeleton-cell" />
+                  <span className="skeleton-cell" />
+                  <span className="skeleton-cell" />
+                  <span />
+                </div>
+              ))}
+            </div>
+          ) : filteredCandidates.length === 0 ? <EmptyState icon={ShieldCheck} label="No possible matches found" detail="Adjust the filter or scan more photos and videos." /> : (
             <>
               <div className="table-header review-candidate-header" aria-hidden="true">
                 <span />
@@ -7508,7 +8631,7 @@ function ReviewView(props: {
                   <ChevronRight size={16} />
                 </div>
               ))}
-              {visibleCandidates.length < filteredTotal && (
+              {pageOffset + visibleCandidates.length < filteredTotal && (
                 <button
                   className="row load-more-row"
                   onClick={() => void loadCandidatePage(true)}
@@ -7871,7 +8994,9 @@ function SettingsView(props: {
   exportReviewLedger(): void;
   exportWorkspaceBackup(): void;
   verifyLatestWorkspaceBackup(): void;
+  restoreLatestWorkspaceBackup(): void;
   backupVerification: WorkspaceBackupVerification | null;
+  backupRestoreResult: WorkspaceBackupRestoreValue | null;
   backupPruneResult: WorkspaceBackupPruneValue | null;
   pruneWorkspaceBackups(): void;
   copyText(text: string, label?: string): void;
@@ -7905,8 +9030,17 @@ function SettingsView(props: {
   runReleaseReadiness(): void;
   accuracyEvaluation: AccuracyEvaluation | null;
   accuracyValidationPack: AccuracyValidationPackValue | null;
+  publicDatasetCatalog: PublicDatasetCatalog | null;
+  publicDatasetInspection: PublicDatasetInspection | null;
+  publicDatasetBenchmark: PublicDatasetBenchmarkResult | null;
+  publicDatasetModelComparison: PublicDatasetModelComparisonResult | null;
   runAccuracyEvaluation(): void;
   generateAccuracyValidationPack(): void;
+  choosePublicDatasetFolder(): Promise<string | null>;
+  inspectPublicDataset(options: { datasetId: string; folder: string; includeVideos?: boolean }): void | Promise<void>;
+  runPublicDatasetBenchmark(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; downloadIfMissing?: boolean; includeVideos?: boolean }): void | Promise<void>;
+  runPublicDatasetModelComparison(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; downloadIfMissing?: boolean; includeVideos?: boolean }): void | Promise<void>;
+  applyModelRecommendation(pack: string): void | Promise<void>;
   applyCalibration(): void;
   exportAccuracyLabels(): void;
   importAccuracyLabels(text: string): void | Promise<void>;
@@ -7925,11 +9059,15 @@ function SettingsView(props: {
   performanceProfile: PerformanceProfile;
   latencySamples: LatencySample[];
   latencySummary: LatencySummary;
+  scanProgress: ScanProgress | null;
   clearLatencySamples(): void;
   copyPerformanceReport(): void;
   warmPreviewsNow(): void;
   chooseModelRoot(): void | Promise<void>;
   downloadModel(pack: string, root?: string, force?: boolean): void | Promise<void>;
+  backfillModelReferences(): void | Promise<void>;
+  modelSwitchPlan: ModelSwitchDryRun | null;
+  runModelSwitchDryRun(targetPack?: string): Promise<ModelSwitchDryRun | null>;
   modelDownloadProgress: ModelDownloadProgress | null;
   installerDiagnostics: InstallerDiagnosticsResult | null;
   runInstallerDiagnostics(): void;
@@ -7937,6 +9075,9 @@ function SettingsView(props: {
   runModelIntegrity(): void;
   modelDriftReport: ModelDriftReport | null;
   runModelDriftReport(): void;
+  referenceGapReport: ReferenceGapReport | null;
+  runReferenceGapReport(): void;
+  startReferenceFix(personName: string): void;
   duplicatePeople: DuplicatePeopleResult | null;
   loadDuplicatePeople(): void;
   mergeDuplicatePeople(sourceName: string, targetName: string): void;
@@ -7953,6 +9094,7 @@ function SettingsView(props: {
   const [renameTarget, setRenameTarget] = useState("");
   const [retentionDays, setRetentionDays] = useState(90);
   const safeModel = props.state.safeModeModel;
+  const modelCompatibility = props.state.modelCompatibility;
 
   useEffect(() => {
     setPersonToDelete((current) => current && props.people.includes(current) ? current : props.people[0] ?? "");
@@ -7977,7 +9119,7 @@ function SettingsView(props: {
       return;
     }
     const preset = settingsPresets.find((item) => item.key === mode);
-    if (preset) props.setSettings({ ...preset.values, mode: preset.key });
+    if (preset) props.setSettings({ ...preset.values, modelPack: props.settings.modelPack, mode: preset.key });
   }
 
   const activePreset = settingsPresets.find((preset) => preset.key === props.settings.mode);
@@ -7989,7 +9131,12 @@ function SettingsView(props: {
       : props.settings.safeModeThreshold >= 0.62
         ? "Light"
         : "Balanced";
+  const modelPackages = props.state.modelSetup?.packages ?? [];
+  const activeModelPackage = modelPackages.find((item) => item.pack === props.settings.modelPack) ?? modelPackages.find((item) => item.pack === props.state.config.modelPack);
   const validationMessages: string[] = [];
+  if (modelPackages.length && !modelPackages.some((item) => item.pack === props.settings.modelPack)) {
+    validationMessages.push("Choose a known face model package.");
+  }
   if (!(props.settings.thresholds.confident >= props.settings.thresholds.likely && props.settings.thresholds.likely >= props.settings.thresholds.relaxedChild)) {
     validationMessages.push("Advanced match levels must stay in order: Strong >= Likely >= Review more.");
   }
@@ -8008,13 +9155,29 @@ function SettingsView(props: {
   );
   const build = props.state.buildInfo;
   const buildCommit = build?.commit && build.commit !== "local" ? build.commit.slice(0, 12) : build?.packaged ? "packaged" : "local";
-  function requestSaveSettings() {
+  async function requestSaveSettings() {
     if (validationMessages.length) return;
     if (safeModeRelaxed) {
-      const proceed = confirmUi("This change makes Safe Mode less protective. Continue only if you want likely intimate media to be filtered less aggressively.");
+      const proceed = await confirmDialog("This change makes Safe Mode less protective. Continue only if you want likely intimate media to be filtered less aggressively.");
       if (!proceed) return;
     }
     props.saveSettings();
+  }
+  function setModelPack(value: string) {
+    const selectedPack = modelPackages.find((item) => item.pack === value);
+    const suggested = selectedPack?.thresholds ?? {};
+    props.runModelSwitchDryRun(value).catch(() => undefined);
+    props.setSettings({
+      ...props.settings,
+      modelPack: value,
+      mode: "custom",
+      thresholds: {
+        ...props.settings.thresholds,
+        confident: finiteNumber(suggested.strong, props.settings.thresholds.confident, 0, 1),
+        likely: finiteNumber(suggested.likely, props.settings.thresholds.likely, 0, 1),
+        relaxedChild: finiteNumber(suggested.review, props.settings.thresholds.relaxedChild, 0, 1)
+      }
+    });
   }
   function copyWorkspaceSummary() {
     const totals = props.state.scanTotals;
@@ -8187,12 +9350,32 @@ function SettingsView(props: {
       <div className="panel">
         <div className="panel-title"><HardDrive size={18} /> Local engine</div>
         <p className="compact">{props.platformSummary}</p>
+        <label className="stacked-control">Face model package
+          <select
+            value={props.settings.modelPack}
+            onChange={(event) => setModelPack(event.currentTarget.value)}
+            disabled={props.busy || modelPackages.length === 0}
+          >
+            {modelPackages.length ? modelPackages.map((item) => (
+              <option key={item.pack} value={item.pack}>{item.label}</option>
+            )) : <option value={props.settings.modelPack}>{props.settings.modelPack || "Default model"}</option>}
+          </select>
+        </label>
+        {activeModelPackage && (
+          <div className="model-package-detail compact-model-detail">
+            <span>{activeModelPackage.pose_aware ? "Pose-aware path" : "Default recognition path"}</span>
+            <span>{activeModelPackage.available ? "Installed" : "Download before full use"}</span>
+            <span>{activeModelPackage.embedding_space || `insightface-${activeModelPackage.pack}`}</span>
+          </div>
+        )}
         <dl className="mini-list">
           <dt>App version</dt><dd>{build?.version ?? props.state.version}</dd>
           <dt>Build</dt><dd title={build?.commit || ""}>{buildCommit}</dd>
           <dt>Channel</dt><dd>{build?.channel ?? "stable"}</dd>
           <dt>Runtime</dt><dd>{build?.packaged ? "Packaged app" : "Developer build"}</dd>
           <dt>Face model</dt><dd>{props.state.modelSetup?.ready ? props.state.modelSetup.currentPack : "Needs download"}</dd>
+          <dt>Compatible references</dt><dd>{modelCompatibility ? `${formatNumber(modelCompatibility.compatibleReferences)} / ${formatNumber(modelCompatibility.totalReferences)}` : "Unknown"}</dd>
+          <dt>Backfill needed</dt><dd>{modelCompatibility?.needsBackfill ? `${formatNumber(modelCompatibility.otherModelReferences)} saved photos` : "No"}</dd>
           <dt>Safe Mode engine</dt><dd>{safeModel?.available ? safeModel.engine.toUpperCase() : "Heuristic fallback"}</dd>
           <dt>Safety model</dt><dd>{safeModel?.modelName ?? "Exposed-skin heuristic"}</dd>
           <dt>Model license</dt><dd>{safeModel?.license || "Local heuristic"}</dd>
@@ -8203,6 +9386,27 @@ function SettingsView(props: {
             <span>Run check</span>
           </button>
         </div>
+      </div>
+      <div className="panel settings-panel model-switch-panel">
+        <ModelSwitchWizard
+          state={props.state}
+          settings={props.settings}
+          modelPackages={modelPackages}
+          modelCompatibility={modelCompatibility}
+          modelDownloadProgress={props.modelDownloadProgress}
+          modelDriftReport={props.modelDriftReport}
+          referenceGapReport={props.referenceGapReport}
+          busy={props.busy}
+          validationBlocked={validationMessages.length > 0}
+          setModelPack={setModelPack}
+          saveSettings={requestSaveSettings}
+          downloadModel={props.downloadModel}
+          backfillModelReferences={props.backfillModelReferences}
+          dryRunPlan={props.modelSwitchPlan}
+          runDryRun={props.runModelSwitchDryRun}
+          runModelDriftReport={props.runModelDriftReport}
+          runReferenceGapReport={props.runReferenceGapReport}
+        />
       </div>
       <ModelSetupCard
         state={props.state}
@@ -8228,6 +9432,13 @@ function SettingsView(props: {
         runModelIntegrity={props.runModelIntegrity}
         runModelDriftReport={props.runModelDriftReport}
       />
+      <ReferenceGapPanel
+        report={props.referenceGapReport}
+        busy={props.busy}
+        runReport={props.runReferenceGapReport}
+        copyText={props.copyText}
+        startReferenceFix={props.startReferenceFix}
+      />
       <RuntimeSelfTestPanel result={props.runtimeSelfTest} />
       <PerformanceCenter
         state={props.state}
@@ -8237,6 +9448,7 @@ function SettingsView(props: {
         profile={props.performanceProfile}
         latencySamples={props.latencySamples}
         latencySummary={props.latencySummary}
+        scanProgress={props.scanProgress}
         busy={props.busy}
         warmPreviewsNow={props.warmPreviewsNow}
         copyPerformanceReport={props.copyPerformanceReport}
@@ -8247,10 +9459,19 @@ function SettingsView(props: {
       <AccuracyLabPanel
         result={props.accuracyEvaluation}
         validationPack={props.accuracyValidationPack}
+        datasetCatalog={props.publicDatasetCatalog}
+        datasetInspection={props.publicDatasetInspection}
+        datasetBenchmark={props.publicDatasetBenchmark}
+        modelComparison={props.publicDatasetModelComparison}
         calibration={props.state.calibration}
         busy={props.busy}
         runAccuracyEvaluation={props.runAccuracyEvaluation}
         generateAccuracyValidationPack={props.generateAccuracyValidationPack}
+        chooseDatasetFolder={props.choosePublicDatasetFolder}
+        inspectDataset={props.inspectPublicDataset}
+        runDatasetBenchmark={props.runPublicDatasetBenchmark}
+        runModelComparison={props.runPublicDatasetModelComparison}
+        applyModelRecommendation={props.applyModelRecommendation}
         applyCalibration={props.applyCalibration}
         exportAccuracyLabels={props.exportAccuracyLabels}
         importAccuracyLabels={props.importAccuracyLabels}
@@ -8402,6 +9623,10 @@ function SettingsView(props: {
           <ShieldCheck size={17} />
           <span>Verify latest backup</span>
         </button>
+        <button className="secondary" onClick={props.restoreLatestWorkspaceBackup} disabled={props.busy}>
+          <FolderOpen size={17} />
+          <span>Restore latest backup</span>
+        </button>
         {props.backupVerification && (
           <div className={props.backupVerification.ok ? "backup-verification ok" : "backup-verification warn"}>
             <strong>{props.backupVerification.ok ? "Backup verified" : "Backup needs attention"}</strong>
@@ -8415,6 +9640,15 @@ function SettingsView(props: {
             {props.backupVerification.corruptEntry && <small>Corrupt entry: {props.backupVerification.corruptEntry}</small>}
             {props.backupVerification.dangerousEntries.length > 0 && <small>Unsafe entries: {props.backupVerification.dangerousEntries.length}</small>}
             {props.backupVerification.error && <small>{props.backupVerification.error}</small>}
+          </div>
+        )}
+        {props.backupRestoreResult && (
+          <div className="backup-verification ok">
+            <strong>Backup restored</strong>
+            <span title={props.backupRestoreResult.targetRoot}>{basename(props.backupRestoreResult.targetRoot) || props.backupRestoreResult.targetRoot}</span>
+            <small>
+              {props.backupRestoreResult.fileCount} files, {formatBytes(props.backupRestoreResult.bytes)}, {props.backupRestoreResult.stateSummary.references} people, {props.backupRestoreResult.stateSummary.candidates} matches
+            </small>
           </div>
         )}
         <button className="secondary" onClick={props.pruneWorkspaceBackups} disabled={props.busy}>
@@ -8976,6 +10210,129 @@ function InstallerDiagnosticsPanel({
   );
 }
 
+function referenceGapLabel(gap: string) {
+  const labels: Record<string, string> = {
+    "needs-active-model-backfill": "Refresh saved photos",
+    "needs-more-references": "Add more photos",
+    "needs-side-reference": "Add side photo",
+    "needs-angled-reference": "Add angled photo",
+    "needs-age-coverage": "Add another age",
+    "needs-clearer-reference": "Use clearer photo",
+    "needs-review-feedback": "Review a few",
+    "mixed-model-references": "Mixed model"
+  };
+  return labels[gap] ?? gap.replaceAll("-", " ");
+}
+
+function ReferenceGapPanel({
+  report,
+  busy,
+  runReport,
+  copyText,
+  startReferenceFix
+}: {
+  report: ReferenceGapReport | null;
+  busy: boolean;
+  runReport(): void;
+  copyText(text: string, label?: string): void;
+  startReferenceFix(personName: string): void;
+}) {
+  const visibleItems = (report?.items ?? []).filter((item) => item.status !== "strong").slice(0, 5);
+  const fallbackItems = report?.items.slice(0, 5) ?? [];
+  const rows = visibleItems.length ? visibleItems : fallbackItems;
+  const summary = report
+    ? {
+        generatedAt: report.generatedAt,
+        currentModel: report.currentModel,
+        people: report.people,
+        needsAttention: report.needsAttention,
+        averageScore: report.averageScore,
+        topGaps: report.topGaps,
+        recommendations: report.recommendations,
+        peopleToFix: rows.map((item) => ({
+          personName: item.personName,
+          score: item.score,
+          status: item.status,
+          references: item.referenceCount,
+          actions: item.actions,
+          gaps: item.gaps
+        }))
+      }
+    : null;
+  return (
+    <div className={report?.needsAttention ? "panel settings-panel reference-gap-panel warn" : "panel settings-panel reference-gap-panel"}>
+      <div className="panel-title"><UserPlus size={18} /> Saved people check</div>
+      {report ? (
+        <>
+          <div className="workspace-health-grid reference-gap-summary">
+            <span className={report.needsAttention ? "warn" : "ok"}><small>People</small><strong>{formatNumber(report.people)}</strong></span>
+            <span className={report.needsAttention ? "warn" : "ok"}><small>Needs help</small><strong>{formatNumber(report.needsAttention)}</strong></span>
+            <span><small>Average strength</small><strong>{Math.round(report.averageScore)}%</strong></span>
+            <span><small>Active model</small><strong>{engineLabel(report.currentModel)}</strong></span>
+          </div>
+          <div className={report.needsAttention ? "health-list warn" : "health-list"}>
+            {report.recommendations.slice(0, 3).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+          </div>
+          {report.topGaps.length > 0 && (
+            <div className="reference-gap-chips" aria-label="Top reference gaps">
+              {report.topGaps.map((gap) => (
+                <span key={gap.gap}>{referenceGapLabel(gap.gap)} <strong>{formatNumber(gap.count)}</strong></span>
+              ))}
+            </div>
+          )}
+          <div className="reference-gap-list">
+            {rows.length ? rows.map((item) => {
+              const poseCount = item.poseCounts.frontal + item.poseCounts.threeQuarter + item.poseCounts.profile + item.poseCounts.edgeFace + item.poseCounts.unknown;
+              const ageCount = Object.values(item.ageBuckets).filter((value) => value > 0).length;
+              return (
+                <div className={`reference-gap-row ${item.status}`} key={item.personName}>
+                  <div className="reference-gap-score" aria-label={`${item.personName} reference strength ${item.score} percent`}>
+                    <strong>{item.score}</strong>
+                    <small>/100</small>
+                  </div>
+                  <div className="reference-gap-body">
+                    <strong>{item.personName}</strong>
+                    <small>
+                      {formatNumber(item.referenceCount)} saved photo{item.referenceCount === 1 ? "" : "s"} • {formatNumber(poseCount)} pose sample{poseCount === 1 ? "" : "s"} • {formatNumber(ageCount)} age range{ageCount === 1 ? "" : "s"}
+                    </small>
+                    <div className="reference-gap-actions">
+                      {(item.actions.length ? item.actions : ["Reference coverage is ready."]).slice(0, 3).map((action) => <span key={action}>{action}</span>)}
+                    </div>
+                  </div>
+                  <span className={`status-pill ${item.status}`}>{item.status === "blocked" ? "Refresh" : item.status}</span>
+                  <button className="secondary compact-action" onClick={() => startReferenceFix(item.personName)} disabled={busy} type="button">
+                    <UserPlus size={15} />
+                    <span>Add photos</span>
+                  </button>
+                </div>
+              );
+            }) : (
+              <div className="empty compact-empty">
+                <UserPlus size={24} />
+                <strong>No saved people yet</strong>
+                <span>Add person photos first, then run this check before scanning a large library.</span>
+              </div>
+            )}
+          </div>
+          <small className="compact">Checked {formatDateTime(report.generatedAt)}</small>
+        </>
+      ) : (
+        <p className="compact">Before a large scan, check whether each saved person has enough clear front, angled, side, and age-range photos.</p>
+      )}
+      <div className="button-row">
+        <button className="secondary" onClick={runReport} disabled={busy}>
+          <RefreshCcw size={17} />
+          <span>Check saved people</span>
+        </button>
+        <button className="ghost compact-action" onClick={() => summary && copyText(JSON.stringify(summary, null, 2), "Saved people check")} disabled={!summary}>
+          <CopyIcon size={16} />
+          <span>Copy summary</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ReviewRulesPanel({
   settings,
   setSettings,
@@ -9405,10 +10762,19 @@ function VideoDecoderPanel({
 function AccuracyLabPanel({
   result,
   validationPack,
+  datasetCatalog,
+  datasetInspection,
+  datasetBenchmark,
+  modelComparison,
   calibration,
   busy,
   runAccuracyEvaluation,
   generateAccuracyValidationPack,
+  chooseDatasetFolder,
+  inspectDataset,
+  runDatasetBenchmark,
+  runModelComparison,
+  applyModelRecommendation,
   applyCalibration,
   exportAccuracyLabels,
   importAccuracyLabels,
@@ -9416,23 +10782,89 @@ function AccuracyLabPanel({
 }: {
   result: AccuracyEvaluation | null;
   validationPack: AccuracyValidationPackValue | null;
+  datasetCatalog: PublicDatasetCatalog | null;
+  datasetInspection: PublicDatasetInspection | null;
+  datasetBenchmark: PublicDatasetBenchmarkResult | null;
+  modelComparison: PublicDatasetModelComparisonResult | null;
   calibration: AppState["calibration"];
   busy: boolean;
   runAccuracyEvaluation(): void;
   generateAccuracyValidationPack(): void;
+  chooseDatasetFolder(): Promise<string | null>;
+  inspectDataset(options: { datasetId: string; folder: string; includeVideos?: boolean }): void | Promise<void>;
+  runDatasetBenchmark(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; downloadIfMissing?: boolean; includeVideos?: boolean }): void | Promise<void>;
+  runModelComparison(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; downloadIfMissing?: boolean; includeVideos?: boolean }): void | Promise<void>;
+  applyModelRecommendation(pack: string): void | Promise<void>;
   applyCalibration(): void;
   exportAccuracyLabels(): void;
   importAccuracyLabels(text: string): void | Promise<void>;
   copyText(text: string, label?: string): void;
 }) {
   const [importText, setImportText] = useState("");
+  const [datasetId, setDatasetId] = useState("lfw");
+  const [datasetFolder, setDatasetFolder] = useState("");
+  const [datasetMaxIdentities, setDatasetMaxIdentities] = useState(12);
+  const [datasetCandidateImages, setDatasetCandidateImages] = useState(3);
+  const [datasetDownloadPublic, setDatasetDownloadPublic] = useState(true);
+  const [datasetIncludeVideos, setDatasetIncludeVideos] = useState(false);
+  const datasets = datasetCatalog?.datasets ?? [];
+  const selectedDataset = datasets.find((item) => item.datasetId === datasetId) ?? datasets[0] ?? null;
+  const canAutoPrepareDataset = Boolean(selectedDataset?.download?.available);
   const likely = result?.metrics.likely;
   const labelCount = likely?.labeled ?? calibration?.matchLabels ?? 0;
   const importDisabled = busy || !importText.trim();
+  const canRunDataset = !busy && Boolean(datasetFolder.trim() || canAutoPrepareDataset);
+  const preferredMatrixKeys = [
+    "all",
+    "age:cross-age",
+    "pose:profile",
+    "pose:frontal",
+    "pose:three-quarter",
+    "media:video",
+    "hard-negative:family-lookalike",
+    "scale:distractor",
+    "dataset:ijbc-template",
+    "expected:non-match"
+  ];
+  const validationMatrix = datasetBenchmark?.validationMatrix ?? {};
+  const benchmarkMatrixItems = [
+    ...preferredMatrixKeys
+      .map((key) => validationMatrix[key])
+      .filter((item): item is NonNullable<PublicDatasetBenchmarkResult["validationMatrix"]>[string] => Boolean(item)),
+    ...Object.values(validationMatrix).filter((item) => !preferredMatrixKeys.includes(item.key))
+  ];
   async function submitImport() {
     if (!importText.trim()) return;
     await importAccuracyLabels(importText);
     setImportText("");
+  }
+  async function chooseFolderForDataset() {
+    const folder = await chooseDatasetFolder();
+    if (folder) setDatasetFolder(folder);
+  }
+  async function inspectSelectedDataset() {
+    if (!datasetFolder.trim()) return;
+    await inspectDataset({ datasetId, folder: datasetFolder, includeVideos: datasetIncludeVideos });
+  }
+  async function runSelectedDatasetBenchmark() {
+    await runDatasetBenchmark({
+      datasetId,
+      folder: datasetFolder,
+      maxIdentities: datasetMaxIdentities,
+      candidateImages: datasetCandidateImages,
+      downloadIfMissing: datasetDownloadPublic,
+      includeVideos: datasetIncludeVideos
+    });
+  }
+  async function runSelectedModelComparison() {
+    await runModelComparison({
+      datasetId,
+      folder: datasetFolder,
+      maxIdentities: datasetMaxIdentities,
+      candidateImages: datasetCandidateImages,
+      downloadIfMissing: datasetDownloadPublic,
+      includeVideos: datasetIncludeVideos
+    });
   }
   return (
     <div className="panel settings-panel benchmark-panel">
@@ -9506,6 +10938,226 @@ function AccuracyLabPanel({
           </div>
         </div>
       )}
+      <details className="accuracy-import public-dataset-lab" open={Boolean(datasetBenchmark)}>
+        <summary>Public dataset benchmark</summary>
+        <div className="settings-form-grid">
+          <label>
+            <span>Dataset</span>
+            <select value={datasetId} onChange={(event) => setDatasetId(event.currentTarget.value)}>
+              {(datasets.length ? datasets : [{ datasetId: "lfw", shortName: "LFW", name: "Labeled Faces in the Wild" } as PublicDatasetCatalogEntry]).map((dataset) => (
+                <option key={dataset.datasetId} value={dataset.datasetId}>{dataset.shortName}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Max identities</span>
+            <input type="number" min={2} max={250} value={datasetMaxIdentities} onChange={(event) => setDatasetMaxIdentities(Number(event.currentTarget.value) || 12)} />
+          </label>
+          <label>
+            <span>Held-out images each</span>
+            <input type="number" min={1} max={20} value={datasetCandidateImages} onChange={(event) => setDatasetCandidateImages(Number(event.currentTarget.value) || 3)} />
+          </label>
+        </div>
+        {selectedDataset ? (
+          <div className="validation-pack-card">
+            <strong>{selectedDataset.name}</strong>
+            <span>{selectedDataset.recommendedUse}</span>
+            {selectedDataset.bestFor?.length ? <small>Best for: {selectedDataset.bestFor.join(", ")}</small> : null}
+            <small>{formatNumber(selectedDataset.scale.images)} images, {formatNumber(selectedDataset.scale.identities)} identities, {formatNumber(selectedDataset.scale.videos)} videos</small>
+            <small>{selectedDataset.terms}</small>
+          </div>
+        ) : null}
+        <div className="button-row">
+          <button className="secondary" onClick={() => void chooseFolderForDataset()} disabled={busy} type="button">
+            <FolderOpen size={17} />
+            <span>Choose dataset folder</span>
+          </button>
+          <button className="secondary" onClick={() => void inspectSelectedDataset()} disabled={busy || !datasetFolder.trim()} type="button">
+            <Search size={17} />
+            <span>Inspect dataset</span>
+          </button>
+          <button className="secondary" onClick={() => void runSelectedDatasetBenchmark()} disabled={!canRunDataset} type="button">
+            <Gauge size={17} />
+            <span>Run dataset benchmark</span>
+          </button>
+          <button className="secondary" onClick={() => void runSelectedModelComparison()} disabled={!canRunDataset} type="button">
+            <SlidersHorizontal size={17} />
+            <span>Compare model packs</span>
+          </button>
+        </div>
+        <div className="settings-toggle-row">
+          <label>
+            <input type="checkbox" checked={datasetDownloadPublic} onChange={(event) => setDatasetDownloadPublic(event.currentTarget.checked)} disabled={!canAutoPrepareDataset} />
+            <span>Use {selectedDataset?.shortName ?? "dataset"} cache/download when no folder is chosen</span>
+          </label>
+          <label>
+            <input type="checkbox" checked={datasetIncludeVideos} onChange={(event) => setDatasetIncludeVideos(event.currentTarget.checked)} />
+            <span>Include video files when identities also have image references</span>
+          </label>
+        </div>
+        {datasetFolder ? <small className="path-chip" title={datasetFolder}>{datasetFolder}</small> : null}
+        {datasetInspection ? (
+          <div className="workspace-health-grid">
+            <span><small>Usable identities</small><strong>{formatNumber(datasetInspection.usableIdentityCount)}</strong></span>
+            <span><small>Images</small><strong>{formatNumber(datasetInspection.imageCount)}</strong></span>
+            <span><small>Videos</small><strong>{formatNumber(datasetInspection.videoCount)}</strong></span>
+            <span><small>Checked</small><strong>{formatNumber(datasetInspection.entriesChecked)}</strong></span>
+          </div>
+        ) : null}
+        {datasetBenchmark ? (
+          <div className="validation-pack-card">
+            <div className="workspace-health-grid">
+              <span><small>Evaluated</small><strong>{formatNumber(datasetBenchmark.metrics.evaluated)}</strong></span>
+              <span><small>Review precision</small><strong>{percent(datasetBenchmark.metrics.precision)}</strong></span>
+              <span><small>Review recall</small><strong>{percent(datasetBenchmark.metrics.recall)}</strong></span>
+              {datasetBenchmark.metricsByThreshold?.likely ? (
+                <>
+                  <span><small>Likely precision</small><strong>{percent(datasetBenchmark.metricsByThreshold.likely.precision)}</strong></span>
+                  <span><small>Likely recall</small><strong>{percent(datasetBenchmark.metricsByThreshold.likely.recall)}</strong></span>
+                </>
+              ) : null}
+              <span><small>Wrong identity</small><strong>{formatNumber(datasetBenchmark.metrics.wrongIdentity)}</strong></span>
+              <span><small>Scan added</small><strong>{formatNumber(datasetBenchmark.pipeline.scanAdded)}</strong></span>
+              <span><small>Video files</small><strong>{formatNumber(datasetBenchmark.selected.videoFiles ?? 0)}</strong></span>
+              <span><small>Video frames</small><strong>{formatNumber(datasetBenchmark.selected.videoFrames ?? 0)}</strong></span>
+              <span><small>Video decode failed</small><strong>{formatNumber(datasetBenchmark.pipeline.videoDecodeFailures?.length ?? 0)}</strong></span>
+              <span><small>Side faces recovered</small><strong>{formatNumber(datasetBenchmark.pipeline.scanMetrics.profileRescueFound ?? 0)}</strong></span>
+              <span><small>Hard-pose reviews</small><strong>{formatNumber(datasetBenchmark.pipeline.scanMetrics.poseRelaxedReviews ?? 0)}</strong></span>
+              <span><small>No face found</small><strong>{formatNumber(datasetBenchmark.pipeline.scanMetrics.noFaceDetected ?? 0)}</strong></span>
+              <span><small>Safe face crops</small><strong>{formatNumber(datasetBenchmark.pipeline.scanMetrics.safeModeFaceCropAllowed ?? 0)}</strong></span>
+            </div>
+            {benchmarkMatrixItems.length ? (
+              <div className="validation-matrix-grid">
+                {benchmarkMatrixItems.map((item) => (
+                  <span key={item.key} className={item.falsePositives || item.wrongIdentity ? "warn" : item.falseNegatives ? "fail" : "ok"}>
+                    <strong>{item.label}</strong>
+                    <small>{formatNumber(item.count)} cases</small>
+                    <em>Precision {percent(item.precision)}</em>
+                    <em>Recall {percent(item.recall)}</em>
+                    <em>Missed {formatNumber(item.falseNegatives)}</em>
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            {datasetBenchmark.thresholdCalibration ? (
+              <div className="calibration-card">
+                <div className="panel-title compact-title">
+                  <SlidersHorizontal size={16} />
+                  <span>Threshold calibration</span>
+                  <div className="spacer" />
+                  <small>{datasetBenchmark.thresholdCalibration.pack ? `${datasetBenchmark.thresholdCalibration.pack} · ` : ""}{formatNumber(datasetBenchmark.thresholdCalibration.labelCount)} labels</small>
+                </div>
+                <div className="workspace-health-grid compact-grid">
+                  <span><small>Review more</small><strong>{percent(datasetBenchmark.thresholdCalibration.recommendedThresholds.reviewMore ?? 0)}</strong></span>
+                  <span><small>Likely</small><strong>{percent(datasetBenchmark.thresholdCalibration.recommendedThresholds.likely ?? 0)}</strong></span>
+                  <span><small>Strong</small><strong>{percent(datasetBenchmark.thresholdCalibration.recommendedThresholds.strong ?? 0)}</strong></span>
+                  <span><small>Likely precision</small><strong>{percent(datasetBenchmark.thresholdCalibration.overall.recommendedLikely?.precision ?? 0)}</strong></span>
+                  <span><small>Likely recall</small><strong>{percent(datasetBenchmark.thresholdCalibration.overall.recommendedLikely?.recall ?? 0)}</strong></span>
+                  <span><small>Wrong identity</small><strong>{formatNumber(datasetBenchmark.thresholdCalibration.overall.recommendedLikely?.wrongIdentity ?? 0)}</strong></span>
+                </div>
+                <div className="health-list">
+                  {datasetBenchmark.thresholdCalibration.recommendations.slice(0, 3).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+                </div>
+              </div>
+            ) : null}
+            <div className="health-list">
+              {datasetBenchmark.recommendations.slice(0, 3).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+            </div>
+            <div className="button-row">
+              <button className="ghost compact-action" onClick={() => copyText(datasetBenchmark.reportPath, "Dataset benchmark report")} type="button">
+                <FileText size={16} />
+                <span>Copy report path</span>
+              </button>
+              <button className="ghost compact-action" onClick={() => copyText(datasetBenchmark.labelsJsonPath, "Dataset labels")} type="button">
+                <Archive size={16} />
+                <span>Copy label path</span>
+              </button>
+            </div>
+          </div>
+        ) : null}
+        {modelComparison ? (
+          <div className="validation-pack-card model-comparison-card">
+            <div className="panel-title compact-title">
+              <SlidersHorizontal size={17} />
+              <span>Model comparison</span>
+              <div className="spacer" />
+              <small>{modelComparison.recommendedPack ? `Recommended: ${modelComparison.recommendedPack}` : modelComparison.bestRecallPack ? `Recall: ${modelComparison.bestRecallPack}` : "No winner yet"}</small>
+            </div>
+            {modelComparison.recommendation ? (
+              <div className={`model-recommendation-card ${modelComparison.recommendation.confidence}`}>
+                <div>
+                  <strong>{modelComparison.recommendation.recommendedLabel || modelComparison.recommendation.recommendedPack || "No model recommendation"}</strong>
+                  <small>{modelComparison.recommendation.summary}</small>
+                </div>
+                <div className="workspace-health-grid compact-grid">
+                  <span><small>Confidence</small><strong>{modelComparison.recommendation.confidence}</strong></span>
+                  <span><small>Precision</small><strong>{percent(modelComparison.recommendation.precision ?? 0)}</strong></span>
+                  <span><small>Recall</small><strong>{percent(modelComparison.recommendation.recall ?? 0)}</strong></span>
+                  <span><small>Profile recall</small><strong>{percent(modelComparison.recommendation.profileRecall ?? 0)}</strong></span>
+                  <span><small>Cross-age recall</small><strong>{percent(modelComparison.recommendation.crossAgeRecall ?? 0)}</strong></span>
+                  <span><small>Lookalike FP</small><strong>{formatNumber(modelComparison.recommendation.hardNegativeFalsePositives ?? 0)}</strong></span>
+                </div>
+                {modelComparison.recommendation.actions.length ? (
+                  <div className="health-list">
+                    {modelComparison.recommendation.actions.slice(0, 3).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+                  </div>
+                ) : null}
+                <div className="button-row">
+                  <button
+                    className="secondary"
+                    onClick={() => modelComparison.recommendation?.recommendedPack && void applyModelRecommendation(modelComparison.recommendation.recommendedPack)}
+                    disabled={busy || !modelComparison.recommendation.recommendedPack || modelComparison.recommendation.status === "unavailable"}
+                    type="button"
+                  >
+                    <Check size={16} />
+                    <span>{modelComparison.recommendation.status === "switch" ? "Apply recommendation" : "Backfill current model"}</span>
+                  </button>
+                  <button className="ghost compact-action" onClick={() => copyText(modelComparison.reportPath, "Model comparison report")} type="button">
+                    <Archive size={16} />
+                    <span>Copy comparison report</span>
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            <div className="model-comparison-grid">
+              {modelComparison.packs.map((pack) => {
+                const likely = pack.metricsByThreshold?.likely;
+                const metrics = pack.metrics;
+                const profileRecovered = Number(pack.pipeline?.scanMetrics?.profileRescueFound ?? 0);
+                const profileMatrix = pack.validationMatrix?.["pose:profile"];
+                return (
+                  <div key={pack.pack} className={pack.status === "complete" ? "model-comparison-row ok" : pack.status === "missing" ? "model-comparison-row warn" : "model-comparison-row fail"}>
+                    <div>
+                      <strong>{pack.label || pack.pack}</strong>
+                      <small>{pack.status === "complete" ? pack.engine : pack.error || pack.status}</small>
+                    </div>
+                    <span><small>Precision</small><strong>{metrics ? percent(metrics.precision) : "n/a"}</strong></span>
+                    <span><small>Recall</small><strong>{metrics ? percent(metrics.recall) : "n/a"}</strong></span>
+                    <span><small>Likely recall</small><strong>{likely ? percent(likely.recall) : "n/a"}</strong></span>
+                    <span><small>Profile recall</small><strong>{profileMatrix ? percent(profileMatrix.recall) : "n/a"}</strong></span>
+                    <span><small>Side faces</small><strong>{formatNumber(profileRecovered)}</strong></span>
+                    {pack.reportPath ? (
+                      <button className="ghost compact-action" onClick={() => copyText(pack.reportPath, `${pack.pack} report`)} type="button">
+                        <FileText size={15} />
+                        <span>Report</span>
+                      </button>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="health-list">
+              {modelComparison.recommendations.slice(0, 3).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+            </div>
+            {!modelComparison.recommendation ? (
+              <button className="ghost compact-action" onClick={() => copyText(modelComparison.reportPath, "Model comparison report")} type="button">
+                <Archive size={16} />
+                <span>Copy comparison report</span>
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+      </details>
       <details className="accuracy-import">
         <summary>Import label JSON</summary>
         <label className="diagnostics-json-label">
@@ -9929,6 +11581,7 @@ function PerformanceCenter({
   profile,
   latencySamples,
   latencySummary,
+  scanProgress,
   busy,
   warmPreviewsNow,
   copyPerformanceReport,
@@ -9941,6 +11594,7 @@ function PerformanceCenter({
   profile: PerformanceProfile;
   latencySamples: LatencySample[];
   latencySummary: LatencySummary;
+  scanProgress: ScanProgress | null;
   busy: boolean;
   warmPreviewsNow(): void;
   copyPerformanceReport(): void;
@@ -9950,6 +11604,19 @@ function PerformanceCenter({
   const budgetLabel = formatDuration(profile.slowCommandMs);
   const platform = state.platform;
   const autoMode = resolvePerformanceMode("auto", platform);
+  const totals = state.scanTotals;
+  const throughput = totals.durationMs > 0 ? (totals.processed / Math.max(1, totals.durationMs / 1000)) : 0;
+  const activeThroughput = scanProgress?.elapsedMs && scanProgress.processed
+    ? Number(scanProgress.processed) / Math.max(1, Number(scanProgress.elapsedMs) / 1000)
+    : 0;
+  const traceSamples = latencySamples.slice(0, 12);
+  const bottlenecks = [
+    latencySummary.p95 > profile.slowCommandMs ? `Command p95 is over budget by ${formatDuration(latencySummary.p95 - profile.slowCommandMs)}.` : "",
+    platform.primary_provider === "CPUExecutionProvider" ? "CPU-only recognition path is active; expect slower scans on large folders." : "",
+    state.videoDecoder && !state.videoDecoder.ffmpegAvailable && (totals.videoFiles ?? 0) > 0 ? "Video files were scanned without FFmpeg; install or bundle the managed decoder for broader codec coverage." : "",
+    throughput > 0 && throughput < 0.4 ? "Historical scan throughput is below 0.4 files/sec; disk, decoder, or model acceleration may be limiting." : "",
+    scanProgress?.memoryPressure && !["normal", ""].includes(String(scanProgress.memoryPressure)) ? scanProgress.memoryMessage || `Memory pressure is ${scanProgress.memoryPressure}.` : ""
+  ].filter(Boolean);
   const effectiveScanDetail = [
     `${state.config.effectiveFaceDetectorSize ?? state.config.faceDetectorSize}px detector`,
     (state.config.effectiveTwoPassScan ?? state.config.twoPassScan) ? "two-pass recheck" : "one-pass scan"
@@ -10056,6 +11723,60 @@ function PerformanceCenter({
           <span>Clear samples</span>
         </button>
       </div>
+      <details className="performance-trace-viewer">
+        <summary>Performance trace</summary>
+        <div className="trace-metrics-grid">
+          <span>
+            <small>Provider</small>
+            <strong>{platform.primary_provider || "Unknown"}</strong>
+          </span>
+          <span>
+            <small>Vector search</small>
+            <strong>{state.vectorStore || platform.vector_backend || "Unknown"}</strong>
+          </span>
+          <span>
+            <small>Decoder</small>
+            <strong>{state.videoDecoder?.backend || "Images only"}</strong>
+          </span>
+          <span>
+            <small>Scan throughput</small>
+            <strong>{throughput ? `${throughput.toFixed(2)} files/s` : "No run yet"}</strong>
+          </span>
+          <span>
+            <small>Active throughput</small>
+            <strong>{activeThroughput ? `${activeThroughput.toFixed(2)} files/s` : "Idle"}</strong>
+          </span>
+          <span>
+            <small>Active ETA</small>
+            <strong>{scanProgress?.etaMs ? formatDuration(Math.round(scanProgress.etaMs)) : "None"}</strong>
+          </span>
+          <span>
+            <small>Workspace DB</small>
+            <strong>{state.scale?.dbBytes ? formatBytes(state.scale.dbBytes) : "Unknown"}</strong>
+          </span>
+          <span>
+            <small>Manifest files</small>
+            <strong>{formatNumber(state.scale?.manifestFiles ?? 0)}</strong>
+          </span>
+        </div>
+        <div className={bottlenecks.length ? "trace-bottlenecks" : "trace-bottlenecks ok"}>
+          {bottlenecks.length ? bottlenecks.map((item) => <span key={item}>{item}</span>) : <span>No current bottleneck detected from collected samples.</span>}
+        </div>
+        <div className="trace-table" role="table" aria-label="Recent command timings">
+          <span className="trace-head">Action</span>
+          <span className="trace-head">Command</span>
+          <span className="trace-head">Time</span>
+          <span className="trace-head">Budget</span>
+          {traceSamples.length ? traceSamples.map((sample) => (
+            <span className={sample.durationMs > sample.budgetMs ? "trace-row slow" : "trace-row"} key={`${sample.at}-${sample.command}-${sample.durationMs}`}>
+              <strong>{sample.label}</strong>
+              <small>{sample.command}</small>
+              <em>{formatDuration(sample.durationMs)}</em>
+              <em>{formatDuration(sample.budgetMs)}</em>
+            </span>
+          )) : <span className="trace-empty">Use the app to collect trace samples.</span>}
+        </div>
+      </details>
       <p className="compact">
         {latencySummary.slowCount
           ? `${latencySummary.slowCount} command sample${latencySummary.slowCount === 1 ? "" : "s"} crossed the ${budgetLabel} budget.`
@@ -10129,7 +11850,7 @@ function CandidateIdentity({ candidate, showThumbnail = true }: { candidate: Rev
   return (
     <span className="candidate-identity">
       <span className="thumb">
-        {showThumbnail && candidate.sourceUrl && !failed ? <img loading="lazy" decoding="async" src={candidate.sourceUrl} alt="" onError={() => setFailed(true)} /> : video ? <Video size={18} /> : <ImageIcon size={18} />}
+        {showThumbnail && candidate.sourceUrl && !failed ? <img loading="lazy" decoding="async" width={44} height={44} src={candidate.sourceUrl} alt="" onError={() => setFailed(true)} /> : video ? <Video size={18} /> : <ImageIcon size={18} />}
       </span>
       <span>
         <strong>{candidate.personName}</strong>

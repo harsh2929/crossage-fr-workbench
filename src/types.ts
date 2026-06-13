@@ -164,6 +164,12 @@ export interface ModelPackageStatus {
   missing: string[];
   downloadedArchive: boolean;
   installedBytes: number;
+  role?: string;
+  pose_aware?: boolean;
+  embedding_space?: string;
+  license_tier?: string;
+  thresholds?: Record<string, number>;
+  recommended_for?: string[];
   governance?: ModelGovernance;
 }
 
@@ -187,6 +193,44 @@ export interface ModelSetupReport {
   packages: ModelPackageStatus[];
   offlineMessage: string;
   recommendation: string;
+}
+
+export interface ModelCompatibilityReport {
+  activeModelName: string;
+  compatibleReferences: number;
+  otherModelReferences: number;
+  totalReferences: number;
+  modelCounts: Record<string, number>;
+  needsBackfill: boolean;
+  message: string;
+}
+
+export interface ModelSwitchDryRun {
+  targetPack: string;
+  targetLabel: string;
+  targetModelName: string;
+  currentPack: string;
+  currentModelName: string;
+  modelRoot: string;
+  installed: boolean;
+  safeToSave: boolean;
+  willResetEngine: boolean;
+  poseAware: boolean;
+  downloadBytes: number;
+  installedBytes: number;
+  estimatedDiskImpactBytes: number;
+  estimatedBackfillSeconds: number;
+  totalReferences: number;
+  compatibleReferences: number;
+  referencesNeedingBackfill: number;
+  currentCompatibleReferences: number;
+  affectedCandidates: number;
+  rollbackPack: string;
+  thresholds: Record<string, number>;
+  blockers: string[];
+  warnings: string[];
+  actions: string[];
+  summary: string;
 }
 
 export interface BuildInfo {
@@ -222,6 +266,7 @@ export interface ReferenceFace {
   captureDate: string | null;
   quality: number;
   modelName: string;
+  poseBucket?: string;
   createdAt: string;
 }
 
@@ -258,6 +303,7 @@ export interface ReviewCandidate {
   band: string;
   quality: number;
   modelName: string;
+  poseBucket?: string;
   status: CandidateStatus;
   note: string;
   createdAt: string;
@@ -288,6 +334,26 @@ export interface ScanMetrics {
   twoPassVerified?: number;
   twoPassChanged?: number;
   twoPassDeferred?: number;
+  noFaceDetected?: number;
+  lowQualityFaces?: number;
+  blockedPairs?: number;
+  duplicateCandidates?: number;
+  videoCandidateCap?: number;
+  profileRescueAttempted?: number;
+  profileRescueFound?: number;
+  profileRescueMatched?: number;
+  profileRescueUnmatched?: number;
+  poseFrontal?: number;
+  poseThreeQuarter?: number;
+  poseProfile?: number;
+  poseUnknown?: number;
+  poseRelaxedReviews?: number;
+  poseRelaxedProfile?: number;
+  poseRelaxedThreeQuarter?: number;
+  poseReranked?: number;
+  poseAmbiguous?: number;
+  hardPoseUnsupported?: number;
+  safeModeFaceCropAllowed?: number;
   memoryPressure?: "normal" | "elevated" | "high" | "critical" | string;
   memoryMessage?: string;
   memoryAvailableBytes?: number;
@@ -704,6 +770,22 @@ export interface WorkspaceBackupValue {
   includeGenerated: boolean;
 }
 
+export interface WorkspaceBackupRestoreValue {
+  generatedAt: string;
+  ok: boolean;
+  zipPath: string;
+  targetRoot: string;
+  fileCount: number;
+  bytes: number;
+  manifest: Record<string, unknown>;
+  stateSummary: {
+    workspaceId: string;
+    references: number;
+    candidates: number;
+    scanRuns: number;
+  };
+}
+
 export interface ScanHistoryExportValue {
   jsonPath: string;
   csvPath: string;
@@ -804,6 +886,46 @@ export interface ModelDriftReport {
     references: Array<Record<string, unknown>>;
     candidates: Array<Record<string, unknown>>;
   };
+  recommendations: string[];
+}
+
+export interface ReferenceGapItem {
+  personName: string;
+  referenceCount: number;
+  compatibleReferences: number;
+  otherModelReferences: number;
+  poseCounts: {
+    frontal: number;
+    threeQuarter: number;
+    profile: number;
+    edgeFace: number;
+    unknown: number;
+  };
+  ageBuckets: Record<AgeBucket | string, number>;
+  averageQuality: number;
+  bestQuality: number;
+  pendingCandidates: number;
+  acceptedCandidates: number;
+  rejectedCandidates: number;
+  uncertainCandidates: number;
+  strongPending: number;
+  lowConfidencePending: number;
+  sampleReferenceNames: string[];
+  gaps: string[];
+  actions: string[];
+  score: number;
+  status: "strong" | "usable" | "weak" | "blocked" | string;
+}
+
+export interface ReferenceGapReport {
+  generatedAt: string;
+  currentModel: string;
+  people: number;
+  needsAttention: number;
+  strongPeople: number;
+  averageScore: number;
+  topGaps: Array<{ gap: string; count: number }>;
+  items: ReferenceGapItem[];
   recommendations: string[];
 }
 
@@ -1050,6 +1172,239 @@ export interface AccuracyValidationRun {
   recommendations: string[];
 }
 
+export interface PublicDatasetCatalogEntry {
+  datasetId: string;
+  name: string;
+  shortName: string;
+  bestFor: string[];
+  scale: {
+    images: number;
+    identities: number;
+    videos: number;
+  };
+  inputMode: string;
+  layout: string;
+  download: {
+    available: boolean;
+    method: string;
+    requiresConfirmation?: boolean;
+  };
+  sourceUrl: string;
+  terms: string;
+  recommendedUse: string;
+}
+
+export interface PublicDatasetCatalog {
+  generatedAt: string;
+  datasets: PublicDatasetCatalogEntry[];
+  policy: Record<string, string>;
+}
+
+export interface PublicDatasetInspection {
+  generatedAt: string;
+  datasetId: string;
+  folder: string;
+  exists: boolean;
+  identityCount: number;
+  usableIdentityCount: number;
+  imageCount: number;
+  videoCount: number;
+  entriesChecked: number;
+  truncated: boolean;
+  durationMs: number;
+  samples: Array<{
+    identity: string;
+    images: number;
+    videos: number;
+    folder: string;
+  }>;
+  recommendations: string[];
+}
+
+export interface PublicDatasetBenchmarkResult {
+  generatedAt: string;
+  datasetId: string;
+  datasetFolder: string;
+  runRoot: string;
+  workspace: string;
+  engine: string;
+  durationMs: number;
+  preparation: Record<string, unknown>;
+  inspection: PublicDatasetInspection;
+  truncated: boolean;
+  entriesChecked: number;
+  selected: {
+    identities: number;
+    distractorIdentities: number;
+    references: number;
+    candidates: number;
+    videoFiles?: number;
+    videoFrames?: number;
+  };
+  pipeline: {
+    enrolled: number;
+    scanAdded: number;
+    scanMetrics: Record<string, number>;
+    enrollErrors: string[];
+    scanErrors: string[];
+    videoDecodeFailures?: Array<{
+      sourcePath: string;
+      error: string;
+      datasetId?: string;
+    }>;
+  };
+  metrics: {
+    evaluated: number;
+    truePositives: number;
+    falsePositives: number;
+    trueNegatives: number;
+    falseNegatives: number;
+    wrongIdentity: number;
+    precision: number;
+    recall: number;
+    specificity: number;
+    accuracy: number;
+  };
+  metricsByThreshold?: Record<string, {
+    threshold: number;
+    evaluated: number;
+    truePositives: number;
+    falsePositives: number;
+    trueNegatives: number;
+    falseNegatives: number;
+    wrongIdentity: number;
+    precision: number;
+    recall: number;
+    specificity: number;
+    accuracy: number;
+  }>;
+  thresholdCalibration?: {
+    generatedAt: string;
+    pack?: string;
+    labelCount: number;
+    positiveCount: number;
+    negativeCount: number;
+    targetPrecision: number;
+    strongPrecision: number;
+    currentThresholds: Record<string, number>;
+    recommendedThresholds: Record<string, number>;
+    overall: Record<string, {
+      threshold: number | null;
+      evaluated: number;
+      positives: number;
+      negatives: number;
+      truePositives: number;
+      falsePositives: number;
+      trueNegatives: number;
+      falseNegatives: number;
+      wrongIdentity: number;
+      precision: number;
+      recall: number;
+      specificity: number;
+      accuracy: number;
+    }>;
+    groups: Record<string, {
+      key: string;
+      label: string;
+      count: number;
+      positives: number;
+      negatives: number;
+      recommendedLikelyThreshold: number;
+      metrics: {
+        threshold: number | null;
+        evaluated: number;
+        positives: number;
+        negatives: number;
+        truePositives: number;
+        falsePositives: number;
+        trueNegatives: number;
+        falseNegatives: number;
+        wrongIdentity: number;
+        precision: number;
+        recall: number;
+        specificity: number;
+        accuracy: number;
+      };
+    }>;
+    recommendations: string[];
+  };
+  validationMatrix?: Record<string, {
+    key: string;
+    label: string;
+    group: string;
+    count: number;
+    evaluated: number;
+    truePositives: number;
+    falsePositives: number;
+    trueNegatives: number;
+    falseNegatives: number;
+    wrongIdentity: number;
+    precision: number;
+    recall: number;
+    specificity: number;
+    accuracy: number;
+    recommendations: string[];
+  }>;
+  labelsJsonPath: string;
+  labelsCsvPath: string;
+  reportPath: string;
+  recommendations: string[];
+  importResult?: AccuracyLabelsImportValue | null;
+}
+
+export interface PublicDatasetModelComparisonPack {
+  pack: string;
+  label: string;
+  available: boolean;
+  status: "complete" | "missing" | "error" | string;
+  engine: string;
+  error: string;
+  metrics: PublicDatasetBenchmarkResult["metrics"] | null;
+  metricsByThreshold?: PublicDatasetBenchmarkResult["metricsByThreshold"] | null;
+  thresholdCalibration?: PublicDatasetBenchmarkResult["thresholdCalibration"] | null;
+  validationMatrix?: PublicDatasetBenchmarkResult["validationMatrix"] | null;
+  recommendationScore?: number;
+  recommendationReasons?: string[];
+  pipeline: PublicDatasetBenchmarkResult["pipeline"] | null;
+  reportPath: string;
+  runRoot: string;
+  recommendations: string[];
+}
+
+export interface ModelPackRecommendation {
+  status: "switch" | "keep" | "unavailable" | string;
+  recommendedPack: string | null;
+  recommendedLabel?: string;
+  currentPack: string;
+  confidence: "high" | "medium" | "low" | "none" | string;
+  score?: number;
+  currentScore?: number | null;
+  margin?: number;
+  precision?: number;
+  recall?: number;
+  profileRecall?: number;
+  crossAgeRecall?: number;
+  wrongIdentity?: number;
+  hardNegativeFalsePositives?: number;
+  summary: string;
+  reasons: string[];
+  actions: string[];
+}
+
+export interface PublicDatasetModelComparisonResult {
+  generatedAt: string;
+  datasetId: string;
+  datasetFolder: string;
+  durationMs: number;
+  packs: PublicDatasetModelComparisonPack[];
+  bestPrecisionPack: string | null;
+  bestRecallPack: string | null;
+  recommendedPack?: string | null;
+  recommendation?: ModelPackRecommendation;
+  reportPath: string;
+  recommendations: string[];
+}
+
 export interface CandidateQueryResult {
   total: number;
   offset: number;
@@ -1243,6 +1598,7 @@ export interface AppState {
   config: AppConfig;
   safeModeModel?: SafeModeModelReport;
   modelSetup?: ModelSetupReport;
+  modelCompatibility?: ModelCompatibilityReport;
   videoDecoder?: VideoDecoderReport;
   references: ReferenceFace[];
   candidates: ReviewCandidate[];
@@ -1276,12 +1632,14 @@ export interface CommandResult<T = unknown> {
 }
 
 export interface ScanProgress extends Partial<ScanMetrics> {
-  phase: "started" | "processing" | "protected" | "candidate" | "processed" | "clustering" | "verifying" | "verified" | "paused" | "error" | "complete" | "cancelled";
+  phase: "started" | "processing" | "protected" | "candidate" | "processed" | "clustering" | "verifying" | "verified" | "model_backfill" | "paused" | "error" | "complete" | "cancelled";
   source?: "manual" | "watch" | "camera" | string;
   currentPath?: string;
   candidateId?: string;
   message?: string;
   safety_score?: number;
+  elapsedMs?: number | null;
+  etaMs?: number | null;
   state?: AppState;
 }
 

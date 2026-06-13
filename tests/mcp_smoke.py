@@ -59,10 +59,12 @@ EXPECTED_TOOLS = {
     "retention_policy_report",
     "export_safe_mode_audit",
     "model_drift_report",
+    "reference_gap_report",
     "export_review_ledger",
     "export_scan_history",
     "export_workspace_backup",
     "verify_workspace_backup",
+    "restore_workspace_backup",
     "prune_workspace_backups",
     "prune_scan_manifests",
     "export_selected_candidates",
@@ -75,7 +77,13 @@ EXPECTED_TOOLS = {
     "release_readiness",
     "model_integrity",
     "model_distribution_audit",
+    "backfill_model_references",
     "installer_self_diagnostics",
+    "public_dataset_catalog",
+    "inspect_public_dataset",
+    "run_public_dataset_benchmark",
+    "compare_public_dataset_models",
+    "apply_model_recommendation",
     "apply_review_rules",
     "calibration_summary",
     "accuracy_evaluation",
@@ -281,6 +289,15 @@ async def smoke() -> None:
             assert not verified_backup.isError
             assert verified_backup.structuredContent
             assert verified_backup.structuredContent["verification"]["ok"] is True
+            restore_target = workspace.parent / "mcp-restored-workspace"
+            await expect_tool_error(session, "restore_workspace_backup", {"path": str(backup_path), "target": str(restore_target)}, "confirm=True")
+            restored_backup = await session.call_tool(
+                "restore_workspace_backup",
+                {"path": str(backup_path), "target": str(restore_target), "confirm": True},
+            )
+            assert not restored_backup.isError
+            assert restored_backup.structuredContent["restore"]["ok"] is True
+            assert (restore_target / "references.json").exists()
             await expect_tool_error(session, "export_workspace_backup", {"include_generated": True}, "confirm=True")
 
             history = await session.call_tool("export_scan_history", {})
@@ -312,6 +329,12 @@ async def smoke() -> None:
             assert not drift.isError
             assert drift.structuredContent
             assert "currentModel" in drift.structuredContent
+
+            gaps = await session.call_tool("reference_gap_report", {})
+            assert not gaps.isError
+            assert gaps.structuredContent
+            assert "items" in gaps.structuredContent
+            assert "recommendations" in gaps.structuredContent
 
             ledger = await session.call_tool("export_review_ledger", {})
             assert not ledger.isError
@@ -354,6 +377,15 @@ async def smoke() -> None:
             distribution = await session.call_tool("model_distribution_audit", {})
             assert not distribution.isError
             assert distribution.structuredContent["items"]
+
+            await expect_tool_error(session, "backfill_model_references", {}, "confirm=True")
+
+            dataset_catalog = await session.call_tool("public_dataset_catalog", {})
+            assert not dataset_catalog.isError
+            assert any(item["datasetId"] == "lfw" for item in dataset_catalog.structuredContent["datasets"])
+
+            await expect_tool_error(session, "compare_public_dataset_models", {"dataset_id": "lfw"}, "confirm=True")
+            await expect_tool_error(session, "apply_model_recommendation", {"pack": "antelopev2"}, "confirm=True")
 
             storage_io = await session.call_tool("storage_io_benchmark", {"path": str(workspace), "size_mb": 1})
             assert not storage_io.isError

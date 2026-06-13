@@ -79,6 +79,11 @@ Release checks:
 
 ```bash
 npm run test:clean
+npm run test:localization
+npm run test:filesystem-chaos
+npm run test:backup-roundtrip
+npm run test:model-downloader
+npm run test:perf-budget
 npm run update:dry-run
 npm run release:check
 npm run release:verify -- --repo harsh2929/crossage-fr-workbench --tag v0.1.0 --platform win32
@@ -89,12 +94,25 @@ npm run release:verify -- --repo harsh2929/crossage-fr-workbench --tag v0.1.0 --
 Release artifacts:
 
 - From a Windows machine: install Node 24 and Python 3.11, then run `npm ci`, `python -m pip install -r requirements-production.txt`, and `npm run dist:win`. Share the generated NSIS `.exe` from `dist/`.
-- From GitHub Actions: run the `Windows Release` workflow manually. It builds the Windows backend sidecar, runs backend smoke tests, packages the NSIS installer, smoke-tests the packaged backend, and uploads `Vintrace-Windows-Installer`. To make in-app updates work for testers, provide `release_tag` such as `v0.1.0`; the workflow will attach the `.exe`, `.blockmap`, and `latest*.yml` updater metadata to that GitHub Release.
-- For Mac testers without signing credentials, run the `macOS Unsigned Release` workflow manually. It builds an unsigned DMG/ZIP pair, validates the packaged backend, uploads `Vintrace-macOS-Unsigned`, and can attach `.dmg`, `.zip`, `.blockmap`, and `latest*.yml` assets to a GitHub Release when `release_tag` is provided.
+- From GitHub Actions: run the `Windows Release` workflow manually. It builds the Windows backend sidecar, runs backend smoke tests, packages the NSIS installer, smoke-tests the packaged backend, generates release metadata, and uploads `Vintrace-Windows-Installer`. To make in-app updates work for testers, provide `release_tag` such as `v0.1.0`; the workflow will attach the `.exe`, `.blockmap`, `latest*.yml`, `SHA256SUMS.txt`, `vintrace-sbom.json`, and `vintrace-provenance.json` assets to that GitHub Release.
+- For Mac testers without signing credentials, run the `macOS Unsigned Release` workflow manually. It builds an unsigned DMG/ZIP pair, validates the packaged backend, generates release metadata, uploads `Vintrace-macOS-Unsigned`, and can attach `.dmg`, `.zip`, `.blockmap`, `latest*.yml`, `SHA256SUMS.txt`, `vintrace-sbom.json`, and `vintrace-provenance.json` assets to a GitHub Release when `release_tag` is provided.
 - The Windows installer is unsigned unless a code-signing certificate is configured, so Windows SmartScreen may warn first-time recipients.
 - The unsigned macOS DMG is for trusted testers only. Gatekeeper may require **Privacy & Security > Open Anyway**.
-- `npm run release:verify` checks published assets after release upload: installer/update metadata presence, public downloadability, sane asset size, and SHA-256 digest matching when `--full` is passed.
+- `npm run release:artifacts` writes `dist/SHA256SUMS.txt`, `dist/vintrace-sbom.json`, and `dist/vintrace-provenance.json`. `npm run release:verify -- --require-release-metadata` checks those files on newly published releases.
+- `npm run release:verify` checks published assets after release upload: installer/update metadata presence, public downloadability, sane asset size, release metadata when required, and SHA-256 digest matching when `--full` is passed.
 - Before sharing broad test builds, run Settings -> Release readiness, Settings -> Machine benchmark, `npm run release:check`, and the tester checklist. These checks now include model license/checksum manifest status, SQLite database integrity, writable local storage, update-feed setup, crash diagnostics, benchmark history, and signing-environment detection. The checks intentionally stay red for code signing and model redistribution until real certificates and final license approvals are configured.
+
+Additional CI gates cover the most common consumer-test failures:
+
+- `npm run test:e2e:buttons` launches Electron and clicks every enabled non-destructive visible control across the main tabs.
+- `npm run test:e2e:i18n` screenshots Dashboard, People, Scan, Review, and Settings in English, Chinese, Spanish, French, Arabic, Hindi, and Japanese, then checks primary controls for clipped text.
+- `npm run test:e2e:ipc` fuzzes the renderer-to-main IPC boundary for blocked commands, bad payloads, oversized params, and untrusted shell paths.
+- `npm run test:e2e:a11y` checks keyboard tab flow, primary tab activation, accessible control names, and modal focus trapping.
+- `npm run test:e2e:soak` repeats core UI flows and fails on page errors, runaway DOM growth, or large Electron memory growth.
+- `npm run test:filesystem-chaos` scans synthetic folders with Unicode paths, broken files, symlinks, nested content, and permission failures.
+- `npm run test:backup-roundtrip` exports, verifies, restores, and reopens a synthetic workspace backup while rejecting unsafe ZIP entries.
+- `npm run test:model-downloader` verifies offline failure, retry/resume, bad checksum recovery, and changed model folders without using real model downloads.
+- `npm run test:perf-budget` enforces startup, dashboard state, review pagination, serialization, scan manifest, and runtime benchmark budgets on synthetic 100k-scale data.
 
 First-run face model setup is now handled inside the desktop app. The DMG/EXE can be shared without pre-installing Python, npm, or InsightFace models. On first launch, the app shows a Face model card that lets the user choose a writable download folder, pick the model package, download with progress, validate the pinned SHA-256 checksum, extract safely, and retry with clear offline messaging. Partial `.part` downloads are preserved and resumed with HTTP range requests when the server supports them. If the user is offline, the app opens in simple matching mode and keeps the download action available.
 
@@ -161,6 +179,22 @@ npm run test
 
 The MCP smoke test starts a real MCP stdio session, lists tools/resources/prompts, calls `get_project_state`, and verifies the bundled report resource. The E2E test launches Electron, creates image fixtures, enrolls references, scans candidates, verifies Safe Mode folder watching, accepts/rejects/marks uncertain review items, and validates settings.
 
+## Public Dataset Benchmarks
+
+Settings -> Accuracy Lab includes a public-dataset benchmark runner for benchmark-only use. It supports LFW from the local scikit-learn fetcher, CFP from the official checksum-validated `cfp-dataset.zip`, and local folder copies of CALFW, CPLFW, VGGFace2, AgeDB, YouTube Faces, FIW, MegaFace, IJB-C, or a custom identity-folder dataset.
+
+The runner is dataset-aware when local folders expose useful structure: CALFW and AgeDB are bucketed as cross-age checks, CPLFW and CFP prefer frontal references against profile/side candidates, YouTube Faces and IJB-C can include held-out videos when image references exist, FIW prioritizes family-lookalike distractors when the folder layout exposes family groups, and MegaFace-style local copies are treated as large-scale distractor stress tests.
+
+The runner keeps these datasets isolated from the user's normal workspace. It creates a temporary benchmark workspace, enrolls a limited number of reference images per identity, scans held-out positives and optional distractor identities, writes JSON/CSV labels, restores the active workspace, and reports precision, recall, specificity, and accuracy. It does not train the model and does not add public-dataset people to the user's saved faces.
+
+For local validation without downloading a real public dataset:
+
+```bash
+npm run test:dataset-benchmark
+```
+
+For agent-driven validation, use the MCP tools `public_dataset_catalog`, `inspect_public_dataset`, `run_public_dataset_benchmark`, and `compare_public_dataset_models`. LFW and CFP download/reuse require explicit confirmation, and all third-party datasets must be obtained and used under their own terms. Avoid retired or disputed datasets such as MS-Celeb-1M for product QA.
+
 ## Large Folder Scale
 
 The scan pipeline is designed to work toward 100k-1M file folders without building one giant in-memory path list. Folder scans stream media paths, write a SQLite/WAL scan manifest at `workspace.sqlite3`, and can be cancelled from the UI. A resumed scan skips files already completed in the previous manifest when their path, size, and mtime match.
@@ -173,7 +207,7 @@ Face scan detail is configurable for large libraries. The recommended default us
 
 Repeated face detection work is cached by file hash, model name, and detector size. Scan controls support pause, resume, cancel, a first-class recovery card for interrupted scans, and resumable manifests. Folder checks include a pre-scan time estimate plus a scan plan with storage estimate, cache coverage, resumability, and warnings for 100k-1M scale folders. Review includes backend-paged browsing for large queues, video moment grouping, source-folder batches, confidence lanes, people-together lanes, identity move/split controls, repeated-false-match suppression, and calibration summaries from accepted/rejected decisions.
 
-Duplicate review rows are suppressed by content hash when the same image appears under multiple names or folders, while video moments remain grouped by their source video. Settings includes an app-folder optimizer, broken-link repair, moved-folder relinking, source-folder inventory export, audit-log export, scan-manifest pruning, model integrity checks, backup verification/pruning, support-bundle export, and a user-friendly storage limit. Cleanup clears regenerable preview cache, removes orphan extracted video frames, checkpoints/VACUUMs the SQLite scale database, and reports reclaimed space without touching original photos or videos.
+Duplicate review rows are suppressed by content hash when the same image appears under multiple names or folders, while video moments remain grouped by their source video. Settings includes an app-folder optimizer, broken-link repair, moved-folder relinking, source-folder inventory export, audit-log export, scan-manifest pruning, model integrity checks, backup verification/restore/pruning, support-bundle export, and a user-friendly storage limit. Cleanup clears regenerable preview cache, removes orphan extracted video frames, checkpoints/VACUUMs the SQLite scale database, and reports reclaimed space without touching original photos or videos.
 
 Settings now includes an Accuracy Lab that turns accepted/rejected review decisions into local precision/recall metrics and can apply threshold feedback when enough positive and negative examples exist. Accuracy labels can be exported as JSON/CSV for external benchmarks, and agents can import labeled rows back into the calibration harness. The backend also exposes paged candidate queries so agents can inspect large review queues without pulling the entire candidate list into context. Save and clean up can export accepted media into a shareable manifest-backed folder plus a review decision ledger. Privacy controls report local face data, generated previews, caches, consent receipt status, Safe Mode audit totals, retention windows, and offer a confirmed delete-face-data operation that clears saved faces, candidates, scan manifests, generated media, and private caches. Model-drift checks flag saved references or review rows created with a different active face model. Error reports are local-first: the app records crashes, renderer hangs, backend errors, and updater failures into a local diagnostics log with stable error codes, categories, severity, fingerprints, and per-code summaries; users preview and export JSON manually, with file paths hidden unless explicitly included.
 

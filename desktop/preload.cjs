@@ -44,10 +44,12 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "retention_policy_report",
   "export_safe_mode_audit",
   "model_drift_report",
+  "reference_gap_report",
   "export_review_ledger",
   "export_scan_history",
   "export_workspace_backup",
   "verify_workspace_backup",
+  "restore_workspace_backup",
   "prune_workspace_backups",
   "prune_scan_manifests",
   "export_candidates",
@@ -68,8 +70,15 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "release_readiness",
   "model_integrity",
   "model_distribution_audit",
+  "model_switch_dry_run",
+  "backfill_model_references",
   "export_support_bundle",
   "installer_self_diagnostics",
+  "public_dataset_catalog",
+  "inspect_public_dataset",
+  "run_public_dataset_benchmark",
+  "compare_public_dataset_models",
+  "apply_model_recommendation",
   "calibration_summary",
   "accuracy_evaluation",
   "generate_accuracy_validation_pack",
@@ -95,7 +104,7 @@ function assertPlainObject(value, label = "Payload") {
 }
 
 function codedError(code, message) {
-  const error = new Error(message);
+  const error = new Error(`[${code}] ${message}`);
   error.code = code;
   return error;
 }
@@ -108,7 +117,7 @@ function normalizeIpcError(error) {
     .trim();
   const code = cleaned.match(/\b([EW]-[A-Z0-9-]{2,})\b/)?.[1] || "";
   const message = cleaned.replace(/^\[[EW]-[A-Z0-9-]{2,}\]\s*/, "").trim() || "The action failed.";
-  const normalized = new Error(message);
+  const normalized = new Error(code ? `[${code}] ${message}` : message);
   if (code) {
     normalized.code = code;
   }

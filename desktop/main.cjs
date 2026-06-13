@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, session, Menu, Tray, nativeImage, shell, Notification, clipboard, protocol, net, safeStorage } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, session, Menu, Tray, nativeImage, shell, Notification, clipboard, protocol, net, safeStorage, nativeTheme } = require("electron");
 const { spawn, spawnSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -391,10 +391,12 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "retention_policy_report",
   "export_safe_mode_audit",
   "model_drift_report",
+  "reference_gap_report",
   "export_review_ledger",
   "export_scan_history",
   "export_workspace_backup",
   "verify_workspace_backup",
+  "restore_workspace_backup",
   "prune_workspace_backups",
   "prune_scan_manifests",
   "export_candidates",
@@ -415,8 +417,15 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "release_readiness",
   "model_integrity",
   "model_distribution_audit",
+  "model_switch_dry_run",
+  "backfill_model_references",
   "export_support_bundle",
   "installer_self_diagnostics",
+  "public_dataset_catalog",
+  "inspect_public_dataset",
+  "run_public_dataset_benchmark",
+  "compare_public_dataset_models",
+  "apply_model_recommendation",
   "calibration_summary",
   "accuracy_evaluation",
   "generate_accuracy_validation_pack",
@@ -1935,6 +1944,13 @@ function grantPathsFromBackendRequest(command, params) {
   if (["set_workspace", "enroll", "scan", "analyze_folder", "export_report", "export_candidates", "preview_candidate_media_action", "manage_candidate_media"].includes(command)) {
     grantUserPath(params.path || params.folder);
   }
+  if (command === "restore_workspace_backup") {
+    grantUserPath(params.path);
+    grantUserPath(params.target || params.targetFolder);
+  }
+  if (["inspect_public_dataset", "run_public_dataset_benchmark", "compare_public_dataset_models"].includes(command)) {
+    grantUserPath(params.folder);
+  }
   if (command === "enroll_age_groups" && Array.isArray(params.groups)) {
     for (const group of params.groups) {
       if (group && typeof group === "object") {
@@ -2917,7 +2933,9 @@ async function createWindow() {
       minHeight: 700,
       title: "Vintrace",
       show: false,
-      backgroundColor: "#f5f6f8",
+      // M14: match the OS theme so dark-mode users don't see a light flash
+      // before the renderer paints (#111216 is the dark :root background).
+      backgroundColor: nativeTheme.shouldUseDarkColors ? "#111216" : "#f5f6f8",
       titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
       trafficLightPosition: { x: 18, y: 18 },
       webPreferences: {

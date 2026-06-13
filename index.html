@@ -7,6 +7,10 @@
       content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' vintrace-media: data: blob:; media-src 'self' vintrace-media: blob:; font-src 'self'; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; worker-src 'self' blob:"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- M14: declare both schemes to the UA before CSS parses so the initial
+         canvas/scrollbars match the OS theme and dark-mode users don't see a
+         light flash before styles.css loads. -->
+    <meta name="color-scheme" content="light dark" />
     <title>Vintrace</title>
   </head>
   <body>

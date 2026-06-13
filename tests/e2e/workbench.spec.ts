@@ -324,8 +324,9 @@ test("desktop workbench renders and every primary control path works", async () 
 
   await expect(page.getByText("Vintrace", { exact: true })).toBeVisible();
   await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
-  await expect(page.locator(".nav-list").getByRole("button", { name: "Dashboard" })).toBeVisible();
   const languageSelect = page.locator(".language-picker select");
+  await languageSelect.selectOption("en");
+  await expect(page.locator(".nav-list").getByRole("button", { name: "Dashboard" })).toBeVisible();
   await languageSelect.selectOption("fr");
   await expect(page.locator(".nav-list").getByRole("button", { name: "Tableau" })).toBeVisible();
   await languageSelect.selectOption("ar");

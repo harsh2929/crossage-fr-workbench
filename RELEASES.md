@@ -14,6 +14,7 @@ Use the GitHub Releases page for shareable installers:
 4. On first launch, Vintrace opens in local mode and shows model setup if the full face model is not installed yet.
 
 The Windows build is currently unsigned. That means Windows may warn even when the file is intact. Use the SHA-256 shown on the release asset when you need to verify a download.
+New release builds also include `SHA256SUMS.txt`, `vintrace-sbom.json`, and `vintrace-provenance.json` for checksum verification, dependency inventory, and build provenance.
 
 ## macOS
 
@@ -56,3 +57,4 @@ npm run release:verify -- --repo harsh2929/crossage-fr-workbench --tag v0.1.0 --
 ```
 
 Use `--platform darwin` for macOS releases.
+Use `--require-release-metadata` for new releases that include `SHA256SUMS.txt`, `vintrace-sbom.json`, and `vintrace-provenance.json`.

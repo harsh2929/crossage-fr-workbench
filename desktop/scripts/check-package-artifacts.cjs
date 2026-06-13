@@ -30,8 +30,34 @@ const dmgFiles = distFiles.filter((file) => /\.dmg$/i.test(file));
 const zipFiles = distFiles.filter((file) => /\.zip$/i.test(file));
 const blockmaps = distFiles.filter((file) => /\.blockmap$/i.test(file));
 const metadata = distFiles.filter((file) => /^(latest|beta|internal).*\.ya?ml$/i.test(file));
+const checksumFile = path.join(dist, "SHA256SUMS.txt");
+const sbomFile = path.join(dist, "vintrace-sbom.json");
+const provenanceFile = path.join(dist, "vintrace-provenance.json");
 const backendExecutable = backendFiles.some((file) => /(^|\/)crossage-backend(\.exe)?$/i.test(file));
 const hasAnyInstaller = exeFiles.length > 0 || dmgFiles.length > 0 || zipFiles.length > 0;
+
+function parseJsonFile(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function checksumEntries() {
+  if (!fs.existsSync(checksumFile)) return new Map();
+  return new Map(
+    fs.readFileSync(checksumFile, "utf8")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const match = line.match(/^([a-f0-9]{64})\s+\*?(.+)$/i);
+        return match ? [match[2].replace(/\\/g, "/"), match[1].toLowerCase()] : null;
+      })
+      .filter(Boolean)
+  );
+}
 
 add("product name", build.productName === "Vintrace", build.productName || "missing");
 add("app id", /^com\.vintrace\./.test(String(build.appId || "")), build.appId || "missing");
@@ -43,8 +69,17 @@ add("model resources configured", Array.isArray(build.extraResources) && build.e
 add("mcp resources configured", Array.isArray(build.extraResources) && build.extraResources.some((item) => item && item.to === "mcp"), "extraResources mcp");
 
 if (required) {
+  const checksums = checksumEntries();
+  const sbom = parseJsonFile(sbomFile);
+  const provenance = parseJsonFile(provenanceFile);
   add("installer artifact present", hasAnyInstaller, distFiles.join(", ") || "dist is empty");
   add("packaged backend present", backendExecutable, backendFiles.slice(0, 8).join(", ") || "backend-dist is empty");
+  add("release checksums present", fs.existsSync(checksumFile), "dist/SHA256SUMS.txt");
+  add("release sbom present", Boolean(sbom && Array.isArray(sbom.packages)), "dist/vintrace-sbom.json");
+  add("release provenance present", Boolean(provenance && Array.isArray(provenance.artifacts)), "dist/vintrace-provenance.json");
+  for (const artifact of [...exeFiles, ...dmgFiles, ...zipFiles, ...blockmaps, ...metadata]) {
+    add(`checksum ${artifact}`, checksums.has(artifact), artifact);
+  }
   if (platform === "win32") {
     add("windows exe", exeFiles.length > 0, exeFiles.join(", ") || "missing .exe");
     add("windows update blockmap", blockmaps.length > 0, blockmaps.join(", ") || "missing .blockmap");
@@ -57,6 +92,7 @@ if (required) {
 } else {
   add("package artifacts optional", true, hasAnyInstaller ? distFiles.join(", ") : "not built in this checkout");
   add("packaged backend optional", true, backendExecutable ? "backend executable found" : "not built in this checkout");
+  add("release metadata optional", true, fs.existsSync(checksumFile) ? "release metadata found" : "not built in this checkout");
 }
 
 const ok = checks.every((check) => check.ok);
@@ -67,7 +103,7 @@ console.log(JSON.stringify({
   required,
   dist,
   backendDist,
-  artifacts: { exeFiles, dmgFiles, zipFiles, blockmaps, metadata },
+  artifacts: { exeFiles, dmgFiles, zipFiles, blockmaps, metadata, releaseMetadata: distFiles.filter((file) => /^SHA256SUMS\.txt$|^vintrace-(sbom|provenance)\.json$/i.test(file)) },
   checks,
   recommendations: ok
     ? ["Package artifact configuration is structurally valid."]

@@ -215,7 +215,12 @@ def needs_browser_preview(path: Path) -> bool:
     return path.suffix.lower() in IMAGE_EXTENSIONS and path.suffix.lower() not in BROWSER_RENDERABLE_IMAGE_EXTENSIONS
 
 
-def write_preview_image(source: Path, target: Path, max_edge: int = 1024, quality: int = 86) -> Path:
+# H2/M12: previews double as the review-list thumbnails. 1024px was far larger
+# than any on-screen use (a 44px row thumb / a small comparison panel) and was
+# only generated for non-browser formats, so common camera JPEGs were streamed
+# and decoded at full multi-megapixel resolution. 768px is sharp enough for human
+# face comparison while cutting decode/memory by ~20-40x on typical originals.
+def write_preview_image(source: Path, target: Path, max_edge: int = 768, quality: int = 84) -> Path:
     image = load_image(source)
     image.thumbnail((max(128, max_edge), max(128, max_edge)), Image.Resampling.LANCZOS)
     target.parent.mkdir(parents=True, exist_ok=True)

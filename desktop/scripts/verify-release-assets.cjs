@@ -12,7 +12,8 @@ const options = {
   repo: process.env.GITHUB_REPOSITORY || "",
   tag: process.env.VINTRACE_RELEASE_TAG || "",
   platform: process.env.VINTRACE_PACKAGE_PLATFORM || process.platform,
-  full: false
+  full: false,
+  requireReleaseMetadata: process.env.VINTRACE_REQUIRE_RELEASE_METADATA === "1"
 };
 
 for (let index = 0; index < args.length; index += 1) {
@@ -22,6 +23,7 @@ for (let index = 0; index < args.length; index += 1) {
   else if (arg === "--platform") options.platform = args[++index] || "";
   else if (arg === "--full") options.full = true;
   else if (arg === "--metadata-only") options.full = false;
+  else if (arg === "--require-release-metadata") options.requireReleaseMetadata = true;
 }
 
 const checks = [];
@@ -152,11 +154,19 @@ async function main() {
   const installer = assetByPattern(assets, installerPattern);
   const metadata = assetByPattern(assets, metadataPattern) || assetByPattern(assets, metadataFallbackPattern);
   const updater = assetByPattern(assets, updaterPattern);
+  const checksumAsset = assetByPattern(assets, /^SHA256SUMS\.txt$/i);
+  const sbomAsset = assetByPattern(assets, /^vintrace-sbom\.json$/i);
+  const provenanceAsset = assetByPattern(assets, /^vintrace-provenance\.json$/i);
 
   add("release is published", !release.draft, release.draft ? "draft release" : "published release", { url: release.html_url });
   add("installer asset exists", Boolean(installer), installer?.name || `missing ${isMac ? ".dmg" : ".exe"}`);
   add("update metadata exists", Boolean(metadata), metadata?.name || "missing latest*.yml");
   add("delta/update companion exists", Boolean(updater), updater?.name || `missing ${isMac ? ".zip" : ".blockmap"}`);
+  if (options.requireReleaseMetadata) {
+    add("checksum asset exists", Boolean(checksumAsset), checksumAsset?.name || "missing SHA256SUMS.txt");
+    add("sbom asset exists", Boolean(sbomAsset), sbomAsset?.name || "missing vintrace-sbom.json");
+    add("provenance asset exists", Boolean(provenanceAsset), provenanceAsset?.name || "missing vintrace-provenance.json");
+  }
   if (installer) {
     const minimumSize = isMac ? 50 * 1024 * 1024 : 80 * 1024 * 1024;
     add("installer size is sane", installer.size >= minimumSize, `${installer.name}: ${installer.size} bytes`, { size: installer.size });
@@ -169,7 +179,7 @@ async function main() {
     add("metadata download is public", [200, 302].includes(head.statusCode || 0), `${metadata.browser_download_url} -> ${head.statusCode}`);
   }
   if (options.full) {
-    for (const asset of [installer, metadata, updater].filter(Boolean)) {
+    for (const asset of [installer, metadata, updater, checksumAsset, sbomAsset, provenanceAsset].filter(Boolean)) {
       const expected = assetDigestSha(asset);
       if (!expected) {
         add(`sha256 ${asset.name}`, false, "asset digest missing");
@@ -188,6 +198,7 @@ async function main() {
     tag: options.tag,
     platform: options.platform,
     full: options.full,
+    requireReleaseMetadata: options.requireReleaseMetadata,
     releaseUrl: release.html_url,
     assets: assets.map((asset) => ({
       name: asset.name,
@@ -210,6 +221,7 @@ main().catch((error) => {
     tag: options.tag,
     platform: options.platform,
     full: options.full,
+    requireReleaseMetadata: options.requireReleaseMetadata,
     checks
   }, null, 2));
   process.exit(1);

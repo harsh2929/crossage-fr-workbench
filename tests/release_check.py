@@ -62,6 +62,32 @@ def run_package_artifact_check(required: bool = False) -> dict[str, Any]:
     return payload
 
 
+def run_dataset_gate_check() -> dict[str, Any]:
+    script = repo_root() / "tests" / "dataset_regression_gates.py"
+    env = os.environ.copy()
+    env["CROSSAGE_FORCE_FALLBACK"] = env.get("CROSSAGE_FORCE_FALLBACK", "1")
+    env["PYTHONPATH"] = str(repo_root())
+    completed = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=repo_root(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError:
+        payload = {"ok": False, "error": completed.stdout.strip() or completed.stderr.strip()}
+    payload["exitCode"] = completed.returncode
+    if completed.stderr.strip():
+        payload["stderr"] = completed.stderr.strip()[-1000:]
+    if completed.returncode != 0:
+        payload["ok"] = False
+    return payload
+
+
 def capture(name: str, fn: Callable[[], Any], checks: list[dict[str, Any]]) -> Any:
     try:
         value = fn()
@@ -93,6 +119,7 @@ def main() -> None:
     clean = capture("clean workspace smoke", run_smoke, checks) or {}
     update_feed = capture("update feed dry-run", run_update_feed_check, checks) or {}
     package_artifacts = capture("package artifact check", lambda: run_package_artifact_check(required=strict), checks) or {}
+    dataset_gates = capture("dataset regression gates", run_dataset_gate_check, checks) or {}
 
     structural_ok = all(check["ok"] for check in checks)
     runtime_ok = bool(runtime.get("ok", False))
@@ -100,7 +127,8 @@ def main() -> None:
     storage_ok = bool(storage.get("ok", False))
     update_ok = bool(update_feed.get("ok", False))
     package_ok = bool(package_artifacts.get("ok", False))
-    no_credential_ok = structural_ok and database_ok and storage_ok and update_ok and package_ok
+    dataset_gate_ok = bool(dataset_gates.get("ok", False))
+    no_credential_ok = structural_ok and database_ok and storage_ok and update_ok and package_ok and dataset_gate_ok
     release_ready = bool(readiness.get("ok", False))
     distribution_blockers = [
         recommendation
@@ -151,6 +179,10 @@ def main() -> None:
         "cleanWorkspace": clean,
         "updateFeed": update_feed,
         "packageArtifacts": package_artifacts,
+        "datasetGates": {
+            "ok": dataset_gate_ok,
+            "recommendedPack": ((dataset_gates.get("recommendation") or {}) if isinstance(dataset_gates.get("recommendation"), dict) else {}).get("recommendedPack"),
+        },
         "distributionBlockers": distribution_blockers,
     }
     print(json.dumps(result, indent=2))

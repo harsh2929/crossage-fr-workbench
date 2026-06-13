@@ -18,6 +18,12 @@ latest*.yml
 test-results/
 playwright-report/
 .pytest_cache/
+benchmarks/public-data/downloads/
+benchmarks/public-data/extracted/
+benchmarks/public-data/prepared/*/
+benchmarks/public-data/prepared/*.json
+benchmarks/public-data/workspaces/
+benchmarks/results/
 
 # Local workspace/runtime state
 crossage_project/

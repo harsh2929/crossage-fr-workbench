@@ -156,14 +156,27 @@ def sample_video_frames(
     interval_seconds: float = 2.0,
     jpeg_quality: int = 88,
 ) -> list[VideoFrameSample]:
+    resolved = path.expanduser().resolve()
+    max_frames = max(1, min(1000, int(max_frames)))
+    interval_seconds = max(0.25, float(interval_seconds))
+    jpeg_quality = max(1, min(100, int(jpeg_quality)))
+    target_dir = output_root / _video_slug(resolved)
+    cached = _load_video_sample_cache(
+        target_dir,
+        source=resolved,
+        max_frames=max_frames,
+        interval_seconds=interval_seconds,
+        jpeg_quality=jpeg_quality,
+    )
+    if cached:
+        return cached[:max_frames]
     try:
         cv2 = _require_cv2()
     except VideoLoadError:
-        return _sample_video_frames_ffmpeg(path, output_root, max_frames=max_frames, interval_seconds=interval_seconds, jpeg_quality=jpeg_quality)
-    resolved = path.expanduser().resolve()
+        return _sample_video_frames_ffmpeg(resolved, output_root, max_frames=max_frames, interval_seconds=interval_seconds, jpeg_quality=jpeg_quality)
     capture = cv2.VideoCapture(str(resolved))
     if not capture.isOpened():
-        return _sample_video_frames_ffmpeg(path, output_root, max_frames=max_frames, interval_seconds=interval_seconds, jpeg_quality=jpeg_quality)
+        return _sample_video_frames_ffmpeg(resolved, output_root, max_frames=max_frames, interval_seconds=interval_seconds, jpeg_quality=jpeg_quality)
     try:
         frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
@@ -173,7 +186,6 @@ def sample_video_frames(
         indices = _sample_indices(frame_count, fps, max_frames=max_frames, interval_seconds=interval_seconds)
         if not indices:
             raise VideoLoadError(f"No decodable frames found in {resolved}")
-        target_dir = output_root / _video_slug(resolved)
         target_dir.mkdir(parents=True, exist_ok=True)
         samples: list[VideoFrameSample] = []
         for index in indices:
@@ -200,6 +212,15 @@ def sample_video_frames(
             )
         if not samples:
             raise VideoLoadError(f"No frames could be decoded from {resolved}")
+        _write_video_sample_cache(
+            target_dir,
+            source=resolved,
+            backend="opencv",
+            max_frames=max_frames,
+            interval_seconds=interval_seconds,
+            jpeg_quality=jpeg_quality,
+            samples=samples,
+        )
         return samples
     finally:
         capture.release()
@@ -418,14 +439,24 @@ def _sample_video_frames_ffmpeg(
     if not ffmpeg:
         raise VideoLoadError("Video support requires OpenCV or FFmpeg on PATH.")
     resolved = path.expanduser().resolve()
+    max_frames = max(1, min(1000, int(max_frames)))
+    interval_seconds = max(0.25, float(interval_seconds))
+    jpeg_quality = max(1, min(100, int(jpeg_quality)))
+    target_dir = output_root / _video_slug(resolved)
+    cached = _load_video_sample_cache(
+        target_dir,
+        source=resolved,
+        max_frames=max_frames,
+        interval_seconds=interval_seconds,
+        jpeg_quality=jpeg_quality,
+    )
+    if cached:
+        return cached[:max_frames]
     probe: dict[str, object]
     try:
         probe = _probe_video_ffmpeg(resolved)
     except VideoLoadError:
         probe = {"width": 0, "height": 0, "durationMs": 0, "fps": 0.0}
-    max_frames = max(1, min(1000, int(max_frames)))
-    interval_seconds = max(0.25, float(interval_seconds))
-    target_dir = output_root / _video_slug(resolved)
     target_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="vintrace-ffmpeg-frames-") as temp_name:
         temp_dir = Path(temp_name)
@@ -470,6 +501,15 @@ def _sample_video_frames_ffmpeg(
                     duration_ms=max(0, duration_ms),
                 )
             )
+        _write_video_sample_cache(
+            target_dir,
+            source=resolved,
+            backend="ffmpeg",
+            max_frames=max_frames,
+            interval_seconds=interval_seconds,
+            jpeg_quality=jpeg_quality,
+            samples=samples,
+        )
         return samples
 
 
@@ -501,6 +541,105 @@ def _parse_frame_rate(value: object) -> float:
         denominator = _safe_float(right)
         return numerator / denominator if denominator else 0.0
     return _safe_float(text)
+
+
+def _video_source_signature(path: Path) -> dict[str, object]:
+    try:
+        stat = path.stat()
+        return {
+            "path": str(path.resolve()),
+            "size": int(stat.st_size),
+            "mtimeNs": int(stat.st_mtime_ns),
+        }
+    except OSError:
+        return {"path": str(path.resolve()), "size": 0, "mtimeNs": 0}
+
+
+def _cache_settings(source: Path, *, max_frames: int, interval_seconds: float, jpeg_quality: int) -> dict[str, object]:
+    return {
+        "source": _video_source_signature(source),
+        "maxFrames": int(max_frames),
+        "intervalSeconds": round(float(interval_seconds), 6),
+        "jpegQuality": int(jpeg_quality),
+        "format": "jpeg",
+        "version": 1,
+    }
+
+
+def _load_video_sample_cache(
+    target_dir: Path,
+    *,
+    source: Path,
+    max_frames: int,
+    interval_seconds: float,
+    jpeg_quality: int,
+) -> list[VideoFrameSample]:
+    manifest_path = target_dir / "manifest.json"
+    if not manifest_path.exists():
+        return []
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    expected = _cache_settings(source, max_frames=max_frames, interval_seconds=interval_seconds, jpeg_quality=jpeg_quality)
+    for key in ("source", "maxFrames", "intervalSeconds", "jpegQuality", "format", "version"):
+        if payload.get(key) != expected.get(key):
+            return []
+    rows = payload.get("samples")
+    if not isinstance(rows, list) or not rows:
+        return []
+    samples: list[VideoFrameSample] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return []
+        frame_path = target_dir / str(row.get("file", ""))
+        try:
+            if not frame_path.exists() or not frame_path.is_file():
+                return []
+            samples.append(
+                VideoFrameSample(
+                    path=frame_path,
+                    timestamp_ms=max(0, int(row.get("timestampMs", 0) or 0)),
+                    frame_index=max(0, int(row.get("frameIndex", 0) or 0)),
+                    width=max(0, int(row.get("width", 0) or 0)),
+                    height=max(0, int(row.get("height", 0) or 0)),
+                    duration_ms=max(0, int(row.get("durationMs", 0) or 0)),
+                )
+            )
+        except (OSError, ValueError, TypeError):
+            return []
+    return samples
+
+
+def _write_video_sample_cache(
+    target_dir: Path,
+    *,
+    source: Path,
+    backend: str,
+    max_frames: int,
+    interval_seconds: float,
+    jpeg_quality: int,
+    samples: list[VideoFrameSample],
+) -> None:
+    payload = {
+        **_cache_settings(source, max_frames=max_frames, interval_seconds=interval_seconds, jpeg_quality=jpeg_quality),
+        "backend": backend,
+        "samples": [
+            {
+                "file": sample.path.name,
+                "timestampMs": int(sample.timestamp_ms),
+                "frameIndex": int(sample.frame_index),
+                "width": int(sample.width),
+                "height": int(sample.height),
+                "durationMs": int(sample.duration_ms),
+            }
+            for sample in samples
+        ],
+    }
+    target_dir.mkdir(parents=True, exist_ok=True)
+    temp = target_dir / "manifest.json.tmp"
+    temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temp.replace(target_dir / "manifest.json")
 
 
 def _sample_indices(frame_count: int, fps: float, max_frames: int, interval_seconds: float) -> list[int]:

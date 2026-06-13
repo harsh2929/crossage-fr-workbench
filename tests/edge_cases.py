@@ -8,6 +8,7 @@ import sys
 import tempfile
 import zipfile
 import hashlib
+import math
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -452,6 +453,9 @@ def assert_static_app_contracts() -> None:
         "repair_database_integrity",
         "export_report",
         "export_workspace_backup",
+        "verify_workspace_backup",
+        "restore_workspace_backup",
+        "prune_workspace_backups",
         "export_candidates",
         "preview_candidate_media_action",
         "manage_candidate_media",
@@ -466,6 +470,7 @@ def assert_static_app_contracts() -> None:
         "retention_policy_report",
         "export_safe_mode_audit",
         "model_drift_report",
+        "reference_gap_report",
         "export_review_ledger",
         "workspace_health",
         "runtime_self_test",
@@ -473,7 +478,14 @@ def assert_static_app_contracts() -> None:
         "storage_io_benchmark",
         "release_readiness",
         "model_distribution_audit",
+        "model_switch_dry_run",
+        "backfill_model_references",
         "installer_self_diagnostics",
+        "public_dataset_catalog",
+        "inspect_public_dataset",
+        "run_public_dataset_benchmark",
+        "compare_public_dataset_models",
+        "apply_model_recommendation",
         "calibration_summary",
         "accuracy_evaluation",
         "generate_accuracy_validation_pack",
@@ -527,10 +539,51 @@ def assert_static_app_contracts() -> None:
     release_verifier = (root / "desktop" / "scripts" / "verify-release-assets.cjs").read_text(encoding="utf-8")
     assert "installer download is public" in release_verifier
     assert "sha256" in release_verifier
+    assert "--require-release-metadata" in release_verifier
+    release_artifacts = (root / "desktop" / "scripts" / "create-release-artifacts.cjs").read_text(encoding="utf-8")
+    assert "SHA256SUMS.txt" in release_artifacts
+    assert "vintrace-sbom.json" in release_artifacts
+    assert "vintrace-provenance.json" in release_artifacts
+    localization_check = (root / "desktop" / "scripts" / "check-localization.cjs").read_text(encoding="utf-8")
+    assert "critical literals" in localization_check
+    assert "visible literal translation coverage" in localization_check
     releases_doc = (root / "RELEASES.md").read_text(encoding="utf-8")
     assert "Windows installer" in releases_doc
     assert "macOS" in releases_doc
     assert "release:verify" in releases_doc
+    package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    assert "release:artifacts" in package["scripts"]
+    assert "test:model-downloader" in package["scripts"]
+    assert "test:perf-budget" in package["scripts"]
+    assert "test:localization" in package["scripts"]
+    assert "test:filesystem-chaos" in package["scripts"]
+    assert "test:backup-roundtrip" in package["scripts"]
+    assert "test:dataset-benchmark" in package["scripts"]
+    assert "test:e2e:buttons" in package["scripts"]
+    assert "test:e2e:i18n" in package["scripts"]
+    assert "test:e2e:ipc" in package["scripts"]
+    assert "test:e2e:a11y" in package["scripts"]
+    assert "test:e2e:soak" in package["scripts"]
+    qa_workflow = (root / ".github" / "workflows" / "qa.yml").read_text(encoding="utf-8")
+    assert "Model downloader failure modes" in qa_workflow
+    assert "Filesystem chaos suite" in qa_workflow
+    assert "Workspace backup roundtrip" in qa_workflow
+    assert "Public dataset benchmark harness" in qa_workflow
+    assert "Performance budget" in qa_workflow
+    assert "Playwright button regression" in qa_workflow
+    assert "Playwright localization layout" in qa_workflow
+    assert "Playwright IPC security fuzz" in qa_workflow
+    assert "Playwright accessibility keyboard" in qa_workflow
+    assert "Playwright memory soak" in qa_workflow
+    assert "Localization contract" in qa_workflow
+    windows_workflow = (root / ".github" / "workflows" / "windows-release.yml").read_text(encoding="utf-8")
+    mac_workflow = (root / ".github" / "workflows" / "macos-release.yml").read_text(encoding="utf-8")
+    assert "npm run release:artifacts" in windows_workflow
+    assert "npm run release:artifacts" in mac_workflow
+    assert "SHA256SUMS.txt" in windows_workflow
+    assert "SHA256SUMS.txt" in mac_workflow
+    assert "--require-release-metadata" in windows_workflow
+    assert "--require-release-metadata" in mac_workflow
     assert {
         "get_project_state",
         "mark_consent",
@@ -542,10 +595,17 @@ def assert_static_app_contracts() -> None:
         "bulk_review_candidates",
         "export_review_report",
         "export_workspace_backup",
+        "restore_workspace_backup",
         "delete_face_data",
         "runtime_benchmark",
         "release_readiness",
         "set_performance_mode",
+        "public_dataset_catalog",
+        "inspect_public_dataset",
+        "run_public_dataset_benchmark",
+        "compare_public_dataset_models",
+        "apply_model_recommendation",
+        "reference_gap_report",
     } <= manifest_tools
 
 
@@ -738,11 +798,267 @@ def assert_embedding_cache_reuses_face_work() -> None:
     assert errors == []
     assert first_engine.calls == 1
     assert metrics["embeddingCacheMisses"] == 1
+    assert metrics["poseUnknown"] == 1
     second_engine = CountingMatchedEngine()
     _added2, errors2, metrics2 = project.scan_paths([image_path], second_engine, total=1, source="cache-b", label="cache-b")
     assert errors2 == []
     assert second_engine.calls == 0
     assert metrics2["embeddingCacheHits"] == 1
+    assert metrics2["poseUnknown"] == 1
+
+
+def assert_model_spaces_are_isolated_for_matching() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-model-isolation-"))
+    ref_path = root / "ref.jpg"
+    candidate_path = root / "candidate.jpg"
+    make_face(ref_path)
+    make_face(candidate_path)
+    project = ProjectState(root / "workspace")
+    project.config.safe_mode = False
+    ref = ReferenceFace(
+        ref_id="ref_other_model",
+        person_name="Person",
+        age_bucket="adult",
+        source_path=str(ref_path),
+        capture_date=None,
+        quality=1.0,
+        model_name="other-model-space",
+        vector=[1.0] + [0.0] * 511,
+    )
+    project.references[ref.ref_id] = ref
+    project.vector_store.add(ref.ref_id, ref.vector)
+    added, errors, metrics = project.scan_paths([candidate_path], StaticUnmatchedEngine(), total=1, source="model-isolation", label="model-isolation")
+    assert errors == []
+    assert added == 0
+    assert metrics["matched"] == 0
+    assert metrics["unmatched"] == 1
+    compatibility = project.model_compatibility_report(StaticUnmatchedEngine.model_name)
+    assert compatibility["compatibleReferences"] == 0
+    assert compatibility["otherModelReferences"] == 1
+    assert compatibility["needsBackfill"] is True
+
+
+def assert_api_scan_requires_backfill_for_mixed_model_spaces() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-api-model-guard-"))
+    ref_path = root / "ref.jpg"
+    candidate_path = root / "scan" / "candidate.jpg"
+    make_face(ref_path)
+    make_face(candidate_path)
+    api = make_api(root / "workspace")
+    api.handle("set_consent", {"value": True})
+    ref = ReferenceFace(
+        ref_id="ref_stale_model",
+        person_name="Person",
+        age_bucket="adult",
+        source_path=str(ref_path),
+        capture_date=None,
+        quality=1.0,
+        model_name="old-model-space",
+        vector=[1.0] + [0.0] * 511,
+    )
+    api.project.references[ref.ref_id] = ref
+    api.project.vector_store.add(ref.ref_id, ref.vector)
+    dry_run = api.handle("model_switch_dry_run", {"targetPack": "buffalo_l"})
+    assert dry_run["targetPack"] == "buffalo_l"
+    assert isinstance(dry_run["safeToSave"], bool)
+    assert dry_run["downloadBytes"] >= 0
+    assert dry_run["referencesNeedingBackfill"] == 1
+    assert dry_run["safeToSave"] or dry_run["blockers"]
+    expect_raises(
+        ValueError,
+        lambda: api.handle("scan_paths", {"paths": [str(candidate_path)], "source": "guard-test"}),
+        "E-MODEL-BACKFILL",
+    )
+    expect_raises(
+        ValueError,
+        lambda: api.handle("scan", {"folder": str(candidate_path.parent), "source": "guard-test"}),
+        "E-MODEL-BACKFILL",
+    )
+    allowed = api.handle(
+        "scan_paths",
+        {"paths": [str(candidate_path)], "source": "guard-test", "allowIncompatibleModel": True},
+    )
+    assert allowed["metrics"]["processed"] == 1
+    assert allowed["metrics"]["unmatched"] == 1
+    allowed_folder = api.handle(
+        "scan",
+        {"folder": str(candidate_path.parent), "source": "guard-test", "allowIncompatibleModel": True, "resume": False},
+    )
+    assert allowed_folder["metrics"]["processed"] == 1
+
+
+def assert_reference_backfill_creates_active_model_embeddings() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-model-backfill-"))
+    ref_path = root / "ref.jpg"
+    candidate_path = root / "candidate.jpg"
+    make_face(ref_path)
+    make_face(candidate_path)
+    project = ProjectState(root / "workspace")
+    project.config.safe_mode = False
+    old_ref = ReferenceFace(
+        ref_id="ref_old_model",
+        person_name="Person",
+        age_bucket="adult",
+        source_path=str(ref_path),
+        capture_date=None,
+        quality=1.0,
+        model_name="old-model-space",
+        vector=[1.0] + [0.0] * 511,
+    )
+    project.references[old_ref.ref_id] = old_ref
+    project.vector_store.add(old_ref.ref_id, old_ref.vector)
+    result = project.backfill_references_for_model(CountingMatchedEngine())
+    assert result["added"] == 1
+    assert result["compatibility"]["compatibleReferences"] == 1
+    assert len(project.references) == 2
+    new_ref = next(ref for ref in project.references.values() if ref.ref_id != old_ref.ref_id)
+    assert new_ref.person_name == old_ref.person_name
+    assert new_ref.age_bucket == old_ref.age_bucket
+    assert new_ref.source_hash
+    assert new_ref.pose_bucket == "unknown"
+    second = project.backfill_references_for_model(CountingMatchedEngine())
+    assert second["added"] == 0
+    assert second["total"] == 0
+    assert second["skipped"] == 0
+    assert second["compatibility"]["needsBackfill"] is False
+    added, errors, metrics = project.scan_paths([candidate_path], CountingMatchedEngine(), total=1, source="model-backfill", label="model-backfill")
+    assert errors == []
+    assert added == 1
+    assert metrics["matched"] == 1
+
+
+def assert_pose_bucket_tracking_and_cache_hits() -> None:
+    class PoseSequenceEngine:
+        model_name = "edge-pose-sequence"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def embed_loaded_image(self, image: Image.Image, path: Path | None = None) -> list[EmbeddingResult]:
+            del image
+            self.calls += 1
+            name = path.name if path else ""
+            pose = "unknown"
+            if "frontal" in name:
+                pose = "frontal"
+            elif "three" in name:
+                pose = "three-quarter"
+            elif "profile" in name:
+                pose = "profile"
+            return [
+                EmbeddingResult(
+                    vector=[1.0] + [0.0] * 511,
+                    quality=1.0,
+                    bbox=(0, 0, 10, 10),
+                    model_name=self.model_name,
+                    pose_bucket=pose,
+                )
+            ]
+
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-pose-buckets-"))
+    ref_path = root / "ref.jpg"
+    scan = root / "scan"
+    make_face(ref_path)
+    for index, name in enumerate(["frontal.jpg", "three-quarter.jpg", "profile.jpg", "unknown.jpg"]):
+        make_face(scan / name, shirt=(60 + index * 40, 90 + index * 25, 130 + index * 15))
+    project = ProjectState(root / "workspace")
+    project.config.safe_mode = False
+    ref = ReferenceFace(
+        ref_id="ref_pose",
+        person_name="Person",
+        age_bucket="adult",
+        source_path=str(ref_path),
+        capture_date=None,
+        quality=1.0,
+        model_name=PoseSequenceEngine.model_name,
+        vector=[1.0] + [0.0] * 511,
+    )
+    project.references[ref.ref_id] = ref
+    project.vector_store.add(ref.ref_id, ref.vector)
+    engine = PoseSequenceEngine()
+    added, errors, metrics = project.scan_paths(sorted(scan.glob("*.jpg")), engine, total=4, source="pose", label="pose")
+    assert errors == []
+    assert added == 4
+    assert metrics["poseFrontal"] == 1
+    assert metrics["poseThreeQuarter"] == 1
+    assert metrics["poseProfile"] == 1
+    assert metrics["poseUnknown"] == 1
+    assert {candidate.pose_bucket for candidate in project.candidates.values()} == {"frontal", "three-quarter", "profile", "unknown"}
+    second_engine = PoseSequenceEngine()
+    _added2, errors2, metrics2 = project.scan_paths([scan / "profile.jpg"], second_engine, total=1, source="pose-cache", label="pose-cache")
+    assert errors2 == []
+    assert second_engine.calls == 0
+    assert metrics2["embeddingCacheHits"] == 1
+    assert metrics2["poseProfile"] == 1
+
+
+def assert_profile_pose_uses_review_threshold_without_accepting_frontal_noise() -> None:
+    class LowScorePoseEngine:
+        model_name = "edge-low-score-pose"
+
+        def embed_loaded_image(self, image: Image.Image, path: Path | None = None) -> list[EmbeddingResult]:
+            del image
+            pose = "profile" if path and "profile" in path.name else "frontal"
+            score = 0.16
+            return [
+                EmbeddingResult(
+                    vector=[score, math.sqrt(1.0 - score * score)] + [0.0] * 510,
+                    quality=1.0,
+                    bbox=(0, 0, 10, 10),
+                    model_name=self.model_name,
+                    pose_bucket=pose,
+                )
+            ]
+
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-pose-threshold-"))
+    ref_path = root / "ref.jpg"
+    scan = root / "scan"
+    profile_path = scan / "candidate-profile.jpg"
+    frontal_path = scan / "candidate-frontal.jpg"
+    make_face(ref_path)
+    make_face(profile_path, shirt=(90, 120, 180))
+    make_face(frontal_path, shirt=(180, 120, 90))
+    project = ProjectState(root / "workspace")
+    project.config.safe_mode = False
+    project.config.two_pass_scan = False
+    ref = ReferenceFace(
+        ref_id="ref_profile_threshold",
+        person_name="Person",
+        age_bucket="adult",
+        source_path=str(ref_path),
+        capture_date=None,
+        quality=1.0,
+        model_name=LowScorePoseEngine.model_name,
+        vector=[1.0] + [0.0] * 511,
+    )
+    ref_support = ReferenceFace(
+        ref_id="ref_profile_threshold_support",
+        person_name="Person",
+        age_bucket="adult",
+        source_path=str(ref_path),
+        capture_date=None,
+        quality=1.0,
+        model_name=LowScorePoseEngine.model_name,
+        vector=[1.0] + [0.0] * 511,
+    )
+    project.references[ref.ref_id] = ref
+    project.references[ref_support.ref_id] = ref_support
+    project.vector_store.add(ref.ref_id, ref.vector)
+    project.vector_store.add(ref_support.ref_id, ref_support.vector)
+    added, errors, metrics = project.scan_paths([profile_path, frontal_path], LowScorePoseEngine(), total=2, source="pose-threshold", label="pose-threshold")
+    assert errors == []
+    assert added == 1
+    assert metrics["matched"] == 1
+    assert metrics["unmatched"] == 1
+    assert metrics["poseRelaxedReviews"] == 1
+    assert metrics["poseRelaxedProfile"] == 1
+    assert metrics["poseRelaxedThreeQuarter"] == 0
+    assert metrics["poseReranked"] == 1
+    assert metrics["poseProfile"] == 1
+    assert metrics["poseFrontal"] == 1
+    candidate = next(iter(project.candidates.values()))
+    assert candidate.pose_bucket == "profile"
+    assert "Hard-angle match used pose-aware scoring" in candidate.note or "Hard-pose review threshold" in candidate.note
 
 
 def assert_duplicate_content_is_suppressed_across_paths() -> None:
@@ -1517,6 +1833,15 @@ def assert_operational_use_case_commands() -> None:
     assert Path(safe_value["csvPath"]).exists()
     assert "safeFiltered" in safe_value["counts"]
 
+    reference_gaps = api.handle("reference_gap_report", {})
+    assert reference_gaps["people"] == 1
+    assert reference_gaps["needsAttention"] == 1
+    assert reference_gaps["items"][0]["personName"] == "Person Prime"
+    assert reference_gaps["items"][0]["referenceCount"] == 1
+    assert "needs-more-references" in reference_gaps["items"][0]["gaps"]
+    assert "needs-side-reference" in reference_gaps["items"][0]["gaps"]
+    assert any("side" in action.lower() or "profile" in action.lower() for action in reference_gaps["items"][0]["actions"])
+
     drift_clean = api.handle("model_drift_report", {})
     assert drift_clean["counts"]["staleReferences"] == 0
     api.project.references[next(iter(api.project.references))].model_name = "legacy-model"
@@ -1525,6 +1850,9 @@ def assert_operational_use_case_commands() -> None:
     drift_stale = api.handle("model_drift_report", {})
     assert drift_stale["counts"]["staleReferences"] == 1
     assert drift_stale["counts"]["staleCandidates"] == 1
+    stale_reference_gaps = api.handle("reference_gap_report", {})
+    assert stale_reference_gaps["items"][0]["status"] == "blocked"
+    assert "needs-active-model-backfill" in stale_reference_gaps["items"][0]["gaps"]
 
     ledger = api.handle("export_review_ledger", {})
     ledger_value = ledger["value"]
@@ -1660,6 +1988,15 @@ def assert_operational_use_case_commands() -> None:
     assert verified_backup["value"]["fileCount"] == backup_value["fileCount"]
     latest_verified = api.handle("verify_workspace_backup", {})
     assert latest_verified["value"]["ok"] is True
+    restore_target = root / "restored-workspace"
+    restored_backup = api.handle("restore_workspace_backup", {"path": str(backup_path), "target": str(restore_target)})
+    assert restored_backup["value"]["ok"] is True
+    assert restored_backup["value"]["fileCount"] == backup_value["fileCount"]
+    assert restored_backup["value"]["stateSummary"]["references"] == 1
+    assert (restore_target / "backup-manifest.json").exists()
+    assert (restore_target / "references.json").exists()
+    expect_raises(ValueError, lambda: api.project.restore_workspace_backup(backup_path, restore_target), "empty")
+    expect_raises(ValueError, lambda: api.project.restore_workspace_backup(backup_path, root / "workspace"), "outside")
     second_backup = api.handle("export_workspace_backup", {"includeGenerated": False})
     second_backup_path = Path(second_backup["value"]["zipPath"])
     pruned_backups = api.handle("prune_workspace_backups", {"keep": 1})
@@ -1682,6 +2019,7 @@ def assert_operational_use_case_commands() -> None:
     assert malformed_verified["value"]["ok"] is False
     assert "config.json" in malformed_verified["value"]["invalidCoreFiles"]
     assert "C:/escape.txt" in malformed_verified["value"]["dangerousEntries"]
+    expect_raises(ValueError, lambda: api.project.restore_workspace_backup(malformed_backup, root / "malformed-restore"), "unsafe")
 
     api.project.db.create_scan_run("old-run-a", "old A", "test", str(root), total=1)
     api.project.db.create_scan_run("old-run-b", "old B", "test", str(root), total=1)
@@ -1690,8 +2028,10 @@ def assert_operational_use_case_commands() -> None:
     assert pruned_manifests["value"]["runsAfter"] == 1
 
     blocked = api.handle("block_false_match", {"candidateId": candidate_id})
-    assert blocked["value"]["blocked"] == 1
-    assert blocked["state"]["calibration"]["falseMatchBlocks"] >= 1
+    assert blocked["value"]["blocked"] == 2
+    assert blocked["state"]["calibration"]["falseMatchBlocks"] >= 2
+    candidate = api.project.candidates[candidate_id]
+    assert api.project.db.blocked_pair_exists(candidate.source_hash, candidate.person_name, "different-ref-id")
     reassigned = api.handle("reassign_candidate_person", {"candidateId": candidate_id, "personName": "Other Person"})
     assert reassigned["value"]["personName"] == "Other Person"
     assert reassigned["state"]["candidates"][0]["personName"] == "Other Person"
@@ -1704,7 +2044,7 @@ def assert_operational_use_case_commands() -> None:
 
     audit = api.handle("audit_events", {"limit": 80, "offset": 0})
     actions = {row.get("action") for row in audit["events"]}
-    assert {"export_workspace_backup", "verify_workspace_backup", "export_report", "export_scan_history", "export_workspace_inventory", "export_audit_log", "export_consent_receipt", "export_safe_mode_audit", "export_review_ledger", "export_support_bundle", "prune_workspace_backups", "prune_scan_manifests", "relink_workspace_paths", "rename_person"} <= actions
+    assert {"export_workspace_backup", "verify_workspace_backup", "restore_workspace_backup", "export_report", "export_scan_history", "export_workspace_inventory", "export_audit_log", "export_consent_receipt", "export_safe_mode_audit", "export_review_ledger", "export_support_bundle", "prune_workspace_backups", "prune_scan_manifests", "relink_workspace_paths", "rename_person"} <= actions
 
     api.project.candidates[candidate_id].created_at = "2000-01-01T00:00:00Z"
     api.project.save()
@@ -1934,14 +2274,14 @@ def assert_privacy_controls_delete_face_data() -> None:
     assert scanned["state"]["counts"]["candidates"] == 1
     candidate_id = scanned["state"]["candidates"][0]["candidateId"]
     blocked = api.handle("block_false_match", {"candidateId": candidate_id})
-    assert blocked["value"]["summary"]["total"] == 1
+    assert blocked["value"]["summary"]["total"] == 2
     before = api.handle("privacy_report", {})
     assert before["references"] == 1
     assert before["candidates"] == 1
     expect_raises(ValueError, lambda: api.handle("delete_face_data", {"confirm": False}), "confirm=true")
     deleted = api.handle("delete_face_data", {"confirm": True})
     assert deleted["value"]["before"]["references"] == 1
-    assert deleted["value"]["dbDeleted"]["blocked_pairs"] == 1
+    assert deleted["value"]["dbDeleted"]["blocked_pairs"] == 2
     assert deleted["state"]["counts"]["references"] == 0
     assert deleted["state"]["counts"]["candidates"] == 0
     after = api.handle("privacy_report", {})
@@ -2309,6 +2649,11 @@ def main() -> None:
     assert_corrupt_installed_models_fail_integrity()
     assert_unmatched_clustering_flushes_in_batches()
     assert_embedding_cache_reuses_face_work()
+    assert_model_spaces_are_isolated_for_matching()
+    assert_api_scan_requires_backfill_for_mixed_model_spaces()
+    assert_reference_backfill_creates_active_model_embeddings()
+    assert_pose_bucket_tracking_and_cache_hits()
+    assert_profile_pose_uses_review_threshold_without_accepting_frontal_noise()
     assert_duplicate_content_is_suppressed_across_paths()
     assert_scan_candidates_survive_without_json_snapshot()
     assert_large_store_dedupe_uses_sqlite_lookup()

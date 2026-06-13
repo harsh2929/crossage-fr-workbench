@@ -1,7 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
-import appIconUrl from "../desktop/assets/icon.png";
+import appIconUrl from "../desktop/assets/icon-192.webp";
 import { normalizeLanguage, translate } from "./i18n";
 import type { LanguageCode, TranslationKey } from "./i18n";
 import "./styles.css";

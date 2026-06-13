@@ -21,10 +21,10 @@ from crossage_fr.config import archive_corrupt_file, load_config, save_config
 from crossage_fr.cluster import cluster_vectors
 from crossage_fr.embed import EmbeddingEngine
 from crossage_fr.ingest import ImageLoadError, VideoLoadError, image_record_for_path, iter_image_paths, load_image, sample_video_frames
-from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, needs_browser_preview, sha256_file, write_preview_image
+from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, sha256_file, write_preview_image
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, configure_video_decoder_paths
 from crossage_fr.ingest.safety import SafetyAssessment, assess_image_safety, safety_model_report
-from crossage_fr.match import group_hits
+from crossage_fr.match import group_hits, pose_review_supported, thresholds_for_pose
 from crossage_fr.models import EmbeddingResult, ReferenceFace, ReviewCandidate, new_id
 from crossage_fr.storage import safe_is_mount, safe_resolve
 from crossage_fr.store import VectorStore
@@ -131,6 +131,8 @@ class ProjectState:
         self.candidates: dict[str, ReviewCandidate] = {}
         self.scan_history: list[dict[str, Any]] = []
         self.vector_store = VectorStore()
+        self._reference_index_version = 0
+        self._model_vector_store_cache: dict[str, tuple[int, VectorStore, dict[str, ReferenceFace]]] = {}
         self._excluded_file_paths_cache_key: tuple[str, ...] = ()
         self._excluded_file_paths_cache: set[str] = set()
         self._exclusion_cache_key: tuple[Any, ...] = ()
@@ -238,8 +240,84 @@ class ProjectState:
         self._candidate_dirty_ids.clear()
         self._candidate_deleted_ids.clear()
         self._ensure_candidate_index()
+        self._invalidate_reference_indexes()
 
-    def save(self, snapshot_candidates: bool = True) -> None:
+    def _invalidate_reference_indexes(self) -> None:
+        self._reference_index_version += 1
+        self._model_vector_store_cache.clear()
+
+    def _model_family_key(self, model_name: str) -> str:
+        value = str(model_name or "").strip().lower()
+        if not value:
+            return ""
+        value = value.split("(", 1)[0].strip()
+        if value.startswith("local-image-fingerprint"):
+            return "local-image-fingerprint"
+        if value.startswith("insightface-"):
+            pack = value.removeprefix("insightface-").split("/", 1)[0].strip()
+            return f"insightface-{pack}" if pack else value
+        return value
+
+    def _compatible_reference_model_name(self, candidate_model_name: str, reference_model_name: str) -> bool:
+        candidate = self._model_family_key(candidate_model_name)
+        reference = self._model_family_key(reference_model_name)
+        if not candidate or not reference:
+            return False
+        return candidate == reference
+
+    def _normalized_pose_bucket(self, value: str | None) -> str:
+        pose = str(value or "unknown").strip().lower().replace("_", "-")
+        if pose in {"frontal", "front", "center"}:
+            return "frontal"
+        if pose in {"three-quarter", "threequarter", "3q", "three quarter"}:
+            return "three-quarter"
+        if pose in {"profile", "side", "side-face"}:
+            return "profile"
+        if pose in {"edge-face", "edge"}:
+            return "edge-face"
+        return "unknown"
+
+    def _reference_search_context(self, model_name: str) -> tuple[VectorStore, dict[str, ReferenceFace]]:
+        model_key = str(model_name or "").strip()
+        cached = self._model_vector_store_cache.get(model_key)
+        if cached is not None and cached[0] == self._reference_index_version:
+            return cached[1], cached[2]
+        references = {
+            ref_id: ref
+            for ref_id, ref in self.references.items()
+            if self._compatible_reference_model_name(model_key, ref.model_name)
+        }
+        store = VectorStore()
+        store.rebuild({ref_id: ref.vector for ref_id, ref in references.items()})
+        self._model_vector_store_cache[model_key] = (self._reference_index_version, store, references)
+        return store, references
+
+    def _reference_active_key(self, ref: ReferenceFace, active_model: str) -> tuple[str, str, str]:
+        return (ref.source_hash or self._path_key(ref.source_path), ref.person_name.casefold(), self._model_family_key(active_model))
+
+    def _pending_backfill_references(self, active_model_name: str) -> list[ReferenceFace]:
+        active = str(active_model_name or "").strip()
+        if not active:
+            return []
+        active_keys = {
+            self._reference_active_key(ref, active)
+            for ref in self.references.values()
+            if self._compatible_reference_model_name(active, ref.model_name)
+        }
+        return [
+            ref
+            for ref in self.references.values()
+            if not self._compatible_reference_model_name(active, ref.model_name)
+            and self._reference_active_key(ref, active) not in active_keys
+        ]
+
+    def _search_matching_references(self, embedding: EmbeddingResult, k: int = 20) -> tuple[list[Any], dict[str, ReferenceFace]]:
+        store, references = self._reference_search_context(embedding.model_name)
+        if not references:
+            return [], references
+        return store.search(embedding.vector, k=k), references
+
+    def save(self, snapshot_candidates: bool = True, flush_candidate_index: bool = True) -> None:
         with self._state_lock():
             self.root.mkdir(parents=True, exist_ok=True)
             save_config(self.config, self.config_path)
@@ -247,7 +325,8 @@ class ProjectState:
             refs = [asdict(ref) for ref in self.references.values()]
             self._write_json_atomic(self.refs_path, refs)
             self.vector_store.save(self.vector_index_path)
-            self._flush_candidate_index()
+            if flush_candidate_index:
+                self._flush_candidate_index()
             if snapshot_candidates and len(self.candidates) <= CANDIDATE_JSON_SNAPSHOT_LIMIT:
                 self._write_json_array_atomic(self.candidates_path, (asdict(candidate) for candidate in self.candidates.values()))
             self._write_json_atomic(self.scan_history_path, self.scan_history[:80])
@@ -320,6 +399,30 @@ class ProjectState:
             "updatedAt": self.consent.get("updatedAt"),
         }
 
+    def model_compatibility_report(self, active_model_name: str) -> dict[str, Any]:
+        active = str(active_model_name or "").strip()
+        counts: dict[str, int] = {}
+        compatible = 0
+        for ref in self.references.values():
+            model_name = str(ref.model_name or "").strip() or "unknown"
+            counts[model_name] = counts.get(model_name, 0) + 1
+            if self._compatible_reference_model_name(active, model_name):
+                compatible += 1
+        pending = len(self._pending_backfill_references(active))
+        return {
+            "activeModelName": active,
+            "compatibleReferences": compatible,
+            "otherModelReferences": pending,
+            "totalReferences": len(self.references),
+            "modelCounts": counts,
+            "needsBackfill": pending > 0 and bool(active),
+            "message": (
+                "Some saved person photos were embedded with another model pack. Re-enroll or backfill before judging recall."
+                if pending > 0
+                else "Saved person photos are compatible with the active recognizer."
+            ),
+        }
+
     def set_consent(
         self,
         value: bool,
@@ -387,6 +490,9 @@ class ProjectState:
                 image = load_image(path)
                 record = image_record_for_path(path, image=image, sha256=source_hash)
                 embeddings = engine.embed_loaded_image(image, path)
+                if not embeddings and self.config.two_pass_scan:
+                    rescue_method = getattr(engine, "embed_loaded_image_rescue", None)
+                    embeddings = rescue_method(image, path) if callable(rescue_method) else []
                 for embedding in embeddings:
                     if embedding.quality < self.config.thresholds.quality_min:
                         continue
@@ -400,6 +506,7 @@ class ProjectState:
                         model_name=embedding.model_name,
                         vector=embedding.vector,
                         source_hash=record.sha256,
+                        pose_bucket=embedding.pose_bucket,
                     )
                     self.references[ref.ref_id] = ref
                     self.vector_store.add(ref.ref_id, ref.vector)
@@ -407,6 +514,8 @@ class ProjectState:
                 known_hashes.add(record.sha256)
             except (ImageLoadError, OSError, ValueError) as exc:
                 errors.append(f"{path.name}: {exc}")
+        if added:
+            self._invalidate_reference_indexes()
         self._append_audit(
             {
                 "action": "enroll_folder",
@@ -456,6 +565,171 @@ class ProjectState:
             }
         )
         return total_added, errors, enrolled_groups
+
+    def backfill_references_for_model(
+        self,
+        engine: EmbeddingEngine,
+        on_progress: ScanProgress | None = None,
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        target_model = str(getattr(engine, "model_name", "") or "").strip()
+        if not target_model or target_model.startswith("local-image-fingerprint"):
+            raise ValueError("A full face model is required before backfilling references.")
+        self.clear_scan_cancel()
+        self.clear_scan_pause()
+        existing_keys = {
+            self._reference_active_key(ref, ref.model_name)
+            for ref in self.references.values()
+        }
+        source_refs = self._pending_backfill_references(target_model)
+        if limit > 0:
+            source_refs = source_refs[: max(0, int(limit))]
+        total = len(source_refs)
+        added = skipped = errors = low_quality = missing = processed = paused_seconds = 0
+        cancelled = False
+        error_rows: list[str] = []
+        if on_progress:
+            on_progress(
+                {
+                    "phase": "model_backfill",
+                    "processed": 0,
+                    "total": total,
+                    "added": 0,
+                    "skipped": 0,
+                    "errors": 0,
+                    "message": "Model backfill started.",
+                }
+            )
+        for index, ref in enumerate(source_refs, start=1):
+            path = Path(ref.source_path).expanduser()
+            pause_started: float | None = None
+            while self.scan_pause_requested() and not self.scan_cancel_requested():
+                if pause_started is None:
+                    pause_started = time.monotonic()
+                    if on_progress:
+                        on_progress(
+                            {
+                                "phase": "paused",
+                                "processed": processed,
+                                "total": total,
+                                "added": added,
+                                "skipped": skipped,
+                                "errors": errors,
+                                "message": "Model backfill paused.",
+                            }
+                        )
+                time.sleep(0.35)
+            if pause_started is not None:
+                paused_seconds += int(max(0.0, time.monotonic() - pause_started))
+            if self.scan_cancel_requested():
+                cancelled = True
+                break
+            try:
+                if not path.exists():
+                    missing += 1
+                    skipped += 1
+                    processed += 1
+                    continue
+                image = load_image(path)
+                source_hash = ref.source_hash or sha256_file(path)
+                key = (source_hash or self._path_key(path), ref.person_name.casefold(), target_model)
+                if key in existing_keys:
+                    skipped += 1
+                    processed += 1
+                    continue
+                record = image_record_for_path(path, image=image, sha256=source_hash)
+                embeddings = engine.embed_loaded_image(image, path)
+                if not embeddings and self.config.two_pass_scan:
+                    rescue_method = getattr(engine, "embed_loaded_image_rescue", None)
+                    embeddings = rescue_method(image, path) if callable(rescue_method) else []
+                accepted = 0
+                for embedding in embeddings:
+                    if embedding.quality < self.config.thresholds.quality_min:
+                        low_quality += 1
+                        continue
+                    new_ref = ReferenceFace(
+                        ref_id=new_id("ref"),
+                        person_name=ref.person_name,
+                        age_bucket=ref.age_bucket,
+                        source_path=str(path),
+                        capture_date=record.capture_date or ref.capture_date,
+                        quality=embedding.quality,
+                        model_name=embedding.model_name,
+                        vector=embedding.vector,
+                        source_hash=record.sha256,
+                        pose_bucket=embedding.pose_bucket,
+                    )
+                    self.references[new_ref.ref_id] = new_ref
+                    self.vector_store.add(new_ref.ref_id, new_ref.vector)
+                    existing_keys.add((record.sha256 or self._path_key(path), new_ref.person_name.casefold(), new_ref.model_name))
+                    added += 1
+                    accepted += 1
+                if not accepted:
+                    skipped += 1
+                processed += 1
+            except (ImageLoadError, OSError, ValueError, RuntimeError) as exc:
+                errors += 1
+                processed += 1
+                if len(error_rows) < 50:
+                    error_rows.append(f"{path.name}: {exc}")
+            if added and (processed % 25 == 0 or index == total):
+                self._invalidate_reference_indexes()
+                self.save(snapshot_candidates=False)
+            if on_progress and (index == total or index % 10 == 0):
+                on_progress(
+                    {
+                        "phase": "model_backfill",
+                        "processed": processed,
+                        "total": total,
+                        "added": added,
+                        "skipped": skipped,
+                        "errors": errors,
+                        "currentPath": str(path),
+                    }
+                )
+        if added:
+            self._invalidate_reference_indexes()
+        self._append_audit(
+            {
+                "action": "backfill_references_for_model",
+                "target_model": target_model,
+                "total": total,
+                "processed": processed,
+                "added": added,
+                "skipped": skipped,
+                "missing": missing,
+                "low_quality": low_quality,
+                "errors": errors,
+                "cancelled": cancelled,
+            }
+        )
+        self.save()
+        if on_progress:
+            on_progress(
+                {
+                    "phase": "cancelled" if cancelled else "complete",
+                    "processed": processed,
+                    "total": total,
+                    "added": added,
+                    "skipped": skipped,
+                    "errors": errors,
+                    "message": "Model backfill cancelled." if cancelled else "Model backfill complete.",
+                }
+            )
+        return {
+            "targetModel": target_model,
+            "total": total,
+            "processed": processed,
+            "added": added,
+            "skipped": skipped,
+            "missing": missing,
+            "lowQuality": low_quality,
+            "errors": errors,
+            "cancelled": cancelled,
+            "pausedSeconds": paused_seconds,
+            "errorRows": error_rows,
+            "compatibility": self.model_compatibility_report(target_model),
+        }
 
     def scan_folder(
         self,
@@ -548,6 +822,26 @@ class ProjectState:
             "embeddingCacheMisses": 0,
             "twoPassVerified": 0,
             "twoPassChanged": 0,
+            "noFaceDetected": 0,
+            "lowQualityFaces": 0,
+            "blockedPairs": 0,
+            "duplicateCandidates": 0,
+            "videoCandidateCap": 0,
+            "profileRescueAttempted": 0,
+            "profileRescueFound": 0,
+            "profileRescueMatched": 0,
+            "profileRescueUnmatched": 0,
+            "safeModeFaceCropAllowed": 0,
+            "poseFrontal": 0,
+            "poseThreeQuarter": 0,
+            "poseProfile": 0,
+            "poseUnknown": 0,
+            "poseRelaxedReviews": 0,
+            "poseRelaxedProfile": 0,
+            "poseRelaxedThreeQuarter": 0,
+            "poseReranked": 0,
+            "poseAmbiguous": 0,
+            "hardPoseUnsupported": 0,
             "excluded": 0,
             "pathErrors": 0,
         }
@@ -680,6 +974,56 @@ class ProjectState:
             if source_path:
                 video_candidate_counts[source_path] = video_candidate_counts.get(source_path, 0) + 1
 
+        def record_skip_reason(
+            image_path: Path,
+            signature: dict[str, Any],
+            phase: str,
+            message: str = "",
+            content_hash: str = "",
+        ) -> None:
+            self.db.record_scan_file(
+                run_id,
+                image_path,
+                signature,
+                "skipped",
+                phase=phase,
+                message=message,
+                content_hash=content_hash,
+                conn=scan_conn,
+            )
+
+        def safe_mode_face_crop_allowed(
+            assessment: SafetyAssessment,
+            embeddings: list[EmbeddingResult],
+            image: Any,
+        ) -> bool:
+            model_score = assessment.model_score
+            if model_score is None:
+                return False
+            if model_score >= max(0.32, self.config.safe_mode_threshold * 0.55):
+                return False
+            image_width = max(1, int(getattr(image, "width", 0) or 0))
+            image_height = max(1, int(getattr(image, "height", 0) or 0))
+            if image_width < 64 or image_height < 64:
+                return False
+            aspect = image_width / max(1, image_height)
+            if aspect < 0.55 or aspect > 1.75:
+                return False
+            for embedding in embeddings:
+                if not embedding.bbox:
+                    continue
+                x1, y1, x2, y2 = embedding.bbox
+                width = max(0, min(image_width, x2) - max(0, x1))
+                height = max(0, min(image_height, y2) - max(0, y1))
+                if not width or not height:
+                    continue
+                coverage = (width * height) / max(1, image_width * image_height)
+                center_x = (max(0, x1) + min(image_width, x2)) / 2 / image_width
+                center_y = (max(0, y1) + min(image_height, y2)) / 2 / image_height
+                if coverage >= 0.12 and 0.18 <= center_x <= 0.82 and 0.12 <= center_y <= 0.72:
+                    return True
+            return False
+
         def queue_image(
             image_path: Path,
             image: Any | None = None,
@@ -699,57 +1043,122 @@ class ProjectState:
             ensure_not_cancelled()
             ensure_stable_signature(image_path, signature)
             metadata.setdefault("source_hash", content_hash)
+            embeddings: list[EmbeddingResult] | None = None
+            cache_hit = False
             if apply_safe_mode and self.config.safe_mode:
                 assessment, content_hash = self._assess_safety_cached(image_path, image, scan_conn, content_hash=content_hash)
                 ensure_not_cancelled()
                 metadata["source_hash"] = content_hash
                 if assessment.sensitive:
-                    metrics["safeFiltered"] += 1
-                    metrics["skipped"] += 1
-                    self.db.record_scan_file(
-                        run_id,
-                        image_path,
-                        signature,
-                        "protected",
-                        phase="protected",
-                        message=assessment.reason,
-                        safety_score=round(assessment.score, 6),
-                        content_hash=content_hash,
-                        conn=scan_conn,
-                    )
-                    self._emit_scan_progress(
-                        on_progress,
-                        "protected",
-                        metrics,
-                        current_path=str(image_path),
-                        message="Safe Mode protected this image from matching and clustering.",
-                        safety_score=round(assessment.score, 3),
-                    )
-                    return 0
-            embeddings, cache_hit = self._embed_image_cached(image_path, engine, image=image, content_hash=content_hash, conn=scan_conn)
+                    embeddings, cache_hit = self._embed_image_cached(image_path, engine, image=image, content_hash=content_hash, conn=scan_conn)
+                    ensure_not_cancelled()
+                    if safe_mode_face_crop_allowed(assessment, embeddings, image):
+                        metrics["safeModeFaceCropAllowed"] += 1
+                    else:
+                        metrics["safeFiltered"] += 1
+                        metrics["skipped"] += 1
+                        self.db.record_scan_file(
+                            run_id,
+                            image_path,
+                            signature,
+                            "protected",
+                            phase="protected",
+                            message=assessment.reason,
+                            safety_score=round(assessment.score, 6),
+                            content_hash=content_hash,
+                            conn=scan_conn,
+                        )
+                        self._emit_scan_progress(
+                            on_progress,
+                            "protected",
+                            metrics,
+                            current_path=str(image_path),
+                            message="Safe Mode protected this image from matching and clustering.",
+                            safety_score=round(assessment.score, 3),
+                        )
+                        return 0
+            if embeddings is None:
+                embeddings, cache_hit = self._embed_image_cached(image_path, engine, image=image, content_hash=content_hash, conn=scan_conn)
             ensure_not_cancelled()
             if cache_hit:
                 metrics["embeddingCacheHits"] += 1
             else:
                 metrics["embeddingCacheMisses"] += 1
+            rescue_used = False
+            if not embeddings and self.config.two_pass_scan:
+                metrics["profileRescueAttempted"] += 1
+                metrics["twoPassVerified"] += 1
+                rescue_embeddings, rescue_cache_hit = self._embed_image_cached(
+                    image_path,
+                    engine,
+                    image=image,
+                    content_hash=content_hash,
+                    conn=scan_conn,
+                    cache_variant="profile-rescue-v1",
+                )
+                if rescue_cache_hit:
+                    metrics["embeddingCacheHits"] += 1
+                else:
+                    metrics["embeddingCacheMisses"] += 1
+                if rescue_embeddings:
+                    metrics["profileRescueFound"] += 1
+                    metrics["twoPassChanged"] += 1
+                    embeddings = rescue_embeddings
+                    rescue_used = True
             accepted = 0
             recorded_any = False
             queued_unmatched = False
+            low_quality_seen = False
             for embedding in embeddings:
                 if embedding.quality < self.config.thresholds.quality_min:
                     metrics["skipped"] += 1
+                    metrics["lowQualityFaces"] += 1
+                    low_quality_seen = True
                     continue
+                pose_bucket = self._normalized_pose_bucket(embedding.pose_bucket)
+                if pose_bucket == "frontal":
+                    metrics["poseFrontal"] += 1
+                elif pose_bucket == "three-quarter":
+                    metrics["poseThreeQuarter"] += 1
+                elif pose_bucket == "profile":
+                    metrics["poseProfile"] += 1
+                else:
+                    metrics["poseUnknown"] += 1
+                embedding_metadata = {**metadata, "pose_bucket": pose_bucket}
                 accepted += 1
-                hits = self.vector_store.search(embedding.vector, k=k)
-                decision = group_hits(hits, self.references, self.config.thresholds)
+                hits, compatible_refs = self._search_matching_references(embedding, k=k)
+                pose_thresholds = thresholds_for_pose(self.config.thresholds, pose_bucket) if pose_review_supported(hits, compatible_refs, self.config.thresholds, pose_bucket) else self.config.thresholds
+                decision = group_hits(hits, compatible_refs, pose_thresholds, pose_bucket=pose_bucket)
+                decision_flags = set(decision.flags) if decision is not None else set()
+                if "pose-reranked" in decision_flags:
+                    metrics["poseReranked"] += 1
+                if "ambiguous-person-margin" in decision_flags:
+                    metrics["poseAmbiguous"] += 1
+                if "single-reference-hard-pose" in decision_flags:
+                    metrics["hardPoseUnsupported"] += 1
+                pose_relaxed = (
+                    decision is not None
+                    and pose_thresholds.relaxed_child < self.config.thresholds.relaxed_child
+                    and decision.score < self.config.thresholds.relaxed_child
+                    and decision.score >= pose_thresholds.relaxed_child
+                )
+                if pose_relaxed:
+                    metrics["poseRelaxedReviews"] += 1
+                    if pose_bucket == "profile" or pose_bucket == "edge-face":
+                        metrics["poseRelaxedProfile"] += 1
+                    elif pose_bucket == "three-quarter":
+                        metrics["poseRelaxedThreeQuarter"] += 1
                 if decision is None or decision.band == "below-review":
-                    unmatched.append((image_path, embedding.quality, embedding.model_name, embedding.vector, metadata))
+                    unmatched.append((image_path, embedding.quality, embedding.model_name, embedding.vector, embedding_metadata))
                     metrics["unmatched"] += 1
+                    if rescue_used:
+                        metrics["profileRescueUnmatched"] += 1
                     queued_unmatched = True
                     flush_unmatched()
                     continue
                 if self.db.blocked_pair_exists(content_hash, decision.person_name, decision.best_ref_id, scan_conn):
                     metrics["skipped"] += 1
+                    metrics["blockedPairs"] += 1
                     self.db.record_scan_file(
                         run_id,
                         image_path,
@@ -766,9 +1175,11 @@ class ProjectState:
                 key = (self._candidate_dedupe_source(image_path, metadata), decision.best_ref_id, decision.person_name)
                 if candidate_key_exists(key):
                     metrics["skipped"] += 1
+                    metrics["duplicateCandidates"] += 1
                     continue
                 if not video_candidate_allowed(metadata):
                     metrics["skipped"] += 1
+                    metrics["videoCandidateCap"] += 1
                     continue
                 candidate = ReviewCandidate(
                     candidate_id=new_id("cand"),
@@ -780,8 +1191,13 @@ class ProjectState:
                     band=decision.band,
                     quality=embedding.quality,
                     model_name=embedding.model_name,
-                    note=_video_note(metadata),
-                    **metadata,
+                    note=_video_note(metadata)
+                    or ("Close identity scores; review this match carefully." if "ambiguous-person-margin" in decision_flags else "")
+                    or ("Only one hard-angle signal matched; add a side/angled saved photo if this is wrong." if "single-reference-hard-pose" in decision_flags else "")
+                    or ("Hard-angle match used pose-aware scoring; compare against saved photos." if "pose-reranked" in decision_flags else "")
+                    or ("Hard-pose review threshold used; verify carefully." if pose_relaxed else "")
+                    or ("Recovered by the side-face detector; review before accepting." if rescue_used else ""),
+                    **embedding_metadata,
                 )
                 self.candidates[candidate.candidate_id] = candidate
                 self._mark_candidate_dirty(candidate.candidate_id)
@@ -808,6 +1224,8 @@ class ProjectState:
                 added += 1
                 metrics["added"] = added
                 metrics["matched"] += 1
+                if rescue_used:
+                    metrics["profileRescueMatched"] += 1
                 self._emit_scan_progress(
                     on_progress,
                     "candidate",
@@ -817,7 +1235,13 @@ class ProjectState:
                 )
             if not accepted:
                 metrics["skipped"] += 1
-                self.db.record_scan_file(run_id, image_path, signature, "skipped", phase="skipped", content_hash=content_hash, conn=scan_conn)
+                if not embeddings:
+                    metrics["noFaceDetected"] += 1
+                    record_skip_reason(image_path, signature, "no_face_detected", "No face was detected after the normal detector and profile rescue pass.", content_hash)
+                elif low_quality_seen:
+                    record_skip_reason(image_path, signature, "low_quality_face", "Detected face quality was below the review threshold.", content_hash)
+                else:
+                    record_skip_reason(image_path, signature, "skipped", "", content_hash)
             elif queued_unmatched:
                 if any(row[0] == image_path for row in unmatched):
                     self.db.record_scan_file(run_id, image_path, signature, "unmatched", phase="pending_cluster", content_hash=content_hash, conn=scan_conn)
@@ -847,7 +1271,7 @@ class ProjectState:
             if force or state_delta >= SCAN_STATE_CHECKPOINT_INTERVAL or now - last_state_checkpoint_at >= SCAN_STATE_CHECKPOINT_SECONDS:
                 last_checkpoint_processed = metrics["processed"]
                 last_state_checkpoint_at = now
-                self.save(snapshot_candidates=False)
+                self.save(snapshot_candidates=False, flush_candidate_index=False)
 
         with self.db.connect() as connection:
             scan_conn = connection
@@ -1196,18 +1620,19 @@ class ProjectState:
             row["references"].append(ref)
         ref_people = {ref.ref_id: person_key for person_key, row in grouped.items() for ref in row["references"]}
         max_person_refs = max((len(row["references"]) for row in grouped.values()), default=0)
-        search_k = min(self.vector_store.size, max(64, limit * 8, max_person_refs + 16))
+        search_k = max(64, limit * 8, max_person_refs + 16)
         suggestions_by_pair: dict[tuple[str, str], dict[str, Any]] = {}
         for ref in self.references.values():
             person_key = ref_people.get(ref.ref_id)
             if not person_key:
                 continue
-            for hit in self.vector_store.search(ref.vector, k=search_k):
+            model_store, model_refs = self._reference_search_context(ref.model_name)
+            for hit in model_store.search(ref.vector, k=min(model_store.size, search_k)):
                 if hit.item_id == ref.ref_id:
                     continue
                 if hit.score < threshold:
                     break
-                other_ref = self.references.get(hit.item_id)
+                other_ref = model_refs.get(hit.item_id)
                 if other_ref is None:
                     continue
                 other_key = ref_people.get(other_ref.ref_id)
@@ -1384,7 +1809,8 @@ class ProjectState:
                         for embedding in embeddings:
                             if embedding.quality < self.config.thresholds.quality_min:
                                 continue
-                            decision = group_hits(self.vector_store.search(embedding.vector, k=k), self.references, self.config.thresholds)
+                            hits, compatible_refs = self._search_matching_references(embedding, k=k)
+                            decision = group_hits(hits, compatible_refs, self.config.thresholds)
                             if decision is None or decision.band == "below-review":
                                 continue
                             if best_decision is None or decision.score > best_decision.score:
@@ -1491,6 +1917,7 @@ class ProjectState:
             "bbox": list(embedding.bbox) if embedding.bbox else None,
             "modelName": embedding.model_name,
             "note": embedding.note,
+            "poseBucket": self._normalized_pose_bucket(embedding.pose_bucket),
         }
 
     def _embedding_from_cache_row(self, row: dict[str, Any]) -> EmbeddingResult:
@@ -1503,6 +1930,7 @@ class ProjectState:
             bbox=bbox,
             model_name=str(row.get("modelName", "")),
             note=str(row.get("note", "")),
+            pose_bucket=self._normalized_pose_bucket(str(row.get("poseBucket", "unknown"))),
         )
 
     def _embed_image_cached(
@@ -1512,14 +1940,23 @@ class ProjectState:
         image: Any | None = None,
         content_hash: str = "",
         conn: sqlite3.Connection | None = None,
+        cache_variant: str = "",
     ) -> tuple[list[EmbeddingResult], bool]:
         content_hash = content_hash or sha256_file(path)
         model_version = self._embedding_cache_version(engine)
+        if cache_variant:
+            model_version = f"{model_version}|{cache_variant}"
         detector_size = self._embedding_detector_size(engine)
         cached = self.db.embedding_lookup(content_hash, model_version, detector_size, conn)
         if cached is not None:
             return [self._embedding_from_cache_row(row) for row in cached], True
-        embeddings = engine.embed_loaded_image(image, path) if image is not None else engine.embed_image(path)
+        if cache_variant:
+            if image is None:
+                image = load_image(path)
+            rescue_method = getattr(engine, "embed_loaded_image_rescue", None)
+            embeddings = rescue_method(image, path) if callable(rescue_method) else []
+        else:
+            embeddings = engine.embed_loaded_image(image, path) if image is not None else engine.embed_image(path)
         self.db.embedding_store(
             content_hash,
             model_version,
@@ -1785,15 +2222,28 @@ class ProjectState:
                 file_hash = ""
         if not file_hash:
             raise ValueError("This match cannot be blocked because its file hash is unavailable.")
+        best_ref_id = candidate.best_ref_id or ""
         self.db.add_blocked_pair(
             {
                 "fileHash": file_hash,
                 "personName": candidate.person_name,
-                "bestRefId": candidate.best_ref_id or "",
+                "bestRefId": best_ref_id,
                 "sourcePath": candidate.source_path,
                 "note": note or "Rejected from review as a repeated false match.",
             }
         )
+        blocked_count = 1
+        if best_ref_id:
+            self.db.add_blocked_pair(
+                {
+                    "fileHash": file_hash,
+                    "personName": candidate.person_name,
+                    "bestRefId": "",
+                    "sourcePath": candidate.source_path,
+                    "note": note or "Rejected from review as a repeated same-image/person false match.",
+                }
+            )
+            blocked_count += 1
         candidate.status = "rejected"
         candidate.note = self._append_candidate_note(candidate.note, "Do not suggest this image/person pair again.")
         self._mark_candidate_dirty(candidate_id)
@@ -1814,11 +2264,12 @@ class ProjectState:
                 "candidate_id": candidate_id,
                 "source_path": candidate.source_path,
                 "person_name": candidate.person_name,
-                "best_ref_id": candidate.best_ref_id or "",
+                "best_ref_id": best_ref_id,
+                "blocked_rows": blocked_count,
             }
         )
         self.save()
-        return {"blocked": 1, "summary": self.db.blocked_pairs_summary(limit=5)}
+        return {"blocked": blocked_count, "summary": self.db.blocked_pairs_summary(limit=5)}
 
     def reassign_candidate_person(self, candidate_id: str, person_name: str, clear_reference: bool = True) -> dict[str, Any]:
         target = person_name.strip()
@@ -2000,6 +2451,7 @@ class ProjectState:
             raise KeyError(f"Reference not found: {ref_id}")
         ref = self.references.pop(ref_id)
         self.vector_store.rebuild({item_id: item.vector for item_id, item in self.references.items()})
+        self._invalidate_reference_indexes()
         self._append_audit(
             {
                 "action": "delete_reference",
@@ -2014,6 +2466,7 @@ class ProjectState:
         count = len(self.references)
         self.references.clear()
         self.vector_store.clear()
+        self._invalidate_reference_indexes()
         self._append_audit({"action": "clear_references", "count": count})
         self.save()
         return count
@@ -2036,6 +2489,8 @@ class ProjectState:
             self.candidates.pop(candidate_id, None)
         self._mark_candidates_deleted(candidate_ids)
         self.vector_store.rebuild({item_id: item.vector for item_id, item in self.references.items()})
+        if ref_ids:
+            self._invalidate_reference_indexes()
         result = {"references": len(ref_ids), "candidates": len(candidate_ids)}
         self._append_audit({"action": "delete_person", "person_name": person_name.strip(), **result})
         self.save()
@@ -2187,6 +2642,7 @@ class ProjectState:
         self._mark_candidates_deleted(missing_candidate_ids)
         if missing_ref_ids:
             self.vector_store.rebuild({item_id: item.vector for item_id, item in self.references.items()})
+            self._invalidate_reference_indexes()
         self._append_audit(
             {
                 "action": "repair_workspace",
@@ -2491,6 +2947,138 @@ class ProjectState:
             }
         )
         return result
+
+    def restore_workspace_backup(self, backup_path: Path | None, target_root: Path) -> dict[str, Any]:
+        path = backup_path.expanduser().resolve() if backup_path else self._latest_workspace_backup()
+        if not path:
+            raise ValueError("No backup zip was found in the exports folder.")
+        target = target_root.expanduser().resolve()
+        current = self.root.resolve()
+        if target == current or current in target.parents:
+            raise ValueError("Restore target must be outside the active app folder.")
+        if target.exists():
+            if not target.is_dir():
+                raise ValueError("Restore target must be a folder.")
+            if target.is_symlink() or safe_is_mount(target):
+                raise ValueError("Restore target must be an app-owned local folder.")
+            allowed_system_files = {".DS_Store", "Thumbs.db", "desktop.ini"}
+            try:
+                existing = [item.name for item in target.iterdir() if item.name not in allowed_system_files]
+            except OSError as exc:
+                raise ValueError(f"Cannot inspect restore target: {exc}") from exc
+            if existing:
+                raise ValueError("Restore target must be empty.")
+
+        verification = self.verify_workspace_backup(path)
+        if not verification.get("ok"):
+            reason = verification.get("error") or "Backup verification failed."
+            missing = verification.get("missingCoreFiles") or []
+            dangerous = verification.get("dangerousEntries") or []
+            invalid = verification.get("invalidCoreFiles") or []
+            details = []
+            if missing:
+                details.append(f"missing {', '.join(str(item) for item in missing[:3])}")
+            if dangerous:
+                details.append(f"unsafe entries {len(dangerous)}")
+            if invalid:
+                details.append(f"invalid core files {', '.join(str(item) for item in invalid[:3])}")
+            raise ValueError(f"{reason} {'; '.join(details)}".strip())
+
+        if target.exists():
+            if not target.is_dir():
+                raise ValueError("Restore target must be a folder.")
+            if target.is_symlink() or safe_is_mount(target):
+                raise ValueError("Restore target must be an app-owned local folder.")
+            allowed_system_files = {".DS_Store", "Thumbs.db", "desktop.ini"}
+            try:
+                existing = [item.name for item in target.iterdir() if item.name not in allowed_system_files]
+            except OSError as exc:
+                raise ValueError(f"Cannot inspect restore target: {exc}") from exc
+            if existing:
+                raise ValueError("Restore target must be empty.")
+        else:
+            target.mkdir(parents=True, exist_ok=True)
+
+        file_count = 0
+        bytes_written = 0
+        with zipfile.ZipFile(path) as archive:
+            for member in archive.infolist():
+                name = member.filename
+                if not name or name.endswith("/"):
+                    continue
+                if (
+                    name.startswith(("/", "\\\\", "//"))
+                    or (len(name) >= 3 and name[1] == ":" and name[2] in {"/", "\\"})
+                    or Path(name).is_absolute()
+                    or ".." in Path(name).parts
+                ):
+                    raise ValueError(f"Unsafe path in backup: {name}")
+                destination = (target / name).resolve()
+                try:
+                    destination.relative_to(target)
+                except ValueError as exc:
+                    raise ValueError(f"Unsafe path in backup: {name}") from exc
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member) as source, destination.open("wb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+                file_count += 1
+                bytes_written += destination.stat().st_size
+
+        state_summary = {
+            "references": 0,
+            "candidates": 0,
+            "scanRuns": 0,
+            "workspaceId": "",
+        }
+        try:
+            metadata_path = target / ".vintrace-workspace.json"
+            if metadata_path.exists():
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if isinstance(metadata, dict):
+                    state_summary["workspaceId"] = str(metadata.get("workspaceId", ""))
+            refs = json.loads((target / "references.json").read_text(encoding="utf-8"))
+            if isinstance(refs, list):
+                state_summary["references"] = len(refs)
+            candidates_path = target / "review_candidates.json"
+            if candidates_path.exists():
+                candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
+                if isinstance(candidates, list):
+                    state_summary["candidates"] = len(candidates)
+            scan_history_path = target / "scan_history.json"
+            if scan_history_path.exists():
+                scan_runs = json.loads(scan_history_path.read_text(encoding="utf-8"))
+                if isinstance(scan_runs, list):
+                    state_summary["scanRuns"] = len(scan_runs)
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            pass
+        database_path = target / "workspace.sqlite3"
+        if database_path.exists():
+            try:
+                with sqlite3.connect(database_path) as connection:
+                    state_summary["candidates"] = int(connection.execute("select count(*) from candidates").fetchone()[0])
+                    state_summary["scanRuns"] = int(connection.execute("select count(*) from scan_runs").fetchone()[0])
+            except sqlite3.DatabaseError:
+                pass
+
+        self._append_audit(
+            {
+                "action": "restore_workspace_backup",
+                "zip_path": str(path),
+                "target_root": str(target),
+                "file_count": file_count,
+                "bytes": bytes_written,
+            }
+        )
+        return {
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "ok": True,
+            "zipPath": str(path),
+            "targetRoot": str(target),
+            "fileCount": file_count,
+            "bytes": bytes_written,
+            "manifest": verification.get("manifest") or {},
+            "stateSummary": state_summary,
+        }
 
     def _latest_workspace_backup(self) -> Path | None:
         export_root = self.root / "exports"
@@ -3466,6 +4054,26 @@ class ProjectState:
             "embeddingCacheMisses",
             "twoPassVerified",
             "twoPassChanged",
+            "noFaceDetected",
+            "lowQualityFaces",
+            "blockedPairs",
+            "duplicateCandidates",
+            "videoCandidateCap",
+            "profileRescueAttempted",
+            "profileRescueFound",
+            "profileRescueMatched",
+            "profileRescueUnmatched",
+            "safeModeFaceCropAllowed",
+            "poseFrontal",
+            "poseThreeQuarter",
+            "poseProfile",
+            "poseUnknown",
+            "poseRelaxedReviews",
+            "poseRelaxedProfile",
+            "poseRelaxedThreeQuarter",
+            "poseReranked",
+            "poseAmbiguous",
+            "hardPoseUnsupported",
         ]
         history = list(self.scan_history)
         payload = {
@@ -3732,7 +4340,7 @@ class ProjectState:
         stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
         json_path = export_root / f"vintrace-safe-mode-audit-{stamp}.json"
         csv_path = export_root / f"vintrace-safe-mode-runs-{stamp}.csv"
-        metric_keys = ["processed", "safeFiltered", "videoProtected", "videoFrames", "errors", "added"]
+        metric_keys = ["processed", "safeFiltered", "safeModeFaceCropAllowed", "videoProtected", "videoFrames", "errors", "added"]
         totals = {key: 0 for key in metric_keys}
         run_rows: list[dict[str, Any]] = []
         for run in self.scan_history:
@@ -3786,6 +4394,7 @@ class ProjectState:
 
     def model_drift_report(self, current_model: str) -> dict[str, Any]:
         current = str(current_model or "unknown")
+        current_key = self._model_family_key(current)
         reference_models: dict[str, int] = {}
         candidate_models: dict[str, int] = {}
         stale_references = []
@@ -3794,7 +4403,7 @@ class ProjectState:
         for ref in self.references.values():
             model = ref.model_name or "unknown"
             reference_models[model] = reference_models.get(model, 0) + 1
-            if model != current:
+            if self._model_family_key(model) != current_key:
                 stale_references.append(
                     {
                         "refId": ref.ref_id,
@@ -3807,7 +4416,7 @@ class ProjectState:
         for candidate in self.candidates.values():
             model = candidate.model_name or "unknown"
             candidate_models[model] = candidate_models.get(model, 0) + 1
-            if model != current:
+            if self._model_family_key(model) != current_key:
                 stale_by_status[candidate.status] = stale_by_status.get(candidate.status, 0) + 1
                 stale_candidates.append(
                     {
@@ -3843,6 +4452,188 @@ class ProjectState:
                 "references": stale_references[:20],
                 "candidates": stale_candidates[:20],
             },
+            "recommendations": recommendations,
+        }
+
+    def reference_gap_report(self, current_model: str | None = None) -> dict[str, Any]:
+        current = str(current_model or "unknown").strip() or "unknown"
+        confident = float(self.config.thresholds.confident)
+        likely = float(self.config.thresholds.likely)
+        people: dict[str, dict[str, Any]] = {}
+
+        def person_bucket(name: str) -> dict[str, Any]:
+            key = str(name or "").strip() or "Unnamed person"
+            return people.setdefault(
+                key.lower(),
+                {
+                    "personName": key,
+                    "referenceCount": 0,
+                    "compatibleReferences": 0,
+                    "otherModelReferences": 0,
+                    "poseCounts": {"frontal": 0, "threeQuarter": 0, "profile": 0, "edgeFace": 0, "unknown": 0},
+                    "ageBuckets": {},
+                    "averageQuality": 0.0,
+                    "bestQuality": 0.0,
+                    "pendingCandidates": 0,
+                    "acceptedCandidates": 0,
+                    "rejectedCandidates": 0,
+                    "uncertainCandidates": 0,
+                    "strongPending": 0,
+                    "lowConfidencePending": 0,
+                    "sampleReferenceNames": [],
+                    "gaps": [],
+                    "actions": [],
+                    "score": 0,
+                    "status": "weak",
+                },
+            )
+
+        quality_sums: dict[str, float] = {}
+        for ref in self.references.values():
+            bucket = person_bucket(ref.person_name)
+            person_key = str(ref.person_name or "").strip().lower() or "unnamed person"
+            bucket["referenceCount"] += 1
+            if self._compatible_reference_model_name(current, ref.model_name):
+                bucket["compatibleReferences"] += 1
+            else:
+                bucket["otherModelReferences"] += 1
+            pose = self._normalized_pose_bucket(ref.pose_bucket)
+            pose_key = {"three-quarter": "threeQuarter", "edge-face": "edgeFace"}.get(pose, pose)
+            bucket["poseCounts"][pose_key] = int(bucket["poseCounts"].get(pose_key, 0)) + 1
+            age = str(ref.age_bucket or "unknown").strip() or "unknown"
+            bucket["ageBuckets"][age] = int(bucket["ageBuckets"].get(age, 0)) + 1
+            quality = max(0.0, min(1.0, float(ref.quality or 0.0)))
+            quality_sums[person_key] = quality_sums.get(person_key, 0.0) + quality
+            bucket["bestQuality"] = max(float(bucket["bestQuality"]), quality)
+            if len(bucket["sampleReferenceNames"]) < 3:
+                bucket["sampleReferenceNames"].append(Path(ref.source_path).name)
+
+        for candidate in self.candidates.values():
+            person_name = str(candidate.person_name or "").strip()
+            if not person_name:
+                continue
+            person_key = person_name.lower()
+            if person_key not in people:
+                continue
+            bucket = people[person_key]
+            status = str(candidate.status or "pending")
+            if status == "accepted":
+                bucket["acceptedCandidates"] += 1
+            elif status == "rejected":
+                bucket["rejectedCandidates"] += 1
+            elif status == "uncertain":
+                bucket["uncertainCandidates"] += 1
+            else:
+                bucket["pendingCandidates"] += 1
+                score = float(candidate.score or 0.0)
+                if score >= confident:
+                    bucket["strongPending"] += 1
+                if score < likely:
+                    bucket["lowConfidencePending"] += 1
+
+        gap_counts: dict[str, int] = {}
+        items: list[dict[str, Any]] = []
+        for person_key, bucket in people.items():
+            reference_count = int(bucket["referenceCount"])
+            compatible_references = int(bucket["compatibleReferences"])
+            other_model_references = int(bucket["otherModelReferences"])
+            pose_counts = bucket["poseCounts"]
+            age_bucket_count = sum(1 for count in bucket["ageBuckets"].values() if int(count) > 0)
+            avg_quality = quality_sums.get(person_key, 0.0) / max(reference_count, 1)
+            bucket["averageQuality"] = round(avg_quality, 4)
+            bucket["bestQuality"] = round(float(bucket["bestQuality"]), 4)
+
+            gaps: list[str] = []
+            actions: list[str] = []
+            if compatible_references == 0:
+                gaps.append("needs-active-model-backfill")
+                actions.append("Refresh saved photos for the active face model.")
+            if reference_count < 2:
+                gaps.append("needs-more-references")
+                actions.append("Add at least one more clear photo for this person.")
+            if int(pose_counts.get("profile", 0)) + int(pose_counts.get("edgeFace", 0)) == 0:
+                gaps.append("needs-side-reference")
+                actions.append("Add a side or profile photo to improve hard-angle matches.")
+            if int(pose_counts.get("threeQuarter", 0)) == 0:
+                gaps.append("needs-angled-reference")
+                actions.append("Add a slightly angled photo if you have one.")
+            if age_bucket_count < 2:
+                gaps.append("needs-age-coverage")
+                actions.append("Add photos from another age range when available.")
+            if avg_quality < 0.35 or float(bucket["bestQuality"]) < 0.45:
+                gaps.append("needs-clearer-reference")
+                actions.append("Add a brighter, sharper face photo.")
+            if int(bucket["pendingCandidates"]) >= 20 and int(bucket["acceptedCandidates"]) + int(bucket["rejectedCandidates"]) == 0:
+                gaps.append("needs-review-feedback")
+                actions.append("Accept or reject a few matches so the queue reflects your decisions.")
+            if other_model_references > 0 and compatible_references > 0:
+                gaps.append("mixed-model-references")
+                actions.append("Refresh older saved photos when convenient.")
+
+            score = 100
+            if compatible_references == 0:
+                score -= 34
+            if reference_count == 1:
+                score -= 24
+            elif reference_count == 2:
+                score -= 8
+            if int(pose_counts.get("profile", 0)) + int(pose_counts.get("edgeFace", 0)) == 0:
+                score -= 18
+            if int(pose_counts.get("threeQuarter", 0)) == 0:
+                score -= 8
+            if age_bucket_count < 2:
+                score -= 10
+            if avg_quality < 0.35:
+                score -= 16
+            if float(bucket["bestQuality"]) < 0.45:
+                score -= 8
+            if other_model_references > 0:
+                score -= 8 if compatible_references else 0
+            if int(bucket["pendingCandidates"]) >= 20 and int(bucket["acceptedCandidates"]) + int(bucket["rejectedCandidates"]) == 0:
+                score -= 8
+            score = max(0, min(100, score))
+            status = "strong" if score >= 78 else "usable" if score >= 55 else "weak"
+            if compatible_references == 0:
+                status = "blocked"
+
+            for gap in gaps:
+                gap_counts[gap] = gap_counts.get(gap, 0) + 1
+            bucket["gaps"] = gaps
+            bucket["actions"] = actions[:4]
+            bucket["score"] = score
+            bucket["status"] = status
+            items.append(bucket)
+
+        items.sort(key=lambda row: (int(row["score"]), -int(row["pendingCandidates"]), row["personName"].lower()))
+        needs_attention = sum(1 for row in items if row["status"] in {"weak", "blocked"})
+        average_score = round(sum(int(row["score"]) for row in items) / max(len(items), 1), 1) if items else 0.0
+        top_gaps = [
+            {"gap": gap, "count": count}
+            for gap, count in sorted(gap_counts.items(), key=lambda row: (-row[1], row[0]))[:6]
+        ]
+        recommendations: list[str] = []
+        if not items:
+            recommendations.append("Add saved photos for at least one person before scanning.")
+        elif needs_attention:
+            recommendations.append("Start with the people marked weak or blocked; they create the most review noise.")
+        if any(row["poseCounts"].get("profile", 0) + row["poseCounts"].get("edgeFace", 0) == 0 for row in items):
+            recommendations.append("Side/profile references improve hard-angle discovery and reduce missed review rows.")
+        if any(len(row["ageBuckets"]) < 2 for row in items):
+            recommendations.append("Multi-age references help when scanning old family libraries.")
+        if any(row["otherModelReferences"] for row in items):
+            recommendations.append("Refresh saved photos after model changes so all people use the same embedding space.")
+        if not recommendations:
+            recommendations.append("Reference coverage looks ready for normal scanning.")
+
+        return {
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "currentModel": current,
+            "people": len(items),
+            "needsAttention": needs_attention,
+            "strongPeople": sum(1 for row in items if row["status"] == "strong"),
+            "averageScore": average_score,
+            "topGaps": top_gaps,
+            "items": items,
             "recommendations": recommendations,
         }
 
@@ -4522,6 +5313,7 @@ class ProjectState:
         self._candidate_dirty_ids.clear()
         self._candidate_deleted_ids.clear()
         self.vector_store.rebuild({})
+        self._invalidate_reference_indexes()
         for generated_path in (self.previews_path, self.video_frames_path):
             if self._generated_dir_is_owned(generated_path):
                 shutil.rmtree(generated_path, ignore_errors=True)
@@ -5076,7 +5868,11 @@ class ProjectState:
         if not value:
             return None
         source = Path(value).expanduser()
-        if not source.exists() or not source.is_file() or not needs_browser_preview(source):
+        # H2: generate a downscaled preview for ALL image formats (not just the
+        # non-browser-renderable ones). Previously jpg/png/webp fell through to
+        # here returning None, so the renderer used the full-resolution original
+        # as the list thumbnail. Any image we can load gets a small cached preview.
+        if not source.exists() or not source.is_file() or source.suffix.lower() not in IMAGE_EXTENSIONS:
             return None
         try:
             preview = self._preview_cache_path(source)
@@ -5120,7 +5916,7 @@ class ProjectState:
     def _preview_cache_path(self, source: Path) -> Path:
         stat = source.stat()
         cache_key = hashlib.sha256(
-            f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|preview-v2".encode("utf-8")
+            f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|preview-v3".encode("utf-8")
         ).hexdigest()[:32]
         return self.previews_path / f"{cache_key}.jpg"
 

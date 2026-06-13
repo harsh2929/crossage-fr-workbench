@@ -256,6 +256,7 @@ class WorkspaceDb:
                 "band": getattr(candidate, "band", ""),
                 "quality": getattr(candidate, "quality", 0.0),
                 "model_name": getattr(candidate, "model_name", ""),
+                "pose_bucket": getattr(candidate, "pose_bucket", "unknown"),
                 "status": getattr(candidate, "status", "pending"),
                 "note": getattr(candidate, "note", ""),
                 "media_kind": getattr(candidate, "media_kind", "image"),
@@ -1100,7 +1101,7 @@ class WorkspaceDb:
         row = conn.execute(
             """
             SELECT 1 FROM blocked_pairs
-            WHERE file_hash = ? AND person_name = ? AND best_ref_id = ?
+            WHERE file_hash = ? AND person_name = ? AND (best_ref_id = ? OR best_ref_id = '')
             LIMIT 1
             """,
             (file_hash, person_key, ref_id),

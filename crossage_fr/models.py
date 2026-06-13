@@ -30,6 +30,7 @@ class EmbeddingResult:
     bbox: tuple[int, int, int, int] | None
     model_name: str
     note: str = ""
+    pose_bucket: str = "unknown"
 
 
 @dataclass(slots=True)
@@ -43,6 +44,7 @@ class ReferenceFace:
     model_name: str
     vector: list[float]
     source_hash: str = ""
+    pose_bucket: str = "unknown"
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat(timespec="seconds") + "Z")
 
 
@@ -65,6 +67,7 @@ class ReviewCandidate:
     video_frame_index: int | None = None
     video_duration_ms: int | None = None
     source_hash: str = ""
+    pose_bucket: str = "unknown"
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat(timespec="seconds") + "Z")
 
 

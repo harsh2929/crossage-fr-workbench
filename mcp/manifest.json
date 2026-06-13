@@ -234,6 +234,10 @@
       "description": "Report references or review rows created with a different active face model."
     },
     {
+      "name": "reference_gap_report",
+      "description": "Report which saved people need clearer, side-angle, multi-age, or refreshed reference photos."
+    },
+    {
       "name": "export_review_ledger",
       "description": "Export review decision metadata and audit events without media, thumbnails, vectors, or model files."
     },
@@ -248,6 +252,10 @@
     {
       "name": "verify_workspace_backup",
       "description": "Verify a Vintrace workspace backup ZIP before sharing or archiving it."
+    },
+    {
+      "name": "restore_workspace_backup",
+      "description": "Restore a verified Vintrace workspace backup ZIP into an empty target folder, requiring confirm=true."
     },
     {
       "name": "prune_workspace_backups",
@@ -268,6 +276,26 @@
     {
       "name": "export_support_bundle",
       "description": "Export a diagnostics-only support bundle without photos, videos, thumbnails, vectors, or model files."
+    },
+    {
+      "name": "public_dataset_catalog",
+      "description": "List supported public benchmark datasets and safe benchmark-only usage guidance."
+    },
+    {
+      "name": "inspect_public_dataset",
+      "description": "Inspect a local public-dataset folder laid out as identity subfolders."
+    },
+    {
+      "name": "run_public_dataset_benchmark",
+      "description": "Run an isolated public-dataset benchmark, with confirm=true required for LFW/CFP download or cache reuse."
+    },
+    {
+      "name": "compare_public_dataset_models",
+      "description": "Compare installed face model packs on the same isolated public-dataset benchmark slice."
+    },
+    {
+      "name": "apply_model_recommendation",
+      "description": "Apply a benchmark-recommended face model pack and optionally backfill saved references, requiring confirm=true."
     },
     {
       "name": "privacy_report",
@@ -312,6 +340,10 @@
     {
       "name": "model_distribution_audit",
       "description": "Audit model sources, checksums, installed paths, and license review status."
+    },
+    {
+      "name": "backfill_model_references",
+      "description": "Create active-model embeddings for saved person photos enrolled with another recognizer, requiring confirm=true."
     },
     {
       "name": "installer_self_diagnostics",

@@ -53,11 +53,29 @@ jobs:
       - name: Typecheck and build UI
         run: npm run build
 
+      - name: Localization contract
+        run: npm run test:localization
+
       - name: Pipeline smoke
         run: python tests/pipeline_smoke.py
 
       - name: Edge-case suite
         run: python tests/edge_cases.py
+
+      - name: Filesystem chaos suite
+        run: npm run test:filesystem-chaos
+
+      - name: Workspace backup roundtrip
+        run: npm run test:backup-roundtrip
+
+      - name: Public dataset benchmark harness
+        run: npm run test:dataset-benchmark
+
+      - name: Dataset regression gates
+        run: npm run test:dataset-gates
+
+      - name: Model downloader failure modes
+        run: npm run test:model-downloader
 
       - name: MCP smoke
         run: python tests/mcp_smoke.py
@@ -73,6 +91,9 @@ jobs:
           VINTRACE_SCALE_BENCH_FILES: "100000"
         run: python tests/scale_benchmark.py
 
+      - name: Performance budget
+        run: npm run test:perf-budget
+
       - name: Update feed dry run
         run: npm run update:dry-run
 
@@ -84,3 +105,18 @@ jobs:
 
       - name: Playwright UI
         run: xvfb-run --auto-servernum npm run test:e2e
+
+      - name: Playwright button regression
+        run: xvfb-run --auto-servernum npm run test:e2e:buttons
+
+      - name: Playwright localization layout
+        run: xvfb-run --auto-servernum npm run test:e2e:i18n
+
+      - name: Playwright IPC security fuzz
+        run: xvfb-run --auto-servernum npm run test:e2e:ipc
+
+      - name: Playwright accessibility keyboard
+        run: xvfb-run --auto-servernum npm run test:e2e:a11y
+
+      - name: Playwright memory soak
+        run: xvfb-run --auto-servernum npm run test:e2e:soak

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import hashlib
 import os
@@ -31,6 +31,12 @@ class ModelPackageSpec:
     license: str
     source: str
     required_any: tuple[tuple[str, ...], ...]
+    role: str = "standard"
+    pose_aware: bool = False
+    embedding_space: str = ""
+    license_tier: str = "needs-review"
+    thresholds: dict[str, float] = field(default_factory=dict)
+    recommended_for: tuple[str, ...] = ()
 
 
 MODEL_PACKAGES: dict[str, ModelPackageSpec] = {
@@ -48,11 +54,17 @@ MODEL_PACKAGES: dict[str, ModelPackageSpec] = {
             ("scrfd_10g_bnkps.onnx", "det_10g.onnx", "retinaface_r50_v1.onnx"),
             ("glintr100.onnx", "w600k_r50.onnx"),
         ),
+        role="default",
+        pose_aware=False,
+        embedding_space="insightface-antelopev2",
+        license_tier="research-or-commercial-license-required",
+        thresholds={"review": 0.20, "likely": 0.28, "strong": 0.40},
+        recommended_for=("general photo libraries", "high-quality references", "default local review"),
     ),
     "buffalo_l": ModelPackageSpec(
         pack="buffalo_l",
-        label="Balanced package",
-        detail="InsightFace buffalo_l, smaller download with strong face detection and recognition.",
+        label="Pose-aware accuracy pack",
+        detail="InsightFace buffalo_l, optional pack for harder pose/profile checks and validation comparisons.",
         filename="buffalo_l.zip",
         url="https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
         sha256="80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f",
@@ -63,6 +75,12 @@ MODEL_PACKAGES: dict[str, ModelPackageSpec] = {
             ("det_10g.onnx", "scrfd_10g_bnkps.onnx"),
             ("w600k_r50.onnx", "glintr100.onnx"),
         ),
+        role="accuracy",
+        pose_aware=True,
+        embedding_space="insightface-buffalo_l",
+        license_tier="research-or-commercial-license-required",
+        thresholds={"review": 0.22, "likely": 0.32, "strong": 0.45},
+        recommended_for=("profile and three-quarter faces", "CFP-style validation", "accuracy lab comparisons"),
     ),
 }
 
@@ -84,18 +102,19 @@ MODEL_GOVERNANCE: dict[str, dict[str, Any]] = {
         ],
     },
     "buffalo_l": {
-        "accuracyTier": "balanced",
-        "intendedUse": "Local review assistance where smaller model download size matters.",
+        "accuracyTier": "pose-aware",
+        "intendedUse": "Optional local review path for harder profile and three-quarter face checks.",
         "humanReviewRequired": True,
         "redistributionRisk": "needs-license-review",
         "limitations": [
             "Do not use as sole identity proof.",
-            "May trade recall for smaller distribution size compared with the recommended package.",
+            "Do not compare its embeddings with embeddings from another model pack.",
+            "May improve hard-pose coverage but still requires validation on your own labels.",
             "Review every result before sharing, deleting, or making decisions from matches.",
         ],
         "validation": [
-            "Run Settings > Accuracy lab after changing model packs.",
-            "Compare thresholds against a labeled local sample before large scans.",
+            "Run Settings > Accuracy lab and CFP/public dataset benchmarks after enabling this pack.",
+            "Backfill references before judging recall; mixed model spaces are isolated.",
         ],
     },
 }
