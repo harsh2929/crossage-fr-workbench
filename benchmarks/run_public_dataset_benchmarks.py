@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 DATASET_RUNS = {
     "calfw": {
         "folder": Path("benchmarks/public-data/prepared/calfw-40x4"),
+        "sliceImages": 4,
         "maxIdentities": 32,
         "referenceImages": 1,
         "candidateImages": 2,
@@ -27,6 +28,7 @@ DATASET_RUNS = {
     },
     "cplfw": {
         "folder": Path("benchmarks/public-data/prepared/cplfw-40x3"),
+        "sliceImages": 3,
         "maxIdentities": 32,
         "referenceImages": 1,
         "candidateImages": 2,
@@ -36,6 +38,7 @@ DATASET_RUNS = {
     },
     "agedb": {
         "folder": Path("benchmarks/public-data/prepared/agedb-40x4"),
+        "sliceImages": 4,
         "maxIdentities": 32,
         "referenceImages": 2,
         "candidateImages": 2,
@@ -54,6 +57,7 @@ DATASET_RUNS = {
     },
     "fiw": {
         "folder": Path("benchmarks/public-data/prepared/fiw-40x4"),
+        "sliceImages": 4,
         "maxIdentities": 32,
         "referenceImages": 1,
         "candidateImages": 2,
@@ -72,12 +76,26 @@ DATASET_RUNS = {
 }
 
 
+BENCHMARK_PROFILES: dict[str, dict[str, int]] = {
+    "standard": {"maxIdentities": 32, "negativeIdentities": 8, "candidateImages": 2},
+    "large": {"maxIdentities": 128, "negativeIdentities": 32, "candidateImages": 2},
+    "stress": {"maxIdentities": 256, "negativeIdentities": 64, "candidateImages": 2},
+}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run reproducible public dataset benchmark slices through Vintrace.")
     parser.add_argument("--datasets", nargs="*", default=["calfw", "cplfw", "agedb", "fiw", "cfp", "ytf"], choices=sorted(DATASET_RUNS))
     parser.add_argument("--packs", nargs="*", default=["antelopev2", "buffalo_l"])
     parser.add_argument("--baseline-pack", default="antelopev2")
     parser.add_argument("--candidate-pack", default="buffalo_l")
+    parser.add_argument("--profile", choices=sorted(BENCHMARK_PROFILES), default="standard", help="Prepared slice size profile.")
+    parser.add_argument("--max-identities", type=int, default=None, help="Override profile positive identity count.")
+    parser.add_argument("--negative-identities", type=int, default=None, help="Override profile distractor identity count.")
+    parser.add_argument("--reference-images", type=int, default=None, help="Override references enrolled per identity.")
+    parser.add_argument("--candidate-images", type=int, default=None, help="Override held-out candidate images per identity.")
+    parser.add_argument("--images-per-identity", type=int, default=None, help="Prepared folder image count suffix for folder-based datasets.")
+    parser.add_argument("--require-real-data", action="store_true", help="Fail immediately when a requested prepared dataset folder is missing.")
     parser.add_argument("--results-dir", default="benchmarks/results")
     parser.add_argument("--workspace-root", default="benchmarks/public-data/workspaces")
     parser.add_argument("--entry-budget", type=int, default=500_000)
@@ -105,9 +123,11 @@ def main() -> None:
     dataset_payloads: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
     for dataset_id in args.datasets:
-        spec = DATASET_RUNS[dataset_id]
+        spec = _resolve_dataset_spec(dataset_id, DATASET_RUNS[dataset_id], args)
         folder = Path(spec["folder"]).expanduser().resolve()
         if spec.get("manual") and not folder.exists():
+            if args.require_real_data:
+                raise SystemExit(f"Required prepared dataset is missing: {folder}")
             skipped = {
                 "datasetId": dataset_id,
                 "status": "manual-data-missing",
@@ -119,6 +139,8 @@ def main() -> None:
             rows.append(_skipped_row(dataset_id, str(folder), str(spec.get("note", ""))))
             continue
         if not folder.exists():
+            if args.require_real_data:
+                raise SystemExit(f"Required prepared dataset is missing: {folder}")
             skipped = {
                 "datasetId": dataset_id,
                 "status": "prepared-folder-missing",
@@ -162,6 +184,8 @@ def main() -> None:
         "generatedAt": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "workspace": str(api.project.root),
         "registry": str(registry_root),
+        "profile": args.profile,
+        "profileConfig": _profile_config(args),
         "packs": args.packs,
         "baselinePack": args.baseline_pack,
         "candidatePack": args.candidate_pack,
@@ -182,6 +206,41 @@ def main() -> None:
     md_path.write_text(markdown, encoding="utf-8")
     latest_md.write_text(markdown, encoding="utf-8")
     print(json.dumps({"json": str(json_path), "markdown": str(md_path), "rows": len(rows), "beforeAfter": len(before_after)}, indent=2))
+
+
+def _profile_config(args: argparse.Namespace) -> dict[str, int | str]:
+    profile = BENCHMARK_PROFILES.get(str(args.profile), BENCHMARK_PROFILES["standard"])
+    return {
+        "profile": str(args.profile),
+        "maxIdentities": max(2, int(args.max_identities if args.max_identities is not None else profile["maxIdentities"])),
+        "negativeIdentities": max(0, int(args.negative_identities if args.negative_identities is not None else profile["negativeIdentities"])),
+        "candidateImages": max(1, int(args.candidate_images if args.candidate_images is not None else profile["candidateImages"])),
+    }
+
+
+def _resolve_dataset_spec(dataset_id: str, spec: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    resolved = dict(spec)
+    profile = _profile_config(args)
+    max_identities = int(profile["maxIdentities"])
+    negative_identities = int(profile["negativeIdentities"])
+    if not resolved.get("manual"):
+        resolved["maxIdentities"] = max_identities
+        resolved["negativeIdentities"] = negative_identities
+    else:
+        resolved["maxIdentities"] = int(args.max_identities if args.max_identities is not None else resolved.get("maxIdentities", max_identities))
+        resolved["negativeIdentities"] = int(args.negative_identities if args.negative_identities is not None else resolved.get("negativeIdentities", negative_identities))
+    if args.reference_images is not None:
+        resolved["referenceImages"] = max(1, int(args.reference_images))
+    if args.candidate_images is not None:
+        resolved["candidateImages"] = max(1, int(args.candidate_images))
+    elif not resolved.get("manual"):
+        resolved["candidateImages"] = int(profile["candidateImages"])
+    if "sliceImages" in resolved:
+        image_count = max(2, int(args.images_per_identity if args.images_per_identity is not None else resolved["sliceImages"]))
+        total_identities = int(resolved["maxIdentities"]) + int(resolved["negativeIdentities"])
+        resolved["folder"] = Path(f"benchmarks/public-data/prepared/{dataset_id}-{total_identities}x{image_count}")
+        resolved["sliceImages"] = image_count
+    return resolved
 
 
 def _rows_from_model_comparison(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -321,6 +380,7 @@ def _markdown_report(payload: dict[str, Any]) -> str:
         "",
         f"Generated: {payload.get('generatedAt', '')}",
         f"Workspace: `{payload.get('workspace', '')}`",
+        f"Profile: `{payload.get('profile', 'standard')}`",
         f"Model packs: `{', '.join(str(item) for item in payload.get('packs', []))}`",
         "",
         "## Before vs After",

@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import sys
+import tarfile
 import zipfile
 
 
@@ -52,6 +53,14 @@ DATASET_SPECS = {
         "layout": "family-person-folders",
         "sort": "image-count-desc",
         "sourceUrl": "https://fulab.sites.northeastern.edu/fiw-download/",
+    },
+    "ytf": {
+        "name": "YouTube Faces",
+        "kind": "ytf-aligned-tar",
+        "archive": Path("benchmarks/public-data/downloads/aligned_images_DB.tar.gz"),
+        "metaArchive": Path("benchmarks/public-data/downloads/meta_data.tar.gz"),
+        "outputFolder": Path("benchmarks/public-data/prepared/ytf"),
+        "sourceUrl": "https://www.cs.tau.ac.il/~wolf/ytfaces/",
     },
 }
 
@@ -98,6 +107,15 @@ def prepare_dataset_slice(
     spec = DATASET_SPECS[dataset_id]
     if spec.get("kind") == "cfp":
         return _prepare_cfp(spec, force=force)
+    if spec.get("kind") == "ytf-aligned-tar":
+        return _prepare_ytf_aligned(
+            spec,
+            output_root=output_root,
+            max_identities=max_identities,
+            images_per_identity=images_per_identity,
+            extra_identities=extra_identities,
+            force=force,
+        )
     archive = Path(spec["archive"]).expanduser().resolve()
     if not archive.exists():
         raise FileNotFoundError(f"Dataset archive is missing: {archive}")
@@ -188,6 +206,169 @@ def _prepare_cfp(spec: dict[str, object], *, force: bool) -> dict[str, object]:
         "sourceUrl": spec["sourceUrl"],
         **manifest,
     }
+
+
+def _prepare_ytf_aligned(
+    spec: dict[str, object],
+    *,
+    output_root: Path,
+    max_identities: int,
+    images_per_identity: int,
+    extra_identities: int,
+    force: bool,
+) -> dict[str, object]:
+    archive = Path(spec["archive"]).expanduser().resolve()
+    meta_archive = Path(spec.get("metaArchive", "")).expanduser().resolve() if spec.get("metaArchive") else None
+    if not archive.exists():
+        raise FileNotFoundError(f"YTF aligned image archive is missing: {archive}")
+    dataset_folder = Path(spec.get("outputFolder") or (output_root / "ytf")).expanduser().resolve()
+    manifest_path = output_root / "ytf-manifest.json"
+    if dataset_folder.exists() and not force:
+        manifest = _load_manifest(manifest_path)
+        if manifest:
+            return {**manifest, "status": "cached"}
+        raise RuntimeError(f"Prepared YTF folder exists without a manifest: {dataset_folder}. Use --force to rebuild it.")
+    if dataset_folder.exists():
+        shutil.rmtree(dataset_folder)
+    dataset_folder.mkdir(parents=True, exist_ok=True)
+
+    required_identities = max_identities + extra_identities
+    selected = _ytf_aligned_members(archive, required_identities=required_identities, images_per_identity=images_per_identity)
+    if len(selected) < max_identities:
+        shutil.rmtree(dataset_folder, ignore_errors=True)
+        raise RuntimeError(
+            f"YTF slice needs {max_identities} identities with {images_per_identity} aligned frames each; found {len(selected)}."
+        )
+    selected_names = {member for members in selected.values() for member in members}
+    copied = 0
+    selected_manifest: list[dict[str, object]] = []
+    identity_folders: dict[str, Path] = {}
+    for identity_index, identity in enumerate(selected, start=1):
+        identity_folder = dataset_folder / f"{identity_index:04d}-{_safe_folder_name(identity)}"
+        identity_folder.mkdir(parents=True, exist_ok=True)
+        identity_folders[identity] = identity_folder
+        selected_manifest.append(
+            {
+                "identity": identity,
+                "folder": str(identity_folder.relative_to(dataset_folder)),
+                "images": len(selected[identity]),
+                "members": selected[identity],
+                "role": "positive" if identity_index <= max_identities else "distractor",
+            }
+        )
+
+    with tarfile.open(archive, mode="r:gz") as handle:
+        for info in handle:
+            if copied >= len(selected_names):
+                break
+            name = info.name.replace("\\", "/")
+            if name not in selected_names or not info.isfile():
+                continue
+            parsed = _ytf_parse_aligned_member(name)
+            if parsed is None:
+                continue
+            identity, video_id = parsed
+            source = handle.extractfile(info)
+            if source is None:
+                continue
+            identity_folder = identity_folders.get(identity)
+            if identity_folder is None:
+                continue
+            destination = identity_folder / f"video-{_safe_folder_name(video_id)}-{_safe_file_name(PurePosixPath(name).name)}"
+            with source, destination.open("wb") as target:
+                shutil.copyfileobj(source, target, length=1024 * 1024)
+            copied += 1
+
+    if copied < len(selected_names):
+        shutil.rmtree(dataset_folder, ignore_errors=True)
+        raise RuntimeError(f"YTF preparation copied {copied} of {len(selected_names)} selected aligned frames.")
+    meta_available = bool(meta_archive and meta_archive.exists())
+    manifest = {
+        "status": "prepared",
+        "generatedAt": _now_iso(),
+        "datasetId": "ytf",
+        "datasetName": spec["name"],
+        "folder": str(dataset_folder),
+        "archive": str(archive),
+        "metaArchive": str(meta_archive) if meta_archive else "",
+        "metaAvailable": meta_available,
+        "metaMembers": _tar_members(meta_archive, limit=20) if meta_available and meta_archive else [],
+        "sourceUrl": spec["sourceUrl"],
+        "identityCount": len(selected),
+        "positiveIdentities": max_identities,
+        "extraIdentities": max(0, len(selected) - max_identities),
+        "imagesPerIdentity": images_per_identity,
+        "imageCount": copied,
+        "layout": "aligned_images_DB/<identity>/<video-id>/<aligned-frame>.jpg",
+        "identities": selected_manifest,
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return manifest
+
+
+def _ytf_aligned_members(archive: Path, *, required_identities: int, images_per_identity: int) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {}
+    per_video_counts: dict[tuple[str, str], int] = {}
+    completed: set[str] = set()
+    per_video_cap = max(1, min(images_per_identity, (images_per_identity + 1) // 2))
+    with tarfile.open(archive, mode="r:gz") as handle:
+        for info in handle:
+            if len(completed) >= required_identities:
+                break
+            if not info.isfile():
+                continue
+            name = info.name.replace("\\", "/")
+            parsed = _ytf_parse_aligned_member(name)
+            if parsed is None:
+                continue
+            identity, video_id = parsed
+            if identity in completed:
+                continue
+            members = groups.setdefault(identity, [])
+            if len(members) >= images_per_identity:
+                completed.add(identity)
+                continue
+            key = (identity, video_id)
+            if per_video_counts.get(key, 0) >= per_video_cap:
+                continue
+            members.append(name)
+            per_video_counts[key] = per_video_counts.get(key, 0) + 1
+            if len(members) >= images_per_identity:
+                completed.add(identity)
+    selected = {
+        identity: members[:images_per_identity]
+        for identity, members in groups.items()
+        if len(members) >= images_per_identity
+    }
+    return dict(list(selected.items())[:required_identities])
+
+
+def _ytf_parse_aligned_member(member: str) -> tuple[str, str] | None:
+    parts = PurePosixPath(member).parts
+    if len(parts) < 4:
+        return None
+    if parts[0] != "aligned_images_DB":
+        return None
+    if PurePosixPath(member).suffix.lower() not in IMAGE_EXTENSIONS:
+        return None
+    identity = parts[1].strip()
+    video_id = parts[2].strip()
+    if not identity or not video_id:
+        return None
+    return identity, video_id
+
+
+def _tar_members(archive: Path, *, limit: int) -> list[str]:
+    members: list[str] = []
+    try:
+        with tarfile.open(archive, mode="r:gz") as handle:
+            for info in handle:
+                members.append(info.name)
+                if len(members) >= limit:
+                    break
+    except (OSError, tarfile.TarError):
+        return []
+    return members
 
 
 def _open_image_archive(archive: Path, spec: dict[str, object]) -> zipfile.ZipFile:

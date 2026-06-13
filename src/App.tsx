@@ -97,6 +97,7 @@ import type {
   PublicDatasetCatalogEntry,
   PublicDatasetInspection,
   PublicDatasetModelComparisonResult,
+  ReferenceFace,
   ReferenceGapReport,
   RetentionPolicyReport,
   ReleaseReadinessResult,
@@ -605,11 +606,14 @@ type ScanQueueItem = SavedScanSource & {
   message?: string;
 };
 
+type ReviewLane = "all" | "high" | "lowQuality" | "groups" | "video" | "notes" | "closeRunner" | "singleReference";
+const reviewLanes: ReviewLane[] = ["all", "high", "lowQuality", "groups", "video", "notes", "closeRunner", "singleReference"];
+
 type SavedReviewView = {
   id: string;
   label: string;
   statusFilter: CandidateStatus | "all";
-  reviewLane: "all" | "high" | "lowQuality" | "groups" | "video" | "notes";
+  reviewLane: ReviewLane;
   search: string;
   sort: "score" | "newest" | "quality";
   createdAt: number;
@@ -1105,7 +1109,7 @@ function readSavedReviewViews(workspace: string | null | undefined): SavedReview
           id: String(row.id || `${row.label}:${createdAt}`),
           label: String(row.label).slice(0, 60),
           statusFilter: ["all", "pending", "accepted", "rejected", "uncertain"].includes(String(row.statusFilter)) ? row.statusFilter : "pending",
-          reviewLane: ["all", "high", "lowQuality", "groups", "video", "notes"].includes(String(row.reviewLane)) ? row.reviewLane : "all",
+          reviewLane: reviewLanes.includes(String(row.reviewLane) as ReviewLane) ? String(row.reviewLane) as ReviewLane : "all",
           search: String(row.search || "").slice(0, 120),
           sort: ["score", "newest", "quality"].includes(String(row.sort)) ? row.sort : "score",
           createdAt,
@@ -1271,6 +1275,109 @@ function candidateSourceTitle(candidate: ReviewCandidate) {
   ].join("\n");
 }
 
+function candidateRiskFlags(candidate: ReviewCandidate) {
+  const flags = new Set((candidate.riskFlags ?? []).map((flag) => String(flag).toLowerCase().trim()).filter(Boolean));
+  const note = safeText(candidate.note).toLowerCase();
+  if (note.includes("close identity scores")) flags.add("ambiguous-person-margin");
+  if (note.includes("another saved person was close") || note.includes("close identity scores")) flags.add("close-runner-up");
+  if (note.includes("only one saved photo separates")) flags.add("single-reference-close-runner-up");
+  if (note.includes("only one saved photo supported")) flags.add("single-reference-match");
+  if (note.includes("only one hard-angle signal")) flags.add("single-reference-hard-pose");
+  if (note.includes("hard-angle match used pose-aware scoring")) flags.add("pose-reranked");
+  return [...flags].sort();
+}
+
+function hasCloseRunnerRisk(candidate: ReviewCandidate) {
+  const flags = new Set(candidateRiskFlags(candidate));
+  return flags.has("close-runner-up") || flags.has("ambiguous-person-margin");
+}
+
+function hasSingleReferenceRisk(candidate: ReviewCandidate) {
+  const flags = new Set(candidateRiskFlags(candidate));
+  return flags.has("single-reference-match") || flags.has("single-reference-close-runner-up") || flags.has("single-reference-hard-pose");
+}
+
+function candidateRiskLabels(candidate: ReviewCandidate) {
+  const flags = new Set(candidateRiskFlags(candidate));
+  const labels: string[] = [];
+  if (flags.has("close-runner-up") || flags.has("ambiguous-person-margin")) labels.push("Close call");
+  if (flags.has("single-reference-close-runner-up") || flags.has("single-reference-match")) labels.push("One saved photo");
+  if (flags.has("single-reference-hard-pose")) labels.push("Hard angle");
+  if (flags.has("pose-reranked")) labels.push("Pose check");
+  return [...new Set(labels)];
+}
+
+function modelFamilyName(value: string | null | undefined) {
+  const lower = safeText(value).toLowerCase();
+  if (lower.includes("buffalo_l")) return "buffalo_l";
+  if (lower.includes("buffalo_s")) return "buffalo_s";
+  if (lower.includes("antelopev2")) return "antelopev2";
+  if (lower.includes("fallback")) return "fallback";
+  return lower || "unknown";
+}
+
+function referenceStrengthForCandidate(candidate: ReviewCandidate, references: ReferenceFace[]) {
+  const personKey = safeText(candidate.personName).trim().toLowerCase();
+  const refs = references.filter((ref) => safeText(ref.personName).trim().toLowerCase() === personKey);
+  const candidateFamily = modelFamilyName(candidate.modelName);
+  const compatible = refs.filter((ref) => modelFamilyName(ref.modelName) === candidateFamily || modelFamilyName(ref.modelName) === "unknown");
+  const ageBuckets = new Set(refs.map((ref) => ref.ageBucket).filter((bucket) => bucket && bucket !== "unknown"));
+  const poseBuckets = new Set(refs.map((ref) => safeText(ref.poseBucket).replace("_", "-").toLowerCase()).filter(Boolean));
+  const hasSide = poseBuckets.has("profile") || poseBuckets.has("edge-face") || poseBuckets.has("side");
+  const hasAngled = poseBuckets.has("three-quarter") || poseBuckets.has("threequarter") || poseBuckets.has("3q");
+  const avgQuality = refs.length ? refs.reduce((sum, ref) => sum + clamp(ref.quality), 0) / refs.length : 0;
+  let score = 0;
+  if (refs.length >= 1) score += 18;
+  if (refs.length >= 2) score += 24;
+  if (refs.length >= 4) score += 8;
+  if (compatible.length >= Math.min(2, refs.length)) score += 14;
+  if (hasSide) score += 13;
+  if (hasAngled) score += 8;
+  if (ageBuckets.size >= 2) score += 10;
+  if (avgQuality >= 0.65) score += 5;
+  const issues: string[] = [];
+  const actions: string[] = [];
+  if (!refs.length) {
+    issues.push("No saved photos");
+    actions.push("Add saved photos for this person.");
+  } else {
+    if (refs.length < 2) {
+      issues.push("Only one saved photo");
+      actions.push("Add another clear photo.");
+    }
+    if (!hasSide) {
+      issues.push("No side photo");
+      actions.push("Add a side or profile photo.");
+    }
+    if (!hasAngled) {
+      issues.push("No angled photo");
+      actions.push("Add a slightly angled photo.");
+    }
+    if (ageBuckets.size < 2) {
+      issues.push("One age range");
+      actions.push("Add photos from another age range.");
+    }
+    if (compatible.length < refs.length) {
+      issues.push("Mixed model photos");
+      actions.push("Refresh saved photos for the active model.");
+    }
+  }
+  const status = score >= 82 ? "strong" : score >= 58 ? "usable" : score > 0 ? "weak" : "blocked";
+  return {
+    score: Math.min(100, score),
+    status,
+    referenceCount: refs.length,
+    compatibleCount: compatible.length,
+    ageBucketCount: ageBuckets.size,
+    hasSide,
+    hasAngled,
+    averageQuality: avgQuality,
+    issues,
+    actions: [...new Set(actions)].slice(0, 3),
+    sampleNames: refs.slice(0, 3).map((ref) => basename(ref.sourcePath))
+  };
+}
+
 function topRecentCandidates(candidates: ReviewCandidate[], limit: number) {
   const rows: Array<{ candidate: ReviewCandidate; time: number }> = [];
   for (const candidate of candidates) {
@@ -1423,6 +1530,8 @@ function normalizeAppState(incoming: AppState, previous: AppState | null): AppSt
     poseRelaxedThreeQuarter: finiteInteger(rawTotals.poseRelaxedThreeQuarter, previousTotals?.poseRelaxedThreeQuarter ?? 0, 0, Number.MAX_SAFE_INTEGER),
     poseReranked: finiteInteger(rawTotals.poseReranked, previousTotals?.poseReranked ?? 0, 0, Number.MAX_SAFE_INTEGER),
     poseAmbiguous: finiteInteger(rawTotals.poseAmbiguous, previousTotals?.poseAmbiguous ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    closeRunnerUp: finiteInteger(rawTotals.closeRunnerUp, previousTotals?.closeRunnerUp ?? 0, 0, Number.MAX_SAFE_INTEGER),
+    singleReferenceMatches: finiteInteger(rawTotals.singleReferenceMatches, previousTotals?.singleReferenceMatches ?? 0, 0, Number.MAX_SAFE_INTEGER),
     hardPoseUnsupported: finiteInteger(rawTotals.hardPoseUnsupported, previousTotals?.hardPoseUnsupported ?? 0, 0, Number.MAX_SAFE_INTEGER),
     safeModeFaceCropAllowed: finiteInteger(rawTotals.safeModeFaceCropAllowed, previousTotals?.safeModeFaceCropAllowed ?? 0, 0, Number.MAX_SAFE_INTEGER),
     durationMs: finiteNumber(rawTotals.durationMs, previousTotals?.durationMs ?? 0, 0),
@@ -7535,7 +7644,10 @@ function ReviewView(props: {
   const [statusFilter, setStatusFilter] = useState<CandidateStatus | "all">(() => readReviewPref<CandidateStatus | "all">("statusFilter", "pending"));
   const [search, setSearch] = useState(() => readReviewPref("search", ""));
   const [sort, setSort] = useState<"score" | "newest" | "quality">(() => readReviewPref<"score" | "newest" | "quality">("sort", "score"));
-  const [reviewLane, setReviewLane] = useState<"all" | "high" | "lowQuality" | "groups" | "video" | "notes">(() => readReviewPref<"all" | "high" | "lowQuality" | "groups" | "video" | "notes">("lane", "all"));
+  const [reviewLane, setReviewLane] = useState<ReviewLane>(() => {
+    const saved = readReviewPref<string>("lane", "all");
+    return reviewLanes.includes(saved as ReviewLane) ? saved as ReviewLane : "all";
+  });
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [selectedPeople, setSelectedPeople] = useState<Set<string>>(() => new Set(readReviewPref<string[]>("people", [])));
   const [groupMinPeople, setGroupMinPeople] = useState(2);
@@ -7690,6 +7802,8 @@ function ReviewView(props: {
     let lowQuality = 0;
     let notes = 0;
     let video = 0;
+    let closeRunner = 0;
+    let singleReference = 0;
     let pending = 0;
     let confidencePending = 0;
     let reviewed = 0;
@@ -7706,6 +7820,12 @@ function ReviewView(props: {
       if (isVideoCandidate(candidate)) {
         video += 1;
       }
+      if (hasCloseRunnerRisk(candidate)) {
+        closeRunner += 1;
+      }
+      if (hasSingleReferenceRisk(candidate)) {
+        singleReference += 1;
+      }
       if (candidate.status === "pending") {
         pending += 1;
         if (candidate.score >= props.state.config.thresholds.confident) {
@@ -7715,26 +7835,35 @@ function ReviewView(props: {
         reviewed += 1;
       }
     }
+    const laneCounts = props.state.reviewInsights?.laneCounts ?? {};
+    const laneCount = (key: ReviewLane, fallback: number) => {
+      const value = laneCounts[key];
+      return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+    };
     return {
       groupedCandidateIds,
       reviewLanes: [
-        { key: "all" as const, label: "All", count: props.state.candidates.length },
-        { key: "high" as const, label: "Strong matches", count: high },
-        { key: "lowQuality" as const, label: "Needs a closer look", count: lowQuality },
-        { key: "groups" as const, label: "Groups", count: groupedCandidateIds.size },
-        { key: "video" as const, label: "Video moments", count: video },
-        { key: "notes" as const, label: "Notes", count: notes }
+        { key: "all" as const, label: "All", count: laneCount("all", props.state.counts.candidates || props.state.candidates.length) },
+        { key: "high" as const, label: "Strong matches", count: laneCount("high", high) },
+        { key: "closeRunner" as const, label: "Close calls", count: laneCount("closeRunner", closeRunner) },
+        { key: "singleReference" as const, label: "One saved photo", count: laneCount("singleReference", singleReference) },
+        { key: "lowQuality" as const, label: "Needs a closer look", count: laneCount("lowQuality", lowQuality) },
+        { key: "groups" as const, label: "Groups", count: laneCount("groups", groupedCandidateIds.size) },
+        { key: "video" as const, label: "Video moments", count: laneCount("video", video) },
+        { key: "notes" as const, label: "Notes", count: laneCount("notes", notes) }
       ],
       smartBatches: [
         { key: "decision", label: "Needs decision", count: pending },
         { key: "confidence", label: "Looks strongest", count: confidencePending },
+        { key: "closeRunner", label: "Close calls", count: props.state.reviewInsights?.closeRunnerUpPending ?? closeRunner },
+        { key: "singleReference", label: "One saved photo", count: props.state.reviewInsights?.singleReferencePending ?? singleReference },
         { key: "quality", label: "Check quality", count: lowQuality },
         { key: "together", label: "People together", count: groupedCandidateIds.size },
         { key: "video", label: "Video moments", count: video },
         { key: "reviewed", label: "Already reviewed", count: reviewed }
       ] as const
     };
-  }, [candidatesByPath, props.state.candidates, props.state.config.thresholds.confident, props.state.config.thresholds.qualityMin]);
+  }, [candidatesByPath, props.state.candidates, props.state.config.thresholds.confident, props.state.config.thresholds.qualityMin, props.state.counts.candidates, props.state.reviewInsights]);
 
   const querySignature = useMemo(() => JSON.stringify({
     workspace: props.state.workspaceMetadata?.workspaceId ?? props.state.workspace,
@@ -8001,6 +8130,14 @@ function ReviewView(props: {
     } else if (batch === "confidence") {
       setStatusFilter("pending");
       setReviewLane("high");
+      setSort("score");
+    } else if (batch === "closeRunner") {
+      setStatusFilter("pending");
+      setReviewLane("closeRunner");
+      setSort("score");
+    } else if (batch === "singleReference") {
+      setStatusFilter("pending");
+      setReviewLane("singleReference");
       setSort("score");
     } else if (batch === "quality") {
       setStatusFilter("all");
@@ -8599,7 +8736,12 @@ function ReviewView(props: {
               {visibleCandidates.map((candidate) => (
                 <div
                   key={candidate.candidateId}
-                  className={props.selectedCandidateId === candidate.candidateId ? "row review-candidate-row selected" : "row review-candidate-row"}
+                  className={[
+                    "row review-candidate-row",
+                    props.selectedCandidateId === candidate.candidateId ? "selected" : "",
+                    hasCloseRunnerRisk(candidate) ? "risk-close-runner" : "",
+                    hasSingleReferenceRisk(candidate) ? "risk-single-reference" : ""
+                  ].filter(Boolean).join(" ")}
                   role="button"
                   tabIndex={0}
                   onClick={() => props.setSelectedCandidateId(candidate.candidateId)}
@@ -8735,6 +8877,7 @@ function ReviewView(props: {
               {activeCandidate.note && <p className="compact">{activeCandidate.note}</p>}
             </div>
             <CandidateExplanation candidate={activeCandidate} state={props.state} />
+            <CandidateReferenceStrength candidate={activeCandidate} state={props.state} />
             <div className="identity-tools accuracy-teach-tools">
               <div>
                 <strong>Teach accuracy</strong>
@@ -8904,6 +9047,8 @@ function CandidateExplanation({ candidate, state }: { candidate: ReviewCandidate
   const bestReference = candidate.bestRefId
     ? state.references.find((ref) => ref.refId === candidate.bestRefId)
     : null;
+  const riskLabels = candidateRiskLabels(candidate);
+  const referenceStrength = referenceStrengthForCandidate(candidate, state.references);
   const thresholds = state.config.thresholds;
   const scoreTarget = candidate.score >= thresholds.confident
     ? "Strong"
@@ -8928,6 +9073,8 @@ function CandidateExplanation({ candidate, state }: { candidate: ReviewCandidate
     { label: "Media", value: isVideoCandidate(candidate) ? `Video @ ${formatMediaTimestamp(candidate.videoTimestampMs)}` : "Image" },
     { label: "Saved person", value: bestReference ? `${bestReference.personName} • ${ageBucketLabel(bestReference.ageBucket)}` : "No saved person photo" },
     { label: "Saved photo", value: bestReference ? basename(bestReference.sourcePath) : candidate.band === "clustered review" ? "Similar group only" : "Unavailable" },
+    { label: "Saved photo strength", value: `${referenceStrength.score}/100 ${referenceStrength.status}` },
+    { label: "Review flags", value: riskLabels.length ? riskLabels.join(", ") : "None" },
     { label: "Search engine", value: engineLabel(candidate.modelName) },
     { label: "Decision", value: state.config.reviewOnly ? "You decide" : "Review recommended" }
   ];
@@ -8959,6 +9106,49 @@ function CandidateExplanation({ candidate, state }: { candidate: ReviewCandidate
       <p className={candidate.quality < thresholds.qualityMin || candidate.score < thresholds.confident ? "evidence-warning active" : "evidence-warning"}>
         Vintrace suggests possible matches only. Treat this as a lead, not an automatic identification.
       </p>
+    </div>
+  );
+}
+
+function CandidateReferenceStrength({ candidate, state }: { candidate: ReviewCandidate; state: AppState }) {
+  const strength = referenceStrengthForCandidate(candidate, state.references);
+  const riskLabels = candidateRiskLabels(candidate);
+  const statusLabel = strength.status === "strong"
+    ? "Strong saved photos"
+    : strength.status === "usable"
+      ? "Usable saved photos"
+      : strength.status === "weak"
+        ? "Needs more saved photos"
+        : "No saved photos";
+  return (
+    <div className={`reference-strength-card ${strength.status}`}>
+      <div className="reference-strength-head">
+        <div>
+          <span className="section-kicker">Saved photo strength</span>
+          <strong>{statusLabel}</strong>
+        </div>
+        <span className="reference-strength-score">{strength.score}/100</span>
+      </div>
+      <div className="reference-strength-grid">
+        <span><small>Photos</small><strong>{strength.referenceCount}</strong></span>
+        <span><small>Same model</small><strong>{strength.compatibleCount}</strong></span>
+        <span><small>Age ranges</small><strong>{strength.ageBucketCount}</strong></span>
+        <span><small>Side photo</small><strong>{strength.hasSide ? "Yes" : "No"}</strong></span>
+        <span><small>Angled photo</small><strong>{strength.hasAngled ? "Yes" : "No"}</strong></span>
+        <span><small>Avg quality</small><strong>{scoreLabel(strength.averageQuality)}</strong></span>
+      </div>
+      {(riskLabels.length > 0 || strength.issues.length > 0) && (
+        <div className="risk-chip-row">
+          {riskLabels.map((label) => <span key={label} className="risk-chip">{label}</span>)}
+          {strength.issues.slice(0, 4).map((issue) => <span key={issue} className="risk-chip subtle">{issue}</span>)}
+        </div>
+      )}
+      {strength.actions.length > 0 && (
+        <p className="compact">{strength.actions.join(" ")}</p>
+      )}
+      {strength.sampleNames.length > 0 && (
+        <small className="reference-strength-samples">{strength.sampleNames.join(" • ")}</small>
+      )}
     </div>
   );
 }
@@ -11847,6 +12037,11 @@ function CandidateIdentity({ candidate, showThumbnail = true }: { candidate: Rev
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [candidate.sourceUrl]);
   const video = isVideoCandidate(candidate);
+  const riskLabels = candidateRiskLabels(candidate);
+  const detail = [
+    video ? `video ${formatMediaTimestamp(candidate.videoTimestampMs)}` : "",
+    ...riskLabels
+  ].filter(Boolean).join(" • ");
   return (
     <span className="candidate-identity">
       <span className="thumb">
@@ -11854,7 +12049,7 @@ function CandidateIdentity({ candidate, showThumbnail = true }: { candidate: Rev
       </span>
       <span>
         <strong>{candidate.personName}</strong>
-        <small>{video ? `${matchBandLabel(candidate.band)} • video ${formatMediaTimestamp(candidate.videoTimestampMs)}` : matchBandLabel(candidate.band)}</small>
+        <small>{detail ? `${matchBandLabel(candidate.band)} • ${detail}` : matchBandLabel(candidate.band)}</small>
       </span>
     </span>
   );

@@ -13,6 +13,9 @@ POSE_REVIEW_DELTAS = {
     "three-quarter": 0.04,
 }
 POSE_REVIEW_MINIMUM = 0.12
+AMBIGUOUS_PERSON_MARGIN = 0.025
+CLOSE_PERSON_MARGIN = 0.055
+SINGLE_REFERENCE_MARGIN = 0.035
 
 
 @dataclass(slots=True)
@@ -129,9 +132,9 @@ def group_hits(
         flags: list[str] = []
         pose_bonus = 0.0
         hard_pose_penalty = 0.0
+        pose_supported = False
         if hard_pose:
             hit_refs = row.get("hit_refs", [])
-            pose_supported = False
             if isinstance(hit_refs, list):
                 for hit, ref in hit_refs[:5]:
                     if not isinstance(hit, SearchHit) or not isinstance(ref, ReferenceFace):
@@ -148,9 +151,11 @@ def group_hits(
                 pose_bonus = 0.015 if candidate_pose in {"profile", "edge-face"} else 0.01
             if len(support_scores) >= 2:
                 pose_bonus += 0.006
-            if not support_scores and not pose_supported and top_score < thresholds.likely:
-                flags.append("single-reference-hard-pose")
-                hard_pose_penalty = 0.025
+        if hard_pose and not support_scores and not pose_supported and top_score < thresholds.likely:
+            flags.append("single-reference-hard-pose")
+            hard_pose_penalty = 0.025
+        elif not support_scores and top_score < thresholds.confident:
+            flags.append("single-reference-match")
         fused = min(1.0, max(0.0, top_score + support_bonus + pose_bonus - hard_pose_penalty))
         best_hit = row["best_hit"]
         best_ref = row["best_ref"]
@@ -173,7 +178,11 @@ def group_hits(
         margin = float(best_decision.score - scored_decisions[1].score)
         flags = list(best_decision.flags)
         adjusted_score = best_decision.score
-        if margin < 0.025 and best_decision.score < thresholds.confident:
+        if margin < CLOSE_PERSON_MARGIN:
+            flags.append("close-runner-up")
+        if margin < SINGLE_REFERENCE_MARGIN and best_decision.evidence_count <= 1:
+            flags.append("single-reference-close-runner-up")
+        if margin < AMBIGUOUS_PERSON_MARGIN and best_decision.score < thresholds.confident:
             flags.append("ambiguous-person-margin")
             adjusted_score = max(0.0, best_decision.score - 0.015)
         best_decision = MatchDecision(

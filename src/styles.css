@@ -4918,7 +4918,7 @@ textarea:focus {
 .review-lanes {
   display: grid;
   gap: 7px;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
 }
 
 .lane-button {
@@ -4964,6 +4964,17 @@ textarea:focus {
   width: 18px;
 }
 
+.review-candidate-row.risk-close-runner,
+.review-candidate-row.risk-single-reference {
+  box-shadow: inset 3px 0 0 rgba(191, 91, 0, 0.72);
+}
+
+.review-candidate-row.risk-close-runner.risk-single-reference {
+  box-shadow:
+    inset 3px 0 0 rgba(191, 91, 0, 0.74),
+    inset 6px 0 0 rgba(0, 122, 255, 0.34);
+}
+
 .score-cell {
   display: grid;
   gap: 6px;
@@ -5002,6 +5013,16 @@ textarea:focus {
   gap: 10px;
   grid-template-columns: 44px minmax(0, 1fr);
   min-width: 0;
+}
+
+.candidate-identity small {
+  color: var(--secondary);
+  display: block;
+  font-size: 12px;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .thumb {
@@ -5207,6 +5228,110 @@ textarea:focus {
   display: grid;
   gap: 10px;
   padding: 10px;
+}
+
+.reference-strength-card {
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid var(--separator-soft);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+}
+
+.reference-strength-card.weak,
+.reference-strength-card.blocked {
+  background: rgba(191, 91, 0, 0.08);
+  border-color: rgba(191, 91, 0, 0.24);
+}
+
+.reference-strength-card.strong {
+  background: rgba(36, 138, 61, 0.08);
+  border-color: rgba(36, 138, 61, 0.22);
+}
+
+.reference-strength-head {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.reference-strength-head strong {
+  display: block;
+  font-size: 15px;
+  line-height: 1.2;
+  margin-top: 3px;
+}
+
+.reference-strength-score {
+  align-items: center;
+  background: var(--content);
+  border: 1px solid var(--separator-soft);
+  border-radius: 999px;
+  color: var(--primary);
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 800;
+  min-height: 30px;
+  padding: 0 10px;
+}
+
+.reference-strength-grid {
+  display: grid;
+  gap: 7px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.reference-strength-grid span {
+  background: rgba(255, 255, 255, 0.5);
+  border: 1px solid var(--separator-soft);
+  border-radius: 8px;
+  min-width: 0;
+  padding: 8px;
+}
+
+.reference-strength-grid small,
+.reference-strength-samples {
+  color: var(--secondary);
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.reference-strength-grid strong {
+  display: block;
+  font-size: 13px;
+  line-height: 1.2;
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.risk-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.risk-chip {
+  align-items: center;
+  background: rgba(191, 91, 0, 0.12);
+  border: 1px solid rgba(191, 91, 0, 0.24);
+  border-radius: 999px;
+  color: var(--orange);
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 800;
+  min-height: 24px;
+  padding: 0 8px;
+}
+
+.risk-chip.subtle {
+  background: rgba(60, 60, 67, 0.08);
+  border-color: rgba(60, 60, 67, 0.16);
+  color: var(--secondary);
 }
 
 .score-ruler {

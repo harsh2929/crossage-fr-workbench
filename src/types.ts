@@ -306,6 +306,7 @@ export interface ReviewCandidate {
   poseBucket?: string;
   status: CandidateStatus;
   note: string;
+  riskFlags?: string[];
   createdAt: string;
 }
 
@@ -352,6 +353,8 @@ export interface ScanMetrics {
   poseRelaxedThreeQuarter?: number;
   poseReranked?: number;
   poseAmbiguous?: number;
+  closeRunnerUp?: number;
+  singleReferenceMatches?: number;
   hardPoseUnsupported?: number;
   safeModeFaceCropAllowed?: number;
   memoryPressure?: "normal" | "elevated" | "high" | "critical" | string;
@@ -1491,6 +1494,9 @@ export interface ReviewInsights {
   confidentPending: number;
   videoPending: number;
   imagePending: number;
+  closeRunnerUpPending?: number;
+  singleReferencePending?: number;
+  laneCounts?: Record<string, number>;
   topFolders: Array<{ folder: string; count: number }>;
   recommendedOrder: string;
 }

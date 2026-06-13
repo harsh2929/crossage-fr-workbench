@@ -61,6 +61,7 @@ class ReviewCandidate:
     model_name: str
     status: str = "pending"
     note: str = ""
+    risk_flags: list[str] = field(default_factory=list)
     media_kind: str = "image"
     media_source_path: str = ""
     video_timestamp_ms: int | None = None
@@ -69,6 +70,38 @@ class ReviewCandidate:
     source_hash: str = ""
     pose_bucket: str = "unknown"
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat(timespec="seconds") + "Z")
+
+
+RISK_FLAG_NOTE_MARKERS = {
+    "ambiguous-person-margin": ("close identity scores",),
+    "close-runner-up": ("another saved person was close", "close identity scores"),
+    "single-reference-close-runner-up": ("only one saved photo separates",),
+    "single-reference-hard-pose": ("only one hard-angle signal",),
+    "single-reference-match": ("only one saved photo supported",),
+    "pose-reranked": ("hard-angle match used pose-aware scoring",),
+}
+
+
+def normalize_risk_flags(value: Any = None, note: str = "") -> list[str]:
+    raw: list[str] = []
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            try:
+                decoded = json.loads(stripped)
+            except json.JSONDecodeError:
+                decoded = None
+            if isinstance(decoded, list):
+                raw.extend(str(item) for item in decoded)
+            else:
+                raw.extend(item for item in stripped.replace(",", " ").split(" ") if item)
+    elif isinstance(value, (list, tuple, set)):
+        raw.extend(str(item) for item in value)
+    note_text = str(note or "").casefold()
+    for flag, markers in RISK_FLAG_NOTE_MARKERS.items():
+        if any(marker in note_text for marker in markers):
+            raw.append(flag)
+    return sorted({flag.strip().casefold() for flag in raw if flag and flag.strip()})
 
 
 def dataclass_to_json(obj: Any) -> str:

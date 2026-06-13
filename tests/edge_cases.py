@@ -14,15 +14,16 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from crossage_fr.api_server import DesktopApi, structured_error
-from crossage_fr.config import MAX_CLUSTER_MIN_SIZE, RuntimeConfig, load_config, save_config
+from crossage_fr.config import MAX_CLUSTER_MIN_SIZE, RuntimeConfig, Thresholds, load_config, save_config
 from crossage_fr.enroll import manager as manager_module
 from crossage_fr.enroll import ProjectState
 from crossage_fr.ingest.image_io import ImageLoadError, load_image, sha256_file
 from crossage_fr.ingest.safety import SafetyAssessment
 from crossage_fr.ingest.video_io import VideoFrameSample, probe_video, sample_video_frames, video_decoder_report
+from crossage_fr.match.scoring import group_hits
 from crossage_fr.model_manager import MODEL_PACKAGES, ModelPackageSpec, download_model_pack, model_governance, model_status
 from crossage_fr.models import EmbeddingResult, ReferenceFace, ReviewCandidate
-from crossage_fr.store import VectorStore
+from crossage_fr.store import SearchHit, VectorStore
 from crossage_fr.store.workspace_db import path_signature
 
 
@@ -1061,6 +1062,41 @@ def assert_profile_pose_uses_review_threshold_without_accepting_frontal_noise() 
     assert "Hard-angle match used pose-aware scoring" in candidate.note or "Hard-pose review threshold" in candidate.note
 
 
+def assert_match_scoring_flags_close_single_reference_decisions() -> None:
+    thresholds = Thresholds(confident=0.40, likely=0.28, relaxed_child=0.20, quality_min=0.10)
+    refs = {
+        "ref_a": ReferenceFace(
+            ref_id="ref_a",
+            person_name="Ada",
+            age_bucket="adult",
+            source_path="/tmp/ada.jpg",
+            capture_date=None,
+            quality=1.0,
+            model_name="test",
+            vector=[1.0] + [0.0] * 511,
+        ),
+        "ref_b": ReferenceFace(
+            ref_id="ref_b",
+            person_name="Grace",
+            age_bucket="adult",
+            source_path="/tmp/grace.jpg",
+            capture_date=None,
+            quality=1.0,
+            model_name="test",
+            vector=[1.0] + [0.0] * 511,
+        ),
+    }
+    decision = group_hits([SearchHit("ref_a", 0.34), SearchHit("ref_b", 0.32)], refs, thresholds, pose_bucket="frontal")
+    assert decision is not None
+    assert decision.person_name == "Ada"
+    assert "close-runner-up" in decision.flags
+    assert "single-reference-close-runner-up" in decision.flags
+    assert "single-reference-match" in decision.flags
+    assert "ambiguous-person-margin" in decision.flags
+    assert decision.runner_up_margin is not None and decision.runner_up_margin < 0.025
+    assert decision.score < 0.34
+
+
 def assert_duplicate_content_is_suppressed_across_paths() -> None:
     root = Path(tempfile.mkdtemp(prefix="crossage-edge-hash-dedupe-"))
     scan = root / "scan"
@@ -2095,6 +2131,52 @@ def assert_operational_use_case_commands() -> None:
     expect_raises(KeyError, lambda: api.handle("delete_person", {"personName": "Person Prime"}), "Person")
 
 
+def assert_candidate_risk_lanes_and_reference_counts() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-risk-lanes-"))
+    api = make_api(root / "workspace")
+    api.project.candidates["cand_close"] = ReviewCandidate(
+        candidate_id="cand_close",
+        source_path=str(root / "close.jpg"),
+        person_name="Ada",
+        best_ref_id="ref_a",
+        best_ref_path=str(root / "ref-a.jpg"),
+        score=0.34,
+        band="likely",
+        quality=0.9,
+        model_name="test",
+        note="Another saved person was close; avoid bulk accepting this row.",
+        risk_flags=["close-runner-up"],
+    )
+    api.project.candidates["cand_single"] = ReviewCandidate(
+        candidate_id="cand_single",
+        source_path=str(root / "single.jpg"),
+        person_name="Grace",
+        best_ref_id="ref_g",
+        best_ref_path=str(root / "ref-g.jpg"),
+        score=0.31,
+        band="likely",
+        quality=0.8,
+        model_name="test",
+        note="Only one saved photo supported this match; review before bulk actions.",
+        risk_flags=[],
+    )
+    api.project.save()
+    close_page = api.handle("query_candidates", {"lane": "closeRunner", "limit": 10})
+    assert close_page["total"] == 1
+    assert close_page["items"][0]["candidateId"] == "cand_close"
+    assert "close-runner-up" in close_page["items"][0]["riskFlags"]
+    single_page = api.handle("query_candidates", {"lane": "singleReference", "limit": 10})
+    assert single_page["total"] == 1
+    assert single_page["items"][0]["candidateId"] == "cand_single"
+    assert "single-reference-match" in single_page["items"][0]["riskFlags"]
+    state = api.state(preview_create_budget=0)
+    insights = state["reviewInsights"]
+    assert insights["laneCounts"]["closeRunner"] == 1
+    assert insights["laneCounts"]["singleReference"] == 1
+    assert insights["closeRunnerUpPending"] == 1
+    assert insights["singleReferencePending"] == 1
+
+
 def assert_candidate_media_actions() -> None:
     root = Path(tempfile.mkdtemp(prefix="crossage-edge-media-actions-"))
     workspace = root / "workspace"
@@ -2654,6 +2736,7 @@ def main() -> None:
     assert_reference_backfill_creates_active_model_embeddings()
     assert_pose_bucket_tracking_and_cache_hits()
     assert_profile_pose_uses_review_threshold_without_accepting_frontal_noise()
+    assert_match_scoring_flags_close_single_reference_decisions()
     assert_duplicate_content_is_suppressed_across_paths()
     assert_scan_candidates_survive_without_json_snapshot()
     assert_large_store_dedupe_uses_sqlite_lookup()
@@ -2673,6 +2756,7 @@ def main() -> None:
     assert_model_governance_metadata()
     assert_package_artifact_checker()
     assert_operational_use_case_commands()
+    assert_candidate_risk_lanes_and_reference_counts()
     assert_candidate_media_actions()
     assert_privacy_controls_delete_face_data()
     assert_repair_blocks_likely_disconnected_roots()

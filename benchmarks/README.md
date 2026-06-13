@@ -15,7 +15,7 @@ CALFW and CPLFW are downloaded from the official unauthenticated Google Drive li
 ```bash
 .venv/bin/python benchmarks/prepare_public_dataset_slice.py calfw --max-identities 32 --images-per-identity 4 --extra-identities 8 --force
 .venv/bin/python benchmarks/prepare_public_dataset_slice.py cplfw --max-identities 32 --images-per-identity 3 --extra-identities 8 --force
-.venv/bin/python benchmarks/prepare_public_dataset_slice.py agedb fiw cfp --max-identities 32 --images-per-identity 4 --extra-identities 8 --force
+.venv/bin/python benchmarks/prepare_public_dataset_slice.py agedb fiw cfp ytf --max-identities 32 --images-per-identity 4 --extra-identities 8 --force
 ```
 
 Prepared slices are written under `benchmarks/public-data/prepared/` with manifest files that list the source archive members.
@@ -23,6 +23,22 @@ Prepared slices are written under `benchmarks/public-data/prepared/` with manife
 AgeDB should be downloaded as `benchmarks/public-data/downloads/AgeDB.zip`.
 FIW should be downloaded as `benchmarks/public-data/downloads/recognizing-faces-in-the-wild.zip`.
 CFP is prepared through the app's official CFP downloader when the local CFP archive is not already available.
+
+For wider confidence intervals, prepare and run the larger profiles:
+
+```bash
+.venv/bin/python benchmarks/prepare_public_dataset_slice.py calfw agedb fiw ytf --max-identities 128 --images-per-identity 4 --extra-identities 32 --force
+.venv/bin/python benchmarks/prepare_public_dataset_slice.py cplfw --max-identities 128 --images-per-identity 3 --extra-identities 32 --force
+.venv/bin/python benchmarks/run_public_dataset_benchmarks.py --profile large --require-real-data
+```
+
+The stress profile expects `320` prepared identities per folder and is intended for overnight/local-machine validation:
+
+```bash
+.venv/bin/python benchmarks/prepare_public_dataset_slice.py calfw agedb fiw ytf --max-identities 256 --images-per-identity 4 --extra-identities 64 --force
+.venv/bin/python benchmarks/prepare_public_dataset_slice.py cplfw --max-identities 256 --images-per-identity 3 --extra-identities 64 --force
+.venv/bin/python benchmarks/run_public_dataset_benchmarks.py --profile stress --require-real-data
+```
 
 ## Run Model-Pack Comparison
 
@@ -35,6 +51,8 @@ CFP is prepared through the app's official CFP downloader when the local CFP arc
 ```
 
 Reports are written to `benchmarks/results/`, including `public-dataset-benchmark-latest.md` and `public-dataset-benchmark-latest.json`.
+
+`npm run release:check` reads `benchmarks/results/public-dataset-benchmark-latest.json` when present and fails if the real public benchmark gates fail, required core datasets are missing from the report, or the report is stale. Use `VINTRACE_PUBLIC_BENCHMARK_REPORT=/path/to/report.json` to validate a different artifact.
 
 Video-capable runs use deterministic frame sampling and a frame cache. Decode failures are counted separately from recognition false negatives.
 
