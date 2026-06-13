@@ -25,11 +25,11 @@ from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, sha256_file, write_pre
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, configure_video_decoder_paths
 from crossage_fr.ingest.safety import SafetyAssessment, assess_image_safety, safety_model_report
 from crossage_fr.match import group_hits, pose_review_supported, thresholds_for_pose
-from crossage_fr.models import EmbeddingResult, ReferenceFace, ReviewCandidate, new_id
+from crossage_fr.models import EmbeddingResult, ReferenceFace, ReviewCandidate, new_id, normalize_risk_flags
 from crossage_fr.storage import safe_is_mount, safe_resolve
 from crossage_fr.store import VectorStore
 from crossage_fr.store.workspace_db import WorkspaceDb, path_signature
-from crossage_fr.workspace_registry import ensure_workspace_metadata, now_iso, write_active_workspace
+from crossage_fr.workspace_registry import atomic_write, atomic_write_text, ensure_workspace_metadata, now_iso, write_active_workspace
 from PIL import Image, ImageDraw, ImageEnhance
 
 
@@ -841,6 +841,8 @@ class ProjectState:
             "poseRelaxedThreeQuarter": 0,
             "poseReranked": 0,
             "poseAmbiguous": 0,
+            "closeRunnerUp": 0,
+            "singleReferenceMatches": 0,
             "hardPoseUnsupported": 0,
             "excluded": 0,
             "pathErrors": 0,
@@ -1134,6 +1136,10 @@ class ProjectState:
                     metrics["poseReranked"] += 1
                 if "ambiguous-person-margin" in decision_flags:
                     metrics["poseAmbiguous"] += 1
+                if "close-runner-up" in decision_flags:
+                    metrics["closeRunnerUp"] += 1
+                if "single-reference-match" in decision_flags or "single-reference-close-runner-up" in decision_flags:
+                    metrics["singleReferenceMatches"] += 1
                 if "single-reference-hard-pose" in decision_flags:
                     metrics["hardPoseUnsupported"] += 1
                 pose_relaxed = (
@@ -1181,6 +1187,24 @@ class ProjectState:
                     metrics["skipped"] += 1
                     metrics["videoCandidateCap"] += 1
                     continue
+                candidate_note = _video_note(metadata)
+                candidate_risk_flags = normalize_risk_flags(decision_flags)
+                for flag, message in (
+                    ("ambiguous-person-margin", "Close identity scores; review this match carefully."),
+                    ("close-runner-up", "Another saved person was close; avoid bulk accepting this row."),
+                    ("single-reference-close-runner-up", "Only one saved photo separates close identities; add more saved photos before trusting this match."),
+                    ("single-reference-hard-pose", "Only one hard-angle signal matched; add a side/angled saved photo if this is wrong."),
+                    ("single-reference-match", "Only one saved photo supported this match; review before bulk actions."),
+                    ("pose-reranked", "Hard-angle match used pose-aware scoring; compare against saved photos."),
+                ):
+                    if flag in decision_flags:
+                        candidate_note = self._append_candidate_note(candidate_note, message)
+                        candidate_risk_flags = normalize_risk_flags(candidate_risk_flags, candidate_note)
+                if pose_relaxed:
+                    candidate_note = self._append_candidate_note(candidate_note, "Hard-pose review threshold used; verify carefully.")
+                if rescue_used:
+                    candidate_note = self._append_candidate_note(candidate_note, "Recovered by the side-face detector; review before accepting.")
+                candidate_risk_flags = normalize_risk_flags(candidate_risk_flags, candidate_note)
                 candidate = ReviewCandidate(
                     candidate_id=new_id("cand"),
                     source_path=str(image_path),
@@ -1191,12 +1215,8 @@ class ProjectState:
                     band=decision.band,
                     quality=embedding.quality,
                     model_name=embedding.model_name,
-                    note=_video_note(metadata)
-                    or ("Close identity scores; review this match carefully." if "ambiguous-person-margin" in decision_flags else "")
-                    or ("Only one hard-angle signal matched; add a side/angled saved photo if this is wrong." if "single-reference-hard-pose" in decision_flags else "")
-                    or ("Hard-angle match used pose-aware scoring; compare against saved photos." if "pose-reranked" in decision_flags else "")
-                    or ("Hard-pose review threshold used; verify carefully." if pose_relaxed else "")
-                    or ("Recovered by the side-face detector; review before accepting." if rescue_used else ""),
+                    note=candidate_note,
+                    risk_flags=candidate_risk_flags,
                     **embedding_metadata,
                 )
                 self.candidates[candidate.candidate_id] = candidate
@@ -1577,14 +1597,36 @@ class ProjectState:
     def review_insights(self) -> dict[str, Any]:
         if self.candidate_index_ready():
             try:
-                return self.db.review_insights(self.config.thresholds.confident)
+                return self.db.review_insights(self.config.thresholds.confident, max(0.2, float(self.config.thresholds.quality_min)))
             except sqlite3.Error:
                 pass
         pending = 0
         confident = 0
         video_pending = 0
+        close_runner_pending = 0
+        single_reference_pending = 0
+        lane_counts = {"all": 0, "high": 0, "lowQuality": 0, "groups": 0, "video": 0, "notes": 0, "closeRunner": 0, "singleReference": 0}
         folders: dict[str, int] = {}
+        grouped_media: dict[str, set[str]] = {}
+        low_quality_threshold = max(0.2, float(self.config.thresholds.quality_min))
         for candidate in self.candidates.values():
+            lane_counts["all"] += 1
+            if candidate.score >= self.config.thresholds.confident:
+                lane_counts["high"] += 1
+            if candidate.quality < low_quality_threshold:
+                lane_counts["lowQuality"] += 1
+            if candidate.media_kind == "video":
+                lane_counts["video"] += 1
+            if candidate.note.strip():
+                lane_counts["notes"] += 1
+            risk_flags = set(normalize_risk_flags(getattr(candidate, "risk_flags", []), candidate.note))
+            if {"close-runner-up", "ambiguous-person-margin"} & risk_flags:
+                lane_counts["closeRunner"] += 1
+            if {"single-reference-match", "single-reference-close-runner-up", "single-reference-hard-pose"} & risk_flags:
+                lane_counts["singleReference"] += 1
+            media_path = candidate.media_source_path or candidate.source_path
+            if candidate.person_name.strip() and not candidate.person_name.startswith("Unmatched cluster"):
+                grouped_media.setdefault(media_path, set()).add(candidate.person_name)
             if candidate.status != "pending":
                 continue
             pending += 1
@@ -1592,18 +1634,27 @@ class ProjectState:
                 confident += 1
             if candidate.media_kind == "video":
                 video_pending += 1
+            if {"close-runner-up", "ambiguous-person-margin"} & risk_flags:
+                close_runner_pending += 1
+            if {"single-reference-match", "single-reference-close-runner-up", "single-reference-hard-pose"} & risk_flags:
+                single_reference_pending += 1
             try:
                 folder = str(Path(candidate.media_source_path or candidate.source_path).expanduser().parent)
             except OSError:
                 folder = ""
             if folder:
                 folders[folder] = folders.get(folder, 0) + 1
+        grouped_paths = {media_path for media_path, people in grouped_media.items() if len(people) >= 2}
+        lane_counts["groups"] = sum(1 for candidate in self.candidates.values() if (candidate.media_source_path or candidate.source_path) in grouped_paths)
         folder_rows = sorted(folders.items(), key=lambda item: (-item[1], item[0]))[:8]
         return {
             "pending": pending,
             "confidentPending": confident,
             "videoPending": video_pending,
             "imagePending": pending - video_pending,
+            "closeRunnerUpPending": close_runner_pending,
+            "singleReferencePending": single_reference_pending,
+            "laneCounts": lane_counts,
             "topFolders": [{"folder": folder, "count": count} for folder, count in folder_rows],
             "recommendedOrder": "strongest-first" if confident else "newest-first",
         }
@@ -2830,21 +2881,51 @@ class ProjectState:
         include_dirs = {"exports"}
         if not include_generated:
             include_dirs.update({"previews", "video-frames"})
+        # data-persistence-3: archive a transactionally-consistent DB snapshot
+        # (VACUUM INTO) instead of byte-copying the live workspace.sqlite3 + its
+        # -wal/-shm, which can be torn if a writer (scan / MCP process) is active
+        # during the backup. The live DB triplet is skipped in the walk below.
+        db_name = self.db.path.name
+        db_wal = db_name + "-wal"
+        db_shm = db_name + "-shm"
+        db_snapshot = export_root / f".db-snapshot-{stamp}.sqlite3"
+        snapshot_ok = False
+        try:
+            self.db.snapshot_to(db_snapshot)
+            snapshot_ok = db_snapshot.exists() and db_snapshot.stat().st_size > 0
+        except Exception:
+            snapshot_ok = False
         written = 0
-        with zipfile.ZipFile(backup_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("backup-manifest.json", json.dumps(manifest, indent=2))
-            written += 1
-            for current, dirnames, filenames in os.walk(self.root):
-                dirnames[:] = sorted(dirname for dirname in dirnames if dirname not in include_dirs)
-                for filename in sorted(filenames):
-                    path = Path(current) / filename
-                    if not path.is_file():
-                        continue
-                    relative = path.relative_to(self.root)
-                    if path == backup_path or path.name == ".state.lock":
-                        continue
-                    archive.write(path, relative.as_posix())
+        try:
+            with zipfile.ZipFile(backup_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("backup-manifest.json", json.dumps(manifest, indent=2))
+                written += 1
+                if snapshot_ok:
+                    archive.write(db_snapshot, db_name)
                     written += 1
+                for current, dirnames, filenames in os.walk(self.root):
+                    dirnames[:] = sorted(dirname for dirname in dirnames if dirname not in include_dirs)
+                    for filename in sorted(filenames):
+                        path = Path(current) / filename
+                        if not path.is_file():
+                            continue
+                        relative = path.relative_to(self.root)
+                        if path == backup_path or path == db_snapshot or path.name == ".state.lock":
+                            continue
+                        # Never archive the live WAL/SHM (process-private, can be
+                        # inconsistent with the main file); skip the live main DB
+                        # too when the consistent snapshot was written.
+                        if path.name in {db_wal, db_shm}:
+                            continue
+                        if snapshot_ok and path.name == db_name:
+                            continue
+                        archive.write(path, relative.as_posix())
+                        written += 1
+        finally:
+            try:
+                db_snapshot.unlink()
+            except OSError:
+                pass
         self._append_audit(
             {
                 "action": "export_workspace_backup",
@@ -3052,13 +3133,30 @@ class ProjectState:
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             pass
         database_path = target / "workspace.sqlite3"
+        summary_warnings: list[str] = []
         if database_path.exists():
+            # data-persistence-2: the DB is authoritative for the restored
+            # workspace. Query each count independently (so one bad table can't
+            # skip the others) and use the real table name (review_candidates,
+            # not the never-existent "candidates" the prior code queried, which
+            # always raised and was silently swallowed). Warn on disagreement
+            # with the manifest/JSON-derived counts.
             try:
                 with sqlite3.connect(database_path) as connection:
-                    state_summary["candidates"] = int(connection.execute("select count(*) from candidates").fetchone()[0])
-                    state_summary["scanRuns"] = int(connection.execute("select count(*) from scan_runs").fetchone()[0])
+                    for key, table in (("candidates", "review_candidates"), ("scanRuns", "scan_runs")):
+                        try:
+                            db_count = int(connection.execute(f"select count(*) from {table}").fetchone()[0])
+                        except sqlite3.DatabaseError:
+                            summary_warnings.append(f"Could not read {table} from the restored database.")
+                            continue
+                        json_count = state_summary.get(key)
+                        if isinstance(json_count, int) and json_count != db_count:
+                            summary_warnings.append(
+                                f"Restored {table} count from the database ({db_count}) differs from the manifest ({json_count})."
+                            )
+                        state_summary[key] = db_count
             except sqlite3.DatabaseError:
-                pass
+                summary_warnings.append("Could not open the restored database to verify counts.")
 
         self._append_audit(
             {
@@ -3078,6 +3176,7 @@ class ProjectState:
             "bytes": bytes_written,
             "manifest": verification.get("manifest") or {},
             "stateSummary": state_summary,
+            "warnings": summary_warnings,
         }
 
     def _latest_workspace_backup(self) -> Path | None:
@@ -5297,9 +5396,19 @@ class ProjectState:
             "embeddingCacheEntries": int(scale.get("embeddingCacheEntries", 0) or 0),
             "calibrationLabels": int(scale.get("calibrationLabels", 0) or 0),
             "auditEvents": self._audit_event_count(),
+            # PC-03: be explicit that face embeddings and previews are stored
+            # unencrypted at rest and that Workspace Lock is an in-app access
+            # control, not on-disk encryption.
+            "dataAtRest": {
+                "encrypted": False,
+                "biometricStorage": "Face embeddings and generated previews are stored unencrypted in the app folder.",
+                "workspaceLock": "Workspace Lock gates access inside the app; it does not encrypt files on disk.",
+                "note": "Protect the app folder with OS full-disk/account encryption; another local user or process can read the raw files.",
+            },
             "recommendations": [
                 "Use Delete face data before handing this app folder to someone else.",
                 "Export what you need first; deleted face data cannot be restored unless you have a backup.",
+                "Keep the app folder on an OS-encrypted volume — files at rest are not encrypted by Vintrace.",
             ],
         }
 
@@ -6049,13 +6158,14 @@ class ProjectState:
         return value
 
     def _write_json_atomic(self, path: Path, value: object) -> None:
-        temp = path.with_suffix(path.suffix + ".tmp")
-        temp.write_text(json.dumps(value, separators=(",", ":")), encoding="utf-8")
-        temp.replace(path)
+        # ER-02/MA-6: route through the shared atomic-write-with-fsync mechanism
+        # while keeping the compact on-disk format.
+        atomic_write_text(path, json.dumps(value, separators=(",", ":")))
 
     def _write_json_array_atomic(self, path: Path, rows: Iterable[object]) -> None:
-        temp = path.with_suffix(path.suffix + ".tmp")
-        with temp.open("w", encoding="utf-8") as handle:
+        # Streams the array so a large candidate list never materializes as one
+        # string; the shared mechanism adds durability (fsync) + atomic replace.
+        def _stream(handle) -> None:
             handle.write("[")
             first = True
             for row in rows:
@@ -6065,7 +6175,8 @@ class ProjectState:
                     handle.write(",")
                 handle.write(json.dumps(row, separators=(",", ":")))
             handle.write("]")
-        temp.replace(path)
+
+        atomic_write(path, _stream)
 
     @contextmanager
     def _state_lock(self):

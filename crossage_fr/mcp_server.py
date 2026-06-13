@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import argparse
+import functools
 import json
 import os
 import sys
@@ -14,6 +15,7 @@ from crossage_fr.api_server import DesktopApi
 from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS
 from crossage_fr.ingest.safety import assess_image_safety
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, probe_video
+from crossage_fr.runtime_env import env_value
 from crossage_fr.workspace_registry import resolve_workspace
 
 
@@ -36,6 +38,7 @@ mcp = FastMCP(
 
 def _api() -> DesktopApi:
     global API
+    _assert_unlocked()  # MCP-05: gate all backend access (tools + resources) on the lock.
     if API is None:
         API = DesktopApi(WORKSPACE, actor="mcp")
     return API
@@ -168,6 +171,151 @@ def _agent_safe_value(value: Any, keep_path_names: bool = True) -> Any:
     return value
 
 
+# ---------------------------------------------------------------------------
+# MCP security boundary (Security audit Phase 2).
+# The desktop app's protections (consent, path scope, the workspace lock) live
+# in the Electron layer and the human operator. The MCP server reuses the same
+# backend, so it must RE-APPLY those gates here rather than assume they carry
+# over: a path allow-list, out-of-band consent, redacted biometric-path output,
+# and the workspace lock.
+# ---------------------------------------------------------------------------
+
+# MCP-04: keys whose values reveal WHERE biometric/source media lives on disk
+# (filenames frequently encode names/dates). These are always redacted in
+# agent-facing tool output. Export/backup DESTINATION paths the agent itself
+# requested (zipPath, jsonPath, target, ...) are intentionally preserved so
+# legitimate export/restore workflows still work.
+# Keys for paths the agent itself requested as an output/destination (export
+# files, backup zips, a restore target). These are preserved so legitimate
+# export/restore workflows keep working; everything else that looks like an
+# absolute path is redacted.
+_PRESERVE_OUTPUT_PATH_KEYS = {
+    "zipPath",
+    "jsonPath",
+    "mdPath",
+    "csvPath",
+    "ndjsonPath",
+    "exportPath",
+    "outputPath",
+    "backupPath",
+    "manifestPath",
+    "target",
+    "targetPath",
+}
+
+
+def _redact_tool_output(value: Any) -> Any:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            key_text = str(key)
+            key_lower = key_text.lower()
+            if key_text in _PRESERVE_OUTPUT_PATH_KEYS:
+                result[key_text] = child  # agent-requested destination; preserved.
+            elif key_lower.endswith(("path", "paths", "url")) or key_text in {"workspace", "root", "scope"}:
+                if isinstance(child, list):
+                    result[key_text] = [_redacted_path(item, keep_name=False) for item in child[:50]]
+                else:
+                    result[key_text] = _redacted_path(child, keep_name=False)
+            else:
+                result[key_text] = _redact_tool_output(child)
+        return result
+    if isinstance(value, list):
+        return [_redact_tool_output(item) for item in value]
+    # Value-based catch-all: redact any string that looks like an absolute path,
+    # wherever it appears (so a path leaking through a non-path key is caught too).
+    if isinstance(value, str) and _looks_like_path(value):
+        return _redacted_path(value, keep_name=False)
+    return value
+
+
+def _allowed_roots() -> list[Path]:
+    # MCP-03: the active workspace is always in-scope; everything else must be an
+    # operator-approved root configured via VINTRACE_MCP_ALLOWED_ROOTS
+    # (os.pathsep-separated). With none configured, MCP can only touch the
+    # workspace — the desktop picks folders via an OS dialog; MCP has no such
+    # human gate, so it fails closed.
+    roots = [WORKSPACE]
+    configured = env_value("MCP_ALLOWED_ROOTS")
+    if configured:
+        for part in configured.split(os.pathsep):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                roots.append(Path(part).expanduser().resolve())
+            except (OSError, ValueError):
+                continue
+    return roots
+
+
+def _assert_allowed_path(value: str) -> Path:
+    # MCP-03 / INJ-02 / INJ-03: confine a client-supplied path to an approved
+    # root, with a generic error (no per-path existence oracle).
+    try:
+        resolved = Path(str(value)).expanduser().resolve()
+    except (OSError, ValueError):
+        raise ValueError("Invalid path.")
+    for root in _allowed_roots():
+        try:
+            resolved.relative_to(root)
+            return resolved
+        except ValueError:
+            continue
+    raise ValueError(
+        "Path is outside the approved MCP roots. Set VINTRACE_MCP_ALLOWED_ROOTS to the "
+        "directories the operator permits, or operate within the workspace."
+    )
+
+
+def _require_mcp_consent() -> None:
+    # INJ-02 / PC-06: decode/processing tools that don't already pass through the
+    # consent-gated handle() commands must still require consent on file (which,
+    # post-MCP-02, only a human can grant).
+    if not _api().consent_on_file:
+        raise ValueError(
+            "Consent is required before processing images or videos. A human operator must "
+            "enable consent in the Vintrace desktop app (the MCP session cannot grant it)."
+        )
+
+
+def _workspace_lock_enabled() -> bool:
+    # MCP-05: a separate MCP process cannot observe the desktop's in-session
+    # unlock, so it treats a lock-enabled workspace as locked.
+    try:
+        lock_path = WORKSPACE / ".vintrace-workspace-lock.json"
+        if not lock_path.exists():
+            return False
+        data = json.loads(lock_path.read_text(encoding="utf-8"))
+        return bool(isinstance(data, dict) and data.get("encryptedSecret"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+
+
+def _assert_unlocked() -> None:
+    if _workspace_lock_enabled():
+        raise ValueError(
+            "Workspace Lock is enabled for this workspace; the MCP server cannot verify the "
+            "desktop unlock and refuses to read or modify locked biometric data. Turn off "
+            "Workspace Lock in the Vintrace desktop app to use MCP."
+        )
+
+
+def safe_tool(*tool_args: Any, **tool_kwargs: Any):
+    # MCP-04 / MCP-05: register a tool whose every return value has biometric
+    # source paths redacted and which honors the workspace lock — centrally, so
+    # no individual tool can forget.
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*call_args: Any, **call_kwargs: Any):
+            _assert_unlocked()
+            return _redact_tool_output(fn(*call_args, **call_kwargs))
+
+        return mcp.tool(*tool_args, **tool_kwargs)(wrapper)
+
+    return decorator
+
+
 def _agent_state() -> dict[str, Any]:
     return _api().state(preview_create_budget=0, candidate_limit=500)
 
@@ -265,31 +413,56 @@ def report_resource() -> str:
     return "report.md is not available in this installation."
 
 
-@mcp.tool()
+@safe_tool()
 def get_project_state() -> dict[str, Any]:
     """Return a compact current state summary for the active workspace."""
     return _state_summary(_agent_state())
 
 
-@mcp.tool()
+@safe_tool()
 def set_workspace(path: str) -> dict[str, Any]:
-    """Switch the MCP server to a workspace directory. Consent must be marked separately."""
+    """Switch the MCP server to a workspace directory (must be within an approved root)."""
+    _assert_allowed_path(path)  # MCP-03/PC-04: don't let an agent point at any directory.
     _set_workspace_root(Path(path))
     result = _api().state()
     return _state_summary(result)
 
 
-@mcp.tool()
-def mark_consent(confirmed: bool, operator: str = "", note: str = "", confirm: bool = False) -> dict[str, Any]:
-    """Mark whether the operator has consent to process images and videos in this MCP session."""
+@safe_tool()
+def mark_consent(
+    confirmed: bool,
+    operator: str = "",
+    note: str = "",
+    confirm: bool = False,
+    operator_token: str = "",
+) -> dict[str, Any]:
+    """Record consent for processing in this workspace.
+
+    MCP-02: the agent CANNOT grant consent on its own authority. Granting
+    (confirmed=True) requires a one-time operator token the agent cannot mint —
+    set VINTRACE_MCP_OPERATOR_TOKEN on the server and pass it as operator_token,
+    or grant consent in the Vintrace desktop app. Revoking (confirmed=False)
+    needs no token.
+    """
     _confirmed(confirm, "change consent status")
+    if confirmed:
+        required = env_value("MCP_OPERATOR_TOKEN")
+        if not required:
+            raise ValueError(
+                "Granting consent over MCP requires an operator approval token. Set "
+                "VINTRACE_MCP_OPERATOR_TOKEN on the server (and pass it as operator_token), "
+                "or grant consent in the Vintrace desktop app."
+            )
+        if operator_token != required:
+            raise ValueError("Invalid operator approval token; consent was not granted.")
     state = _call("set_consent", {"value": confirmed, "source": "mcp", "operator": operator, "note": note, "scope": str(WORKSPACE)})
     return {**_state_summary(state), "operator": operator, "note": note}
 
 
-@mcp.tool()
+@safe_tool()
 def enroll_reference_folder(person_name: str, age_bucket: AgeBucket, folder: str) -> dict[str, Any]:
     """Enroll reference images for one person from one folder and one age bucket."""
+    _assert_allowed_path(folder)
     result = _call("enroll", {"personName": person_name, "ageBucket": age_bucket, "folder": folder})
     return {
         "added": result.get("added", 0),
@@ -298,7 +471,7 @@ def enroll_reference_folder(person_name: str, age_bucket: AgeBucket, folder: str
     }
 
 
-@mcp.tool()
+@safe_tool()
 def enroll_age_reference_set(
     person_name: str,
     child_folder: str = "",
@@ -307,6 +480,9 @@ def enroll_age_reference_set(
     unknown_folder: str = "",
 ) -> dict[str, Any]:
     """Enroll multiple age-bucket reference folders for the same person in one action."""
+    for folder in (child_folder, adolescent_folder, adult_folder, unknown_folder):
+        if folder:
+            _assert_allowed_path(folder)
     groups = [
         {"ageBucket": "child", "folder": child_folder},
         {"ageBucket": "adolescent", "folder": adolescent_folder},
@@ -322,9 +498,10 @@ def enroll_age_reference_set(
     }
 
 
-@mcp.tool()
+@safe_tool()
 def scan_folder(folder: str, ctx: Context) -> dict[str, Any]:
     """Scan an image/video folder and queue matched or clustered review candidates."""
+    _assert_allowed_path(folder)
     result = _call("scan", {"folder": folder, "source": "mcp"}, progress=_progress_reporter(ctx))
     return {
         "added": result.get("added", 0),
@@ -334,9 +511,11 @@ def scan_folder(folder: str, ctx: Context) -> dict[str, Any]:
     }
 
 
-@mcp.tool()
+@safe_tool()
 def scan_media_paths(paths: list[str], ctx: Context) -> dict[str, Any]:
     """Scan explicit image or video paths and queue matched or clustered review candidates."""
+    for media_path in paths:
+        _assert_allowed_path(media_path)
     result = _call("scan_paths", {"paths": paths, "source": "mcp"}, progress=_progress_reporter(ctx))
     return {
         "added": result.get("added", 0),
@@ -346,48 +525,49 @@ def scan_media_paths(paths: list[str], ctx: Context) -> dict[str, Any]:
     }
 
 
-@mcp.tool()
+@safe_tool()
 def cancel_active_scan(confirm: bool = False) -> dict[str, Any]:
     """Request cancellation of the active scan. The current file finishes, then the scan stops with a resumable manifest."""
     _confirmed(confirm, "cancel the active scan")
     return _call("cancel_scan", {"source": "mcp"})
 
 
-@mcp.tool()
+@safe_tool()
 def pause_active_scan(confirm: bool = False) -> dict[str, Any]:
     """Pause the active scan between files without losing resumable progress."""
     _confirmed(confirm, "pause the active scan")
     return _call("pause_scan", {"source": "mcp"})
 
 
-@mcp.tool()
+@safe_tool()
 def resume_active_scan() -> dict[str, Any]:
     """Resume a paused scan."""
     return _call("resume_scan", {"source": "mcp"})
 
 
-@mcp.tool()
+@safe_tool()
 def scan_job_status() -> dict[str, Any]:
     """Read active scan job controls and latest manifest status."""
     return _call("scan_job_status")
 
 
-@mcp.tool()
+@safe_tool()
 def scan_image_paths(paths: list[str], ctx: Context) -> dict[str, Any]:
     """Compatibility alias for scan_media_paths; accepts image and video paths."""
     return scan_media_paths(paths, ctx)
 
 
-@mcp.tool()
+@safe_tool()
 def analyze_folder(folder: str) -> dict[str, Any]:
     """Preflight a folder before scanning: counts images/videos, samples readability, and returns recommendations."""
+    _assert_allowed_path(folder)
     return _agent_safe_value(_call("analyze_folder", {"folder": folder}), keep_path_names=False)
 
 
-@mcp.tool()
+@safe_tool()
 def probe_video_file(path: str) -> dict[str, Any]:
     """Probe one video file for decoder support, dimensions, frame count, and duration."""
-    resolved = Path(path).expanduser().resolve()
+    resolved = _assert_allowed_path(path)
     extension_ok = resolved.suffix.lower() in VIDEO_EXTENSIONS
     if not extension_ok:
         return {"path": "[hidden]", "extensionOk": False, "readable": False}
@@ -397,10 +577,13 @@ def probe_video_file(path: str) -> dict[str, Any]:
         return {"path": "[hidden]", "extensionOk": True, "readable": False, "error": str(exc)}
 
 
-@mcp.tool()
+@safe_tool()
 def assess_image(path: str) -> dict[str, Any]:
     """Assess one still image for Safe Mode filtering and image-extension eligibility."""
-    resolved = Path(path).expanduser().resolve()
+    # INJ-02: confine the path and require consent, so this isn't a filesystem-wide
+    # NSFW oracle / un-consented decoder over arbitrary files.
+    _require_mcp_consent()
+    resolved = _assert_allowed_path(path)
     extension_ok = resolved.suffix.lower() in IMAGE_EXTENSIONS
     if not extension_ok:
         return {"path": "[hidden]", "extensionOk": False, "sensitive": False, "score": 0.0}
@@ -422,7 +605,7 @@ def assess_image(path: str) -> dict[str, Any]:
     }
 
 
-@mcp.tool()
+@safe_tool()
 def review_candidate(candidate_id: str, status: ReviewStatus, confirm: bool = False) -> dict[str, Any]:
     """Set a review candidate status after a human review decision."""
     _confirmed(confirm, f"set candidate {candidate_id} to {status}")
@@ -430,7 +613,7 @@ def review_candidate(candidate_id: str, status: ReviewStatus, confirm: bool = Fa
     return _state_summary(state)
 
 
-@mcp.tool()
+@safe_tool()
 def bulk_review_candidates(candidate_ids: list[str], status: ReviewStatus, confirm: bool = False) -> dict[str, Any]:
     """Set the same review status on multiple candidates after human review."""
     _confirmed(confirm, f"set {len(candidate_ids)} candidate(s) to {status}")
@@ -438,14 +621,14 @@ def bulk_review_candidates(candidate_ids: list[str], status: ReviewStatus, confi
     return {"updated": result.get("updated", 0), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def set_candidate_note(candidate_id: str, note: str) -> dict[str, Any]:
     """Save an operator note on a review candidate."""
     state = _call("set_candidate_note", {"candidateId": candidate_id, "note": note})
     return _state_summary(state)
 
 
-@mcp.tool()
+@safe_tool()
 def block_false_match(candidate_id: str, confirm: bool = False) -> dict[str, Any]:
     """Reject and suppress this exact image/person false-match pair in future scans."""
     _confirmed(confirm, f"block repeated false match for {candidate_id}")
@@ -453,7 +636,7 @@ def block_false_match(candidate_id: str, confirm: bool = False) -> dict[str, Any
     return {"blocked": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def reassign_candidate_person(candidate_id: str, person_name: str, confirm: bool = False) -> dict[str, Any]:
     """Move one candidate row to a different person label for identity split/cleanup workflows."""
     _confirmed(confirm, f"move candidate {candidate_id} to {person_name}")
@@ -461,7 +644,7 @@ def reassign_candidate_person(candidate_id: str, person_name: str, confirm: bool
     return {"reassigned": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def query_candidates(
     status: ReviewStatus | Literal["all"] = "all",
     lane: Literal["all", "high", "lowQuality", "groups", "video", "notes"] = "all",
@@ -485,7 +668,7 @@ def query_candidates(
     )
 
 
-@mcp.tool()
+@safe_tool()
 def clear_review_queue(confirm: bool = False) -> dict[str, Any]:
     """Clear all review candidates from the active workspace."""
     _confirmed(confirm, "clear the review queue")
@@ -493,7 +676,7 @@ def clear_review_queue(confirm: bool = False) -> dict[str, Any]:
     return _state_summary(state)
 
 
-@mcp.tool()
+@safe_tool()
 def purge_reviewed_candidates(confirm: bool = False) -> dict[str, Any]:
     """Remove accepted, rejected, and uncertain candidates from the active queue while preserving audit records."""
     _confirmed(confirm, "purge reviewed candidates")
@@ -501,52 +684,52 @@ def purge_reviewed_candidates(confirm: bool = False) -> dict[str, Any]:
     return {"purged": result.get("purged", 0), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def workspace_health() -> dict[str, Any]:
     """Audit workspace health: missing files/media sources, duplicate review rows, storage footprint, and cleanup recommendations."""
     return _call("workspace_health")
 
 
-@mcp.tool()
+@safe_tool()
 def repair_workspace(confirm: bool = False) -> dict[str, Any]:
     """Preview or repair missing saved-photo and match links. Without confirm=true this returns a dry run only."""
     result = _call("repair_workspace", {"dryRun": not confirm})
     return {"repair": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def database_integrity() -> dict[str, Any]:
     """Run SQLite integrity and foreign-key checks for the active workspace index."""
     return _call("database_integrity")
 
 
-@mcp.tool()
+@safe_tool()
 def repair_database_integrity(confirm: bool = False) -> dict[str, Any]:
     """Snapshot and repair the local SQLite index. Without confirm=true this returns a dry run only."""
     result = _call("repair_database_integrity", {"confirm": bool(confirm)})
     return {"repair": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def relink_workspace_paths(old_root: str, new_root: str, confirm: bool = False) -> dict[str, Any]:
     """Relink saved photo/video paths after a library folder has moved. Without confirm=true this returns a dry run only."""
     result = _call("relink_workspace_paths", {"oldRoot": old_root, "newRoot": new_root, "dryRun": not confirm})
     return {"relink": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def duplicate_people(threshold: float = 0.82, limit: int = 20) -> dict[str, Any]:
     """Find enrolled person labels whose saved reference faces are very similar and may need merging."""
     return _call("duplicate_people", {"threshold": threshold, "limit": limit})
 
 
-@mcp.tool()
+@safe_tool()
 def read_audit_events(limit: int = 100, offset: int = 0) -> dict[str, Any]:
     """Read recent audit events with pagination instead of loading the entire audit log."""
     return _call("audit_events", {"limit": limit, "offset": offset})
 
 
-@mcp.tool()
+@safe_tool()
 def purge_duplicate_candidates(confirm: bool = False) -> dict[str, Any]:
     """Compact duplicate review rows for the same person/media item while preserving the strongest candidate."""
     _confirmed(confirm, "purge duplicate candidate rows")
@@ -554,7 +737,7 @@ def purge_duplicate_candidates(confirm: bool = False) -> dict[str, Any]:
     return {"purged": result.get("purged", 0), "health": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def delete_reference(ref_id: str, confirm: bool = False) -> dict[str, Any]:
     """Delete one enrolled reference face by reference id."""
     _confirmed(confirm, f"delete reference {ref_id}")
@@ -562,7 +745,7 @@ def delete_reference(ref_id: str, confirm: bool = False) -> dict[str, Any]:
     return _state_summary(state)
 
 
-@mcp.tool()
+@safe_tool()
 def delete_person(person_name: str, confirm: bool = False) -> dict[str, Any]:
     """Delete all references and queued candidates for one person while preserving audit records."""
     _confirmed(confirm, f"delete all data for {person_name}")
@@ -570,7 +753,7 @@ def delete_person(person_name: str, confirm: bool = False) -> dict[str, Any]:
     return {"deleted": result.get("deleted", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def rename_person(old_name: str, new_name: str, confirm: bool = False) -> dict[str, Any]:
     """Rename or merge one person label into another person label, requiring confirm=true."""
     _confirmed(confirm, f"rename or merge {old_name} into {new_name}")
@@ -578,7 +761,7 @@ def rename_person(old_name: str, new_name: str, confirm: bool = False) -> dict[s
     return {"renamed": result.get("renamed", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def clear_references(confirm: bool = False) -> dict[str, Any]:
     """Delete all enrolled references from the active workspace."""
     _confirmed(confirm, "clear all references")
@@ -586,7 +769,7 @@ def clear_references(confirm: bool = False) -> dict[str, Any]:
     return {"cleared": result.get("cleared", 0), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def purge_old_candidates(days: int = 90, confirm: bool = False) -> dict[str, Any]:
     """Purge reviewed candidates older than the retention window while preserving audit records."""
     _confirmed(confirm, f"purge reviewed candidates older than {days} day(s)")
@@ -594,7 +777,7 @@ def purge_old_candidates(days: int = 90, confirm: bool = False) -> dict[str, Any
     return {"purged": result.get("purged", 0), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def save_settings(
     confident: float,
     likely: float,
@@ -660,7 +843,7 @@ def save_settings(
     return {**_state_summary(state), "confirmed": confirm, "reason": reason}
 
 
-@mcp.tool()
+@safe_tool()
 def set_performance_mode(mode: str = "auto") -> dict[str, Any]:
     """Set the scan and UI performance profile to auto, fast, balanced, or quality."""
     state = _call("set_performance_mode", {"mode": mode, "source": "mcp"})
@@ -674,74 +857,74 @@ def set_performance_mode(mode: str = "auto") -> dict[str, Any]:
     }
 
 
-@mcp.tool()
+@safe_tool()
 def export_review_report() -> dict[str, Any]:
     """Export a JSON audit report and CSV candidate table into the workspace exports folder."""
     result = _call("export_report")
     return {"export": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def export_workspace_inventory() -> dict[str, Any]:
     """Export a workspace inventory with source-folder counts, saved references, and review rows, without media files."""
     result = _call("export_workspace_inventory")
     return {"export": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def export_audit_log() -> dict[str, Any]:
     """Export the full local activity log to JSON and CSV for review or support."""
     result = _call("export_audit_log")
     return {"export": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def export_consent_receipt() -> dict[str, Any]:
     """Export a consent receipt with policy and counts, without photos, thumbnails, vectors, or model files."""
     result = _call("export_consent_receipt")
     return {"receipt": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def retention_policy_report() -> dict[str, Any]:
     """Report reviewed-match retention windows, generated data size, and cleanup recommendations."""
     return _call("retention_policy_report")
 
 
-@mcp.tool()
+@safe_tool()
 def export_safe_mode_audit() -> dict[str, Any]:
     """Export Safe Mode policy, model status, cache counts, and protected-media scan totals."""
     result = _call("export_safe_mode_audit")
     return {"audit": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def model_drift_report() -> dict[str, Any]:
     """Report references or review rows created with a different active face model."""
     return _call("model_drift_report")
 
 
-@mcp.tool()
+@safe_tool()
 def reference_gap_report() -> dict[str, Any]:
     """Report which saved people need clearer, side-angle, multi-age, or refreshed reference photos."""
     return _call("reference_gap_report")
 
 
-@mcp.tool()
+@safe_tool()
 def export_review_ledger() -> dict[str, Any]:
     """Export review decision metadata and audit events without media, thumbnails, vectors, or model files."""
     result = _call("export_review_ledger")
     return {"ledger": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def export_scan_history() -> dict[str, Any]:
     """Export scan run history to JSON and CSV for performance/support review."""
     result = _call("export_scan_history")
     return {"export": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def export_workspace_backup(include_generated: bool = False, confirm: bool = False) -> dict[str, Any]:
     """Export a ZIP backup of workspace metadata and audit logs; generated files require confirm=true."""
     if include_generated:
@@ -750,14 +933,14 @@ def export_workspace_backup(include_generated: bool = False, confirm: bool = Fal
     return {"backup": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def verify_workspace_backup(path: str = "") -> dict[str, Any]:
     """Verify a Vintrace workspace backup ZIP before sharing or archiving it."""
     result = _call("verify_workspace_backup", {"path": path})
     return {"verification": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def restore_workspace_backup(path: str = "", target: str = "", confirm: bool = False) -> dict[str, Any]:
     """Restore a verified Vintrace workspace backup ZIP into an empty target folder. Requires confirm=true."""
     _confirmed(confirm, "restore a workspace backup into an empty target folder")
@@ -765,7 +948,7 @@ def restore_workspace_backup(path: str = "", target: str = "", confirm: bool = F
     return {"restore": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def prune_workspace_backups(keep: int = 5, confirm: bool = False) -> dict[str, Any]:
     """Remove older workspace backup ZIPs, keeping the newest N backups. Requires confirm=true."""
     _confirmed(confirm, f"remove old workspace backups and keep the newest {keep}")
@@ -773,7 +956,7 @@ def prune_workspace_backups(keep: int = 5, confirm: bool = False) -> dict[str, A
     return {"cleanup": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def prune_scan_manifests(keep_runs: int = 20, confirm: bool = False) -> dict[str, Any]:
     """Remove older resumable scan manifest rows while keeping the newest runs. Requires confirm=true."""
     _confirmed(confirm, f"remove old scan manifests and keep the newest {keep_runs}")
@@ -781,14 +964,14 @@ def prune_scan_manifests(keep_runs: int = 20, confirm: bool = False) -> dict[str
     return {"cleanup": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def export_selected_candidates(candidate_ids: list[str]) -> dict[str, Any]:
     """Export selected candidate rows to JSON and CSV in the workspace exports folder."""
     result = _call("export_candidates", {"candidateIds": candidate_ids})
     return {"export": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def export_accepted_media_bundle(confirm: bool = False) -> dict[str, Any]:
     """Copy accepted media into a shareable folder with JSON/CSV manifests."""
     _confirmed(confirm, "export accepted media files")
@@ -796,49 +979,49 @@ def export_accepted_media_bundle(confirm: bool = False) -> dict[str, Any]:
     return {"bundle": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def runtime_self_test() -> dict[str, Any]:
     """Run local runtime diagnostics for workspace, decoders, acceleration, Safe Mode, and health."""
     return _call("runtime_self_test")
 
 
-@mcp.tool()
+@safe_tool()
 def runtime_benchmark() -> dict[str, Any]:
     """Run a local scale benchmark for vector search, state serialization, and SQLite manifest health."""
     return _call("runtime_benchmark")
 
 
-@mcp.tool()
+@safe_tool()
 def benchmark_history(limit: int = 8) -> dict[str, Any]:
     """Return recent runtime benchmark runs without running a new benchmark."""
     return {"benchmarks": _call("benchmark_history", {"limit": limit})}
 
 
-@mcp.tool()
+@safe_tool()
 def storage_io_benchmark(path: str = "", size_mb: int = 8) -> dict[str, Any]:
     """Benchmark metadata I/O in a folder without reading or training on any photos."""
     return _call("storage_io_benchmark", {"path": path, "sizeMb": size_mb})
 
 
-@mcp.tool()
+@safe_tool()
 def release_readiness() -> dict[str, Any]:
     """Return a local release checklist for models, Safe Mode, signing, updates, and crash reporting."""
     return _call("release_readiness")
 
 
-@mcp.tool()
+@safe_tool()
 def model_integrity() -> dict[str, Any]:
     """Verify model folder writability, downloaded archive checksums, Safe Mode model, and decoder readiness."""
     return _call("model_integrity")
 
 
-@mcp.tool()
+@safe_tool()
 def model_distribution_audit() -> dict[str, Any]:
     """Audit local/downloadable model sources, checksums, installed paths, and license review status."""
     return _call("model_distribution_audit")
 
 
-@mcp.tool()
+@safe_tool()
 def backfill_model_references(confirm: bool = False, limit: int = 0) -> dict[str, Any]:
     """Create active-model embeddings for saved person photos that were enrolled with another recognizer. Requires confirm=true."""
     _confirmed(confirm, "backfill saved references for the active face model")
@@ -846,32 +1029,32 @@ def backfill_model_references(confirm: bool = False, limit: int = 0) -> dict[str
     return {"backfill": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def export_support_bundle(include_paths: bool = False) -> dict[str, Any]:
     """Export a diagnostics-only support bundle without photos, videos, thumbnails, vectors, or model files."""
     result = _call("export_support_bundle", {"includePaths": include_paths})
     return {"bundle": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def installer_self_diagnostics() -> dict[str, Any]:
     """Run first-run diagnostics for installers: model downloader, decoders, Safe Mode, workspace, and packaged backend readiness."""
     return _call("installer_self_diagnostics")
 
 
-@mcp.tool()
+@safe_tool()
 def public_dataset_catalog() -> dict[str, Any]:
     """List supported public benchmark datasets and how Vintrace uses them safely."""
     return _call("public_dataset_catalog")
 
 
-@mcp.tool()
+@safe_tool()
 def inspect_public_dataset(dataset_id: str, folder: str, include_videos: bool = True) -> dict[str, Any]:
     """Inspect a local public-dataset folder laid out as identity subfolders."""
     return _call("inspect_public_dataset", {"datasetId": dataset_id, "folder": folder, "includeVideos": include_videos})
 
 
-@mcp.tool()
+@safe_tool()
 def run_public_dataset_benchmark(
     dataset_id: str,
     folder: str = "",
@@ -900,7 +1083,7 @@ def run_public_dataset_benchmark(
     return {"benchmark": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def compare_public_dataset_models(
     dataset_id: str,
     folder: str = "",
@@ -927,7 +1110,7 @@ def compare_public_dataset_models(
     return {"comparison": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def apply_model_recommendation(pack: str, backfill: bool = True, confirm: bool = False) -> dict[str, Any]:
     """Apply a model pack recommended by model comparison. Requires confirm=true because it changes settings and can backfill references."""
     _confirmed(confirm, "apply the recommended model pack and backfill saved references")
@@ -935,7 +1118,7 @@ def apply_model_recommendation(pack: str, backfill: bool = True, confirm: bool =
     return {"application": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def apply_review_rules(confirm: bool = False) -> dict[str, Any]:
     """Apply saved auto-triage review rules to pending candidates. Requires confirm=true because it changes review status."""
     _confirmed(confirm, "apply saved review rules to pending candidates")
@@ -943,26 +1126,26 @@ def apply_review_rules(confirm: bool = False) -> dict[str, Any]:
     return {"rules": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def calibration_summary() -> dict[str, Any]:
     """Return the local calibration label summary built from accepted/rejected review decisions."""
     return _call("calibration_summary")
 
 
-@mcp.tool()
+@safe_tool()
 def accuracy_evaluation() -> dict[str, Any]:
     """Evaluate precision/recall from accepted and rejected review decisions."""
     return _call("accuracy_evaluation")
 
 
-@mcp.tool()
+@safe_tool()
 def export_accuracy_labels() -> dict[str, Any]:
     """Export accepted/rejected review labels to JSON and CSV for accuracy benchmarking."""
     result = _call("export_accuracy_labels")
     return {"export": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def import_accuracy_labels(labels: list[dict[str, Any]], confirm: bool = False) -> dict[str, Any]:
     """Import local ground-truth label rows into the calibration/accuracy harness."""
     _confirmed(confirm, "import accuracy labels")
@@ -970,7 +1153,7 @@ def import_accuracy_labels(labels: list[dict[str, Any]], confirm: bool = False) 
     return {"imported": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def apply_calibration(confirm: bool = False) -> dict[str, Any]:
     """Apply local review feedback to matching thresholds."""
     _confirmed(confirm, "apply review feedback to matching thresholds")
@@ -978,13 +1161,13 @@ def apply_calibration(confirm: bool = False) -> dict[str, Any]:
     return {"calibration": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def privacy_report() -> dict[str, Any]:
     """Report local face data, generated previews, caches, and audit history in this workspace."""
     return _call("privacy_report")
 
 
-@mcp.tool()
+@safe_tool()
 def delete_face_data(confirm: bool = False, include_audit: bool = False) -> dict[str, Any]:
     """Delete saved faces, possible matches, scan history, generated previews, and private caches."""
     _confirmed(confirm, "delete face data from the workspace")
@@ -992,7 +1175,7 @@ def delete_face_data(confirm: bool = False, include_audit: bool = False) -> dict
     return {"deleted": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def optimize_workspace(confirm: bool = False) -> dict[str, Any]:
     """Remove regenerable preview cache, orphan extracted video frames, and compact the scale database."""
     _confirmed(confirm, "optimize generated workspace files")
@@ -1000,7 +1183,7 @@ def optimize_workspace(confirm: bool = False) -> dict[str, Any]:
     return {"optimized": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
-@mcp.tool()
+@safe_tool()
 def enforce_storage_budget(confirm: bool = False) -> dict[str, Any]:
     """Clean generated cache to try to bring the workspace under the configured storage limit."""
     _confirmed(confirm, "clean generated cache to enforce the storage limit")
@@ -1079,6 +1262,17 @@ def run_mcp_server(
     if workspace:
         _set_workspace_root(Path(workspace))
     if transport == "streamable-http":
+        # MCP-01: the HTTP transport exposes the full biometric tool surface, so
+        # require an explicit operator token before it can start (fail closed —
+        # no accidental open HTTP server). Combined with the path allow-list,
+        # out-of-band consent, output redaction, and lock checks, this bounds what
+        # the transport can do; per-request Bearer validation is the next step.
+        if not env_value("MCP_TOKEN"):
+            raise ValueError(
+                "Streamable HTTP MCP requires an auth token. Set VINTRACE_MCP_TOKEN before "
+                "starting the HTTP transport (clients must present it). Use stdio for the "
+                "unauthenticated local transport."
+            )
         local_hosts = {"127.0.0.1", "localhost", "::1", "[::1]"}
         if host not in local_hosts and not allow_remote_http:
             raise ValueError("Streamable HTTP MCP is localhost-only unless --allow-remote-http is set.")

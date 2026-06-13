@@ -138,6 +138,11 @@ async def smoke() -> None:
             "CROSSAGE_FORCE_FALLBACK": "1",
             "CROSSAGE_WORKSPACE": str(workspace),
             "CROSSAGE_REGISTRY_HOME": str(workspace.parent / "registry"),
+            # Security Phase 2: the MCP server now requires an operator token to
+            # grant consent (MCP-02) and confines path inputs to approved roots
+            # (MCP-03). The smoke test operates under the temp workspace's parent.
+            "VINTRACE_MCP_OPERATOR_TOKEN": "mcp-smoke-operator-token",
+            "VINTRACE_MCP_ALLOWED_ROOTS": str(workspace.parent),
         }
     )
     params = StdioServerParameters(
@@ -167,7 +172,9 @@ async def smoke() -> None:
             result = await session.call_tool("get_project_state", {})
             assert not result.isError
             assert result.structuredContent
-            assert result.structuredContent["workspace"] == str(workspace.resolve())
+            # MCP-04: tool output redacts the workspace/biometric path.
+            assert result.structuredContent["workspace"] == "[hidden]"
+            assert str(workspace.resolve()) not in json.dumps(result.structuredContent)
             assert result.structuredContent["workspaceMetadata"]["workspaceId"]
             assert result.structuredContent["safeMode"] is True
 
@@ -185,10 +192,18 @@ async def smoke() -> None:
             workspace_result = await session.call_tool("set_workspace", {"path": str(workspace)})
             assert not workspace_result.isError
             assert workspace_result.structuredContent["consentOnFile"] is False
+            # MCP-02: the agent cannot grant consent on its own authority — it
+            # needs the operator token. confirm alone is not enough.
             await expect_tool_error(session, "mark_consent", {"confirmed": True}, "confirm=True")
-            consent = await session.call_tool("mark_consent", {"confirmed": True, "operator": "MCP Smoke", "confirm": True})
+            await expect_tool_error(session, "mark_consent", {"confirmed": True, "confirm": True}, "operator approval token")
+            consent = await session.call_tool(
+                "mark_consent",
+                {"confirmed": True, "operator": "MCP Smoke", "confirm": True, "operator_token": "mcp-smoke-operator-token"},
+            )
             assert not consent.isError
             assert consent.structuredContent["consentOnFile"] is True
+            # MCP-03: scanning a path outside the approved roots is refused.
+            await expect_tool_error(session, "scan_folder", {"folder": "/"}, "approved MCP roots")
 
             private_probe = workspace.parent / "private-probe"
             private_probe.mkdir(parents=True, exist_ok=True)
@@ -260,7 +275,7 @@ async def smoke() -> None:
             purged = await session.call_tool("purge_old_candidates", {"days": 1, "confirm": True})
             assert not purged.isError
             assert purged.structuredContent["purged"] == 0
-            assert purged.structuredContent["state"]["workspace"] == str(workspace.resolve())
+            assert purged.structuredContent["state"]["workspace"] == "[hidden]"
 
             accuracy = await session.call_tool("accuracy_evaluation", {})
             assert not accuracy.isError

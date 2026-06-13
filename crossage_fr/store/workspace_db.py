@@ -9,7 +9,8 @@ import shutil
 import sqlite3
 from typing import Any, Iterable, Iterator
 
-from crossage_fr.workspace_registry import now_iso
+from crossage_fr.models import normalize_risk_flags
+from crossage_fr.workspace_registry import now_iso, restrict_file_mode
 
 
 SCHEMA_VERSION = 1
@@ -36,6 +37,11 @@ class WorkspaceDb:
                 raise
             self.snapshot_files("startup-corrupt")
             self.rebuild_empty()
+        # MISS-05: the SQLite DB holds biometric embeddings — keep it owner-only.
+        restrict_file_mode(self.path, 0o600)
+        for sidecar in (Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
+            if sidecar.exists():
+                restrict_file_mode(sidecar, 0o600)
 
     def _looks_corrupt(self, exc: sqlite3.DatabaseError) -> bool:
         message = str(exc).lower()
@@ -186,6 +192,9 @@ class WorkspaceDb:
                     model_name TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'pending',
                     note TEXT NOT NULL DEFAULT '',
+                    risk_flags TEXT NOT NULL DEFAULT '',
+                    close_runner_up INTEGER NOT NULL DEFAULT 0,
+                    single_reference_match INTEGER NOT NULL DEFAULT 0,
                     media_kind TEXT NOT NULL DEFAULT 'image',
                     media_source_path TEXT NOT NULL DEFAULT '',
                     media_path TEXT NOT NULL DEFAULT '',
@@ -218,6 +227,9 @@ class WorkspaceDb:
                 """
             )
             self._ensure_column(conn, "review_candidates", "folder_path", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "review_candidates", "risk_flags", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "review_candidates", "close_runner_up", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "review_candidates", "single_reference_match", "INTEGER NOT NULL DEFAULT 0")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_review_candidates_folder
@@ -228,6 +240,18 @@ class WorkspaceDb:
                 """
                 CREATE INDEX IF NOT EXISTS idx_review_candidates_status_folder
                     ON review_candidates(status, folder_path)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_review_candidates_close_runner
+                    ON review_candidates(close_runner_up, status, score DESC, candidate_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_review_candidates_single_reference
+                    ON review_candidates(single_reference_match, status, score DESC, candidate_id)
                 """
             )
             conn.execute(
@@ -259,6 +283,7 @@ class WorkspaceDb:
                 "pose_bucket": getattr(candidate, "pose_bucket", "unknown"),
                 "status": getattr(candidate, "status", "pending"),
                 "note": getattr(candidate, "note", ""),
+                "risk_flags": getattr(candidate, "risk_flags", []),
                 "media_kind": getattr(candidate, "media_kind", "image"),
                 "media_source_path": getattr(candidate, "media_source_path", ""),
                 "video_timestamp_ms": getattr(candidate, "video_timestamp_ms", None),
@@ -279,6 +304,11 @@ class WorkspaceDb:
         except (OSError, ValueError):
             folder_path = ""
         person_name = str(payload.get("person_name", ""))
+        risk_flags = normalize_risk_flags(payload.get("risk_flags"), str(payload.get("note", "")))
+        payload["risk_flags"] = risk_flags
+        risk_flags_text = " ".join(risk_flags)
+        close_runner_up = int(bool({"close-runner-up", "ambiguous-person-margin"} & set(risk_flags)))
+        single_reference_match = int(bool({"single-reference-match", "single-reference-close-runner-up", "single-reference-hard-pose"} & set(risk_flags)))
         return (
             str(payload.get("candidate_id", "")),
             source_path,
@@ -292,6 +322,9 @@ class WorkspaceDb:
             str(payload.get("model_name", "")),
             str(payload.get("status", "pending")),
             str(payload.get("note", "")),
+            risk_flags_text,
+            close_runner_up,
+            single_reference_match,
             str(payload.get("media_kind", "image") or "image"),
             media_source_path,
             media_path,
@@ -308,10 +341,10 @@ class WorkspaceDb:
         return """
             INSERT OR REPLACE INTO review_candidates(
                 candidate_id, source_path, person_name, person_key, best_ref_id, best_ref_path,
-                score, band, quality, model_name, status, note, media_kind, media_source_path,
+                score, band, quality, model_name, status, note, risk_flags, close_runner_up, single_reference_match, media_kind, media_source_path,
                 media_path, folder_path, video_timestamp_ms, video_frame_index, video_duration_ms, source_hash,
                 created_at, payload_json
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
     def _candidate_param_batches(self, candidates: Iterable[Any], batch_size: int = 1000) -> Iterator[list[tuple[Any, ...]]]:
@@ -431,20 +464,54 @@ class WorkspaceDb:
         counts["reviewed"] = counts["total"] - counts.get("pending", 0)
         return counts
 
-    def review_insights(self, confident_threshold: float, limit: int = 8, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    def review_insights(
+        self,
+        confident_threshold: float,
+        low_quality_threshold: float = 0.2,
+        limit: int = 8,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
         if conn is None:
             with self.connect() as local_conn:
-                return self.review_insights(confident_threshold, limit, local_conn)
+                return self.review_insights(confident_threshold, low_quality_threshold, limit, local_conn)
         stats = conn.execute(
             """
             SELECT
                 COUNT(*) AS pending,
                 SUM(CASE WHEN score >= ? THEN 1 ELSE 0 END) AS confident_pending,
-                SUM(CASE WHEN media_kind = 'video' THEN 1 ELSE 0 END) AS video_pending
+                SUM(CASE WHEN media_kind = 'video' THEN 1 ELSE 0 END) AS video_pending,
+                SUM(CASE WHEN close_runner_up = 1 OR LOWER(note) LIKE '%another saved person was close%' OR LOWER(note) LIKE '%close identity scores%' THEN 1 ELSE 0 END) AS close_runner_pending,
+                SUM(CASE WHEN single_reference_match = 1 OR LOWER(note) LIKE '%only one saved photo%' OR LOWER(note) LIKE '%only one hard-angle signal%' THEN 1 ELSE 0 END) AS single_reference_pending
             FROM review_candidates
             WHERE status = 'pending'
             """,
             (float(confident_threshold),),
+        ).fetchone()
+        lane_stats = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS all_count,
+                SUM(CASE WHEN score >= ? THEN 1 ELSE 0 END) AS high_count,
+                SUM(CASE WHEN quality < ? THEN 1 ELSE 0 END) AS low_quality_count,
+                SUM(CASE WHEN media_kind = 'video' THEN 1 ELSE 0 END) AS video_count,
+                SUM(CASE WHEN TRIM(note) != '' THEN 1 ELSE 0 END) AS notes_count,
+                SUM(CASE WHEN close_runner_up = 1 OR LOWER(note) LIKE '%another saved person was close%' OR LOWER(note) LIKE '%close identity scores%' THEN 1 ELSE 0 END) AS close_runner_count,
+                SUM(CASE WHEN single_reference_match = 1 OR LOWER(note) LIKE '%only one saved photo%' OR LOWER(note) LIKE '%only one hard-angle signal%' THEN 1 ELSE 0 END) AS single_reference_count
+            FROM review_candidates
+            """,
+            (float(confident_threshold), float(low_quality_threshold)),
+        ).fetchone()
+        group_count_row = conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM review_candidates
+            WHERE media_path IN (
+                SELECT media_path FROM review_candidates
+                WHERE TRIM(person_name) != '' AND person_name NOT LIKE 'Unmatched cluster%'
+                GROUP BY media_path
+                HAVING COUNT(DISTINCT person_name) >= 2
+            )
+            """
         ).fetchone()
         folder_rows = conn.execute(
             """
@@ -460,11 +527,26 @@ class WorkspaceDb:
         pending = int(stats["pending"] or 0) if stats else 0
         confident = int(stats["confident_pending"] or 0) if stats else 0
         video_pending = int(stats["video_pending"] or 0) if stats else 0
+        close_runner_pending = int(stats["close_runner_pending"] or 0) if stats else 0
+        single_reference_pending = int(stats["single_reference_pending"] or 0) if stats else 0
+        lane_counts = {
+            "all": int(lane_stats["all_count"] or 0) if lane_stats else 0,
+            "high": int(lane_stats["high_count"] or 0) if lane_stats else 0,
+            "lowQuality": int(lane_stats["low_quality_count"] or 0) if lane_stats else 0,
+            "groups": int(group_count_row["n"] or 0) if group_count_row else 0,
+            "video": int(lane_stats["video_count"] or 0) if lane_stats else 0,
+            "notes": int(lane_stats["notes_count"] or 0) if lane_stats else 0,
+            "closeRunner": int(lane_stats["close_runner_count"] or 0) if lane_stats else 0,
+            "singleReference": int(lane_stats["single_reference_count"] or 0) if lane_stats else 0,
+        }
         return {
             "pending": pending,
             "confidentPending": confident,
             "videoPending": video_pending,
             "imagePending": pending - video_pending,
+            "closeRunnerUpPending": close_runner_pending,
+            "singleReferencePending": single_reference_pending,
+            "laneCounts": lane_counts,
             "topFolders": [{"folder": str(row["folder"] or ""), "count": int(row["n"] or 0)} for row in folder_rows],
             "recommendedOrder": "strongest-first" if confident else "newest-first",
             "index": "sqlite",
@@ -579,6 +661,10 @@ class WorkspaceDb:
             where.append("media_kind = 'video'")
         elif lane == "notes":
             where.append("TRIM(note) != ''")
+        elif lane == "closeRunner":
+            where.append("(close_runner_up = 1 OR LOWER(note) LIKE '%another saved person was close%' OR LOWER(note) LIKE '%close identity scores%')")
+        elif lane == "singleReference":
+            where.append("(single_reference_match = 1 OR LOWER(note) LIKE '%only one saved photo%' OR LOWER(note) LIKE '%only one hard-angle signal%')")
         query_text = query.strip().lower()
         if query_text:
             like = f"%{query_text}%"
@@ -590,11 +676,12 @@ class WorkspaceDb:
                     OR LOWER(source_path) LIKE ?
                     OR LOWER(media_source_path) LIKE ?
                     OR LOWER(note) LIKE ?
+                    OR LOWER(risk_flags) LIKE ?
                     OR LOWER(source_hash) LIKE ?
                 )
                 """
             )
-            args.extend([like, like, like, like, like, like])
+            args.extend([like, like, like, like, like, like, like])
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         total_row = conn.execute(f"SELECT COUNT(*) AS n FROM review_candidates {where_sql}", args).fetchone()
         total = int(total_row["n"] if total_row else 0)
@@ -1218,6 +1305,22 @@ class WorkspaceDb:
             "dbBytesAfter": after + after_wal + after_shm,
             "dbBytesReclaimed": max(0, before + before_wal + before_shm - after - after_wal - after_shm),
         }
+
+    def snapshot_to(self, target: Path) -> None:
+        # data-persistence-3: write a transactionally-consistent single-file copy
+        # of the database via VACUUM INTO. Unlike byte-copying the live
+        # main+WAL+SHM, this is safe to take while another writer is active and
+        # produces a self-contained file that needs no -wal/-shm sidecars.
+        target = Path(target)
+        if target.exists():
+            target.unlink()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(self.path), timeout=30, isolation_level=None)
+        try:
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("VACUUM INTO ?", (str(target),))
+        finally:
+            conn.close()
 
     def integrity_report(self) -> dict[str, Any]:
         wal_path = Path(str(self.path) + "-wal")

@@ -136,8 +136,16 @@ def default_model_root() -> Path:
     return Path.home() / ".insightface"
 
 
+def _is_packaged() -> bool:
+    return bool(getattr(sys, "frozen", False) or os.environ.get("CROSSAGE_PACKAGED_BACKEND") == "1")
+
+
 def configured_model_root(config: RuntimeConfig) -> Path | None:
-    configured = (config.model_root or os.environ.get("CROSSAGE_MODEL_ROOT") or "").strip()
+    # USC-04: in packaged builds, ignore the CROSSAGE_MODEL_ROOT env override (a
+    # local-attacker model-substitution vector). Honor only the user's saved
+    # config.model_root; the env override stays available in dev.
+    env_root = "" if _is_packaged() else (os.environ.get("CROSSAGE_MODEL_ROOT") or "")
+    configured = (config.model_root or env_root or "").strip()
     if not configured:
         return None
     return Path(configured).expanduser()
@@ -150,9 +158,12 @@ def bundled_model_roots() -> list[Path]:
         [
             executable.parent / "models" / "insightface",
             executable.parent.parent / "models" / "insightface",
-            Path.cwd() / "models" / "insightface",
         ]
     )
+    if not _is_packaged():
+        # USC-04: cwd is a trusted model source only in dev — in a packaged build
+        # an attacker-controlled working directory must not be a model load path.
+        roots.append(Path.cwd() / "models" / "insightface")
     bundle_root = getattr(sys, "_MEIPASS", "")
     if bundle_root:
         roots.append(Path(bundle_root) / "models" / "insightface")

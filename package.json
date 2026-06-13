@@ -41,8 +41,10 @@
     "release:verify": "node desktop/scripts/verify-release-assets.cjs",
     "release:check": "node desktop/scripts/run-python.cjs tests/release_check.py",
     "test:model-downloader": "node desktop/scripts/run-python.cjs tests/model_downloader_failures.py",
+    "test:safety-model": "node desktop/scripts/run-python.cjs tests/safety_model_inference.py",
     "test:perf-budget": "node desktop/scripts/run-python.cjs tests/performance_budget.py",
     "test:localization": "node desktop/scripts/check-localization.cjs",
+    "test:command-contract": "node desktop/scripts/run-python.cjs tests/command_contract.py",
     "test:e2e:buttons": "cross-env VINTRACE_BUTTON_AUDIT=1 playwright test tests/e2e/button-regression.spec.ts",
     "test:e2e:i18n": "cross-env VINTRACE_I18N_LAYOUT=1 playwright test tests/e2e/localization-layout.spec.ts",
     "test:e2e:ipc": "cross-env VINTRACE_IPC_FUZZ=1 playwright test tests/e2e/ipc-security.spec.ts",
@@ -235,6 +237,10 @@
       "extendInfo": {
         "NSCameraUsageDescription": "Vintrace uses the camera to capture local review photos for face matching."
       },
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "desktop/assets/entitlements.mac.plist",
+      "entitlementsInherit": "desktop/assets/entitlements.mac.plist",
       "target": [
         "dmg",
         "zip"

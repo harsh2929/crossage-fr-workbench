@@ -192,8 +192,24 @@ def _load_raw_image(path: Path) -> Image.Image:
         raise ImageLoadError(f"RAW/DNG image support requires rawpy: {path}") from exc
     try:
         with rawpy.imread(str(path)) as raw:
+            # MD-01: rawpy/libraw decode bypasses PIL's decompression-bomb guard,
+            # so enforce the same pixel ceiling BEFORE allocating the full-res RGB
+            # buffer — a crafted RAW can declare huge sensor dimensions and OOM the
+            # backend during a scan.
+            sizes = raw.sizes
+            pixels = max(
+                int(getattr(sizes, "raw_width", 0)) * int(getattr(sizes, "raw_height", 0)),
+                int(getattr(sizes, "width", 0)) * int(getattr(sizes, "height", 0)),
+            )
+            limit = int(getattr(Image, "MAX_IMAGE_PIXELS", 0) or 0)
+            if limit and pixels > limit:
+                raise ImageLoadError(
+                    f"RAW/DNG image exceeds the maximum allowed pixels ({pixels} > {limit}): {path}"
+                )
             rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=False, output_bps=8)
         return Image.fromarray(rgb).convert("RGB")
+    except ImageLoadError:
+        raise
     except Exception as exc:
         raise ImageLoadError(f"Could not load RAW/DNG image {path}: {exc}") from exc
 

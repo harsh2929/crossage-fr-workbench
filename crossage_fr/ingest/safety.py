@@ -11,7 +11,8 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from crossage_fr.ingest.image_io import load_image
+from crossage_fr.ingest.image_io import load_image, sha256_file
+from crossage_fr.runtime_env import env_flag, env_value
 from crossage_fr.platform_detect import detect_platform, get_providers, split_provider_config
 
 
@@ -228,12 +229,13 @@ class _SafetyModelSpec:
     std: tuple[float, float, float]
     interpolation: str
     threshold_hint: str
+    expected_sha256: str = ""
 
 
 class _OnnxSafetyModel:
     def __init__(self, spec: _SafetyModelSpec):
         self.spec = spec
-        self.session = _session_for_model(str(spec.path))
+        self.session = _session_for_model(str(spec.path), _model_stat_token(spec.path))
         self.input_name = self.session.get_inputs()[0].name
 
     def assess(self, image: Image.Image, threshold: float, heuristic: SafetyAssessment) -> SafetyAssessment:
@@ -280,26 +282,97 @@ class _OnnxSafetyModel:
 
 
 def _safety_engine_mode() -> str:
-    configured = os.environ.get("CROSSAGE_SAFE_MODE_ENGINE", "").strip().lower()
+    # MS-1: honor both VINTRACE_* and legacy CROSSAGE_* names for these
+    # safety-critical toggles (previously only the legacy name was read, so the
+    # documented VINTRACE_SAFE_MODE_ENGINE / VINTRACE_FORCE_FALLBACK were ignored).
+    configured = (env_value("SAFE_MODE_ENGINE", default="") or "").strip().lower()
     if configured in {"heuristic", "model", "auto"}:
         return configured
-    if os.environ.get("CROSSAGE_FORCE_FALLBACK") == "1":
+    if env_flag("FORCE_FALLBACK"):
         return "heuristic"
     return "auto"
 
 
-@lru_cache(maxsize=1)
+def _model_stat_token(path: Path) -> tuple[int, int]:
+    # MS-7: identity token so the in-memory model/session caches invalidate when
+    # the model file on disk is replaced/repaired (the backend is a long-lived
+    # process, so a plain lru_cache would pin the first-seen file forever).
+    try:
+        stat = path.stat()
+        return (stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        return (-1, -1)
+
+
+# USC-03: pinned SHA-256 for models shipped WITH the app, keyed by file name. The
+# trust anchor lives here in code, not in the writable sidecar JSON a local
+# attacker could rewrite. A file whose name matches a pinned entry MUST match the
+# pinned hash regardless of what its sidecar claims.
+_PINNED_SAFETY_MODEL_HASHES = {
+    "adamcodd_vit_base_nsfw_int8.onnx": "d25aa73fe1eec78459e35ff911e2af98f652ee919b48d9c54316c86d5ff435fa",
+}
+
+
+def _verify_model_integrity(spec: _SafetyModelSpec) -> str | None:
+    # BRS-2/USC-03: verify the model file against a pinned (in-code) hash for known
+    # bundled models, else against the manifest sidecar. Returns an error message
+    # on mismatch (None when OK, or when no hash is available to verify against).
+    pinned = _PINNED_SAFETY_MODEL_HASHES.get(spec.path.name.lower())
+    expected = (pinned or spec.expected_sha256 or "").lower()
+    if not expected:
+        return None
+    try:
+        actual = sha256_file(spec.path).lower()
+    except OSError as exc:
+        return f"could not read {spec.path.name} to verify integrity ({exc})"
+    if actual != expected:
+        anchor = "pinned" if pinned else "manifest"
+        return (
+            f"{spec.path.name} failed its {anchor} integrity check "
+            f"(expected {expected[:12]}…, got {actual[:12]}…)"
+        )
+    return None
+
+
+# MS-7: keyed on (path, size, mtime) instead of a bare maxsize=1 cache.
+_SAFETY_MODEL_CACHE: dict[tuple[str, int, int], _OnnxSafetyModel] = {}
+
+
 def _load_safety_model() -> _OnnxSafetyModel | None:
     spec = _find_safety_model()
     if spec is None:
         if _safety_engine_mode() == "model":
             raise RuntimeError("CROSSAGE_SAFE_MODE_ENGINE=model, but no ONNX safety model was found.")
         return None
-    return _OnnxSafetyModel(spec)
+    integrity_error = _verify_model_integrity(spec)
+    if integrity_error:
+        # BRS-2: a tampered/corrupt model must not be used. In explicit `model`
+        # mode this is a hard error; otherwise fail CLOSED to the heuristic gate
+        # (assess_image_safety treats None as "use the heuristic"), so Safe Mode
+        # stays protective rather than trusting an unverified model.
+        if _safety_engine_mode() == "model":
+            raise RuntimeError(f"Safe Mode model integrity check failed: {integrity_error}")
+        return None
+    size, mtime = _model_stat_token(spec.path)
+    cache_key = (str(spec.path), size, mtime)
+    model = _SAFETY_MODEL_CACHE.get(cache_key)
+    if model is None:
+        if len(_SAFETY_MODEL_CACHE) >= 4:
+            _SAFETY_MODEL_CACHE.clear()
+        model = _OnnxSafetyModel(spec)
+        _SAFETY_MODEL_CACHE[cache_key] = model
+    return model
+
+
+def _is_packaged() -> bool:
+    return bool(getattr(sys, "frozen", False) or os.environ.get("CROSSAGE_PACKAGED_BACKEND") == "1")
 
 
 def _find_safety_model() -> _SafetyModelSpec | None:
-    configured = os.environ.get("CROSSAGE_SAFE_MODEL")
+    # USC-03: in packaged builds ignore the SAFE_MODEL env override so a local
+    # attacker can't point Safe Mode at a benign "always-SFW" model. The bundled,
+    # pinned-hash model is used instead. The override is honored only in dev.
+    configured = None if _is_packaged() else env_value("SAFE_MODEL")
     if configured:
         path = Path(configured).expanduser().resolve()
         if path.exists():
@@ -318,7 +391,7 @@ def _find_safety_model() -> _SafetyModelSpec | None:
 
 def _safety_model_dirs() -> list[Path]:
     dirs: list[Path] = []
-    configured = os.environ.get("CROSSAGE_SAFE_MODEL_DIR")
+    configured = None if _is_packaged() else env_value("SAFE_MODEL_DIR")  # USC-03
     if configured:
         dirs.append(Path(configured).expanduser())
     source_root = Path(__file__).resolve().parents[2]
@@ -373,6 +446,7 @@ def _spec_for_model(path: Path) -> _SafetyModelSpec:
         std=_triple(manifest.get("std"), (0.5, 0.5, 0.5)),
         interpolation=str(manifest.get("interpolation") or ("bicubic" if "marqo" in name else "bilinear")),
         threshold_hint=str(manifest.get("thresholdHint") or "Use app Safe Mode threshold profiles; calibrate on local labels."),
+        expected_sha256=str(manifest.get("sha256") or "").strip().lower(),
     )
 
 
@@ -425,7 +499,10 @@ def _triple(value: object, fallback: tuple[float, float, float]) -> tuple[float,
 
 
 @lru_cache(maxsize=4)
-def _session_for_model(model_path: str):
+def _session_for_model(model_path: str, cache_token: tuple[int, int] = (0, 0)):
+    # cache_token (size, mtime) participates in the cache key only so a replaced
+    # model file at the same path invalidates the cached session (MS-7).
+    del cache_token
     import onnxruntime as ort
 
     selected = get_providers(detect_platform())

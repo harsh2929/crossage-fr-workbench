@@ -15,6 +15,7 @@ from crossage_fr.config import RuntimeConfig
 from crossage_fr.ingest import load_image
 from crossage_fr.model_manager import model_pack_ready, model_roots_for_engine, resolved_model_pack_dir
 from crossage_fr.models import EmbeddingResult
+from crossage_fr.runtime_env import env_flag
 from crossage_fr.platform_detect import build_platform_report, get_providers, provider_label, split_provider_config
 
 
@@ -337,7 +338,8 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
 
 
 def create_embedding_engine(config: RuntimeConfig) -> EmbeddingEngine:
-    if os.environ.get("CROSSAGE_FORCE_FALLBACK") == "1":
+    # MS-1: honor both VINTRACE_FORCE_FALLBACK and legacy CROSSAGE_FORCE_FALLBACK.
+    if env_flag("FORCE_FALLBACK"):
         return FallbackEmbeddingEngine()
     if importlib.util.find_spec("insightface") is not None:
         candidates = [config.model_pack]

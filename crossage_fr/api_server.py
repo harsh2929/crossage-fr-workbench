@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from contextlib import redirect_stdout
 from copy import deepcopy
 from dataclasses import asdict
@@ -32,7 +33,7 @@ from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, image_decoder_report, 
 from crossage_fr.ingest.safety import safety_model_report
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, VideoLoadError, probe_video, sample_video_frames, video_decoder_report
 from crossage_fr.model_manager import MODEL_PACKAGES, download_model_pack, model_governance, model_pack_ready, model_root_for_config, model_roots_for_engine, model_status, set_model_root
-from crossage_fr.models import ReferenceFace, ReviewCandidate, new_id
+from crossage_fr.models import ReferenceFace, ReviewCandidate, new_id, normalize_risk_flags
 from crossage_fr.platform_detect import build_platform_report, memory_available_bytes, process_memory_bytes
 from crossage_fr.storage import inspect_storage_path, safe_resolve
 from crossage_fr.store import VectorStore
@@ -987,6 +988,42 @@ class DesktopApi:
             result.append(extension[:32])
         return result
 
+    def _decoder_allowed_roots(self) -> list[Path]:
+        # INJ-01: trusted directories a configured ffmpeg/ffprobe binary may live
+        # in — the managed/bundled decoder and well-known system bin dirs.
+        roots: list[Path] = []
+        try:
+            import imageio_ffmpeg
+
+            roots.append(Path(imageio_ffmpeg.get_ffmpeg_exe()).resolve().parent)
+        except Exception:
+            pass
+        bundle = getattr(sys, "_MEIPASS", "")
+        if bundle:
+            try:
+                roots.append(Path(bundle).resolve())
+            except (OSError, ValueError):
+                pass
+        try:
+            roots.append(Path(sys.executable).resolve().parent)
+        except (OSError, ValueError):
+            pass
+        for system_dir in ("/usr/bin", "/usr/local/bin", "/bin", "/opt/homebrew/bin", "/opt/local/bin"):
+            candidate = Path(system_dir)
+            if candidate.exists():
+                roots.append(candidate.resolve())
+        configured = os.environ.get("VINTRACE_FFMPEG_ALLOWED_DIRS") or os.environ.get("CROSSAGE_FFMPEG_ALLOWED_DIRS")
+        if configured:
+            for part in configured.split(os.pathsep):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    roots.append(Path(part).expanduser().resolve())
+                except (OSError, ValueError):
+                    pass
+        return roots
+
     def _optional_existing_file(self, value: Any, label: str) -> str:
         text = str(value or "").strip()
         if not text:
@@ -999,7 +1036,29 @@ class DesktopApi:
                 raise ValueError(f"{label} does not exist or is not a file.")
         except OSError as exc:
             raise ValueError(f"{label} cannot be read: {exc}") from exc
-        return str(path)
+        # INJ-01: a configured decoder path becomes argv[0] of a subprocess, so a
+        # renderer/config-tampering foothold could otherwise run any executable.
+        # Confine it (after resolving symlinks) to a trusted location.
+        try:
+            real = path.resolve()
+        except OSError as exc:
+            raise ValueError(f"{label} cannot be resolved: {exc}") from exc
+        allowed_roots = self._decoder_allowed_roots()
+
+        def _within(child: Path, parent: Path) -> bool:
+            try:
+                child.relative_to(parent)
+                return True
+            except ValueError:
+                return False
+
+        if not any(_within(real, root) for root in allowed_roots):
+            raise ValueError(
+                f"{label} must be a decoder binary in a trusted location (a bundled/managed "
+                "binary or a standard system bin directory). Set VINTRACE_FFMPEG_ALLOWED_DIRS "
+                "to permit another directory."
+            )
+        return str(real)
 
     def set_workspace(self, path: Path) -> dict[str, Any]:
         self.project = ProjectState(path.expanduser().resolve(), actor=self.actor)
@@ -2026,6 +2085,23 @@ class DesktopApi:
         result["ok"] = True
         return result
 
+    def recent_backend_errors(self, limit: int = 50) -> dict[str, Any]:
+        # TO-3: read the tail of the persisted (already path-redacted) error log
+        # so the support bundle ships recent backend failures for offline debug.
+        log_path = self.project.root / "logs" / "backend-errors.jsonl"
+        records: list[dict[str, Any]] = []
+        try:
+            if log_path.exists():
+                tail = deque(log_path.read_text(encoding="utf-8").splitlines(), maxlen=max(1, limit))
+                for line in tail:
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            pass
+        return {"count": len(records), "errors": records}
+
     def export_support_bundle(self, include_paths: bool = False) -> dict[str, Any]:
         export_root = self.project.root / "exports"
         export_root.mkdir(parents=True, exist_ok=True)
@@ -2057,6 +2133,7 @@ class DesktopApi:
             "video-decoder.json": video_decoder_report(),
             "scale-summary.json": self.project.scale_summary(),
             "audit-events.json": self.project.audit_events(limit=80, offset=0),
+            "backend-errors.json": self.recent_backend_errors(limit=50),
         }
         serializable = self._redact_paths(payloads, include_paths=include_paths)
         with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -2113,6 +2190,21 @@ class DesktopApi:
             "to",
         }
         path_key_suffixes = ("path", "paths", "root", "roots", "directory", "directories", "folder", "folders")
+        # PC-01: free-text identity fields (subject names, operator identity, and
+        # consent/case notes) carried by audit rows are NOT path-shaped, so the
+        # path redaction above misses them and they shipped verbatim in the
+        # "diagnostics only" bundle. Mask them when paths are excluded.
+        pii_keys = {
+            "person_name",
+            "personName",
+            "operator",
+            "note",
+            "label",
+            "oldName",
+            "newName",
+            "old_name",
+            "new_name",
+        }
         if isinstance(value, dict):
             redacted: dict[str, Any] = {}
             for key, item in value.items():
@@ -2125,6 +2217,8 @@ class DesktopApi:
                         redacted[key_text] = None
                     else:
                         redacted[key_text] = self._redacted_path(str(item))
+                elif key_text in pii_keys:
+                    redacted[key_text] = "[redacted]" if isinstance(item, str) and item else item
                 else:
                     redacted[key_text] = self._redact_paths(item, include_paths=False)
             return redacted
@@ -2152,7 +2246,9 @@ class DesktopApi:
             text = text.replace(prefix, "[hidden]")
         if text.startswith(("/", "~")) or re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith("\\\\"):
             return self._redacted_path(text)
-        return text
+        # PC-02: mask any remaining mid-line absolute paths (external-drive paths /
+        # sensitive filenames in error messages and tracebacks) to their basename.
+        return _mask_absolute_paths(text)
 
     def _redacted_path(self, value: str) -> str:
         if not value:
@@ -2519,12 +2615,13 @@ class DesktopApi:
                         selected_candidates += 1
                     continue
                 destination = materialize_selected(source, scan_root, folder_name, f"pos-{index:02d}")
+                media_kind = "video-frame" if dataset_id == "ytf" else "image"
                 ground_truth[str(destination)] = {
                     "identity": person_name,
                     "sourceIdentity": identity.identity,
                     "sourceDatasetPath": str(source),
                     "expectedMatch": True,
-                    "mediaKind": "image",
+                    "mediaKind": media_kind,
                 }
                 selected_candidates += 1
 
@@ -2554,12 +2651,13 @@ class DesktopApi:
                         selected_candidates += 1
                     continue
                 destination = materialize_selected(source, scan_root, folder_name, f"neg-{index:02d}")
+                media_kind = "video-frame" if dataset_id == "ytf" else "image"
                 ground_truth[str(destination)] = {
                     "identity": identity.identity,
                     "sourceIdentity": identity.identity,
                     "sourceDatasetPath": str(source),
                     "expectedMatch": False,
-                    "mediaKind": "image",
+                    "mediaKind": media_kind,
                     "validationBucket": "hard-negative:family-lookalike" if family_hard_negative else "",
                 }
                 selected_candidates += 1
@@ -3214,7 +3312,7 @@ class DesktopApi:
             return "age:cross-age" if age in {"young", "older", "adult", "unknown"} else f"age:{age}"
         if dataset_key in CROSS_POSE_DATASETS and expected_match:
             return "pose:profile" if pose == "profile" else f"pose:{pose}"
-        if dataset_key == "ytf" and media == "video":
+        if dataset_key == "ytf" and media in {"video", "video-frame"}:
             return "media:video"
         if dataset_key == "ijbc":
             if media == "video":
@@ -3305,7 +3403,7 @@ class DesktopApi:
             rows = [row for row in labels if str(row.get("poseBucket") or "unknown") == pose]
             if rows:
                 bucket_specs.append((f"pose:{pose}", f"{pose.replace('-', ' ').title()} pose", "pose", rows))
-        for media_kind in ("image", "video"):
+        for media_kind in ("image", "video", "video-frame"):
             rows = [row for row in labels if str(row.get("mediaKind") or "image") == media_kind]
             if rows:
                 bucket_specs.append((f"media:{media_kind}", f"{media_kind.title()} media", "media", rows))
@@ -3452,8 +3550,8 @@ class DesktopApi:
         if status not in {"all", "pending", "accepted", "rejected", "uncertain"}:
             raise ValueError("Candidate status filter must be all, pending, accepted, rejected, or uncertain.")
         lane = str(params.get("lane", "all")).strip()
-        if lane not in {"all", "high", "lowQuality", "groups", "video", "notes"}:
-            raise ValueError("Candidate lane must be all, high, lowQuality, groups, video, or notes.")
+        if lane not in {"all", "high", "lowQuality", "groups", "video", "notes", "closeRunner", "singleReference"}:
+            raise ValueError("Candidate lane must be all, high, lowQuality, groups, video, notes, closeRunner, or singleReference.")
         query = str(params.get("query", "")).strip().lower()
         sort = str(params.get("sort", "score")).strip()
         offset = max(0, int(params.get("offset", 0) or 0))
@@ -3526,6 +3624,11 @@ class DesktopApi:
                 return False
             if lane == "notes" and not candidate.note.strip():
                 return False
+            risk_flags = self._candidate_risk_flags(candidate)
+            if lane == "closeRunner" and not ({"close-runner-up", "ambiguous-person-margin"} & set(risk_flags)):
+                return False
+            if lane == "singleReference" and not ({"single-reference-match", "single-reference-close-runner-up", "single-reference-hard-pose"} & set(risk_flags)):
+                return False
             if query:
                 haystack = "\n".join(
                     [
@@ -3534,6 +3637,7 @@ class DesktopApi:
                         candidate.source_path,
                         candidate.media_source_path,
                         candidate.note,
+                        " ".join(risk_flags),
                         candidate.source_hash,
                     ]
                 ).lower()
@@ -3608,6 +3712,7 @@ class DesktopApi:
             "modelName": candidate.model_name,
             "status": candidate.status,
             "note": candidate.note,
+            "riskFlags": self._candidate_risk_flags(candidate),
             "mediaKind": candidate.media_kind,
             "mediaSourcePath": candidate.media_source_path,
             "videoTimestampMs": candidate.video_timestamp_ms,
@@ -3616,6 +3721,9 @@ class DesktopApi:
             "sourceHash": candidate.source_hash,
             "createdAt": candidate.created_at,
         }
+
+    def _candidate_risk_flags(self, candidate: Any) -> list[str]:
+        return normalize_risk_flags(getattr(candidate, "risk_flags", []), getattr(candidate, "note", ""))
 
     def state(self, preview_create_budget: int = 8, candidate_limit: int = 500) -> dict[str, Any]:
         candidate_limit = max(250, min(10_000, int(candidate_limit)))
@@ -3685,7 +3793,10 @@ class DesktopApi:
         if index_ready:
             try:
                 video_moments = self.project.db.video_moments(limit=80)
-                review_insights = self.project.db.review_insights(self.project.config.thresholds.confident)
+                review_insights = self.project.db.review_insights(
+                    self.project.config.thresholds.confident,
+                    max(0.2, float(self.project.config.thresholds.quality_min)),
+                )
             except Exception:
                 video_moments = self.project.video_moments(limit=80)
                 review_insights = self.project.review_insights()
@@ -3950,14 +4061,86 @@ def structured_error(exc: Exception, command: str = "") -> dict[str, Any]:
     }
 
 
+# PC-02: an absolute path embedded anywhere in a string (POSIX/Windows/UNC),
+# masked down to its basename. Used to scrub error messages/tracebacks that may
+# carry external-drive paths and sensitive filenames the prefix-replace misses.
+_ABS_PATH_RE = re.compile(r"(?:[A-Za-z]:\\|\\\\|/)[^\s'\"<>|,;:]+")
+
+
+def _mask_absolute_paths(text: str) -> str:
+    def _repl(match: "re.Match[str]") -> str:
+        token = match.group(0)
+        base = token.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        return f"[hidden]/{base}" if base else "[hidden]"
+
+    return _ABS_PATH_RE.sub(_repl, text)
+
+
+def _redact_text(text: str, root: Path) -> str:
+    # TO-3/PC-02: strip absolute paths so the persisted/exported error log is
+    # privacy-safe — first the workspace root -> <workspace> and home -> ~, then
+    # generically mask any remaining absolute path (e.g. external/removable-drive
+    # paths and sensitive filenames in tracebacks) down to its basename.
+    if not text:
+        return text
+    redacted = text.replace(str(root), "<workspace>")
+    try:
+        home = str(Path.home())
+        if home and home != str(root):
+            redacted = redacted.replace(home, "~")
+    except Exception:
+        pass
+    return _mask_absolute_paths(redacted)
+
+
+def record_backend_error(root: Path, exc: Exception, command: str = "") -> None:
+    # TO-3: always persist a redacted traceback. Shipped builds drop tracebacks
+    # from the client error unless CROSSAGE_DEBUG is set, leaving offline field
+    # failures undebuggable; this writes a rotating <workspace>/logs/
+    # backend-errors.jsonl that the support bundle ships. Best-effort: the error
+    # path must never raise.
+    try:
+        log_dir = Path(root) / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "backend-errors.jsonl"
+        try:
+            if log_path.exists() and log_path.stat().st_size > 1_000_000:
+                log_path.replace(log_dir / "backend-errors.1.jsonl")
+        except OSError:
+            pass
+        record = {
+            "at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "command": command,
+            "type": exc.__class__.__name__,
+            "message": _redact_text(str(exc), Path(root)),
+            "traceback": _redact_text(traceback.format_exc(limit=12), Path(root)),
+        }
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
+
+
 def serve(workspace: Path | None = None) -> None:
     root = resolve_workspace(workspace or os.environ.get("VINTRACE_WORKSPACE") or os.environ.get("CROSSAGE_WORKSPACE"))
     json_stream = sys.stdout
     def startup(payload: dict[str, Any]) -> None:
         emit({"event": "startup", "payload": payload}, stream=json_stream)
 
-    api = DesktopApi(root, actor="desktop", startup=startup)
-    emit({"ready": True, "state": api.state(preview_create_budget=2, candidate_limit=250)}, stream=json_stream)
+    # ER-01: route startup-construction failures (e.g. the workspace on a
+    # detached/read-only drive, or a permission-denied path) through the
+    # structured-error machinery so the renderer gets an actionable code
+    # (E-FS-NOT-FOUND / E-BACKEND-PERMISSION / E-FS-IO) instead of a raw
+    # traceback that the Electron side can only report as a generic
+    # E-BACKEND-EXIT.
+    try:
+        api = DesktopApi(root, actor="desktop", startup=startup)
+        ready_state = api.state(preview_create_budget=2, candidate_limit=250)
+    except Exception as exc:
+        record_backend_error(root, exc, "startup")
+        emit({"ready": False, "error": structured_error(exc, "startup")}, stream=json_stream)
+        return
+    emit({"ready": True, "state": ready_state}, stream=json_stream)
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -3984,6 +4167,7 @@ def serve(workspace: Path | None = None) -> None:
         except Exception as exc:
             request_id = request.get("id") if isinstance(request, dict) else None
             command = str(request.get("command", "")) if isinstance(request, dict) else ""
+            record_backend_error(root, exc, command)
             emit(
                 {
                     "id": request_id,

@@ -45,7 +45,12 @@ jobs:
       - name: Install Python production dependencies
         run: |
           python -m pip install --upgrade pip wheel setuptools
-          python -m pip install -r requirements-production.txt
+          # BRS-1: install from the fully pinned + hashed lock so builds are
+          # reproducible and tamper-evident. The human-edited requirements*.txt
+          # remain the source spec; regenerate with:
+          #   uv pip compile requirements-production.txt --generate-hashes \
+          #     --universal --python-version 3.11 -o requirements-production.lock.txt
+          python -m pip install --require-hashes -r requirements-production.lock.txt
 
       - name: Install Playwright dependencies
         run: npx playwright install --with-deps chromium
@@ -55,6 +60,9 @@ jobs:
 
       - name: Localization contract
         run: npm run test:localization
+
+      - name: Command contract
+        run: python tests/command_contract.py
 
       - name: Pipeline smoke
         run: python tests/pipeline_smoke.py
@@ -76,6 +84,14 @@ jobs:
 
       - name: Model downloader failure modes
         run: npm run test:model-downloader
+
+      # TO-1/MS-6: the rest of the suite runs CROSSAGE_FORCE_FALLBACK=1, so the
+      # real ONNX Safe-Mode gate had no behavioural coverage. This step runs the
+      # bundled model for real (no download needed — it ships in the repo).
+      - name: Real Safe-Mode model inference (no fallback)
+        env:
+          CROSSAGE_FORCE_FALLBACK: ""
+        run: python tests/safety_model_inference.py
 
       - name: MCP smoke
         run: python tests/mcp_smoke.py

@@ -5,6 +5,8 @@ from pathlib import Path
 import json
 import math
 
+from crossage_fr.workspace_registry import atomic_write_text
+
 MAX_CLUSTER_MIN_SIZE = 20
 MIN_FACE_DETECTOR_SIZE = 320
 MAX_FACE_DETECTOR_SIZE = 1024
@@ -195,7 +197,5 @@ def load_config(path: Path) -> RuntimeConfig:
 
 
 def save_config(config: RuntimeConfig, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(asdict(config), indent=2), encoding="utf-8")
-    temp.replace(path)
+    # ER-02/MA-6: shared atomic-write-with-fsync; keep the indented format.
+    atomic_write_text(path, json.dumps(asdict(config), indent=2))

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 import json
 import os
 import uuid
@@ -37,11 +37,59 @@ def legacy_workspace_marker_path(workspace: Path) -> Path:
     return workspace.expanduser().resolve() / ".crossage-workspace.json"
 
 
-def write_json_atomic(path: Path, value: object) -> None:
+def _fsync_dir(directory: Path) -> None:
+    # ER-02: fsync the containing directory so the rename itself is durable.
+    # Opening a directory O_RDONLY is not supported on Windows — skip there.
+    try:
+        fd = os.open(str(directory), os.O_RDONLY)
+    except (OSError, ValueError):
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def restrict_file_mode(path: Path, mode: int = 0o600) -> None:
+    # MISS-05: biometric-adjacent files/dirs should not be world-readable. Best
+    # effort: os.chmod only toggles the read-only bit on Windows, which is fine.
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
+def atomic_write(path: Path, writer: Callable[[Any], None], *, fsync: bool = True) -> None:
+    """Atomically write a file: stream content via ``writer(handle)`` to a temp
+    file, flush+fsync it, then ``os.replace`` into place and fsync the directory.
+
+    ER-02/MA-6: the single implementation of the atomic-write-with-durability
+    mechanism. Callers keep their own serialization (compact / indented /
+    streamed) and just supply the writer, so the durability fix lives in one
+    place instead of being duplicated (and missing fsync) across modules.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    restrict_file_mode(path.parent, 0o700)  # MISS-05
     temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, indent=2, sort_keys=True), encoding="utf-8")
-    temp.replace(path)
+    with temp.open("w", encoding="utf-8") as handle:
+        writer(handle)
+        handle.flush()
+        if fsync:
+            os.fsync(handle.fileno())
+    restrict_file_mode(temp, 0o600)  # MISS-05: set before it becomes the live file
+    os.replace(temp, path)
+    if fsync:
+        _fsync_dir(path.parent)
+
+
+def atomic_write_text(path: Path, text: str, *, fsync: bool = True) -> None:
+    atomic_write(path, lambda handle: handle.write(text), fsync=fsync)
+
+
+def write_json_atomic(path: Path, value: object) -> None:
+    atomic_write_text(path, json.dumps(value, indent=2, sort_keys=True))
 
 
 def read_json_object(path: Path) -> dict[str, Any]:
@@ -92,7 +140,13 @@ def read_active_workspace() -> Path | None:
     payload = read_json_object(active_workspace_path())
     workspace = payload.get("workspace")
     if isinstance(workspace, str) and workspace.strip():
-        return Path(workspace).expanduser().resolve()
+        candidate = Path(workspace).expanduser().resolve()
+        # MISS-02: the active-workspace pointer is a plain JSON file a second
+        # process could plant to redirect processing at an arbitrary directory.
+        # Only trust it if the target actually carries a Vintrace workspace marker
+        # (a registered workspace always writes one); otherwise fall back.
+        if workspace_marker_path(candidate).exists() or legacy_workspace_marker_path(candidate).exists():
+            return candidate
     return None
 
 

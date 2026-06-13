@@ -25,6 +25,49 @@ New release builds also include `SHA256SUMS.txt`, `vintrace-sbom.json`, and `vin
 
 Unsigned DMGs are intended for private testing. Public macOS distribution should use an Apple Developer ID signed and notarized build.
 
+## Data at rest (PC-03)
+
+Vintrace stores everything locally and never uploads your data, but the app
+folder is **not encrypted on disk**: face embeddings, generated previews, and the
+SQLite workspace are written unencrypted (with owner-only file permissions where
+the OS supports it). **Workspace Lock** gates access *inside the running app* — it
+is an access control, not on-disk encryption — so another local user or process
+could read the raw files. Keep the app folder on an OS-encrypted volume
+(FileVault / BitLocker) and use **Delete face data** before handing the folder to
+someone else. The in-app privacy report surfaces this under `dataAtRest`.
+
+## Enabling code signing & notarization (BRS-3)
+
+The build is pre-wired for signing — it stays unsigned only because no
+certificates are configured. The macOS `hardenedRuntime` + entitlements
+(`desktop/assets/entitlements.mac.plist`, which permits the bundled native
+backend libraries to load under the hardened runtime) are already in
+`package.json`, and are inert while signing is skipped. To produce a signed,
+notarized public build:
+
+**macOS** — provide a Developer ID Application certificate and notarization
+credentials as CI secrets, then drop the `CSC_IDENTITY_AUTO_DISCOVERY=false`
+override in `.github/workflows/macos-release.yml`:
+
+- `CSC_LINK` — base64 of the `.p12` Developer ID Application certificate
+- `CSC_KEY_PASSWORD` — its password
+- `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` — for notarization
+
+Add `"notarize": true` under `build.mac` (electron-builder notarizes with the
+Apple env vars above), or run notarization in an `afterSign` hook.
+
+**Windows** — provide an Authenticode certificate and drop the
+`CSC_IDENTITY_AUTO_DISCOVERY=false` override in
+`.github/workflows/windows-release.yml`:
+
+- `CSC_LINK` — base64 of the `.pfx`/`.p12` code-signing certificate
+- `CSC_KEY_PASSWORD` — its password
+
+Until certificates exist, keep the explicit "private testing only" framing above
+and verify downloads via the published `SHA256SUMS.txt`. The auto-updater's
+integrity still rests on `latest.yml` hashes over TLS, so do not advertise
+auto-update to untrusted users before signing is enabled.
+
 ## First Run
 
 Vintrace does not require Python or npm on the tester's machine. The packaged app includes the desktop UI and backend sidecar.

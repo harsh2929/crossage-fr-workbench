@@ -4,6 +4,7 @@
   "source": "https://huggingface.co/AdamCodd/vit-base-nsfw-detector",
   "license": "Apache-2.0",
   "modelFile": "adamcodd_vit_base_nsfw_int8.onnx",
+  "sha256": "d25aa73fe1eec78459e35ff911e2af98f652ee919b48d9c54316c86d5ff435fa",
   "inputSize": 384,
   "labels": ["sfw", "nsfw"],
   "nsfwLabel": "nsfw",

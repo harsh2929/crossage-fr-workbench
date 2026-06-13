@@ -320,6 +320,15 @@ const BACKEND_COMMAND_TIMEOUT_MS = Math.max(
   60_000,
   Number.parseInt(process.env.CROSSAGE_BACKEND_COMMAND_TIMEOUT_MS || "3600000", 10) || 3_600_000
 );
+// CP-03: the single global 1h timeout mis-scaled both fast reads (which queue
+// behind a serial scan) and large scans. Instead of a per-wall-clock cap, use a
+// progress-aware watchdog that only fails when the backend has produced NO
+// output for this long (genuinely hung), bounded by the absolute cap above. A
+// scan that keeps emitting progress events keeps every queued command alive.
+const BACKEND_STALL_TIMEOUT_MS = Math.max(
+  30_000,
+  Number.parseInt(process.env.VINTRACE_BACKEND_STALL_TIMEOUT_MS || "120000", 10) || 120_000
+);
 
 function normalizeAppLanguage(value) {
   const code = String(value || "").trim().toLowerCase().split(/[-_]/)[0];
@@ -747,6 +756,9 @@ function lockWorkspaceNow() {
     throw createAppError("E-WORKSPACE-LOCK-OFF", "Enable Workspace Lock before locking this app folder.");
   }
   workspaceLockUnlocked = false;
+  // EIPC-02: drop media/shell path trust so a locked workspace can't keep
+  // serving private images or revealing files the renderer already referenced.
+  clearPathTrust();
   appendDiagnosticEvent({ type: "workspace_locked", level: "info", workspace: activeWorkspacePath() });
   return getWorkspaceLockStatus();
 }
@@ -1355,6 +1367,15 @@ function grantQueryMediaPath(filePath) {
   }
 }
 
+// EIPC-02: forget every previously-granted media/shell path. Called when the
+// workspace is locked (so a locked workspace stops serving private files) and
+// when switching workspaces (so prior-case access doesn't leak into the next).
+// The new workspace's paths are re-granted as its state loads.
+function clearPathTrust() {
+  userGrantedPaths.clear();
+  queryTrustedMediaPaths.clear();
+}
+
 function isUserGrantedPath(filePath) {
   const target = path.resolve(String(filePath || ""));
   for (const granted of userGrantedPaths) {
@@ -1456,8 +1477,43 @@ function publishUpdateState(patch = {}) {
   return updateState;
 }
 
+// USC-02: a custom update feed can otherwise be redirected by any local actor
+// who sets VINTRACE_UPDATE_URL, and (because releases are unsigned) electron-
+// updater's only integrity check is the feed's own latest.yml hash. Require
+// https:// and, in packaged builds, an operator-allowlisted host
+// (VINTRACE_UPDATE_HOSTS) before honoring the override; reject anything else and
+// fall back to the default GitHub provider.
+function resolveUpdateFeedUrl() {
+  const raw = String(process.env.VINTRACE_UPDATE_URL || process.env.CROSSAGE_UPDATE_URL || "").trim();
+  if (!raw) {
+    return "";
+  }
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    appendDiagnosticEvent({ type: "update_feed_rejected", level: "warn", reason: "invalid-url" });
+    return "";
+  }
+  if (parsed.protocol !== "https:") {
+    appendDiagnosticEvent({ type: "update_feed_rejected", level: "warn", reason: "non-https" });
+    return "";
+  }
+  if (app.isPackaged) {
+    const allowedHosts = String(process.env.VINTRACE_UPDATE_HOSTS || "")
+      .split(",")
+      .map((host) => host.trim().toLowerCase())
+      .filter(Boolean);
+    if (!allowedHosts.includes(parsed.host.toLowerCase())) {
+      appendDiagnosticEvent({ type: "update_feed_rejected", level: "warn", reason: "host-not-allowlisted", host: parsed.host });
+      return "";
+    }
+  }
+  return raw;
+}
+
 function updateProviderLabel() {
-  if (process.env.VINTRACE_UPDATE_URL || process.env.CROSSAGE_UPDATE_URL) {
+  if (resolveUpdateFeedUrl()) {
     return "generic";
   }
   if (app.isPackaged) {
@@ -1494,7 +1550,7 @@ function configureAutoUpdater() {
   autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.allowDowngrade = false;
 
-  const feedUrl = String(process.env.VINTRACE_UPDATE_URL || process.env.CROSSAGE_UPDATE_URL || "").trim();
+  const feedUrl = resolveUpdateFeedUrl();
   const allowDevChecks = process.env.CROSSAGE_ENABLE_UPDATER === "1";
   if (feedUrl) {
     autoUpdater.setFeedURL({ provider: "generic", url: feedUrl });
@@ -1702,9 +1758,6 @@ function notifyForCommand(command, result) {
 }
 
 function findPythonExecutable() {
-  if (process.env.CROSSAGE_PYTHON) {
-    return process.env.CROSSAGE_PYTHON;
-  }
   const root = appRoot();
   const backendName = process.platform === "win32" ? "crossage-backend.exe" : "crossage-backend";
   const packagedCandidates = [
@@ -1712,10 +1765,18 @@ function findPythonExecutable() {
     path.join(process.resourcesPath, "backend", backendName)
   ];
   if (app.isPackaged) {
+    // USC-01/USC-05: in packaged builds, run ONLY the bundled frozen backend that
+    // ships under resourcesPath. CROSSAGE_PYTHON and any system interpreter are
+    // deliberately ignored, so a local attacker who sets that env var cannot make
+    // the app launch an arbitrary executable, and the app never silently falls
+    // back to an unpinned system Python. If the bundle is missing, return the
+    // expected path so spawn fails with a clear, handled error.
     const packagedBackend = packagedCandidates.find((candidate) => fs.existsSync(candidate));
-    if (packagedBackend) {
-      return packagedBackend;
-    }
+    return packagedBackend || packagedCandidates[0];
+  }
+  // Development only (unpackaged): honor an explicit interpreter override.
+  if (process.env.VINTRACE_PYTHON || process.env.CROSSAGE_PYTHON) {
+    return process.env.VINTRACE_PYTHON || process.env.CROSSAGE_PYTHON;
   }
   const venvPython = process.platform === "win32"
     ? path.join(root, ".venv", "Scripts", "python.exe")
@@ -2009,7 +2070,9 @@ function registerMediaProtocol() {
   protocol.handle(MEDIA_PROTOCOL_SCHEME, async (request) => {
     const url = new URL(request.url);
     const target = decodeMediaPath(url.pathname.replace(/^\/+/, "") || url.hostname);
-    if (!target || !fs.existsSync(target) || !isTrustedMediaPath(target)) {
+    // EIPC-02: a locked workspace must not serve private media even for a URL
+    // the renderer already holds.
+    if (!target || !fs.existsSync(target) || !isTrustedMediaPath(target) || isWorkspaceLocked()) {
       return new Response("Not found", { status: 404 });
     }
     return net.fetch(pathToFileURL(target).toString());
@@ -2697,6 +2760,10 @@ class PythonBackend {
     this.nextId = 1;
     this.child = null;
     this.stderrTail = "";
+    // CP-03: timestamp of the last byte received from the backend (stdout or
+    // stderr). The command watchdog treats "recently produced output" as proof
+    // the backend is alive, even while a long scan blocks the request loop.
+    this.lastActivityAt = Date.now();
   }
 
   start() {
@@ -2715,6 +2782,14 @@ class PythonBackend {
       VINTRACE_WORKSPACE: process.env.VINTRACE_WORKSPACE || process.env.CROSSAGE_WORKSPACE || path.join(app.getPath("userData"), "workspace"),
       CROSSAGE_WORKSPACE: process.env.CROSSAGE_WORKSPACE || process.env.VINTRACE_WORKSPACE || path.join(app.getPath("userData"), "workspace")
     };
+    // MISS-01: scrub dynamic-loader injection variables before spawning the
+    // backend so a local attacker who sets DYLD_*/LD_* can't load a malicious
+    // library into the (hardened-runtime, camera-capable) backend process.
+    for (const key of Object.keys(env)) {
+      if (key.startsWith("DYLD_") || key.startsWith("LD_")) {
+        delete env[key];
+      }
+    }
     this.child = spawn(executable, args, {
       cwd: root,
       env,
@@ -2734,6 +2809,7 @@ class PythonBackend {
         reject(error);
       }, 180000);
       lines.on("line", (line) => {
+        this.lastActivityAt = Date.now();
         let message;
         try {
           message = JSON.parse(line);
@@ -2744,6 +2820,26 @@ class PythonBackend {
           clearTimeout(timer);
           this.readyState = decorateState(message.state);
           resolve(this.readyState);
+          return;
+        }
+        if (message.ready === false) {
+          // ER-01: the backend reported a structured startup failure (e.g. the
+          // workspace lives on a detached/read-only drive). Reject with the
+          // actionable code/message instead of letting start() time out and
+          // surface only a generic E-BACKEND-EXIT.
+          clearTimeout(timer);
+          this.readyPromise = null;
+          this.readyState = null;
+          const backendError = message.error || {};
+          const startupError = createAppError(
+            backendError.code || "E-BACKEND-START",
+            backendError.message || "The local engine could not start."
+          );
+          startupError.backend = backendError;
+          if (this.child === child && !child.killed) {
+            child.kill();
+          }
+          reject(startupError);
           return;
         }
         if (message.event === "startup") {
@@ -2822,6 +2918,7 @@ class PythonBackend {
         });
       });
       child.stderr.on("data", (chunk) => {
+        this.lastActivityAt = Date.now();
         const text = chunk.toString();
         this.stderrTail = `${this.stderrTail}${text}`.slice(-MAX_BACKEND_STDERR_TAIL_BYTES);
         console.error(`[backend] ${text}`);
@@ -2838,15 +2935,30 @@ class PythonBackend {
     const id = this.nextId++;
     const payload = JSON.stringify({ id, command, params }) + "\n";
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const startedAt = Date.now();
+      // CP-03: progress-aware watchdog. Only time out when the backend has been
+      // silent for BACKEND_STALL_TIMEOUT_MS (truly hung) — not merely because a
+      // fast read is queued behind a long, actively-progressing scan — while
+      // still enforcing the absolute BACKEND_COMMAND_TIMEOUT_MS ceiling.
+      const fireWatchdog = () => {
         if (!this.pending.has(id)) {
+          return;
+        }
+        const now = Date.now();
+        const silentFor = now - this.lastActivityAt;
+        if (silentFor < BACKEND_STALL_TIMEOUT_MS && now - startedAt < BACKEND_COMMAND_TIMEOUT_MS) {
+          const entry = this.pending.get(id);
+          if (entry) {
+            entry.timer = setTimeout(fireWatchdog, Math.max(1_000, BACKEND_STALL_TIMEOUT_MS - silentFor));
+          }
           return;
         }
         this.pending.delete(id);
         this.handleCommandTimeout(command);
         const error = createAppError("E-BACKEND-TIMEOUT", `Backend command timed out: ${command}.`);
         reject(error);
-      }, BACKEND_COMMAND_TIMEOUT_MS);
+      };
+      const timer = setTimeout(fireWatchdog, BACKEND_STALL_TIMEOUT_MS);
       this.pending.set(id, { resolve, reject, command, timer });
       this.child.stdin.write(payload, "utf8", (error) => {
         if (error) {
@@ -3085,6 +3197,12 @@ ipcMain.handle("backend:invoke", async (event, payload) => {
       throw createAppError("E-WORKSPACE-LOCKED", "Unlock this app folder before making changes or reading private review data.");
     }
   }
+  if (request.command === "set_workspace") {
+    // EIPC-02: forget the previous workspace's media/shell trust before the new
+    // workspace's state is granted (decorateState re-grants inside invoke), so
+    // prior-case access can't leak across a switch.
+    clearPathTrust();
+  }
   grantPathsFromBackendRequest(request.command, request.params);
   try {
     const result = await backend.invoke(request.command, request.params);
@@ -3256,7 +3374,8 @@ ipcMain.handle("shell:reveal-path", async (event, payload = {}) => {
   assertTrustedSender(event);
   assertPlainObject(payload, "Reveal payload");
   const target = path.resolve(String(payload.path || ""));
-  if (isTrustedShellPath(target) && fs.existsSync(target)) {
+  // EIPC-02: don't reveal files while the workspace is locked.
+  if (isTrustedShellPath(target) && fs.existsSync(target) && !isWorkspaceLocked()) {
     shell.showItemInFolder(target);
     auditDesktopAction({ action: "shell_reveal", path: target });
     return true;
@@ -3268,7 +3387,8 @@ ipcMain.handle("shell:open-path", async (event, payload = {}) => {
   assertTrustedSender(event);
   assertPlainObject(payload, "Open payload");
   const target = path.resolve(String(payload.path || ""));
-  if (!isTrustedShellPath(target) || !fs.existsSync(target)) {
+  // EIPC-02: don't open files while the workspace is locked.
+  if (!isTrustedShellPath(target) || !fs.existsSync(target) || isWorkspaceLocked()) {
     return { ok: false, error: "Path does not exist." };
   }
   const error = await shell.openPath(target);
@@ -3314,6 +3434,10 @@ ipcMain.handle("dialog:choose-folder", async (event) => {
 ipcMain.handle("camera:save-frame", async (event, payload = {}) => {
   assertTrustedSender(event);
   assertPlainObject(payload, "Camera frame payload");
+  // MISS-03: don't write captured face media into a locked workspace.
+  if (isWorkspaceLocked()) {
+    throw createAppError("E-WORKSPACE-LOCKED", "Unlock this app folder before capturing photos.");
+  }
   await backend.start();
   const workspace = backend.readyState?.workspace || path.join(app.getPath("userData"), "workspace");
   const folder = path.join(workspace, "camera-captures", timestampSlug());
