@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 import argparse
 import csv
+import gc
 import hashlib
 import heapq
 import importlib.util
@@ -57,6 +58,21 @@ except ValueError:
     ANALYZE_TIME_BUDGET_MS = 15_000
 
 
+def memory_pressure_plan(pressure: str) -> dict[str, Any]:
+    """CP-05: map a memory-pressure level to the work the scan/monitor should shed.
+
+    Pure (no I/O) so it is unit-testable in isolation. ``batchScale`` is a hint
+    in (0, 1] for the embedding/cluster batch size; the optional flags tell the
+    pipeline to skip regenerable work (previews) and force a GC under pressure.
+    """
+    level = str(pressure or "normal").lower()
+    if level == "critical":
+        return {"collectGarbage": True, "reducePreviews": True, "batchScale": 0.25}
+    if level == "high":
+        return {"collectGarbage": True, "reducePreviews": True, "batchScale": 0.5}
+    if level == "elevated":
+        return {"collectGarbage": False, "reducePreviews": False, "batchScale": 0.75}
+    return {"collectGarbage": False, "reducePreviews": False, "batchScale": 1.0}
 
 
 class DesktopApi(PublicDatasetBenchmarkMixin):
@@ -1909,12 +1925,21 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         elif total and process_ratio > 0.7:
             pressure = "high"
             message = "The app is using a large share of system memory; preview work is reduced."
+        # CP-05: act on pressure, not just report it. Under high/critical memory
+        # the monitor (which is polled during scans, see _with_resource_status)
+        # reclaims memory directly — gc.collect() can never change correctness, so
+        # this is safe to do here without touching the scan loop. The plan also
+        # tells the renderer/scan to shed optional work (previews, batch size).
+        plan = memory_pressure_plan(pressure)
+        if plan["collectGarbage"] and (force or not self._last_resource_status or self._last_resource_status.get("memoryPressure") != pressure):
+            gc.collect()
         status = {
             "memoryPressure": pressure,
             "memoryMessage": message,
             "memoryAvailableBytes": available,
             "memoryTotalBytes": total,
             "processMemoryBytes": process_bytes,
+            "memoryPlan": plan,
         }
         self._last_resource_status_at = now
         self._last_resource_status = status

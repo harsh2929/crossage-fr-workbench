@@ -323,7 +323,12 @@ def assert_static_app_contracts() -> None:
     assert "frame-src 'none'" in html
 
     desktop_main = (root / "desktop" / "main.cjs").read_text(encoding="utf-8")
-    assert "function safeRealpath" in desktop_main
+    # EIPC-01: safeRealpath was extracted to desktop/main/util.cjs; main.cjs now
+    # imports and uses it for path-trust checks.
+    assert 'require("./main/util.cjs")' in desktop_main
+    assert "safeRealpath" in desktop_main
+    util_cjs = (root / "desktop" / "main" / "util.cjs").read_text(encoding="utf-8")
+    assert "function safeRealpath" in util_cjs
     assert "previewsReal" in desktop_main
     assert "!fs.existsSync(target) || !isTrustedMediaPath(target)" in desktop_main
 

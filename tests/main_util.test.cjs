@@ -55,10 +55,41 @@ function testSafeRealpath() {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+function testBackendRestartDelay() {
+  // EIPC-05: happy path (no failures) must be 0 delay; then capped-exponential.
+  assert.strictEqual(util.backendRestartDelayMs(0), 0);
+  assert.strictEqual(util.backendRestartDelayMs(1, 500, 30000), 500);
+  assert.strictEqual(util.backendRestartDelayMs(2, 500, 30000), 1000);
+  assert.strictEqual(util.backendRestartDelayMs(3, 500, 30000), 2000);
+  assert.strictEqual(util.backendRestartDelayMs(100, 500, 30000), 30000); // capped
+  assert.strictEqual(util.backendRestartDelayMs(-5), 0); // never negative
+  assert.strictEqual(util.backendRestartDelayMs("nan"), 0);
+}
+
+function testCanonicalPathKey() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vintrace-canon-"));
+  // case-fold on -> equal keys regardless of case
+  const a = util.canonicalPathKey(path.join(dir, "Photos/Img.JPG"), { caseFold: true });
+  const b = util.canonicalPathKey(path.join(dir, "photos/img.jpg"), { caseFold: true });
+  assert.strictEqual(a, b);
+  // case-sensitive -> different keys
+  const c = util.canonicalPathKey(path.join(dir, "Photos/Img.JPG"), { caseFold: false });
+  const d = util.canonicalPathKey(path.join(dir, "photos/img.jpg"), { caseFold: false });
+  assert.notStrictEqual(c, d);
+  // normalizes .. segments
+  assert.strictEqual(
+    util.canonicalPathKey("/a/b/../c", { caseFold: false }),
+    path.normalize(path.resolve("/a/b/../c")),
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 testJsonAtomicRoundTrip();
 testMediaPathCodec();
 testEscapeHtml();
 testIsSubpath();
 testTimestampSlug();
 testSafeRealpath();
+testBackendRestartDelay();
+testCanonicalPathKey();
 console.log("main util ok");

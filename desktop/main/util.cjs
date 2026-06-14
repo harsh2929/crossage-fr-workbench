@@ -64,6 +64,28 @@ function safeRealpath(filePath) {
   }
 }
 
+// EIPC-05: capped-exponential backoff for backend respawns. With 0 prior
+// consecutive failures the delay is 0 (the happy path is unchanged); each
+// further failure doubles the wait up to `capMs`, so a crashing backend can't
+// be hammered into a tight respawn loop.
+function backendRestartDelayMs(consecutiveFailures, baseMs = 500, capMs = 30000) {
+  const failures = Math.max(0, Math.floor(Number(consecutiveFailures) || 0));
+  if (failures <= 0) {
+    return 0;
+  }
+  const delay = baseMs * 2 ** (failures - 1);
+  return Math.min(capMs, delay);
+}
+
+// MS-5: case-fold + canonicalize a path so trust comparisons are correct on
+// case-insensitive filesystems (default macOS / Windows). Returns a comparable
+// key; falls back to a normalized lowercase string if realpath fails.
+function canonicalPathKey(filePath, { caseFold = process.platform === "darwin" || process.platform === "win32" } = {}) {
+  const resolved = safeRealpath(filePath) || path.resolve(String(filePath || ""));
+  const normalized = path.normalize(resolved);
+  return caseFold ? normalized.toLowerCase() : normalized;
+}
+
 module.exports = {
   writeJsonAtomic,
   readJsonObject,
@@ -73,4 +95,6 @@ module.exports = {
   escapeHtml,
   isSubpath,
   safeRealpath,
+  backendRestartDelayMs,
+  canonicalPathKey,
 };

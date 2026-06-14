@@ -16,6 +16,8 @@ const {
   escapeHtml,
   isSubpath,
   safeRealpath,
+  backendRestartDelayMs,
+  canonicalPathKey,
 } = require("./main/util.cjs");
 
 let autoUpdater = null;
@@ -1317,7 +1319,9 @@ function decodeImageDataUrl(value) {
 
 function grantUserPath(filePath) {
   if (typeof filePath === "string" && filePath.trim()) {
-    userGrantedPaths.add(path.resolve(filePath));
+    // MS-5: store a case-folded canonical key on case-insensitive filesystems
+    // so a differently-cased reference to the SAME granted file still matches.
+    userGrantedPaths.add(canonicalPathKey(filePath));
   }
 }
 
@@ -1342,7 +1346,9 @@ function clearPathTrust() {
 }
 
 function isUserGrantedPath(filePath) {
-  const target = path.resolve(String(filePath || ""));
+  // MS-5: compare with the same case-folded canonical key used at grant time, so
+  // path trust is correct on case-insensitive filesystems (macOS/Windows).
+  const target = canonicalPathKey(filePath);
   for (const granted of userGrantedPaths) {
     if (isSubpath(granted, target) || target === granted) {
       return true;
@@ -2720,12 +2726,27 @@ class PythonBackend {
     // stderr). The command watchdog treats "recently produced output" as proof
     // the backend is alive, even while a long scan blocks the request loop.
     this.lastActivityAt = Date.now();
+    // EIPC-05: consecutive failed/abnormal exits, for crash-loop backoff. Reset
+    // to 0 once the backend reports ready.
+    this.consecutiveFailures = 0;
   }
 
   start() {
     if (this.readyPromise && this.child && !this.child.killed) {
       return this.readyPromise;
     }
+    // EIPC-05: defer the respawn by a capped-exponential backoff after repeated
+    // crashes. backendRestartDelayMs(0) === 0, so the first start / healthy
+    // restarts are unchanged; only a crash-loop is throttled.
+    const backoffMs = backendRestartDelayMs(this.consecutiveFailures);
+    if (backoffMs > 0) {
+      this.readyPromise = new Promise((resolve) => setTimeout(resolve, backoffMs)).then(() => this._spawn());
+      return this.readyPromise;
+    }
+    return this._spawn();
+  }
+
+  _spawn() {
     this.readyPromise = null;
     const root = appRoot();
     const executable = findPythonExecutable();
@@ -2775,6 +2796,7 @@ class PythonBackend {
         if (message.ready) {
           clearTimeout(timer);
           this.readyState = decorateState(message.state);
+          this.consecutiveFailures = 0; // EIPC-05: healthy start clears the backoff.
           resolve(this.readyState);
           return;
         }
@@ -2854,6 +2876,10 @@ class PythonBackend {
       });
       child.on("exit", (code) => {
         clearTimeout(timer);
+        // EIPC-05: count abnormal exits toward the crash-loop backoff.
+        if (code !== 0) {
+          this.consecutiveFailures += 1;
+        }
         const error = createAppError("E-BACKEND-EXIT", `Python backend exited with code ${code}.`, { exitCode: code });
         for (const pending of this.pending.values()) {
           clearTimeout(pending.timer);
