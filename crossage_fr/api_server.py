@@ -263,646 +263,867 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             ),
         }
 
+    # MA-4: required-parameter schema validated once at the dispatch boundary.
+    # Seeded from the commands whose handlers directly index params[...] (an
+    # absent key currently raises an opaque KeyError); this turns that into a
+    # clear, uniform error. Per-command typed/range specs extend this dict.
+    _COMMAND_REQUIRED_PARAMS = {
+        "set_workspace": ("path",),
+        "set_status": ("candidateId", "status"),
+        "bulk_set_status": ("status",),
+        "set_candidate_note": ("candidateId",),
+        "block_false_match": ("candidateId",),
+        "reassign_candidate_person": ("candidateId", "personName"),
+        "delete_reference": ("refId",),
+        "delete_person": ("personName",),
+        "rename_person": ("oldName", "newName"),
+    }
+
     def handle(self, command: str, params: dict[str, Any], progress: Any | None = None) -> Any:
         if not isinstance(params, dict):
             raise ValueError("Command parameters must be an object.")
-        if command == "ping":
-            return {"pong": True, "version": __version__}
-        if command == "get_state":
-            return self.state(
-                preview_create_budget=int(params.get("previewBudget", 8) or 0),
-                candidate_limit=int(params.get("candidateLimit", 500) or 500),
-            )
-        if command == "model_status":
-            return model_status(self.project.config, self.engine_name)
-        if command == "model_switch_dry_run":
-            return self._model_switch_dry_run(str(params.get("targetPack", params.get("pack", self.project.config.model_pack))))
-        if command == "set_performance_mode":
-            mode = str(params.get("mode", "auto")).strip().lower()
-            if mode not in PERFORMANCE_MODES:
-                raise ValueError("Performance mode must be auto, fast, balanced, or quality.")
-            previous_effective = self._effective_performance_mode()
-            self.project.config.performance_mode = mode
-            self.project._append_audit({"action": "set_performance_mode", "mode": mode, "source": str(params.get("source", "desktop"))})
-            self.project.save()
-            if self._effective_performance_mode() != previous_effective:
-                self._reset_engine()
-            return self.state()
-        if command == "set_model_root":
-            root_value = str(params.get("root", "")).strip()
-            if not root_value:
-                raise ValueError("Choose a model download folder first.")
-            root = set_model_root(self.project.config, Path(root_value))
-            self.project._append_audit({"action": "set_model_root", "root": str(root), "source": str(params.get("source", "desktop"))})
-            self.project.save()
+        # MA-2: O(1) registry dispatch replaces the former 96-branch if-chain.
+        handler = self._COMMAND_HANDLERS.get(command)
+        if handler is None:
+            raise ValueError(f"Unknown command: {command}")
+        # MA-4: validate required params once, at the boundary.
+        required = self._COMMAND_REQUIRED_PARAMS.get(command)
+        if required:
+            missing = [key for key in required if key not in params]
+            if missing:
+                raise ValueError(f"{command} requires parameter(s): {', '.join(missing)}.")
+        return getattr(self, handler)(params, progress)
+
+    _COMMAND_HANDLERS = {
+        "ping": "_cmd_ping",
+        "get_state": "_cmd_get_state",
+        "model_status": "_cmd_model_status",
+        "model_switch_dry_run": "_cmd_model_switch_dry_run",
+        "set_performance_mode": "_cmd_set_performance_mode",
+        "set_model_root": "_cmd_set_model_root",
+        "download_model": "_cmd_download_model",
+        "set_workspace": "_cmd_set_workspace",
+        "set_consent": "_cmd_set_consent",
+        "enroll": "_cmd_enroll",
+        "enroll_age_groups": "_cmd_enroll_age_groups",
+        "scan": "_cmd_scan",
+        "scan_paths": "_cmd_scan_paths",
+        "analyze_folder": "_cmd_analyze_folder",
+        "cancel_scan": "_cmd_cancel_scan",
+        "pause_scan": "_cmd_pause_scan",
+        "resume_scan": "_cmd_resume_scan",
+        "scan_job_status": "_cmd_scan_job_status",
+        "set_status": "_cmd_set_status",
+        "bulk_set_status": "_cmd_bulk_set_status",
+        "set_candidate_note": "_cmd_set_candidate_note",
+        "block_false_match": "_cmd_block_false_match",
+        "reassign_candidate_person": "_cmd_reassign_candidate_person",
+        "duplicate_people": "_cmd_duplicate_people",
+        "apply_review_rules": "_cmd_apply_review_rules",
+        "query_candidates": "_cmd_query_candidates",
+        "clear_queue": "_cmd_clear_queue",
+        "purge_candidates": "_cmd_purge_candidates",
+        "purge_duplicate_candidates": "_cmd_purge_duplicate_candidates",
+        "prepare_previews": "_cmd_prepare_previews",
+        "delete_reference": "_cmd_delete_reference",
+        "delete_person": "_cmd_delete_person",
+        "rename_person": "_cmd_rename_person",
+        "clear_references": "_cmd_clear_references",
+        "purge_old_candidates": "_cmd_purge_old_candidates",
+        "repair_workspace": "_cmd_repair_workspace",
+        "database_integrity": "_cmd_database_integrity",
+        "repair_database_integrity": "_cmd_repair_database_integrity",
+        "relink_workspace_paths": "_cmd_relink_workspace_paths",
+        "export_report": "_cmd_export_report",
+        "export_workspace_inventory": "_cmd_export_workspace_inventory",
+        "export_audit_log": "_cmd_export_audit_log",
+        "export_consent_receipt": "_cmd_export_consent_receipt",
+        "retention_policy_report": "_cmd_retention_policy_report",
+        "export_safe_mode_audit": "_cmd_export_safe_mode_audit",
+        "model_drift_report": "_cmd_model_drift_report",
+        "reference_gap_report": "_cmd_reference_gap_report",
+        "export_review_ledger": "_cmd_export_review_ledger",
+        "export_scan_history": "_cmd_export_scan_history",
+        "export_workspace_backup": "_cmd_export_workspace_backup",
+        "verify_workspace_backup": "_cmd_verify_workspace_backup",
+        "restore_workspace_backup": "_cmd_restore_workspace_backup",
+        "prune_workspace_backups": "_cmd_prune_workspace_backups",
+        "prune_scan_manifests": "_cmd_prune_scan_manifests",
+        "export_candidates": "_cmd_export_candidates",
+        "preview_candidate_media_action": "_cmd_preview_candidate_media_action",
+        "manage_candidate_media": "_cmd_manage_candidate_media",
+        "media_action_history": "_cmd_media_action_history",
+        "restore_media_action": "_cmd_restore_media_action",
+        "retry_media_action": "_cmd_retry_media_action",
+        "undo_media_action": "_cmd_undo_media_action",
+        "media_trash_report": "_cmd_media_trash_report",
+        "cleanup_media_trash": "_cmd_cleanup_media_trash",
+        "export_media_bundle": "_cmd_export_media_bundle",
+        "workspace_health": "_cmd_workspace_health",
+        "runtime_self_test": "_cmd_runtime_self_test",
+        "runtime_benchmark": "_cmd_runtime_benchmark",
+        "benchmark_history": "_cmd_benchmark_history",
+        "storage_io_benchmark": "_cmd_storage_io_benchmark",
+        "release_readiness": "_cmd_release_readiness",
+        "model_integrity": "_cmd_model_integrity",
+        "model_distribution_audit": "_cmd_model_distribution_audit",
+        "backfill_model_references": "_cmd_backfill_model_references",
+        "export_support_bundle": "_cmd_export_support_bundle",
+        "installer_self_diagnostics": "_cmd_installer_self_diagnostics",
+        "public_dataset_catalog": "_cmd_public_dataset_catalog",
+        "inspect_public_dataset": "_cmd_inspect_public_dataset",
+        "run_public_dataset_benchmark": "_cmd_run_public_dataset_benchmark",
+        "compare_public_dataset_models": "_cmd_compare_public_dataset_models",
+        "apply_model_recommendation": "_cmd_apply_model_recommendation",
+        "calibration_summary": "_cmd_calibration_summary",
+        "accuracy_evaluation": "_cmd_accuracy_evaluation",
+        "generate_accuracy_validation_pack": "_cmd_generate_accuracy_validation_pack",
+        "run_accuracy_validation_pack": "_cmd_run_accuracy_validation_pack",
+        "accuracy_validation_history": "_cmd_accuracy_validation_history",
+        "apply_calibration": "_cmd_apply_calibration",
+        "export_accuracy_labels": "_cmd_export_accuracy_labels",
+        "import_accuracy_labels": "_cmd_import_accuracy_labels",
+        "privacy_report": "_cmd_privacy_report",
+        "delete_face_data": "_cmd_delete_face_data",
+        "optimize_workspace": "_cmd_optimize_workspace",
+        "enforce_storage_budget": "_cmd_enforce_storage_budget",
+        "add_calibration_label": "_cmd_add_calibration_label",
+        "audit_events": "_cmd_audit_events",
+        "record_audit": "_cmd_record_audit",
+        "save_settings": "_cmd_save_settings",
+    }
+
+    def _cmd_ping(self, params, progress=None):
+        return {"pong": True, "version": __version__}
+
+    def _cmd_get_state(self, params, progress=None):
+        return self.state(
+            preview_create_budget=int(params.get("previewBudget", 8) or 0),
+            candidate_limit=int(params.get("candidateLimit", 500) or 500),
+        )
+
+    def _cmd_model_status(self, params, progress=None):
+        return model_status(self.project.config, self.engine_name)
+
+    def _cmd_model_switch_dry_run(self, params, progress=None):
+        return self._model_switch_dry_run(str(params.get("targetPack", params.get("pack", self.project.config.model_pack))))
+
+    def _cmd_set_performance_mode(self, params, progress=None):
+        mode = str(params.get("mode", "auto")).strip().lower()
+        if mode not in PERFORMANCE_MODES:
+            raise ValueError("Performance mode must be auto, fast, balanced, or quality.")
+        previous_effective = self._effective_performance_mode()
+        self.project.config.performance_mode = mode
+        self.project._append_audit({"action": "set_performance_mode", "mode": mode, "source": str(params.get("source", "desktop"))})
+        self.project.save()
+        if self._effective_performance_mode() != previous_effective:
             self._reset_engine()
-            return self.state()
-        if command == "download_model":
-            pack = str(params.get("pack", self.project.config.model_pack or "antelopev2"))
-            root_param = str(params.get("root", "")).strip()
-            root = set_model_root(self.project.config, Path(root_param)) if root_param else set_model_root(self.project.config, model_root_for_config(self.project.config, prefer_ready=False))
-            result = download_model_pack(
-                pack,
-                root,
-                on_progress=(lambda payload: progress(payload, "model_download")) if progress else None,
-                force=bool(params.get("force", False)),
-            )
-            self.project.config.model_pack = pack
-            self.project.config.model_root = str(root)
-            self.project._append_audit(
-                {
-                    "action": "download_model",
-                    "pack": pack,
-                    "root": str(root),
-                    "sha256": result.get("sha256"),
-                    "bytes": result.get("bytes"),
-                    "source": str(params.get("source", "desktop")),
-                }
-            )
-            self.project.save()
-            self._reset_engine()
-            return {"value": result, "state": self.state()}
-        if command == "set_workspace":
-            return self.set_workspace(Path(str(params["path"])))
-        if command == "set_consent":
-            self.consent_on_file = bool(params.get("value"))
-            self.project.set_consent(
-                self.consent_on_file,
-                source=str(params.get("source", self.actor)),
-                operator=str(params.get("operator", "")),
-                note=str(params.get("note", "")),
-                scope=str(params.get("scope", self.project.root)),
-            )
-            return self.state()
-        if command == "enroll":
-            self._require_consent()
-            engine = self._engine_instance()
-            added, errors = self.project.enroll_folder(
-                str(params.get("personName", "")),
-                str(params.get("ageBucket", "unknown")),
-                Path(str(params.get("folder", ""))).expanduser(),
-                engine,
-            )
-            return {"added": added, "errors": errors, "state": self.state()}
-        if command == "enroll_age_groups":
-            self._require_consent()
-            groups_param = params.get("groups", [])
-            if not isinstance(groups_param, list):
-                raise ValueError("Age-group enrollment expects a list of folders.")
-            engine = self._engine_instance()
-            added, errors, groups = self.project.enroll_age_groups(
-                str(params.get("personName", "")),
-                groups_param,
-                engine,
-            )
-            return {"added": added, "errors": errors, "value": {"groups": groups}, "state": self.state()}
-        if command == "scan":
-            self._require_consent()
-            if not self.project.references:
-                raise ValueError("Enroll at least one reference before scanning.")
-            source = str(params.get("source", "manual"))
-            existing_candidate_ids = set(self.project.candidates)
-            engine = self._engine_instance()
-            self._require_scan_model_compatibility(engine, params)
-            added, errors, metrics = self.project.scan_folder(
-                Path(str(params.get("folder", ""))).expanduser(),
-                engine,
-                on_progress=lambda payload: self._progress(progress, {**payload, "source": source}),
-                source=source,
-                resume=bool(params.get("resume", True)),
-                total=int(params.get("total", 0) or 0) or None,
-            )
-            verification = self._maybe_verify_new_candidates(existing_candidate_ids, metrics, progress, source)
-            metrics.update({
-                "twoPassVerified": int(verification.get("verified", 0)),
-                "twoPassChanged": int(verification.get("changed", 0)),
-                "twoPassDeferred": int(verification.get("deferred", 0)),
-            })
-            return {"added": added, "errors": errors, "metrics": metrics, "state": self.state()}
-        if command == "scan_paths":
-            self._require_consent()
-            if not self.project.references:
-                raise ValueError("Enroll at least one reference before scanning.")
-            paths_param = params.get("paths", [])
-            if not isinstance(paths_param, list):
-                raise ValueError("scan_paths expects a list of image or video paths.")
-            source = str(params.get("source", "manual"))
-            paths = [
-                Path(str(item)).expanduser()
-                for item in paths_param
-                if Path(str(item)).suffix.lower() in IMAGE_EXTENSIONS or Path(str(item)).suffix.lower() in VIDEO_EXTENSIONS
-            ]
-            existing_candidate_ids = set(self.project.candidates)
-            engine = self._engine_instance()
-            self._require_scan_model_compatibility(engine, params)
-            added, errors, metrics = self.project.scan_paths(
-                paths,
-                engine,
-                on_progress=lambda payload: self._progress(progress, {**payload, "source": source}),
-                source=source,
-                label=f"{len(paths)} selected file(s)",
-                resume=bool(params.get("resume", False)),
-            )
-            verification = self._maybe_verify_new_candidates(existing_candidate_ids, metrics, progress, source)
-            metrics.update({
-                "twoPassVerified": int(verification.get("verified", 0)),
-                "twoPassChanged": int(verification.get("changed", 0)),
-                "twoPassDeferred": int(verification.get("deferred", 0)),
-            })
-            return {"added": added, "errors": errors, "metrics": metrics, "state": self.state()}
-        if command == "analyze_folder":
-            return self.analyze_folder(
-                Path(str(params.get("folder", ""))).expanduser(),
-                max_entries=int(params.get("maxEntries", ANALYZE_ENTRY_BUDGET) or ANALYZE_ENTRY_BUDGET),
-                time_budget_ms=int(params.get("timeBudgetMs", ANALYZE_TIME_BUDGET_MS) or ANALYZE_TIME_BUDGET_MS),
-            )
-        if command == "cancel_scan":
-            return self.project.request_scan_cancel(source=str(params.get("source", self.actor)))
-        if command == "pause_scan":
-            return self.project.request_scan_pause(source=str(params.get("source", self.actor)))
-        if command == "resume_scan":
-            return self.project.request_scan_resume(source=str(params.get("source", self.actor)))
-        if command == "scan_job_status":
-            return self.project.scan_job_status()
-        if command == "set_status":
-            self.project.set_candidate_status(str(params["candidateId"]), str(params["status"]))
-            return self.state()
-        if command == "bulk_set_status":
-            candidate_ids = params.get("candidateIds", [])
-            if not isinstance(candidate_ids, list):
-                raise ValueError("candidateIds must be a list.")
-            count = self.project.bulk_set_candidate_status([str(candidate_id) for candidate_id in candidate_ids], str(params["status"]))
-            return {"updated": count, "state": self.state()}
-        if command == "set_candidate_note":
-            self.project.set_candidate_note(str(params["candidateId"]), str(params.get("note", "")))
-            return self.state()
-        if command == "block_false_match":
-            result = self.project.block_false_match(str(params["candidateId"]), str(params.get("note", "")))
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "reassign_candidate_person":
-            result = self.project.reassign_candidate_person(
-                str(params["candidateId"]),
-                str(params["personName"]),
-                clear_reference=bool(params.get("clearReference", True)),
-            )
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "duplicate_people":
-            return self.project.duplicate_people(
-                threshold=float(params.get("threshold", 0.82)),
-                limit=int(params.get("limit", 20)),
-            )
-        if command == "apply_review_rules":
-            result = self.project.apply_review_rules()
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "query_candidates":
-            return self.query_candidates(params)
-        if command == "clear_queue":
-            self.project.clear_candidates()
-            return self.state()
-        if command == "purge_candidates":
-            statuses = params.get("statuses", ["accepted", "rejected", "uncertain"])
-            if not isinstance(statuses, list):
-                raise ValueError("statuses must be a list.")
-            count = self.project.purge_candidates([str(status) for status in statuses])
-            return {"purged": count, "state": self.state()}
-        if command == "purge_duplicate_candidates":
-            count = self.project.purge_duplicate_candidates()
-            return {"purged": count, "state": self.state(), "value": self.project.workspace_health()}
-        if command == "prepare_previews":
-            prepared = self.project.prepare_previews(int(params.get("limit", 32)))
-            return {"prepared": prepared, "state": self.state(preview_create_budget=0)}
-        if command == "delete_reference":
-            self.project.delete_reference(str(params["refId"]))
-            return self.state()
-        if command == "delete_person":
-            result = self.project.delete_person(str(params["personName"]))
-            return {"deleted": result, "state": self.state()}
-        if command == "rename_person":
-            result = self.project.rename_person(str(params["oldName"]), str(params["newName"]))
-            return {"renamed": result, "state": self.state()}
-        if command == "clear_references":
-            count = self.project.clear_references()
-            return {"cleared": count, "state": self.state()}
-        if command == "purge_old_candidates":
-            statuses = params.get("statuses", ["accepted", "rejected", "uncertain"])
-            if not isinstance(statuses, list):
-                raise ValueError("statuses must be a list.")
-            count = self.project.purge_old_candidates(int(params.get("days", 90)), [str(status) for status in statuses])
-            return {"purged": count, "state": self.state()}
-        if command == "repair_workspace":
-            result = self.project.repair_workspace(dry_run=bool(params.get("dryRun", True)), force=bool(params.get("force", False)))
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "database_integrity":
-            return self.project.database_integrity()
-        if command == "repair_database_integrity":
-            result = self.project.repair_database_integrity(confirm=bool(params.get("confirm", False)))
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "relink_workspace_paths":
-            result = self.project.relink_workspace_paths(
-                Path(str(params.get("oldRoot", ""))).expanduser(),
-                Path(str(params.get("newRoot", ""))).expanduser(),
-                dry_run=bool(params.get("dryRun", True)),
-                force_partial=bool(params.get("forcePartial", False)),
-            )
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "export_report":
-            folder_param = str(params.get("folder", "")).strip()
-            result = self.project.export_report(Path(folder_param).expanduser() if folder_param else None)
-            return {"value": result, "state": self.state()}
-        if command == "export_workspace_inventory":
-            folder_param = str(params.get("folder", "")).strip()
-            result = self.project.export_workspace_inventory(Path(folder_param).expanduser() if folder_param else None)
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "export_audit_log":
-            folder_param = str(params.get("folder", "")).strip()
-            result = self.project.export_audit_log(Path(folder_param).expanduser() if folder_param else None)
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "export_consent_receipt":
-            folder_param = str(params.get("folder", "")).strip()
-            result = self.project.export_consent_receipt(Path(folder_param).expanduser() if folder_param else None)
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "retention_policy_report":
-            return self.project.retention_policy_report()
-        if command == "export_safe_mode_audit":
-            folder_param = str(params.get("folder", "")).strip()
-            result = self.project.export_safe_mode_audit(Path(folder_param).expanduser() if folder_param else None)
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "model_drift_report":
-            return self.project.model_drift_report(self.engine_name)
-        if command == "reference_gap_report":
-            return self.project.reference_gap_report(self.engine_name)
-        if command == "export_review_ledger":
-            folder_param = str(params.get("folder", "")).strip()
-            result = self.project.export_review_ledger(Path(folder_param).expanduser() if folder_param else None)
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "export_scan_history":
-            folder_param = str(params.get("folder", "")).strip()
-            result = self.project.export_scan_history(Path(folder_param).expanduser() if folder_param else None)
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "export_workspace_backup":
-            folder_param = str(params.get("folder", "")).strip()
-            result = self.project.export_workspace_backup(
-                Path(folder_param).expanduser() if folder_param else None,
-                include_generated=bool(params.get("includeGenerated", True)),
-            )
-            return {"value": result, "state": self.state()}
-        if command == "verify_workspace_backup":
-            path_param = str(params.get("path", "")).strip()
-            result = self.project.verify_workspace_backup(Path(path_param).expanduser() if path_param else None)
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "restore_workspace_backup":
-            path_param = str(params.get("path", "")).strip()
-            target_param = str(params.get("target", "") or params.get("targetFolder", "")).strip()
-            if not target_param:
-                raise ValueError("Choose an empty folder to restore into.")
-            result = self.project.restore_workspace_backup(
-                Path(path_param).expanduser() if path_param else None,
-                Path(target_param).expanduser(),
-            )
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "prune_workspace_backups":
-            result = self.project.prune_workspace_backups(int(params.get("keep", 5) or 5))
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "prune_scan_manifests":
-            result = self.project.prune_scan_manifests(int(params.get("keepRuns", 20) or 20))
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "export_candidates":
-            candidate_ids = params.get("candidateIds", [])
-            if not isinstance(candidate_ids, list):
-                raise ValueError("candidateIds must be a list.")
-            folder_param = str(params.get("folder", "")).strip()
-            result = self.project.export_candidates(
-                [str(candidate_id) for candidate_id in candidate_ids],
-                Path(folder_param).expanduser() if folder_param else None,
-            )
-            return {"value": result, "state": self.state()}
-        if command == "preview_candidate_media_action":
-            candidate_ids = params.get("candidateIds", [])
-            if not isinstance(candidate_ids, list):
-                raise ValueError("candidateIds must be a list.")
-            folder_param = str(params.get("folder", "")).strip()
-            return self.project.preview_candidate_media_action(
-                [str(candidate_id) for candidate_id in candidate_ids],
-                str(params.get("action", "")),
-                Path(folder_param).expanduser() if folder_param else None,
-                item_limit=int(params.get("itemLimit", 120) or 120),
-                item_offset=int(params.get("itemOffset", 0) or 0),
-            )
-        if command == "manage_candidate_media":
-            candidate_ids = params.get("candidateIds", [])
-            if not isinstance(candidate_ids, list):
-                raise ValueError("candidateIds must be a list.")
-            folder_param = str(params.get("folder", "")).strip()
-            result = self.project.manage_candidate_media(
-                [str(candidate_id) for candidate_id in candidate_ids],
-                str(params.get("action", "")),
-                Path(folder_param).expanduser() if folder_param else None,
-                on_progress=(lambda payload: progress(payload, "media_action")) if progress else None,
-            )
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "media_action_history":
-            return self.project.media_action_history(limit=int(params.get("limit", 20) or 20))
-        if command == "restore_media_action":
-            manifest_path = str(params.get("manifestPath", "")).strip()
-            if not manifest_path:
-                raise ValueError("manifestPath is required.")
-            result = self.project.restore_media_action(Path(manifest_path))
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "retry_media_action":
-            manifest_path = str(params.get("manifestPath", "")).strip()
-            if not manifest_path:
-                raise ValueError("manifestPath is required.")
-            folder_param = str(params.get("folder", "")).strip()
-            result = self.project.retry_media_action(
-                Path(manifest_path),
-                Path(folder_param).expanduser() if folder_param else None,
-                on_progress=(lambda payload: progress(payload, "media_action")) if progress else None,
-            )
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "undo_media_action":
-            manifest_path = str(params.get("manifestPath", "")).strip()
-            result = self.project.undo_media_action(Path(manifest_path) if manifest_path else None)
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "media_trash_report":
-            return self.project.media_trash_report()
-        if command == "cleanup_media_trash":
-            days_param = params.get("days", 30)
-            result = self.project.cleanup_media_trash(
-                days=int(30 if days_param in (None, "") else days_param),
-                dry_run=bool(params.get("dryRun", True)),
-            )
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "export_media_bundle":
-            candidate_ids = params.get("candidateIds")
-            if candidate_ids is not None and not isinstance(candidate_ids, list):
-                raise ValueError("candidateIds must be a list.")
-            statuses = params.get("statuses", ["accepted"])
-            if not isinstance(statuses, list):
-                raise ValueError("statuses must be a list.")
-            folder_param = str(params.get("folder", "")).strip()
-            result = self.project.export_media_bundle(
-                [str(candidate_id) for candidate_id in candidate_ids] if isinstance(candidate_ids, list) else None,
-                Path(folder_param).expanduser() if folder_param else None,
-                [str(status) for status in statuses],
-                include_original_media=bool(params.get("includeOriginalMedia", True)),
-            )
-            return {"value": result, "state": self.state()}
-        if command == "workspace_health":
-            return self.project.workspace_health()
-        if command == "runtime_self_test":
-            return self.runtime_self_test()
-        if command == "runtime_benchmark":
-            return self.runtime_benchmark()
-        if command == "benchmark_history":
-            return self.project.benchmark_history(limit=int(params.get("limit", 8) or 8))
-        if command == "storage_io_benchmark":
-            return self.storage_io_benchmark(params)
-        if command == "release_readiness":
-            return self.release_readiness()
-        if command == "model_integrity":
-            return self.model_integrity()
-        if command == "model_distribution_audit":
-            return self.model_distribution_audit()
-        if command == "backfill_model_references":
-            result = self.project.backfill_references_for_model(
-                self._engine_instance(),
-                on_progress=(lambda payload: self._progress(progress, {**payload, "source": "model_backfill"})) if progress else None,
-                limit=int(params.get("limit", 0) or 0),
-            )
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "export_support_bundle":
-            result = self.export_support_bundle(include_paths=bool(params.get("includePaths", False)))
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "installer_self_diagnostics":
-            return self.installer_self_diagnostics()
-        if command == "public_dataset_catalog":
-            return public_dataset_catalog()
-        if command == "inspect_public_dataset":
-            folder_param = str(params.get("folder", "")).strip()
-            if not folder_param:
-                raise ValueError("Choose a local dataset folder to inspect.")
-            return inspect_identity_dataset(
-                Path(folder_param).expanduser(),
-                dataset_id=str(params.get("datasetId", "custom") or "custom"),
-                max_identities=int(params.get("maxIdentities", 25000) or 25000),
-                entry_budget=int(params.get("entryBudget", 1_000_000) or 1_000_000),
-                include_videos=bool(params.get("includeVideos", True)),
-            )
-        if command == "run_public_dataset_benchmark":
-            result = self.public_dataset_benchmark(params)
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "compare_public_dataset_models":
-            result = self.public_dataset_model_comparison(params)
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "apply_model_recommendation":
-            result = self.apply_model_recommendation(params, progress=progress)
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "calibration_summary":
-            return self.project.calibration_summary()
-        if command == "accuracy_evaluation":
-            return self.project.accuracy_evaluation()
-        if command == "generate_accuracy_validation_pack":
-            folder_param = str(params.get("folder", "")).strip()
-            result = self.project.generate_accuracy_validation_pack(
-                Path(folder_param).expanduser() if folder_param else None,
-                import_labels=bool(params.get("importLabels", False)),
-            )
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "run_accuracy_validation_pack":
-            folder_param = str(params.get("folder", "")).strip()
-            result = self.project.run_accuracy_validation_pack(
-                Path(folder_param).expanduser() if folder_param else None,
-                import_labels=bool(params.get("importLabels", False)),
-            )
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "accuracy_validation_history":
-            return {"history": self.project.accuracy_validation_history(limit=int(params.get("limit", 20) or 20))}
-        if command == "apply_calibration":
-            result = self.project.apply_calibration_to_config()
-            self._reset_engine()
-            return {"value": result, "state": self.state()}
-        if command == "export_accuracy_labels":
-            folder_param = str(params.get("folder", "")).strip()
-            result = self.project.export_accuracy_labels(Path(folder_param).expanduser() if folder_param else None)
-            return {"value": result, "state": self.state()}
-        if command == "import_accuracy_labels":
-            rows = params.get("rows", [])
-            if not isinstance(rows, list):
-                raise ValueError("Accuracy labels must be a list of rows.")
-            result = self.project.import_accuracy_labels([row for row in rows if isinstance(row, dict)])
-            return {"value": result, "state": self.state()}
-        if command == "privacy_report":
-            return self.project.privacy_report()
-        if command == "delete_face_data":
-            result = self.project.delete_face_data(
-                confirm=bool(params.get("confirm", False)),
-                include_audit=bool(params.get("includeAudit", False)),
-            )
-            return {"value": result, "state": self.state()}
-        if command == "optimize_workspace":
-            result = self.project.optimize_workspace()
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "enforce_storage_budget":
-            result = self.project.enforce_storage_budget()
-            return {"value": result, "state": self.state(preview_create_budget=0)}
-        if command == "add_calibration_label":
-            row = params.get("row", {})
-            if not isinstance(row, dict):
-                raise ValueError("Calibration label must be an object.")
-            return self.project.add_calibration_label({str(key): value for key, value in row.items()})
-        if command == "audit_events":
-            return self.project.audit_events(int(params.get("limit", 100)), int(params.get("offset", 0)))
-        if command == "record_audit":
-            row = params.get("row", {})
-            if not isinstance(row, dict):
-                raise ValueError("Audit row must be an object.")
-            self.project._append_audit({str(key): value for key, value in row.items()})
-            return {"ok": True}
-        if command == "save_settings":
-            thresholds = self.project.config.thresholds
-            incoming = params.get("thresholds", {})
-            if not isinstance(incoming, dict):
-                raise ValueError("Threshold settings must be an object.")
-            confident = float(incoming.get("confident", thresholds.confident))
-            likely = float(incoming.get("likely", thresholds.likely))
-            relaxed_child = float(incoming.get("relaxedChild", thresholds.relaxed_child))
-            quality_min = float(incoming.get("qualityMin", thresholds.quality_min))
-            values = [confident, likely, relaxed_child, quality_min]
-            if any(not math.isfinite(value) or value < 0.0 or value > 1.0 for value in values):
-                raise ValueError("Thresholds and quality minimum must be between 0 and 1.")
-            if not confident >= likely >= relaxed_child:
-                raise ValueError("Thresholds must be descending: confident >= likely >= relaxed child.")
-            cluster_min_size = int(params.get("clusterMinSize", self.project.config.cluster_min_size))
-            if cluster_min_size < 2:
-                raise ValueError("Cluster minimum size must be at least 2.")
-            if cluster_min_size > MAX_CLUSTER_MIN_SIZE:
-                raise ValueError(f"Cluster minimum size must be {MAX_CLUSTER_MIN_SIZE} or lower.")
-            face_detector_size = int(params.get("faceDetectorSize", self.project.config.face_detector_size))
-            if face_detector_size < MIN_FACE_DETECTOR_SIZE:
-                raise ValueError(f"Face scan detail must be at least {MIN_FACE_DETECTOR_SIZE}.")
-            if face_detector_size > MAX_FACE_DETECTOR_SIZE:
-                raise ValueError(f"Face scan detail must be {MAX_FACE_DETECTOR_SIZE} or lower.")
-            face_detector_size = int(round(face_detector_size / 32) * 32)
-            two_pass_scan = bool(params.get("twoPassScan", self.project.config.two_pass_scan))
-            verification_detector_size = int(params.get("verificationDetectorSize", self.project.config.verification_detector_size))
-            if verification_detector_size < MIN_FACE_DETECTOR_SIZE:
-                raise ValueError(f"High-detail recheck must be at least {MIN_FACE_DETECTOR_SIZE}.")
-            if verification_detector_size > MAX_FACE_DETECTOR_SIZE:
-                raise ValueError(f"High-detail recheck must be {MAX_FACE_DETECTOR_SIZE} or lower.")
-            verification_detector_size = int(round(verification_detector_size / 32) * 32)
-            if verification_detector_size < face_detector_size:
-                verification_detector_size = face_detector_size
-            performance_mode = str(params.get("performanceMode", self.project.config.performance_mode)).strip().lower()
-            if performance_mode not in PERFORMANCE_MODES:
-                raise ValueError("Performance mode must be auto, fast, balanced, or quality.")
-            model_pack = str(params.get("modelPack", self.project.config.model_pack)).strip()
-            if model_pack not in MODEL_PACKAGES:
-                raise ValueError("Choose a known face model package.")
-            storage_budget_bytes = int(params.get("storageBudgetBytes", self.project.config.storage_budget_bytes))
-            if storage_budget_bytes < 0:
-                raise ValueError("Storage limit must be zero or higher.")
-            storage_budget_bytes = min(storage_budget_bytes, 10 * 1024 * 1024 * 1024 * 1024)
-            max_media_file_bytes = int(params.get("maxMediaFileBytes", self.project.config.max_media_file_bytes))
-            if max_media_file_bytes < 0:
-                raise ValueError("Maximum media file size must be zero or higher.")
-            max_media_file_bytes = min(max_media_file_bytes, 10 * 1024 * 1024 * 1024 * 1024)
-            review_rules = params.get("reviewRules", {})
-            if not isinstance(review_rules, dict):
-                raise ValueError("Review rules must be an object.")
-            auto_reject_below = float(review_rules.get("autoRejectBelow", self.project.config.auto_reject_below))
-            if not math.isfinite(auto_reject_below) or auto_reject_below < 0.0 or auto_reject_below > 1.0:
-                raise ValueError("Auto-reject level must be between 0 and 1.")
-            auto_uncertain_low_quality = bool(review_rules.get("autoUncertainLowQuality", self.project.config.auto_uncertain_low_quality))
-            auto_reject_low_quality_video = bool(review_rules.get("autoRejectLowQualityVideo", self.project.config.auto_reject_low_quality_video))
-            scan_exclusions = params.get("scanExclusions", {})
-            if not isinstance(scan_exclusions, dict):
-                raise ValueError("Scan exclusions must be an object.")
-            excluded_dir_names = self._string_list(scan_exclusions.get("dirNames", self.project.config.excluded_dir_names), "Excluded folder names")
-            excluded_path_keywords = self._string_list(scan_exclusions.get("pathKeywords", self.project.config.excluded_path_keywords), "Excluded path words")
-            excluded_extensions = self._extension_list(scan_exclusions.get("extensions", self.project.config.excluded_extensions))
-            excluded_file_paths = self._string_list(scan_exclusions.get("filePaths", self.project.config.excluded_file_paths), "Excluded files", limit=400)
-            video_decoder_settings = params.get("videoDecoder", {})
-            if video_decoder_settings is None:
-                video_decoder_settings = {}
-            if not isinstance(video_decoder_settings, dict):
-                raise ValueError("Video decoder settings must be an object.")
-            ffmpeg_path = self._optional_existing_file(
-                video_decoder_settings.get("ffmpegPath", self.project.config.ffmpeg_path),
-                "FFmpeg path",
-            )
-            ffprobe_path = self._optional_existing_file(
-                video_decoder_settings.get("ffprobePath", self.project.config.ffprobe_path),
-                "FFprobe path",
-            )
-            safe_mode_threshold = float(params.get("safeModeThreshold", self.project.config.safe_mode_threshold))
-            if not math.isfinite(safe_mode_threshold) or safe_mode_threshold < 0.0 or safe_mode_threshold > 1.0:
-                raise ValueError("Safe Mode threshold must be between 0 and 1.")
-            thresholds.confident = confident
-            thresholds.likely = likely
-            thresholds.relaxed_child = relaxed_child
-            thresholds.quality_min = quality_min
-            self.project.config.cluster_min_size = cluster_min_size
-            self.project.config.face_detector_size = face_detector_size
-            self.project.config.two_pass_scan = two_pass_scan
-            self.project.config.verification_detector_size = verification_detector_size
-            self.project.config.performance_mode = performance_mode
-            self.project.config.model_pack = model_pack
-            self.project.config.storage_budget_bytes = storage_budget_bytes
-            self.project.config.max_media_file_bytes = max_media_file_bytes
-            self.project.config.auto_reject_below = auto_reject_below
-            self.project.config.auto_uncertain_low_quality = auto_uncertain_low_quality
-            self.project.config.auto_reject_low_quality_video = auto_reject_low_quality_video
-            self.project.config.excluded_dir_names = excluded_dir_names
-            self.project.config.excluded_path_keywords = excluded_path_keywords
-            self.project.config.excluded_extensions = excluded_extensions
-            self.project.config.excluded_file_paths = excluded_file_paths
-            self.project.config.ffmpeg_path = ffmpeg_path
-            self.project.config.ffprobe_path = ffprobe_path
-            self.project.config.safe_mode = bool(params.get("safeMode", self.project.config.safe_mode))
-            self.project.config.safe_mode_threshold = safe_mode_threshold
-            self.project.apply_video_decoder_config()
-            self.project._append_audit(
-                {
-                    "action": "save_settings",
-                    "thresholds": {
-                        "confident": confident,
-                        "likely": likely,
-                        "relaxed_child": relaxed_child,
-                        "quality_min": quality_min,
-                    },
-                    "cluster_min_size": cluster_min_size,
-                    "face_detector_size": face_detector_size,
-                    "two_pass_scan": two_pass_scan,
-                    "verification_detector_size": verification_detector_size,
-                    "performance_mode": performance_mode,
-                    "model_pack": model_pack,
-                    "storage_budget_bytes": storage_budget_bytes,
-                    "max_media_file_bytes": max_media_file_bytes,
-                    "review_rules": {
-                        "auto_reject_below": auto_reject_below,
-                        "auto_uncertain_low_quality": auto_uncertain_low_quality,
-                        "auto_reject_low_quality_video": auto_reject_low_quality_video,
-                    },
-                    "scan_exclusions": {
-                        "dir_names": excluded_dir_names,
-                        "path_keywords": excluded_path_keywords,
-                        "extensions": excluded_extensions,
-                        "file_paths": excluded_file_paths,
-                    },
-                    "video_decoder": {
-                        "ffmpeg_path_set": bool(ffmpeg_path),
-                        "ffprobe_path_set": bool(ffprobe_path),
-                    },
-                    "safe_mode": self.project.config.safe_mode,
-                    "safe_mode_threshold": safe_mode_threshold,
-                    "source": str(params.get("source", "desktop")),
-                    "reason": str(params.get("reason", ""))[:800],
-                }
-            )
-            self.project.save()
-            self._reset_engine()
-            return self.state()
-        raise ValueError(f"Unknown command: {command}")
+        return self.state()
+
+    def _cmd_set_model_root(self, params, progress=None):
+        root_value = str(params.get("root", "")).strip()
+        if not root_value:
+            raise ValueError("Choose a model download folder first.")
+        root = set_model_root(self.project.config, Path(root_value))
+        self.project._append_audit({"action": "set_model_root", "root": str(root), "source": str(params.get("source", "desktop"))})
+        self.project.save()
+        self._reset_engine()
+        return self.state()
+
+    def _cmd_download_model(self, params, progress=None):
+        pack = str(params.get("pack", self.project.config.model_pack or "antelopev2"))
+        root_param = str(params.get("root", "")).strip()
+        root = set_model_root(self.project.config, Path(root_param)) if root_param else set_model_root(self.project.config, model_root_for_config(self.project.config, prefer_ready=False))
+        result = download_model_pack(
+            pack,
+            root,
+            on_progress=(lambda payload: progress(payload, "model_download")) if progress else None,
+            force=bool(params.get("force", False)),
+        )
+        self.project.config.model_pack = pack
+        self.project.config.model_root = str(root)
+        self.project._append_audit(
+            {
+                "action": "download_model",
+                "pack": pack,
+                "root": str(root),
+                "sha256": result.get("sha256"),
+                "bytes": result.get("bytes"),
+                "source": str(params.get("source", "desktop")),
+            }
+        )
+        self.project.save()
+        self._reset_engine()
+        return {"value": result, "state": self.state()}
+
+    def _cmd_set_workspace(self, params, progress=None):
+        return self.set_workspace(Path(str(params["path"])))
+
+    def _cmd_set_consent(self, params, progress=None):
+        self.consent_on_file = bool(params.get("value"))
+        self.project.set_consent(
+            self.consent_on_file,
+            source=str(params.get("source", self.actor)),
+            operator=str(params.get("operator", "")),
+            note=str(params.get("note", "")),
+            scope=str(params.get("scope", self.project.root)),
+        )
+        return self.state()
+
+    def _cmd_enroll(self, params, progress=None):
+        self._require_consent()
+        engine = self._engine_instance()
+        added, errors = self.project.enroll_folder(
+            str(params.get("personName", "")),
+            str(params.get("ageBucket", "unknown")),
+            Path(str(params.get("folder", ""))).expanduser(),
+            engine,
+        )
+        return {"added": added, "errors": errors, "state": self.state()}
+
+    def _cmd_enroll_age_groups(self, params, progress=None):
+        self._require_consent()
+        groups_param = params.get("groups", [])
+        if not isinstance(groups_param, list):
+            raise ValueError("Age-group enrollment expects a list of folders.")
+        engine = self._engine_instance()
+        added, errors, groups = self.project.enroll_age_groups(
+            str(params.get("personName", "")),
+            groups_param,
+            engine,
+        )
+        return {"added": added, "errors": errors, "value": {"groups": groups}, "state": self.state()}
+
+    def _cmd_scan(self, params, progress=None):
+        self._require_consent()
+        if not self.project.references:
+            raise ValueError("Enroll at least one reference before scanning.")
+        source = str(params.get("source", "manual"))
+        existing_candidate_ids = set(self.project.candidates)
+        engine = self._engine_instance()
+        self._require_scan_model_compatibility(engine, params)
+        added, errors, metrics = self.project.scan_folder(
+            Path(str(params.get("folder", ""))).expanduser(),
+            engine,
+            on_progress=lambda payload: self._progress(progress, {**payload, "source": source}),
+            source=source,
+            resume=bool(params.get("resume", True)),
+            total=int(params.get("total", 0) or 0) or None,
+        )
+        verification = self._maybe_verify_new_candidates(existing_candidate_ids, metrics, progress, source)
+        metrics.update({
+            "twoPassVerified": int(verification.get("verified", 0)),
+            "twoPassChanged": int(verification.get("changed", 0)),
+            "twoPassDeferred": int(verification.get("deferred", 0)),
+        })
+        return {"added": added, "errors": errors, "metrics": metrics, "state": self.state()}
+
+    def _cmd_scan_paths(self, params, progress=None):
+        self._require_consent()
+        if not self.project.references:
+            raise ValueError("Enroll at least one reference before scanning.")
+        paths_param = params.get("paths", [])
+        if not isinstance(paths_param, list):
+            raise ValueError("scan_paths expects a list of image or video paths.")
+        source = str(params.get("source", "manual"))
+        paths = [
+            Path(str(item)).expanduser()
+            for item in paths_param
+            if Path(str(item)).suffix.lower() in IMAGE_EXTENSIONS or Path(str(item)).suffix.lower() in VIDEO_EXTENSIONS
+        ]
+        existing_candidate_ids = set(self.project.candidates)
+        engine = self._engine_instance()
+        self._require_scan_model_compatibility(engine, params)
+        added, errors, metrics = self.project.scan_paths(
+            paths,
+            engine,
+            on_progress=lambda payload: self._progress(progress, {**payload, "source": source}),
+            source=source,
+            label=f"{len(paths)} selected file(s)",
+            resume=bool(params.get("resume", False)),
+        )
+        verification = self._maybe_verify_new_candidates(existing_candidate_ids, metrics, progress, source)
+        metrics.update({
+            "twoPassVerified": int(verification.get("verified", 0)),
+            "twoPassChanged": int(verification.get("changed", 0)),
+            "twoPassDeferred": int(verification.get("deferred", 0)),
+        })
+        return {"added": added, "errors": errors, "metrics": metrics, "state": self.state()}
+
+    def _cmd_analyze_folder(self, params, progress=None):
+        return self.analyze_folder(
+            Path(str(params.get("folder", ""))).expanduser(),
+            max_entries=int(params.get("maxEntries", ANALYZE_ENTRY_BUDGET) or ANALYZE_ENTRY_BUDGET),
+            time_budget_ms=int(params.get("timeBudgetMs", ANALYZE_TIME_BUDGET_MS) or ANALYZE_TIME_BUDGET_MS),
+        )
+
+    def _cmd_cancel_scan(self, params, progress=None):
+        return self.project.request_scan_cancel(source=str(params.get("source", self.actor)))
+
+    def _cmd_pause_scan(self, params, progress=None):
+        return self.project.request_scan_pause(source=str(params.get("source", self.actor)))
+
+    def _cmd_resume_scan(self, params, progress=None):
+        return self.project.request_scan_resume(source=str(params.get("source", self.actor)))
+
+    def _cmd_scan_job_status(self, params, progress=None):
+        return self.project.scan_job_status()
+
+    def _cmd_set_status(self, params, progress=None):
+        self.project.set_candidate_status(str(params["candidateId"]), str(params["status"]))
+        return self.state()
+
+    def _cmd_bulk_set_status(self, params, progress=None):
+        candidate_ids = params.get("candidateIds", [])
+        if not isinstance(candidate_ids, list):
+            raise ValueError("candidateIds must be a list.")
+        count = self.project.bulk_set_candidate_status([str(candidate_id) for candidate_id in candidate_ids], str(params["status"]))
+        return {"updated": count, "state": self.state()}
+
+    def _cmd_set_candidate_note(self, params, progress=None):
+        self.project.set_candidate_note(str(params["candidateId"]), str(params.get("note", "")))
+        return self.state()
+
+    def _cmd_block_false_match(self, params, progress=None):
+        result = self.project.block_false_match(str(params["candidateId"]), str(params.get("note", "")))
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_reassign_candidate_person(self, params, progress=None):
+        result = self.project.reassign_candidate_person(
+            str(params["candidateId"]),
+            str(params["personName"]),
+            clear_reference=bool(params.get("clearReference", True)),
+        )
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_duplicate_people(self, params, progress=None):
+        return self.project.duplicate_people(
+            threshold=float(params.get("threshold", 0.82)),
+            limit=int(params.get("limit", 20)),
+        )
+
+    def _cmd_apply_review_rules(self, params, progress=None):
+        result = self.project.apply_review_rules()
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_query_candidates(self, params, progress=None):
+        return self.query_candidates(params)
+
+    def _cmd_clear_queue(self, params, progress=None):
+        self.project.clear_candidates()
+        return self.state()
+
+    def _cmd_purge_candidates(self, params, progress=None):
+        statuses = params.get("statuses", ["accepted", "rejected", "uncertain"])
+        if not isinstance(statuses, list):
+            raise ValueError("statuses must be a list.")
+        count = self.project.purge_candidates([str(status) for status in statuses])
+        return {"purged": count, "state": self.state()}
+
+    def _cmd_purge_duplicate_candidates(self, params, progress=None):
+        count = self.project.purge_duplicate_candidates()
+        return {"purged": count, "state": self.state(), "value": self.project.workspace_health()}
+
+    def _cmd_prepare_previews(self, params, progress=None):
+        prepared = self.project.prepare_previews(int(params.get("limit", 32)))
+        return {"prepared": prepared, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_delete_reference(self, params, progress=None):
+        self.project.delete_reference(str(params["refId"]))
+        return self.state()
+
+    def _cmd_delete_person(self, params, progress=None):
+        result = self.project.delete_person(str(params["personName"]))
+        return {"deleted": result, "state": self.state()}
+
+    def _cmd_rename_person(self, params, progress=None):
+        result = self.project.rename_person(str(params["oldName"]), str(params["newName"]))
+        return {"renamed": result, "state": self.state()}
+
+    def _cmd_clear_references(self, params, progress=None):
+        count = self.project.clear_references()
+        return {"cleared": count, "state": self.state()}
+
+    def _cmd_purge_old_candidates(self, params, progress=None):
+        statuses = params.get("statuses", ["accepted", "rejected", "uncertain"])
+        if not isinstance(statuses, list):
+            raise ValueError("statuses must be a list.")
+        count = self.project.purge_old_candidates(int(params.get("days", 90)), [str(status) for status in statuses])
+        return {"purged": count, "state": self.state()}
+
+    def _cmd_repair_workspace(self, params, progress=None):
+        result = self.project.repair_workspace(dry_run=bool(params.get("dryRun", True)), force=bool(params.get("force", False)))
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_database_integrity(self, params, progress=None):
+        return self.project.database_integrity()
+
+    def _cmd_repair_database_integrity(self, params, progress=None):
+        result = self.project.repair_database_integrity(confirm=bool(params.get("confirm", False)))
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_relink_workspace_paths(self, params, progress=None):
+        result = self.project.relink_workspace_paths(
+            Path(str(params.get("oldRoot", ""))).expanduser(),
+            Path(str(params.get("newRoot", ""))).expanduser(),
+            dry_run=bool(params.get("dryRun", True)),
+            force_partial=bool(params.get("forcePartial", False)),
+        )
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_export_report(self, params, progress=None):
+        folder_param = str(params.get("folder", "")).strip()
+        result = self.project.export_report(Path(folder_param).expanduser() if folder_param else None)
+        return {"value": result, "state": self.state()}
+
+    def _cmd_export_workspace_inventory(self, params, progress=None):
+        folder_param = str(params.get("folder", "")).strip()
+        result = self.project.export_workspace_inventory(Path(folder_param).expanduser() if folder_param else None)
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_export_audit_log(self, params, progress=None):
+        folder_param = str(params.get("folder", "")).strip()
+        result = self.project.export_audit_log(Path(folder_param).expanduser() if folder_param else None)
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_export_consent_receipt(self, params, progress=None):
+        folder_param = str(params.get("folder", "")).strip()
+        result = self.project.export_consent_receipt(Path(folder_param).expanduser() if folder_param else None)
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_retention_policy_report(self, params, progress=None):
+        return self.project.retention_policy_report()
+
+    def _cmd_export_safe_mode_audit(self, params, progress=None):
+        folder_param = str(params.get("folder", "")).strip()
+        result = self.project.export_safe_mode_audit(Path(folder_param).expanduser() if folder_param else None)
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_model_drift_report(self, params, progress=None):
+        return self.project.model_drift_report(self.engine_name)
+
+    def _cmd_reference_gap_report(self, params, progress=None):
+        return self.project.reference_gap_report(self.engine_name)
+
+    def _cmd_export_review_ledger(self, params, progress=None):
+        folder_param = str(params.get("folder", "")).strip()
+        result = self.project.export_review_ledger(Path(folder_param).expanduser() if folder_param else None)
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_export_scan_history(self, params, progress=None):
+        folder_param = str(params.get("folder", "")).strip()
+        result = self.project.export_scan_history(Path(folder_param).expanduser() if folder_param else None)
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_export_workspace_backup(self, params, progress=None):
+        folder_param = str(params.get("folder", "")).strip()
+        result = self.project.export_workspace_backup(
+            Path(folder_param).expanduser() if folder_param else None,
+            include_generated=bool(params.get("includeGenerated", True)),
+        )
+        return {"value": result, "state": self.state()}
+
+    def _cmd_verify_workspace_backup(self, params, progress=None):
+        path_param = str(params.get("path", "")).strip()
+        result = self.project.verify_workspace_backup(Path(path_param).expanduser() if path_param else None)
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_restore_workspace_backup(self, params, progress=None):
+        path_param = str(params.get("path", "")).strip()
+        target_param = str(params.get("target", "") or params.get("targetFolder", "")).strip()
+        if not target_param:
+            raise ValueError("Choose an empty folder to restore into.")
+        result = self.project.restore_workspace_backup(
+            Path(path_param).expanduser() if path_param else None,
+            Path(target_param).expanduser(),
+        )
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_prune_workspace_backups(self, params, progress=None):
+        result = self.project.prune_workspace_backups(int(params.get("keep", 5) or 5))
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_prune_scan_manifests(self, params, progress=None):
+        result = self.project.prune_scan_manifests(int(params.get("keepRuns", 20) or 20))
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_export_candidates(self, params, progress=None):
+        candidate_ids = params.get("candidateIds", [])
+        if not isinstance(candidate_ids, list):
+            raise ValueError("candidateIds must be a list.")
+        folder_param = str(params.get("folder", "")).strip()
+        result = self.project.export_candidates(
+            [str(candidate_id) for candidate_id in candidate_ids],
+            Path(folder_param).expanduser() if folder_param else None,
+        )
+        return {"value": result, "state": self.state()}
+
+    def _cmd_preview_candidate_media_action(self, params, progress=None):
+        candidate_ids = params.get("candidateIds", [])
+        if not isinstance(candidate_ids, list):
+            raise ValueError("candidateIds must be a list.")
+        folder_param = str(params.get("folder", "")).strip()
+        return self.project.preview_candidate_media_action(
+            [str(candidate_id) for candidate_id in candidate_ids],
+            str(params.get("action", "")),
+            Path(folder_param).expanduser() if folder_param else None,
+            item_limit=int(params.get("itemLimit", 120) or 120),
+            item_offset=int(params.get("itemOffset", 0) or 0),
+        )
+
+    def _cmd_manage_candidate_media(self, params, progress=None):
+        candidate_ids = params.get("candidateIds", [])
+        if not isinstance(candidate_ids, list):
+            raise ValueError("candidateIds must be a list.")
+        folder_param = str(params.get("folder", "")).strip()
+        result = self.project.manage_candidate_media(
+            [str(candidate_id) for candidate_id in candidate_ids],
+            str(params.get("action", "")),
+            Path(folder_param).expanduser() if folder_param else None,
+            on_progress=(lambda payload: progress(payload, "media_action")) if progress else None,
+        )
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_media_action_history(self, params, progress=None):
+        return self.project.media_action_history(limit=int(params.get("limit", 20) or 20))
+
+    def _cmd_restore_media_action(self, params, progress=None):
+        manifest_path = str(params.get("manifestPath", "")).strip()
+        if not manifest_path:
+            raise ValueError("manifestPath is required.")
+        result = self.project.restore_media_action(Path(manifest_path))
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_retry_media_action(self, params, progress=None):
+        manifest_path = str(params.get("manifestPath", "")).strip()
+        if not manifest_path:
+            raise ValueError("manifestPath is required.")
+        folder_param = str(params.get("folder", "")).strip()
+        result = self.project.retry_media_action(
+            Path(manifest_path),
+            Path(folder_param).expanduser() if folder_param else None,
+            on_progress=(lambda payload: progress(payload, "media_action")) if progress else None,
+        )
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_undo_media_action(self, params, progress=None):
+        manifest_path = str(params.get("manifestPath", "")).strip()
+        result = self.project.undo_media_action(Path(manifest_path) if manifest_path else None)
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_media_trash_report(self, params, progress=None):
+        return self.project.media_trash_report()
+
+    def _cmd_cleanup_media_trash(self, params, progress=None):
+        days_param = params.get("days", 30)
+        result = self.project.cleanup_media_trash(
+            days=int(30 if days_param in (None, "") else days_param),
+            dry_run=bool(params.get("dryRun", True)),
+        )
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_export_media_bundle(self, params, progress=None):
+        candidate_ids = params.get("candidateIds")
+        if candidate_ids is not None and not isinstance(candidate_ids, list):
+            raise ValueError("candidateIds must be a list.")
+        statuses = params.get("statuses", ["accepted"])
+        if not isinstance(statuses, list):
+            raise ValueError("statuses must be a list.")
+        folder_param = str(params.get("folder", "")).strip()
+        result = self.project.export_media_bundle(
+            [str(candidate_id) for candidate_id in candidate_ids] if isinstance(candidate_ids, list) else None,
+            Path(folder_param).expanduser() if folder_param else None,
+            [str(status) for status in statuses],
+            include_original_media=bool(params.get("includeOriginalMedia", True)),
+        )
+        return {"value": result, "state": self.state()}
+
+    def _cmd_workspace_health(self, params, progress=None):
+        return self.project.workspace_health()
+
+    def _cmd_runtime_self_test(self, params, progress=None):
+        return self.runtime_self_test()
+
+    def _cmd_runtime_benchmark(self, params, progress=None):
+        return self.runtime_benchmark()
+
+    def _cmd_benchmark_history(self, params, progress=None):
+        return self.project.benchmark_history(limit=int(params.get("limit", 8) or 8))
+
+    def _cmd_storage_io_benchmark(self, params, progress=None):
+        return self.storage_io_benchmark(params)
+
+    def _cmd_release_readiness(self, params, progress=None):
+        return self.release_readiness()
+
+    def _cmd_model_integrity(self, params, progress=None):
+        return self.model_integrity()
+
+    def _cmd_model_distribution_audit(self, params, progress=None):
+        return self.model_distribution_audit()
+
+    def _cmd_backfill_model_references(self, params, progress=None):
+        result = self.project.backfill_references_for_model(
+            self._engine_instance(),
+            on_progress=(lambda payload: self._progress(progress, {**payload, "source": "model_backfill"})) if progress else None,
+            limit=int(params.get("limit", 0) or 0),
+        )
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_export_support_bundle(self, params, progress=None):
+        result = self.export_support_bundle(include_paths=bool(params.get("includePaths", False)))
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_installer_self_diagnostics(self, params, progress=None):
+        return self.installer_self_diagnostics()
+
+    def _cmd_public_dataset_catalog(self, params, progress=None):
+        return public_dataset_catalog()
+
+    def _cmd_inspect_public_dataset(self, params, progress=None):
+        folder_param = str(params.get("folder", "")).strip()
+        if not folder_param:
+            raise ValueError("Choose a local dataset folder to inspect.")
+        return inspect_identity_dataset(
+            Path(folder_param).expanduser(),
+            dataset_id=str(params.get("datasetId", "custom") or "custom"),
+            max_identities=int(params.get("maxIdentities", 25000) or 25000),
+            entry_budget=int(params.get("entryBudget", 1_000_000) or 1_000_000),
+            include_videos=bool(params.get("includeVideos", True)),
+        )
+
+    def _cmd_run_public_dataset_benchmark(self, params, progress=None):
+        result = self.public_dataset_benchmark(params)
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_compare_public_dataset_models(self, params, progress=None):
+        result = self.public_dataset_model_comparison(params)
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_apply_model_recommendation(self, params, progress=None):
+        result = self.apply_model_recommendation(params, progress=progress)
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_calibration_summary(self, params, progress=None):
+        return self.project.calibration_summary()
+
+    def _cmd_accuracy_evaluation(self, params, progress=None):
+        return self.project.accuracy_evaluation()
+
+    def _cmd_generate_accuracy_validation_pack(self, params, progress=None):
+        folder_param = str(params.get("folder", "")).strip()
+        result = self.project.generate_accuracy_validation_pack(
+            Path(folder_param).expanduser() if folder_param else None,
+            import_labels=bool(params.get("importLabels", False)),
+        )
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_run_accuracy_validation_pack(self, params, progress=None):
+        folder_param = str(params.get("folder", "")).strip()
+        result = self.project.run_accuracy_validation_pack(
+            Path(folder_param).expanduser() if folder_param else None,
+            import_labels=bool(params.get("importLabels", False)),
+        )
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_accuracy_validation_history(self, params, progress=None):
+        return {"history": self.project.accuracy_validation_history(limit=int(params.get("limit", 20) or 20))}
+
+    def _cmd_apply_calibration(self, params, progress=None):
+        result = self.project.apply_calibration_to_config()
+        self._reset_engine()
+        return {"value": result, "state": self.state()}
+
+    def _cmd_export_accuracy_labels(self, params, progress=None):
+        folder_param = str(params.get("folder", "")).strip()
+        result = self.project.export_accuracy_labels(Path(folder_param).expanduser() if folder_param else None)
+        return {"value": result, "state": self.state()}
+
+    def _cmd_import_accuracy_labels(self, params, progress=None):
+        rows = params.get("rows", [])
+        if not isinstance(rows, list):
+            raise ValueError("Accuracy labels must be a list of rows.")
+        result = self.project.import_accuracy_labels([row for row in rows if isinstance(row, dict)])
+        return {"value": result, "state": self.state()}
+
+    def _cmd_privacy_report(self, params, progress=None):
+        return self.project.privacy_report()
+
+    def _cmd_delete_face_data(self, params, progress=None):
+        result = self.project.delete_face_data(
+            confirm=bool(params.get("confirm", False)),
+            include_audit=bool(params.get("includeAudit", False)),
+        )
+        return {"value": result, "state": self.state()}
+
+    def _cmd_optimize_workspace(self, params, progress=None):
+        result = self.project.optimize_workspace()
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_enforce_storage_budget(self, params, progress=None):
+        result = self.project.enforce_storage_budget()
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_add_calibration_label(self, params, progress=None):
+        row = params.get("row", {})
+        if not isinstance(row, dict):
+            raise ValueError("Calibration label must be an object.")
+        return self.project.add_calibration_label({str(key): value for key, value in row.items()})
+
+    def _cmd_audit_events(self, params, progress=None):
+        return self.project.audit_events(int(params.get("limit", 100)), int(params.get("offset", 0)))
+
+    def _cmd_record_audit(self, params, progress=None):
+        row = params.get("row", {})
+        if not isinstance(row, dict):
+            raise ValueError("Audit row must be an object.")
+        self.project._append_audit({str(key): value for key, value in row.items()})
+        return {"ok": True}
+
+    def _cmd_save_settings(self, params, progress=None):
+        thresholds = self.project.config.thresholds
+        incoming = params.get("thresholds", {})
+        if not isinstance(incoming, dict):
+            raise ValueError("Threshold settings must be an object.")
+        confident = float(incoming.get("confident", thresholds.confident))
+        likely = float(incoming.get("likely", thresholds.likely))
+        relaxed_child = float(incoming.get("relaxedChild", thresholds.relaxed_child))
+        quality_min = float(incoming.get("qualityMin", thresholds.quality_min))
+        values = [confident, likely, relaxed_child, quality_min]
+        if any(not math.isfinite(value) or value < 0.0 or value > 1.0 for value in values):
+            raise ValueError("Thresholds and quality minimum must be between 0 and 1.")
+        if not confident >= likely >= relaxed_child:
+            raise ValueError("Thresholds must be descending: confident >= likely >= relaxed child.")
+        cluster_min_size = int(params.get("clusterMinSize", self.project.config.cluster_min_size))
+        if cluster_min_size < 2:
+            raise ValueError("Cluster minimum size must be at least 2.")
+        if cluster_min_size > MAX_CLUSTER_MIN_SIZE:
+            raise ValueError(f"Cluster minimum size must be {MAX_CLUSTER_MIN_SIZE} or lower.")
+        face_detector_size = int(params.get("faceDetectorSize", self.project.config.face_detector_size))
+        if face_detector_size < MIN_FACE_DETECTOR_SIZE:
+            raise ValueError(f"Face scan detail must be at least {MIN_FACE_DETECTOR_SIZE}.")
+        if face_detector_size > MAX_FACE_DETECTOR_SIZE:
+            raise ValueError(f"Face scan detail must be {MAX_FACE_DETECTOR_SIZE} or lower.")
+        face_detector_size = int(round(face_detector_size / 32) * 32)
+        two_pass_scan = bool(params.get("twoPassScan", self.project.config.two_pass_scan))
+        verification_detector_size = int(params.get("verificationDetectorSize", self.project.config.verification_detector_size))
+        if verification_detector_size < MIN_FACE_DETECTOR_SIZE:
+            raise ValueError(f"High-detail recheck must be at least {MIN_FACE_DETECTOR_SIZE}.")
+        if verification_detector_size > MAX_FACE_DETECTOR_SIZE:
+            raise ValueError(f"High-detail recheck must be {MAX_FACE_DETECTOR_SIZE} or lower.")
+        verification_detector_size = int(round(verification_detector_size / 32) * 32)
+        if verification_detector_size < face_detector_size:
+            verification_detector_size = face_detector_size
+        performance_mode = str(params.get("performanceMode", self.project.config.performance_mode)).strip().lower()
+        if performance_mode not in PERFORMANCE_MODES:
+            raise ValueError("Performance mode must be auto, fast, balanced, or quality.")
+        model_pack = str(params.get("modelPack", self.project.config.model_pack)).strip()
+        if model_pack not in MODEL_PACKAGES:
+            raise ValueError("Choose a known face model package.")
+        storage_budget_bytes = int(params.get("storageBudgetBytes", self.project.config.storage_budget_bytes))
+        if storage_budget_bytes < 0:
+            raise ValueError("Storage limit must be zero or higher.")
+        storage_budget_bytes = min(storage_budget_bytes, 10 * 1024 * 1024 * 1024 * 1024)
+        max_media_file_bytes = int(params.get("maxMediaFileBytes", self.project.config.max_media_file_bytes))
+        if max_media_file_bytes < 0:
+            raise ValueError("Maximum media file size must be zero or higher.")
+        max_media_file_bytes = min(max_media_file_bytes, 10 * 1024 * 1024 * 1024 * 1024)
+        review_rules = params.get("reviewRules", {})
+        if not isinstance(review_rules, dict):
+            raise ValueError("Review rules must be an object.")
+        auto_reject_below = float(review_rules.get("autoRejectBelow", self.project.config.auto_reject_below))
+        if not math.isfinite(auto_reject_below) or auto_reject_below < 0.0 or auto_reject_below > 1.0:
+            raise ValueError("Auto-reject level must be between 0 and 1.")
+        auto_uncertain_low_quality = bool(review_rules.get("autoUncertainLowQuality", self.project.config.auto_uncertain_low_quality))
+        auto_reject_low_quality_video = bool(review_rules.get("autoRejectLowQualityVideo", self.project.config.auto_reject_low_quality_video))
+        scan_exclusions = params.get("scanExclusions", {})
+        if not isinstance(scan_exclusions, dict):
+            raise ValueError("Scan exclusions must be an object.")
+        excluded_dir_names = self._string_list(scan_exclusions.get("dirNames", self.project.config.excluded_dir_names), "Excluded folder names")
+        excluded_path_keywords = self._string_list(scan_exclusions.get("pathKeywords", self.project.config.excluded_path_keywords), "Excluded path words")
+        excluded_extensions = self._extension_list(scan_exclusions.get("extensions", self.project.config.excluded_extensions))
+        excluded_file_paths = self._string_list(scan_exclusions.get("filePaths", self.project.config.excluded_file_paths), "Excluded files", limit=400)
+        video_decoder_settings = params.get("videoDecoder", {})
+        if video_decoder_settings is None:
+            video_decoder_settings = {}
+        if not isinstance(video_decoder_settings, dict):
+            raise ValueError("Video decoder settings must be an object.")
+        ffmpeg_path = self._optional_existing_file(
+            video_decoder_settings.get("ffmpegPath", self.project.config.ffmpeg_path),
+            "FFmpeg path",
+        )
+        ffprobe_path = self._optional_existing_file(
+            video_decoder_settings.get("ffprobePath", self.project.config.ffprobe_path),
+            "FFprobe path",
+        )
+        safe_mode_threshold = float(params.get("safeModeThreshold", self.project.config.safe_mode_threshold))
+        if not math.isfinite(safe_mode_threshold) or safe_mode_threshold < 0.0 or safe_mode_threshold > 1.0:
+            raise ValueError("Safe Mode threshold must be between 0 and 1.")
+        thresholds.confident = confident
+        thresholds.likely = likely
+        thresholds.relaxed_child = relaxed_child
+        thresholds.quality_min = quality_min
+        self.project.config.cluster_min_size = cluster_min_size
+        self.project.config.face_detector_size = face_detector_size
+        self.project.config.two_pass_scan = two_pass_scan
+        self.project.config.verification_detector_size = verification_detector_size
+        self.project.config.performance_mode = performance_mode
+        self.project.config.model_pack = model_pack
+        self.project.config.storage_budget_bytes = storage_budget_bytes
+        self.project.config.max_media_file_bytes = max_media_file_bytes
+        self.project.config.auto_reject_below = auto_reject_below
+        self.project.config.auto_uncertain_low_quality = auto_uncertain_low_quality
+        self.project.config.auto_reject_low_quality_video = auto_reject_low_quality_video
+        self.project.config.excluded_dir_names = excluded_dir_names
+        self.project.config.excluded_path_keywords = excluded_path_keywords
+        self.project.config.excluded_extensions = excluded_extensions
+        self.project.config.excluded_file_paths = excluded_file_paths
+        self.project.config.ffmpeg_path = ffmpeg_path
+        self.project.config.ffprobe_path = ffprobe_path
+        self.project.config.safe_mode = bool(params.get("safeMode", self.project.config.safe_mode))
+        self.project.config.safe_mode_threshold = safe_mode_threshold
+        self.project.apply_video_decoder_config()
+        self.project._append_audit(
+            {
+                "action": "save_settings",
+                "thresholds": {
+                    "confident": confident,
+                    "likely": likely,
+                    "relaxed_child": relaxed_child,
+                    "quality_min": quality_min,
+                },
+                "cluster_min_size": cluster_min_size,
+                "face_detector_size": face_detector_size,
+                "two_pass_scan": two_pass_scan,
+                "verification_detector_size": verification_detector_size,
+                "performance_mode": performance_mode,
+                "model_pack": model_pack,
+                "storage_budget_bytes": storage_budget_bytes,
+                "max_media_file_bytes": max_media_file_bytes,
+                "review_rules": {
+                    "auto_reject_below": auto_reject_below,
+                    "auto_uncertain_low_quality": auto_uncertain_low_quality,
+                    "auto_reject_low_quality_video": auto_reject_low_quality_video,
+                },
+                "scan_exclusions": {
+                    "dir_names": excluded_dir_names,
+                    "path_keywords": excluded_path_keywords,
+                    "extensions": excluded_extensions,
+                    "file_paths": excluded_file_paths,
+                },
+                "video_decoder": {
+                    "ffmpeg_path_set": bool(ffmpeg_path),
+                    "ffprobe_path_set": bool(ffprobe_path),
+                },
+                "safe_mode": self.project.config.safe_mode,
+                "safe_mode_threshold": safe_mode_threshold,
+                "source": str(params.get("source", "desktop")),
+                "reason": str(params.get("reason", ""))[:800],
+            }
+        )
+        self.project.save()
+        self._reset_engine()
+        return self.state()
 
     def _verification_engine(self) -> Any | None:
         config = self._effective_engine_config()

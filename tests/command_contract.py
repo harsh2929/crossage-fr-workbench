@@ -29,8 +29,17 @@ INTERNAL_COMMANDS = {
 
 
 def _python_commands() -> set[str]:
-    src = (ROOT / "crossage_fr" / "api_server.py").read_text(encoding="utf-8")
-    return set(re.findall(r'command == "([a-z_]+)"', src))
+    # MA-2: the dispatch is now a registry (DesktopApi._COMMAND_HANDLERS), not a
+    # 96-branch if-chain — so the command surface is the registry's keys. Prefer
+    # runtime introspection (authoritative); fall back to a source regex over the
+    # registry literal if the backend can't be imported in this environment.
+    try:
+        from crossage_fr.api_server import DesktopApi
+
+        return set(DesktopApi._COMMAND_HANDLERS)
+    except Exception:
+        src = (ROOT / "crossage_fr" / "api_server.py").read_text(encoding="utf-8")
+        return set(re.findall(r'"([a-z_]+)":\s*"_cmd_\w+"', src))
 
 
 def _preload_allowlist() -> set[str]:
@@ -60,6 +69,18 @@ def main() -> None:
     # 3) INTERNAL_COMMANDS must be real backend commands (no stale entries).
     stale_internal = sorted(INTERNAL_COMMANDS - py)
     assert not stale_internal, f"INTERNAL_COMMANDS lists non-existent commands: {stale_internal}"
+
+    # 4) MA-2/MA-4: the registry and the required-param schema must reference only
+    # real commands, and every registered handler method must exist.
+    try:
+        from crossage_fr.api_server import DesktopApi
+
+        stale_specs = sorted(set(DesktopApi._COMMAND_REQUIRED_PARAMS) - set(DesktopApi._COMMAND_HANDLERS))
+        assert not stale_specs, f"_COMMAND_REQUIRED_PARAMS references unknown commands: {stale_specs}"
+        missing_handlers = sorted(m for m in DesktopApi._COMMAND_HANDLERS.values() if not hasattr(DesktopApi, m))
+        assert not missing_handlers, f"registry points at missing handler methods: {missing_handlers}"
+    except ImportError:
+        pass
 
     print(f"command contract ok ({len(py)} backend commands, {len(allow)} renderer-allowlisted)")
 
