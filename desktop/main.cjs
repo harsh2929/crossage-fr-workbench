@@ -6,6 +6,17 @@ const readline = require("readline");
 const os = require("os");
 const crypto = require("crypto");
 const { pathToFileURL, fileURLToPath } = require("url");
+// EIPC-01: self-contained helpers extracted to a unit-testable module.
+const {
+  writeJsonAtomic,
+  readJsonObject,
+  encodeMediaPath,
+  decodeMediaPath,
+  timestampSlug,
+  escapeHtml,
+  isSubpath,
+  safeRealpath,
+} = require("./main/util.cjs");
 
 let autoUpdater = null;
 try {
@@ -533,22 +544,6 @@ function appIconPath() {
 
 function watchConfigPath() {
   return path.join(app.getPath("userData"), "folder-watch.json");
-}
-
-function writeJsonAtomic(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const temp = `${filePath}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify(value, null, 2), "utf8");
-  fs.renameSync(temp, filePath);
-}
-
-function readJsonObject(filePath) {
-  try {
-    const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  } catch {
-    return {};
-  }
 }
 
 function updateChannelPath() {
@@ -1300,25 +1295,8 @@ function makeTrayImage() {
   return image.resize({ width: 16, height: 16 });
 }
 
-function encodeMediaPath(filePath) {
-  return Buffer.from(path.resolve(String(filePath || "")), "utf8")
-    .toString("base64url");
-}
-
-function decodeMediaPath(value) {
-  try {
-    return path.resolve(Buffer.from(String(value || ""), "base64url").toString("utf8"));
-  } catch {
-    return "";
-  }
-}
-
 function mediaUrlFor(filePath) {
   return `${MEDIA_PROTOCOL_SCHEME}://local/${encodeMediaPath(filePath)}`;
-}
-
-function timestampSlug() {
-  return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
 function decodeImageDataUrl(value) {
@@ -1335,19 +1313,6 @@ function decodeImageDataUrl(value) {
   }
   const extension = match[1] === "png" ? ".png" : match[1] === "webp" ? ".webp" : ".jpg";
   return { buffer, extension };
-}
-
-function isSubpath(parent, child) {
-  const relative = path.relative(path.resolve(parent), path.resolve(child));
-  return relative === "" || (relative && !relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-function safeRealpath(filePath) {
-  try {
-    return fs.realpathSync.native(path.resolve(String(filePath || "")));
-  } catch {
-    return "";
-  }
 }
 
 function grantUserPath(filePath) {
@@ -1901,15 +1866,6 @@ function rendererEntryUrl() {
     return process.env.VITE_DEV_SERVER_URL;
   }
   return pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).toString();
-}
-
-function escapeHtml(value) {
-  return String(value || "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
 }
 
 function rendererFallbackPath() {

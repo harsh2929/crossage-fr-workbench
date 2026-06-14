@@ -44,6 +44,7 @@
     "test:safety-model": "node desktop/scripts/run-python.cjs tests/safety_model_inference.py",
     "test:perf-budget": "node desktop/scripts/run-python.cjs tests/performance_budget.py",
     "test:localization": "node desktop/scripts/check-localization.cjs",
+    "test:main-util": "node tests/main_util.test.cjs",
     "test:command-contract": "node desktop/scripts/run-python.cjs tests/command_contract.py",
     "test:e2e:buttons": "cross-env VINTRACE_BUTTON_AUDIT=1 playwright test tests/e2e/button-regression.spec.ts",
     "test:e2e:i18n": "cross-env VINTRACE_I18N_LAYOUT=1 playwright test tests/e2e/localization-layout.spec.ts",
@@ -51,7 +52,7 @@
     "test:e2e:a11y": "cross-env VINTRACE_A11Y=1 playwright test tests/e2e/accessibility-keyboard.spec.ts",
     "test:e2e:packaged": "cross-env VINTRACE_PACKAGED_SMOKE=1 playwright test tests/e2e/packaged.spec.ts",
     "test:e2e:soak": "cross-env VINTRACE_SOAK=1 playwright test tests/e2e/memory-soak.spec.ts",
-    "test": "npm run build && npm run test:localization && npm run test:pipeline && npm run test:edge && npm run test:filesystem-chaos && npm run test:backup-roundtrip && npm run test:dataset-benchmark && npm run test:dataset-gates && npm run test:model-downloader && npm run test:mcp && npm run test:perf-budget && npm run test:e2e"
+    "test": "npm run build && npm run test:localization && npm run test:main-util && npm run test:pipeline && npm run test:edge && npm run test:filesystem-chaos && npm run test:backup-roundtrip && npm run test:dataset-benchmark && npm run test:dataset-gates && npm run test:model-downloader && npm run test:mcp && npm run test:perf-budget && npm run test:e2e"
   },
   "dependencies": {
     "electron-updater": "^6.8.9",
