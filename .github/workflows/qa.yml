@@ -99,6 +99,9 @@ jobs:
       - name: MCP redaction & model integrity
         run: python tests/mcp_redaction.py
 
+      - name: Scoring/validation units
+        run: python tests/scoring_units.py
+
       - name: Clean workspace simulation
         run: npm run test:clean
 

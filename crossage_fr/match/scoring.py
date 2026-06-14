@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
+import math
 
 from crossage_fr.config import Thresholds
-from crossage_fr.models import ReferenceFace
+from crossage_fr.models import ReferenceFace, ReviewCandidate
 from crossage_fr.store import SearchHit
 
 
@@ -196,3 +198,100 @@ def group_hits(
             runner_up_margin=margin,
         )
     return best_decision
+
+
+# ---------------------------------------------------------------------------
+# Pure accuracy + validation math (MA-1). These were `self`-less methods on the
+# 6k-line ProjectState god-object; they belong in the tidy match/ module where
+# they are unit-testable in isolation. Behavior is byte-identical to the former
+# ProjectState._accuracy_*/_valid_*/_finite_number methods.
+# ---------------------------------------------------------------------------
+def _confusion_metrics(tp: int, fp: int, tn: int, fn: int, *, threshold: float, labeled: int) -> dict[str, Any]:
+    precision = tp / max(1, tp + fp)
+    recall = tp / max(1, tp + fn)
+    specificity = tn / max(1, tn + fp)
+    return {
+        "threshold": round(float(threshold), 4),
+        "labeled": labeled,
+        "truePositives": tp,
+        "falsePositives": fp,
+        "trueNegatives": tn,
+        "falseNegatives": fn,
+        "precision": round(precision, 4),
+        "recall": round(recall, 4),
+        "specificity": round(specificity, 4),
+    }
+
+
+def accuracy_at_threshold(candidates: list[ReviewCandidate], threshold: float) -> dict[str, Any]:
+    tp = fp = tn = fn = 0
+    for candidate in candidates:
+        expected_match = candidate.status == "accepted"
+        predicted_match = float(candidate.score) >= threshold
+        if expected_match and predicted_match:
+            tp += 1
+        elif not expected_match and predicted_match:
+            fp += 1
+        elif not expected_match and not predicted_match:
+            tn += 1
+        else:
+            fn += 1
+    return _confusion_metrics(tp, fp, tn, fn, threshold=threshold, labeled=len(candidates))
+
+
+def accuracy_from_label_rows(rows: list[dict[str, Any]], threshold: float) -> dict[str, Any]:
+    tp = fp = tn = fn = 0
+    for row in rows:
+        try:
+            score = float(row.get("matchScore", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        expected_match = bool(row.get("isMatch"))
+        predicted_match = score >= threshold
+        if expected_match and predicted_match:
+            tp += 1
+        elif not expected_match and predicted_match:
+            fp += 1
+        elif not expected_match and not predicted_match:
+            tn += 1
+        else:
+            fn += 1
+    return _confusion_metrics(tp, fp, tn, fn, threshold=threshold, labeled=len(rows))
+
+
+def finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def valid_vector(vector: object) -> bool:
+    if not isinstance(vector, list) or len(vector) != 512:
+        return False
+    return all(finite_number(value) for value in vector)
+
+
+def valid_reference(ref: ReferenceFace) -> bool:
+    return (
+        isinstance(ref.ref_id, str)
+        and bool(ref.ref_id)
+        and isinstance(ref.person_name, str)
+        and bool(ref.person_name.strip())
+        and isinstance(ref.age_bucket, str)
+        and isinstance(ref.source_path, str)
+        and isinstance(ref.model_name, str)
+        and finite_number(ref.quality)
+        and valid_vector(ref.vector)
+    )
+
+
+def valid_candidate(candidate: ReviewCandidate) -> bool:
+    return (
+        isinstance(candidate.candidate_id, str)
+        and bool(candidate.candidate_id)
+        and isinstance(candidate.source_path, str)
+        and isinstance(candidate.person_name, str)
+        and isinstance(candidate.band, str)
+        and isinstance(candidate.model_name, str)
+        and candidate.status in {"pending", "accepted", "rejected", "uncertain"}
+        and finite_number(candidate.score)
+        and finite_number(candidate.quality)
+    )

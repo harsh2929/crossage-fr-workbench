@@ -24,7 +24,15 @@ from crossage_fr.ingest import ImageLoadError, VideoLoadError, image_record_for_
 from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, sha256_file, write_preview_image
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, configure_video_decoder_paths
 from crossage_fr.ingest.safety import SafetyAssessment, assess_image_safety, safety_model_report
-from crossage_fr.match import group_hits, pose_review_supported, thresholds_for_pose
+from crossage_fr.match import (
+    accuracy_at_threshold,
+    accuracy_from_label_rows,
+    group_hits,
+    pose_review_supported,
+    thresholds_for_pose,
+    valid_candidate,
+    valid_reference,
+)
 from crossage_fr.models import EmbeddingResult, ReferenceFace, ReviewCandidate, new_id, normalize_risk_flags
 from crossage_fr.storage import safe_is_mount, safe_resolve
 from crossage_fr.store import VectorStore
@@ -199,7 +207,7 @@ class ProjectState:
                     ref = ReferenceFace(**row)
                 except TypeError:
                     continue
-                if not self._valid_reference(ref):
+                if not valid_reference(ref):
                     continue
                 self.references[ref.ref_id] = ref
         if self.candidates_path.exists():
@@ -208,7 +216,7 @@ class ProjectState:
                     candidate = ReviewCandidate(**row)
                 except TypeError:
                     continue
-                if not self._valid_candidate(candidate):
+                if not valid_candidate(candidate):
                     continue
                 self.candidates[candidate.candidate_id] = candidate
         try:
@@ -223,7 +231,7 @@ class ProjectState:
                         candidate = ReviewCandidate(**row)
                     except TypeError:
                         continue
-                    if not self._valid_candidate(candidate):
+                    if not valid_candidate(candidate):
                         continue
                     loaded_from_index[candidate.candidate_id] = candidate
             except sqlite3.Error:
@@ -1727,25 +1735,6 @@ class ProjectState:
             "quality": ref.quality,
             "modelName": ref.model_name,
         }
-
-    def _cosine_similarity(self, left: list[float], right: list[float]) -> float:
-        if not left or len(left) != len(right):
-            return 0.0
-        dot = 0.0
-        left_norm = 0.0
-        right_norm = 0.0
-        for left_value, right_value in zip(left, right):
-            left_float = float(left_value)
-            right_float = float(right_value)
-            if not math.isfinite(left_float) or not math.isfinite(right_float):
-                return 0.0
-            dot += left_float * right_float
-            left_norm += left_float * left_float
-            right_norm += right_float * right_float
-        denom = math.sqrt(left_norm) * math.sqrt(right_norm)
-        if denom <= 0.0:
-            return 0.0
-        return max(0.0, min(1.0, dot / denom))
 
     def apply_review_rules(self) -> dict[str, Any]:
         rules = {
@@ -4947,11 +4936,11 @@ class ProjectState:
             "likely": float(self.config.thresholds.likely),
             "strong": float(self.config.thresholds.confident),
         }
-        metrics = {name: self._accuracy_at_threshold(labeled, threshold) for name, threshold in thresholds.items()}
+        metrics = {name: accuracy_at_threshold(labeled, threshold) for name, threshold in thresholds.items()}
         segments = {
-            "images": self._accuracy_at_threshold([item for item in labeled if item.media_kind != "video"], thresholds["likely"]),
-            "videos": self._accuracy_at_threshold([item for item in labeled if item.media_kind == "video"], thresholds["likely"]),
-            "lowQuality": self._accuracy_at_threshold([item for item in labeled if item.quality < self.config.thresholds.quality_min], thresholds["likely"]),
+            "images": accuracy_at_threshold([item for item in labeled if item.media_kind != "video"], thresholds["likely"]),
+            "videos": accuracy_at_threshold([item for item in labeled if item.media_kind == "video"], thresholds["likely"]),
+            "lowQuality": accuracy_at_threshold([item for item in labeled if item.quality < self.config.thresholds.quality_min], thresholds["likely"]),
         }
         recommendations: list[str] = []
         likely = metrics["likely"]
@@ -5102,9 +5091,9 @@ class ProjectState:
             "likely": float(self.config.thresholds.likely),
             "strong": float(self.config.thresholds.confident),
         }
-        metrics = {name: self._accuracy_from_label_rows(labels, threshold) for name, threshold in thresholds.items()}
+        metrics = {name: accuracy_from_label_rows(labels, threshold) for name, threshold in thresholds.items()}
         segments = {
-            scenario: self._accuracy_from_label_rows([row for row in labels if row.get("scenario") == scenario], thresholds["likely"])
+            scenario: accuracy_from_label_rows([row for row in labels if row.get("scenario") == scenario], thresholds["likely"])
             for scenario in sorted({str(row.get("scenario")) for row in labels})
         }
         manifest = {
@@ -5548,66 +5537,6 @@ class ProjectState:
             "video_timestamp_ms": candidate.video_timestamp_ms,
             "source_hash": candidate.source_hash,
             "copy_status": copy_status,
-        }
-
-    def _accuracy_at_threshold(self, candidates: list[ReviewCandidate], threshold: float) -> dict[str, Any]:
-        true_positive = false_positive = true_negative = false_negative = 0
-        for candidate in candidates:
-            expected_match = candidate.status == "accepted"
-            predicted_match = float(candidate.score) >= threshold
-            if expected_match and predicted_match:
-                true_positive += 1
-            elif not expected_match and predicted_match:
-                false_positive += 1
-            elif not expected_match and not predicted_match:
-                true_negative += 1
-            else:
-                false_negative += 1
-        precision = true_positive / max(1, true_positive + false_positive)
-        recall = true_positive / max(1, true_positive + false_negative)
-        specificity = true_negative / max(1, true_negative + false_positive)
-        return {
-            "threshold": round(float(threshold), 4),
-            "labeled": len(candidates),
-            "truePositives": true_positive,
-            "falsePositives": false_positive,
-            "trueNegatives": true_negative,
-            "falseNegatives": false_negative,
-            "precision": round(precision, 4),
-            "recall": round(recall, 4),
-            "specificity": round(specificity, 4),
-        }
-
-    def _accuracy_from_label_rows(self, rows: list[dict[str, Any]], threshold: float) -> dict[str, Any]:
-        true_positive = false_positive = true_negative = false_negative = 0
-        for row in rows:
-            try:
-                score = float(row.get("matchScore", 0.0) or 0.0)
-            except (TypeError, ValueError):
-                score = 0.0
-            expected_match = bool(row.get("isMatch"))
-            predicted_match = score >= threshold
-            if expected_match and predicted_match:
-                true_positive += 1
-            elif not expected_match and predicted_match:
-                false_positive += 1
-            elif not expected_match and not predicted_match:
-                true_negative += 1
-            else:
-                false_negative += 1
-        precision = true_positive / max(1, true_positive + false_positive)
-        recall = true_positive / max(1, true_positive + false_negative)
-        specificity = true_negative / max(1, true_negative + false_positive)
-        return {
-            "threshold": round(float(threshold), 4),
-            "labeled": len(rows),
-            "truePositives": true_positive,
-            "falsePositives": false_positive,
-            "trueNegatives": true_negative,
-            "falseNegatives": false_negative,
-            "precision": round(precision, 4),
-            "recall": round(recall, 4),
-            "specificity": round(specificity, 4),
         }
 
     def _validation_pack_recommendations(self, metrics: dict[str, dict[str, Any]], segments: dict[str, dict[str, Any]]) -> list[str]:
@@ -6208,36 +6137,3 @@ class ProjectState:
             except OSError:
                 pass
 
-    def _valid_reference(self, ref: ReferenceFace) -> bool:
-        return (
-            isinstance(ref.ref_id, str)
-            and bool(ref.ref_id)
-            and isinstance(ref.person_name, str)
-            and bool(ref.person_name.strip())
-            and isinstance(ref.age_bucket, str)
-            and isinstance(ref.source_path, str)
-            and isinstance(ref.model_name, str)
-            and self._finite_number(ref.quality)
-            and self._valid_vector(ref.vector)
-        )
-
-    def _valid_candidate(self, candidate: ReviewCandidate) -> bool:
-        return (
-            isinstance(candidate.candidate_id, str)
-            and bool(candidate.candidate_id)
-            and isinstance(candidate.source_path, str)
-            and isinstance(candidate.person_name, str)
-            and isinstance(candidate.band, str)
-            and isinstance(candidate.model_name, str)
-            and candidate.status in {"pending", "accepted", "rejected", "uncertain"}
-            and self._finite_number(candidate.score)
-            and self._finite_number(candidate.quality)
-        )
-
-    def _valid_vector(self, vector: object) -> bool:
-        if not isinstance(vector, list) or len(vector) != 512:
-            return False
-        return all(self._finite_number(value) for value in vector)
-
-    def _finite_number(self, value: object) -> bool:
-        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
