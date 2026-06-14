@@ -36,6 +36,16 @@ could read the raw files. Keep the app folder on an OS-encrypted volume
 (FileVault / BitLocker) and use **Delete face data** before handing the folder to
 someone else. The in-app privacy report surfaces this under `dataAtRest`.
 
+**Encrypted backups (opt-in).** Exported workspace backups — the most portable
+artifact — can be encrypted at rest. Set the `VINTRACE_BACKUP_PASSPHRASE`
+environment variable before exporting and the backup ZIP is written with
+AES-256-GCM (key derived from the passphrase via scrypt) and a tamper-evident
+header. `Verify` and `Restore` transparently decrypt it and require the same
+passphrase; without it they refuse rather than fail confusingly. This protects a
+backup placed on a USB stick or in cloud storage. The live workspace database and
+previews remain unencrypted on disk — full workspace-DB encryption (SQLCipher) is
+a larger migration tracked separately.
+
 ## Enabling code signing & notarization (BRS-3)
 
 The build is pre-wired for signing — it stays unsigned only because no

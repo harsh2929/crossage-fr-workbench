@@ -45,6 +45,7 @@
     "test:perf-budget": "node desktop/scripts/run-python.cjs tests/performance_budget.py",
     "test:localization": "node desktop/scripts/check-localization.cjs",
     "test:main-util": "node tests/main_util.test.cjs",
+    "test:crypto": "PYTHONPATH=. .venv/bin/python tests/crypto_roundtrip.py",
     "test:command-contract": "node desktop/scripts/run-python.cjs tests/command_contract.py",
     "test:e2e:buttons": "cross-env VINTRACE_BUTTON_AUDIT=1 playwright test tests/e2e/button-regression.spec.ts",
     "test:e2e:i18n": "cross-env VINTRACE_I18N_LAYOUT=1 playwright test tests/e2e/localization-layout.spec.ts",

@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 import csv
 import hashlib
+import io
 import json
 import math
 import os
@@ -19,6 +20,7 @@ from typing import Callable, Any
 
 from crossage_fr.config import archive_corrupt_file, load_config, save_config
 from crossage_fr.cluster import cluster_vectors
+from crossage_fr.crypto import DecryptionError, backup_passphrase, decrypt_bytes, encrypt_bytes, is_encrypted
 from crossage_fr.embed import EmbeddingEngine
 from crossage_fr.ingest import ImageLoadError, VideoLoadError, image_record_for_path, iter_image_paths, load_image, sample_video_frames
 from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, sha256_file, write_preview_image
@@ -2915,12 +2917,22 @@ class ProjectState:
                 db_snapshot.unlink()
             except OSError:
                 pass
+        # PC-03: optionally encrypt the finished backup at rest (AES-256-GCM via
+        # an operator passphrase). The file keeps its .zip name; verify/restore
+        # detect the encryption from the content header. Default (no passphrase)
+        # path is unchanged.
+        encrypted = False
+        passphrase = backup_passphrase()
+        if passphrase:
+            backup_path.write_bytes(encrypt_bytes(backup_path.read_bytes(), passphrase))
+            encrypted = True
         self._append_audit(
             {
                 "action": "export_workspace_backup",
                 "zip_path": str(backup_path),
                 "file_count": written,
                 "include_generated": bool(include_generated),
+                "encrypted": encrypted,
             }
         )
         return {
@@ -2928,7 +2940,25 @@ class ProjectState:
             "fileCount": written,
             "bytes": backup_path.stat().st_size,
             "includeGenerated": bool(include_generated),
+            "encrypted": encrypted,
         }
+
+    def _backup_archive_source(self, path: Path):
+        # PC-03: transparently open an (optionally) encrypted backup. Returns the
+        # path itself for a plain ZIP (unchanged behavior) or an in-memory
+        # decrypted ZIP. Raises ValueError if encrypted but the passphrase is
+        # missing/wrong.
+        with path.open("rb") as handle:
+            head = handle.read(16)
+        if not is_encrypted(head):
+            return path
+        passphrase = backup_passphrase()
+        if not passphrase:
+            raise ValueError("This backup is encrypted; set VINTRACE_BACKUP_PASSPHRASE to verify or restore it.")
+        try:
+            return io.BytesIO(decrypt_bytes(path.read_bytes(), passphrase))
+        except DecryptionError as exc:
+            raise ValueError(str(exc)) from exc
 
     def verify_workspace_backup(self, backup_path: Path | None = None) -> dict[str, Any]:
         path = backup_path.expanduser().resolve() if backup_path else self._latest_workspace_backup()
@@ -2955,7 +2985,7 @@ class ProjectState:
         result["bytes"] = path.stat().st_size
         required = {"backup-manifest.json", "config.json", "references.json"}
         try:
-            with zipfile.ZipFile(path) as archive:
+            with zipfile.ZipFile(self._backup_archive_source(path)) as archive:
                 corrupt = archive.testzip()
                 names = archive.namelist()
                 result["fileCount"] = len(names)
@@ -3005,7 +3035,7 @@ class ProjectState:
                     and isinstance(result["manifest"], dict)
                     and bool(result["manifest"])
                 )
-        except (OSError, zipfile.BadZipFile, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        except (OSError, zipfile.BadZipFile, json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             result["error"] = str(exc)
         self._append_audit(
             {
@@ -3071,7 +3101,7 @@ class ProjectState:
 
         file_count = 0
         bytes_written = 0
-        with zipfile.ZipFile(path) as archive:
+        with zipfile.ZipFile(self._backup_archive_source(path)) as archive:
             for member in archive.infolist():
                 name = member.filename
                 if not name or name.endswith("/"):
@@ -5392,12 +5422,20 @@ class ProjectState:
                 "encrypted": False,
                 "biometricStorage": "Face embeddings and generated previews are stored unencrypted in the app folder.",
                 "workspaceLock": "Workspace Lock gates access inside the app; it does not encrypt files on disk.",
+                "backupEncryption": (
+                    "Available now: set VINTRACE_BACKUP_PASSPHRASE and workspace backups are encrypted at rest "
+                    "(AES-256-GCM, scrypt-derived key); verify/restore require the same passphrase."
+                    if backup_passphrase()
+                    else "Optional: set VINTRACE_BACKUP_PASSPHRASE to encrypt exported workspace backups at rest "
+                    "(AES-256-GCM). The live workspace itself is still unencrypted on disk."
+                ),
                 "note": "Protect the app folder with OS full-disk/account encryption; another local user or process can read the raw files.",
             },
             "recommendations": [
                 "Use Delete face data before handing this app folder to someone else.",
                 "Export what you need first; deleted face data cannot be restored unless you have a backup.",
                 "Keep the app folder on an OS-encrypted volume — files at rest are not encrypted by Vintrace.",
+                "For portable backups, set VINTRACE_BACKUP_PASSPHRASE so exported backup ZIPs are encrypted at rest.",
             ],
         }
 

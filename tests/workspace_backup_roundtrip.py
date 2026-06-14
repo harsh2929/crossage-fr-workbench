@@ -106,6 +106,46 @@ def assert_backup_restore_roundtrip() -> None:
     assert not (root / "escape.txt").exists()
 
 
+def assert_encrypted_backup_roundtrip() -> None:
+    # PC-03: with VINTRACE_BACKUP_PASSPHRASE set, the backup is encrypted at rest
+    # and verify/restore transparently decrypt; without the passphrase, verify is
+    # refused. Full project (refs + a scanned candidate) so core files are present.
+    from crossage_fr.crypto import is_encrypted
+
+    os.environ["CROSSAGE_FORCE_FALLBACK"] = "1"
+    os.environ["VINTRACE_BACKUP_PASSPHRASE"] = "roundtrip-secret-passphrase"
+    root = Path(tempfile.mkdtemp(prefix="vintrace-backup-enc-"))
+    os.environ["CROSSAGE_REGISTRY_HOME"] = str(root / "registry")
+    try:
+        api = DesktopApi(root / "workspace")
+        make_face(root / "refs" / "person.jpg")
+        make_face(root / "scan" / "candidate.jpg", (92, 116, 88))
+        api.handle("set_consent", {"value": True, "note": "enc backup"})
+        assert api.handle("enroll", {"folder": str(root / "refs"), "personName": "Enc Person"})["added"] == 1
+        api.handle("scan", {"folder": str(root / "scan"), "source": "enc-roundtrip", "resume": False})
+
+        backup = api.handle("export_workspace_backup", {"includeGenerated": False})["value"]
+        assert backup["encrypted"] is True, "backup should be encrypted when passphrase is set"
+        backup_path = Path(backup["zipPath"])
+        assert is_encrypted(backup_path.read_bytes()[:16]), "backup file must carry the encryption header"
+
+        verified = api.handle("verify_workspace_backup", {"path": str(backup_path)})["value"]
+        assert verified["ok"] is True, f"encrypted verify should succeed with passphrase: {verified.get('error')}"
+
+        # Without the passphrase, verify must refuse (not silently treat as corrupt).
+        del os.environ["VINTRACE_BACKUP_PASSPHRASE"]
+        refused = api.handle("verify_workspace_backup", {"path": str(backup_path)})["value"]
+        assert refused["ok"] is False and "encrypted" in refused["error"].lower()
+
+        # Restore works once the passphrase is back.
+        os.environ["VINTRACE_BACKUP_PASSPHRASE"] = "roundtrip-secret-passphrase"
+        restored = api.handle("restore_workspace_backup", {"path": str(backup_path), "target": str(root / "restored")})["value"]
+        assert restored["ok"] is True and restored["stateSummary"]["references"] == 1
+    finally:
+        os.environ.pop("VINTRACE_BACKUP_PASSPHRASE", None)
+
+
 if __name__ == "__main__":
     assert_backup_restore_roundtrip()
+    assert_encrypted_backup_roundtrip()
     print("workspace backup roundtrip passed")

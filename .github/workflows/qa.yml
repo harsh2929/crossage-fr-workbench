@@ -102,6 +102,9 @@ jobs:
       - name: Scoring/validation units
         run: python tests/scoring_units.py
 
+      - name: At-rest encryption (PC-03)
+        run: python tests/crypto_roundtrip.py
+
       - name: Clean workspace simulation
         run: npm run test:clean
 
