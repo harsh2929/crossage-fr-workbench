@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 import argparse
 import functools
+import hmac
 import json
 import os
+import re
 import sys
 from typing import Any, Literal
 
@@ -148,6 +150,28 @@ def _looks_like_path(value: str) -> bool:
     )
 
 
+# MCP-04 (embedded-path leak): _looks_like_path/_redacted_path only catch a value
+# that IS a path. Biometric paths/filenames also leak *inside* free-text fields —
+# e.g. scanHistory errorSamples `f"{name}: {exc}"` where exc embeds an absolute
+# path, or audit message/detail. These masks redact absolute paths AND media
+# filenames wherever they appear in a string.
+_EMBEDDED_PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\|~?/)[^\s'\"<>|,;]+")
+_MEDIA_EXTS = sorted({ext.lstrip(".").lower() for ext in (set(IMAGE_EXTENSIONS) | set(VIDEO_EXTENSIONS)) if ext})
+_MEDIA_NAME_RE = re.compile(
+    r"[\w\-.]+\.(?:" + "|".join(re.escape(ext) for ext in _MEDIA_EXTS) + r")",
+    re.IGNORECASE,
+)
+
+
+def _scrub_text(value: str, *, mask_filenames: bool = True) -> str:
+    if not value:
+        return value
+    masked = _EMBEDDED_PATH_RE.sub("[hidden]", value)
+    if mask_filenames:
+        masked = _MEDIA_NAME_RE.sub("[hidden]", masked)
+    return masked
+
+
 def _agent_safe_value(value: Any, keep_path_names: bool = True) -> Any:
     if isinstance(value, dict):
         result: dict[str, Any] = {}
@@ -166,8 +190,12 @@ def _agent_safe_value(value: Any, keep_path_names: bool = True) -> Any:
         return result
     if isinstance(value, list):
         return [_agent_safe_value(item, keep_path_names) for item in value]
-    if isinstance(value, str) and not keep_path_names and _looks_like_path(value):
-        return _redacted_path(value, keep_name=False)
+    if isinstance(value, str):
+        if not keep_path_names and _looks_like_path(value):
+            return _redacted_path(value, keep_name=False)
+        # Mask absolute paths embedded mid-string always; mask bare media
+        # filenames too when basenames are being hidden (resources).
+        return _scrub_text(value, mask_filenames=not keep_path_names)
     return value
 
 
@@ -223,9 +251,13 @@ def _redact_tool_output(value: Any) -> Any:
     if isinstance(value, list):
         return [_redact_tool_output(item) for item in value]
     # Value-based catch-all: redact any string that looks like an absolute path,
-    # wherever it appears (so a path leaking through a non-path key is caught too).
-    if isinstance(value, str) and _looks_like_path(value):
-        return _redacted_path(value, keep_name=False)
+    # wherever it appears (so a path leaking through a non-path key is caught too),
+    # AND mask absolute paths / media filenames embedded inside free-text fields
+    # (e.g. error or audit messages) — start-anchored matching alone misses those.
+    if isinstance(value, str):
+        if _looks_like_path(value):
+            return _redacted_path(value, keep_name=False)
+        return _scrub_text(value, mask_filenames=True)
     return value
 
 
@@ -346,14 +378,15 @@ def _progress_reporter(ctx: Context):
 @mcp.resource("crossage://state", mime_type="application/json")
 def state_resource() -> str:
     """Redacted project state for agent context, including counts, config, references, and candidates."""
-    return _json(_agent_safe_value(_agent_state()))
+    # MCP-04 (resources): hide basenames too — filenames frequently encode names/dates.
+    return _json(_agent_safe_value(_agent_state(), keep_path_names=False))
 
 
 @mcp.resource("vintrace://summary", mime_type="application/json")
 @mcp.resource("crossage://summary", mime_type="application/json")
 def summary_resource() -> str:
     """Compact project summary for deciding which MCP tools to call next."""
-    return _json(_agent_safe_value(_state_summary(_agent_state())))
+    return _json(_agent_safe_value(_state_summary(_agent_state()), keep_path_names=False))
 
 
 @mcp.resource("vintrace://references", mime_type="application/json")
@@ -364,28 +397,28 @@ def references_resource() -> str:
     grouped: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for ref in state["references"]:
         grouped.setdefault(ref["personName"], {}).setdefault(ref["ageBucket"], []).append(ref)
-    return _json(_agent_safe_value(grouped))
+    return _json(_agent_safe_value(grouped, keep_path_names=False))
 
 
 @mcp.resource("vintrace://candidates", mime_type="application/json")
 @mcp.resource("crossage://candidates", mime_type="application/json")
 def candidates_resource() -> str:
     """Current review candidates with statuses and scores, with local paths and hashes hidden."""
-    return _json(_agent_safe_value(_agent_state()["candidates"]))
+    return _json(_agent_safe_value(_agent_state()["candidates"], keep_path_names=False))
 
 
 @mcp.resource("vintrace://config", mime_type="application/json")
 @mcp.resource("crossage://config", mime_type="application/json")
 def config_resource() -> str:
     """Runtime thresholds, clustering settings, Safe Mode, and consent policy."""
-    return _json(_agent_safe_value(_agent_state()["config"]))
+    return _json(_agent_safe_value(_agent_state()["config"], keep_path_names=False))
 
 
 @mcp.resource("vintrace://audit", mime_type="application/jsonl")
 @mcp.resource("crossage://audit", mime_type="application/jsonl")
 def audit_resource() -> str:
     """Recent audit log events with local paths hidden. Use read_audit_events for pagination."""
-    return "\n".join(json.dumps(_agent_safe_value(row), ensure_ascii=False) for row in _api().project.audit_events(limit=200)["events"])
+    return "\n".join(json.dumps(_agent_safe_value(row, keep_path_names=False), ensure_ascii=False) for row in _api().project.audit_events(limit=200)["events"])
 
 
 @mcp.resource("vintrace://agent-guide", mime_type="text/markdown")
@@ -713,6 +746,11 @@ def repair_database_integrity(confirm: bool = False) -> dict[str, Any]:
 @safe_tool()
 def relink_workspace_paths(old_root: str, new_root: str, confirm: bool = False) -> dict[str, Any]:
     """Relink saved photo/video paths after a library folder has moved. Without confirm=true this returns a dry run only."""
+    # MCP-06: confine both ends of the relink to approved roots.
+    if old_root:
+        _assert_allowed_path(old_root)
+    if new_root:
+        _assert_allowed_path(new_root)
     result = _call("relink_workspace_paths", {"oldRoot": old_root, "newRoot": new_root, "dryRun": not confirm})
     return {"relink": result.get("value", {}), "state": _state_summary(result["state"])}
 
@@ -936,6 +974,8 @@ def export_workspace_backup(include_generated: bool = False, confirm: bool = Fal
 @safe_tool()
 def verify_workspace_backup(path: str = "") -> dict[str, Any]:
     """Verify a Vintrace workspace backup ZIP before sharing or archiving it."""
+    if path:
+        _assert_allowed_path(path)  # MCP-06: confine the agent-supplied source ZIP.
     result = _call("verify_workspace_backup", {"path": path})
     return {"verification": result.get("value", {}), "state": _state_summary(result["state"])}
 
@@ -944,6 +984,12 @@ def verify_workspace_backup(path: str = "") -> dict[str, Any]:
 def restore_workspace_backup(path: str = "", target: str = "", confirm: bool = False) -> dict[str, Any]:
     """Restore a verified Vintrace workspace backup ZIP into an empty target folder. Requires confirm=true."""
     _confirmed(confirm, "restore a workspace backup into an empty target folder")
+    # MCP-06: confine BOTH the source ZIP and the restore destination to approved
+    # roots — restore writes files, so an unconfined target is an arbitrary-write.
+    if path:
+        _assert_allowed_path(path)
+    if target:
+        _assert_allowed_path(target)
     result = _call("restore_workspace_backup", {"path": path, "target": target})
     return {"restore": result.get("value", {}), "state": _state_summary(result["state"])}
 
@@ -1000,6 +1046,11 @@ def benchmark_history(limit: int = 8) -> dict[str, Any]:
 @safe_tool()
 def storage_io_benchmark(path: str = "", size_mb: int = 8) -> dict[str, Any]:
     """Benchmark metadata I/O in a folder without reading or training on any photos."""
+    # MCP-06: this writes a real (1-128MB) probe file + reveals fs metadata, so
+    # confine the agent-supplied directory to approved roots (an empty path
+    # defaults to the workspace). Prevents arbitrary-dir write + a filesystem oracle.
+    if path:
+        _assert_allowed_path(path)
     return _call("storage_io_benchmark", {"path": path, "sizeMb": size_mb})
 
 
@@ -1051,6 +1102,8 @@ def public_dataset_catalog() -> dict[str, Any]:
 @safe_tool()
 def inspect_public_dataset(dataset_id: str, folder: str, include_videos: bool = True) -> dict[str, Any]:
     """Inspect a local public-dataset folder laid out as identity subfolders."""
+    if folder:
+        _assert_allowed_path(folder)  # MCP-06: confine the agent-supplied dataset folder.
     return _call("inspect_public_dataset", {"datasetId": dataset_id, "folder": folder, "includeVideos": include_videos})
 
 
@@ -1069,6 +1122,8 @@ def run_public_dataset_benchmark(
     should_download = bool(download_lfw if download_dataset is None else download_dataset)
     if should_download or not folder:
         _confirmed(confirm, "download/reuse a public benchmark cache or run a dataset benchmark without a local folder")
+    if folder:
+        _assert_allowed_path(folder)  # MCP-06: confine the agent-supplied dataset folder.
     result = _call(
         "run_public_dataset_benchmark",
         {
@@ -1096,6 +1151,8 @@ def compare_public_dataset_models(
     """Compare installed face model packs on the same isolated public-dataset benchmark slice."""
     if download_dataset or not folder:
         _confirmed(confirm, "download/reuse a public benchmark cache or compare model packs without a local folder")
+    if folder:
+        _assert_allowed_path(folder)  # MCP-06: confine the agent-supplied dataset folder.
     result = _call(
         "compare_public_dataset_models",
         {
@@ -1252,6 +1309,44 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _bearer_token_ok(authorization_header: str, token: str) -> bool:
+    # MCP-01: constant-time check of an `Authorization: Bearer <token>` header.
+    if not token:
+        return False
+    scheme, _, presented = (authorization_header or "").partition(" ")
+    if scheme.lower() != "bearer":
+        return False
+    return hmac.compare_digest(presented.strip().encode("utf-8"), token.encode("utf-8"))
+
+
+def _build_bearer_auth_app(token: str):
+    # MCP-01: wrap FastMCP's streamable_http_app() (a Starlette app) so the
+    # operator token is enforced on EVERY request, not just at startup. Returns
+    # the wrapped app (kept separate from uvicorn.run so it is unit-testable).
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.responses import JSONResponse
+
+    class BearerAuthMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            if not _bearer_token_ok(request.headers.get("authorization", ""), token):
+                return JSONResponse(
+                    {"error": "unauthorized", "detail": "Valid MCP bearer token required."},
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            return await call_next(request)
+
+    app = mcp.streamable_http_app()
+    app.add_middleware(BearerAuthMiddleware)
+    return app
+
+
+def _serve_http_with_bearer_auth(host: str, port: int, token: str) -> None:
+    import uvicorn
+
+    uvicorn.run(_build_bearer_auth_app(token), host=host, port=port, log_level="warning")
+
+
 def run_mcp_server(
     workspace: Path | str | None = None,
     transport: Literal["stdio", "streamable-http"] = "stdio",
@@ -1263,11 +1358,10 @@ def run_mcp_server(
         _set_workspace_root(Path(workspace))
     if transport == "streamable-http":
         # MCP-01: the HTTP transport exposes the full biometric tool surface, so
-        # require an explicit operator token before it can start (fail closed —
-        # no accidental open HTTP server). Combined with the path allow-list,
-        # out-of-band consent, output redaction, and lock checks, this bounds what
-        # the transport can do; per-request Bearer validation is the next step.
-        if not env_value("MCP_TOKEN"):
+        # require an explicit operator token (fail closed — no accidental open
+        # HTTP server) AND validate it per request via Bearer auth below.
+        token = env_value("MCP_TOKEN")
+        if not token:
             raise ValueError(
                 "Streamable HTTP MCP requires an auth token. Set VINTRACE_MCP_TOKEN before "
                 "starting the HTTP transport (clients must present it). Use stdio for the "
@@ -1278,6 +1372,11 @@ def run_mcp_server(
             raise ValueError("Streamable HTTP MCP is localhost-only unless --allow-remote-http is set.")
         mcp.settings.host = host
         mcp.settings.port = port
+        try:
+            _serve_http_with_bearer_auth(host, port, token)
+        except KeyboardInterrupt:
+            sys.exit(0)
+        return
     try:
         mcp.run(transport=transport)
         if transport == "stdio":

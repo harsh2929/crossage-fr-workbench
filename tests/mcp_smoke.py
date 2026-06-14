@@ -182,7 +182,11 @@ async def smoke() -> None:
             assert state_resource.contents
             state_text = getattr(state_resource.contents[0], "text", "")
             assert str(workspace.resolve()) not in state_text
-            assert "[hidden]/workspace" in state_text
+            # MCP-04 (resources): paths are redacted AND basenames are now hidden
+            # too — filenames frequently encode names/dates, so a basename leak is
+            # still a privacy leak. The workspace path collapses to "[hidden]".
+            assert '"workspace": "[hidden]"' in state_text
+            assert f"[hidden]/{workspace.name}" not in state_text
 
             audit = await session.call_tool("read_audit_events", {"limit": 10})
             assert not audit.isError
@@ -204,6 +208,21 @@ async def smoke() -> None:
             assert consent.structuredContent["consentOnFile"] is True
             # MCP-03: scanning a path outside the approved roots is refused.
             await expect_tool_error(session, "scan_folder", {"folder": "/"}, "approved MCP roots")
+            # MCP-06: backup restore/verify destinations are confined too — an
+            # out-of-scope source ZIP or restore target is refused (restore writes
+            # files, so an unconfined target would be an arbitrary write).
+            await expect_tool_error(session, "verify_workspace_backup", {"path": "/etc/passwd"}, "approved MCP roots")
+            await expect_tool_error(
+                session,
+                "restore_workspace_backup",
+                {"path": "/tmp/x.zip", "target": "/tmp/out", "confirm": True},
+                "approved MCP roots",
+            )
+            # MCP-06 (completeness): storage_io_benchmark writes a real probe file
+            # and leaks fs metadata, so an out-of-scope directory must be refused —
+            # not just the backup tools. (Found by adversarial verification.)
+            await expect_tool_error(session, "storage_io_benchmark", {"path": "/etc"}, "approved MCP roots")
+            await expect_tool_error(session, "inspect_public_dataset", {"dataset_id": "lfw", "folder": "/etc"}, "approved MCP roots")
 
             private_probe = workspace.parent / "private-probe"
             private_probe.mkdir(parents=True, exist_ok=True)

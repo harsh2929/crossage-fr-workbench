@@ -96,6 +96,9 @@ jobs:
       - name: MCP smoke
         run: python tests/mcp_smoke.py
 
+      - name: MCP redaction & model integrity
+        run: python tests/mcp_redaction.py
+
       - name: Clean workspace simulation
         run: npm run test:clean
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import hashlib
+import json
 import os
 import shutil
 import ssl
@@ -14,6 +15,16 @@ import zipfile
 from typing import Any, Callable
 
 from crossage_fr.config import RuntimeConfig
+from crossage_fr.workspace_registry import restrict_file_mode
+
+
+# USC-04: name of the per-pack integrity manifest written next to the model
+# files at download time and re-checked at engine load (see verify_model_files).
+MODEL_INTEGRITY_FILENAME = ".model-integrity.json"
+
+
+class ModelIntegrityError(RuntimeError):
+    """Raised when on-disk face-model files don't match their integrity manifest."""
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -321,6 +332,9 @@ def download_model_pack(pack: str, root: Path, on_progress: ProgressCallback | N
     missing = missing_model_files(installed_dir, spec.pack)
     if missing:
         raise ValueError(f"Downloaded model is incomplete: {', '.join(missing)}")
+    # USC-04: anchor the just-verified files so engine load can detect a later swap.
+    integrity_dir = resolved_model_pack_dir(root, spec.pack) or installed_dir
+    write_model_integrity_manifest(integrity_dir, spec)
     emit({"phase": "complete", "downloadedBytes": spec.size_bytes, "percent": 100, "message": "Face model ready"})
     return {
         "pack": spec.pack,
@@ -423,6 +437,89 @@ def _download_total_bytes(headers: Any, expected: int, resume_from: int) -> int:
     if content_length.isdigit():
         return int(content_length) + int(resume_from)
     return expected
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _model_onnx_files(pack_dir: Path) -> list[Path]:
+    try:
+        return sorted(p for p in pack_dir.glob("*.onnx") if p.is_file())
+    except OSError:
+        return []
+
+
+def write_model_integrity_manifest(pack_dir: Path, spec: ModelPackageSpec) -> dict[str, Any]:
+    """USC-04: record per-file SHA-256s next to the freshly-extracted model.
+
+    We can't pin per-ONNX hashes in code (the pack is downloaded, not bundled in
+    the repo), so we derive them here from an archive that ``download_model_pack``
+    has *already* verified against the in-code-pinned ``spec.sha256``. The
+    manifest is the trust anchor for engine load: ``verify_model_files`` fails
+    closed if any file is swapped after download. Stored ``0o600`` so a
+    non-owner can't quietly rewrite it.
+    """
+    files = {path.name: _hash_file(path) for path in _model_onnx_files(pack_dir)}
+    manifest = {
+        "schemaVersion": 1,
+        "pack": spec.pack,
+        "archiveSha256": spec.sha256.lower(),
+        "files": files,
+        "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    manifest_path = pack_dir / MODEL_INTEGRITY_FILENAME
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    restrict_file_mode(manifest_path, 0o600)
+    return manifest
+
+
+def verify_model_files(pack_dir: Path, pack: str) -> None:
+    """USC-04: fail closed if loaded ONNX files drift from the integrity manifest.
+
+    Enforcement is strict *when a manifest is present* (always true for packs
+    installed via ``download_model_pack``). If none exists — manually placed or
+    pre-bundled models a dev dropped in — verification is skipped rather than
+    breaking those flows; that residual is closed by shipping signed manifests
+    with bundled packs. Raises :class:`ModelIntegrityError` on any mismatch.
+    """
+    manifest_path = Path(pack_dir) / MODEL_INTEGRITY_FILENAME
+    if not manifest_path.exists():
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ModelIntegrityError(f"Model integrity manifest for {pack} is unreadable.") from exc
+    spec = MODEL_PACKAGES.get(pack)
+    if spec and str(manifest.get("archiveSha256", "")).lower() != spec.sha256.lower():
+        raise ModelIntegrityError(
+            f"Model integrity manifest for {pack} does not trace to the pinned release archive."
+        )
+    recorded = manifest.get("files")
+    if not isinstance(recorded, dict) or not recorded:
+        raise ModelIntegrityError(f"Model integrity manifest for {pack} lists no files.")
+    for name, expected in recorded.items():
+        file_path = Path(pack_dir) / name
+        if not file_path.exists():
+            raise ModelIntegrityError(f"Model file {name} for {pack} is missing.")
+        if _hash_file(file_path).lower() != str(expected).lower():
+            raise ModelIntegrityError(f"Model file {name} for {pack} failed its integrity check.")
+    # USC-04 (close the set): editing a recorded file is caught above, but the
+    # engine selects ONNX by priority *name* (scrfd_10g_bnkps.onnx / glintr100.onnx
+    # first), so an attacker can ADD an unrecorded higher-priority .onnx that loads
+    # before the genuine weights. Reject any on-disk .onnx absent from the manifest
+    # — the manifest captured every .onnx present at download time, so an extra one
+    # is tampering, not a legitimate file.
+    recorded_names = {str(name) for name in recorded}
+    extras = sorted(p.name for p in _model_onnx_files(Path(pack_dir)) if p.name not in recorded_names)
+    if extras:
+        raise ModelIntegrityError(
+            f"Unexpected model file(s) for {pack} not covered by the integrity manifest: {', '.join(extras)}."
+        )
 
 
 def _verify_archive(path: Path, spec: ModelPackageSpec) -> str:

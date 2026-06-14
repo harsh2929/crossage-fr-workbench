@@ -13,7 +13,13 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 from crossage_fr.config import RuntimeConfig
 from crossage_fr.ingest import load_image
-from crossage_fr.model_manager import model_pack_ready, model_roots_for_engine, resolved_model_pack_dir
+from crossage_fr.model_manager import (
+    ModelIntegrityError,
+    model_pack_ready,
+    model_roots_for_engine,
+    resolved_model_pack_dir,
+    verify_model_files,
+)
 from crossage_fr.models import EmbeddingResult
 from crossage_fr.runtime_env import env_flag
 from crossage_fr.platform_detect import build_platform_report, get_providers, provider_label, split_provider_config
@@ -144,12 +150,18 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
         pack = model_pack or config.model_pack
         self.model_name = f"insightface-{pack}"
         self._face_cls = Face
+        model_dir = str(resolved_model_pack_dir(model_roots_for_engine(config)[0], pack) or "")
+        # USC-04: verify on-disk model integrity before loading and OUTSIDE the
+        # try/except below, so a ModelIntegrityError fails closed instead of being
+        # swallowed into the CPU-fallback path (which would load the same files).
+        if model_dir:
+            verify_model_files(Path(model_dir), pack)
         try:
-            model_dir = str(resolved_model_pack_dir(model_roots_for_engine(config)[0], pack) or "")
             self.det_model = self._load_model(model_zoo, model_dir, "detection", providers, provider_options)
             self.rec_model = self._load_model(model_zoo, model_dir, "recognition", providers, provider_options)
+        except ModelIntegrityError:
+            raise
         except Exception:
-            model_dir = str(resolved_model_pack_dir(model_roots_for_engine(config)[0], pack) or "")
             self.det_model = self._load_model(model_zoo, model_dir, "detection", ["CPUExecutionProvider"], None)
             self.rec_model = self._load_model(model_zoo, model_dir, "recognition", ["CPUExecutionProvider"], None)
             ctx_id = -1
