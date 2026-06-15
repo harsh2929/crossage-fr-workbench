@@ -78,12 +78,29 @@ def test_embedded_path_redacted_in_tool_output() -> None:
     assert LEAK_PATH not in out
 
 
+def test_rate_limiter_token_bucket() -> None:
+    # Burst of 3, refilling 1 token/sec, with a deterministic injected clock.
+    limiter = mcp._RateLimiter(capacity=3, refill_per_sec=1.0)
+    assert limiter.allow(100.0) is True
+    assert limiter.allow(100.0) is True
+    assert limiter.allow(100.0) is True
+    assert limiter.allow(100.0) is False, "bucket should be empty after the burst"
+    assert limiter.allow(101.0) is True, "one token should refill after 1 second"
+    assert limiter.allow(101.0) is False, "only one token refilled"
+    # Capacity caps accumulation: a long idle never grants more than `capacity` tokens.
+    assert limiter.allow(200.0) is True
+    assert limiter.allow(200.0) is True
+    assert limiter.allow(200.0) is True
+    assert limiter.allow(200.0) is False
+
+
 def main() -> None:
     test_usc04_rejects_added_unrecorded_model()
     test_absent_manifest_is_skipped()
     test_embedded_path_redacted_in_resource_freetext()
     test_embedded_path_redacted_in_audit_message()
     test_embedded_path_redacted_in_tool_output()
+    test_rate_limiter_token_bucket()
     print("mcp redaction + model integrity ok")
 
 

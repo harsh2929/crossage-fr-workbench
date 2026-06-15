@@ -265,6 +265,13 @@ async def smoke() -> None:
             await expect_tool_error(session, "rename_person", {"old_name": "A", "new_name": "B"}, "confirm=True")
             await expect_tool_error(session, "purge_old_candidates", {"days": 1}, "confirm=True")
             await expect_tool_error(session, "delete_face_data", {}, "confirm=True")
+            # Deleting the audit log too needs the human-only operator token (MCP-07).
+            await expect_tool_error(
+                session,
+                "delete_face_data",
+                {"confirm": True, "include_audit": True},
+                "operator approval token",
+            )
             await expect_tool_error(session, "apply_calibration", {}, "confirm=True")
             await expect_tool_error(session, "import_accuracy_labels", {"labels": []}, "confirm=True")
             await expect_tool_error(session, "export_accepted_media_bundle", {}, "confirm=True")

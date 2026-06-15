@@ -1264,9 +1264,20 @@ def privacy_report() -> dict[str, Any]:
 
 
 @safe_tool()
-def delete_face_data(confirm: bool = False, include_audit: bool = False) -> dict[str, Any]:
-    """Delete saved faces, possible matches, scan history, generated previews, and private caches."""
+def delete_face_data(
+    confirm: bool = False,
+    include_audit: bool = False,
+    operator_token: str = "",
+) -> dict[str, Any]:
+    """Delete saved faces, possible matches, scan history, generated previews, and private caches.
+
+    Deleting the tamper-evident audit log too (include_audit=True) is a human-only operator
+    action: it requires the VINTRACE_MCP_OPERATOR_TOKEN (passed as operator_token), so an
+    authenticated agent cannot erase its own trail.
+    """
     _confirmed(confirm, "delete face data from the workspace")
+    if include_audit:
+        _validate_operator_token("Deleting the audit log", operator_token)
     result = _call("delete_face_data", {"confirm": True, "includeAudit": include_audit})
     return {"deleted": result.get("value", {}), "state": _state_summary(result["state"])}
 
@@ -1358,12 +1369,56 @@ def _bearer_token_ok(authorization_header: str, token: str) -> bool:
     return hmac.compare_digest(presented.strip().encode("utf-8"), token.encode("utf-8"))
 
 
+class _RateLimiter:
+    """Token-bucket limiter with an injectable clock (so the logic is unit-testable)."""
+
+    def __init__(self, capacity: float, refill_per_sec: float) -> None:
+        self.capacity = max(1.0, float(capacity))
+        self.refill_per_sec = max(0.0, float(refill_per_sec))
+        self._tokens = self.capacity
+        self._last: float | None = None
+
+    def allow(self, now: float) -> bool:
+        if self._last is None:
+            self._last = now
+        elapsed = max(0.0, now - self._last)
+        self._last = now
+        self._tokens = min(self.capacity, self._tokens + elapsed * self.refill_per_sec)
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return True
+        return False
+
+
+def _rate_limit_settings() -> tuple[float, float, int]:
+    # MCP-08: env-tunable flood protection for the HTTP host. Rate 0 disables rate limiting,
+    # max-concurrency 0 disables the concurrency cap.
+    def _num(name: str, default: float) -> float:
+        raw = env_value(name)
+        if raw is None or str(raw).strip() == "":
+            return default
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return default
+
+    rate = max(0.0, _num("MCP_RATE_LIMIT", 20.0))  # requests/sec per client
+    burst = max(1.0, _num("MCP_RATE_BURST", max(rate * 2.0, 1.0)))
+    max_concurrency = max(0, int(_num("MCP_MAX_CONCURRENCY", 8.0)))
+    return (rate, burst, max_concurrency)
+
+
 def _build_bearer_auth_app(token: str):
     # MCP-01: wrap FastMCP's streamable_http_app() (a Starlette app) so the
     # operator token is enforced on EVERY request, not just at startup. Returns
     # the wrapped app (kept separate from uvicorn.run so it is unit-testable).
+    import asyncio
+    import time
+
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
+
+    rate, burst, max_concurrency = _rate_limit_settings()
 
     class BearerAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
@@ -1375,8 +1430,36 @@ def _build_bearer_auth_app(token: str):
                 )
             return await call_next(request)
 
+    class RateLimitMiddleware(BaseHTTPMiddleware):
+        # MCP-08: per-client token bucket + a global concurrency cap so a single agent
+        # cannot flood the highest-risk (biometric) tool surface.
+        def __init__(self, app) -> None:
+            super().__init__(app)
+            self._buckets: dict[str, _RateLimiter] = {}
+            self._semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency > 0 else None
+
+        async def dispatch(self, request, call_next):
+            if rate > 0:
+                client = request.client.host if request.client else "unknown"
+                bucket = self._buckets.get(client)
+                if bucket is None:
+                    bucket = _RateLimiter(burst, rate)
+                    self._buckets[client] = bucket
+                if not bucket.allow(time.monotonic()):
+                    return JSONResponse(
+                        {"error": "rate_limited", "detail": "Too many requests; slow down."},
+                        status_code=429,
+                        headers={"Retry-After": "1"},
+                    )
+            if self._semaphore is not None:
+                async with self._semaphore:
+                    return await call_next(request)
+            return await call_next(request)
+
     app = mcp.streamable_http_app()
     app.add_middleware(BearerAuthMiddleware)
+    # Added last => outermost: rate-limiting runs before auth, capping floods (incl. auth brute force).
+    app.add_middleware(RateLimitMiddleware)
     return app
 
 
