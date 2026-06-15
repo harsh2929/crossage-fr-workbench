@@ -768,6 +768,17 @@ def read_audit_events(limit: int = 100, offset: int = 0) -> dict[str, Any]:
 
 
 @safe_tool()
+def audit_chain_status() -> dict[str, Any]:
+    """Verify the tamper-evident SHA-256 hash chain over the audit log.
+
+    Returns verified=true when every chained entry hashes correctly and links to its
+    predecessor; otherwise firstBreak identifies the first altered/missing entry. Entries
+    that predate chaining are counted as legacy and do not count as breaks.
+    """
+    return _call("audit_chain_status")
+
+
+@safe_tool()
 def purge_duplicate_candidates(confirm: bool = False) -> dict[str, Any]:
     """Compact duplicate review rows for the same person/media item while preserving the strongest candidate."""
     _confirmed(confirm, "purge duplicate candidate rows")

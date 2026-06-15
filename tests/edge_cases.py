@@ -2722,6 +2722,61 @@ def assert_support_bundle_redaction_is_strict() -> None:
     assert str(Path.home()) not in support_text
 
 
+def assert_audit_chain_is_tamper_evident() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-audit-chain-"))
+    workspace = root / "workspace"
+    api = make_api(workspace)
+    # Generate several audited actions.
+    api.handle("set_consent", {"value": True, "operator": "tester", "source": "test"})
+    api.handle("clear_queue", {"confirm": True})
+    api.handle("set_consent", {"value": False, "operator": "tester", "source": "test"})
+    project = api.project
+    audit_path = project.audit_path
+    assert audit_path.exists(), "audit log should exist after audited actions"
+    lines = [json.loads(l) for l in audit_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) >= 3, f"expected >=3 audit rows, got {len(lines)}"
+    # Every entry is chained.
+    for idx, row in enumerate(lines, start=1):
+        assert isinstance(row.get("hash"), str) and row["hash"], f"row {idx} missing hash"
+        assert isinstance(row.get("seq"), int), f"row {idx} missing seq"
+        assert "prevHash" in row, f"row {idx} missing prevHash"
+    seqs = [row["seq"] for row in lines]
+    assert seqs == list(range(1, len(lines) + 1)), f"seqs not monotonic from 1: {seqs}"
+    assert lines[0]["prevHash"] == "", "genesis prevHash must be empty"
+    for prev, cur in zip(lines, lines[1:]):
+        assert cur["prevHash"] == prev["hash"], "prevHash must chain to prior hash"
+    # Verify command reports a sound chain.
+    chain = api.handle("audit_chain_status", {})
+    chain = chain.get("value", chain) if isinstance(chain, dict) else chain
+    assert chain["verified"] is True, f"chain should verify clean: {chain}"
+    assert chain["chained"] == len(lines), f"chained count mismatch: {chain}"
+    assert chain["tail"] == lines[-1]["hash"], "tail must be last hash"
+    # Tamper a middle line -> chain must fail at the right index.
+    target = 1
+    raw_lines = audit_path.read_text(encoding="utf-8").splitlines()
+    mutated = dict(lines[target])
+    mutated["action"] = str(mutated.get("action", "")) + "_TAMPERED"
+    raw_lines[target] = json.dumps(mutated)
+    audit_path.write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
+    chain2 = api.handle("audit_chain_status", {})
+    chain2 = chain2.get("value", chain2) if isinstance(chain2, dict) else chain2
+    assert chain2["verified"] is False, "tampered chain must fail verification"
+    assert chain2["firstBreak"] is not None, "tampered chain must report a break"
+    assert chain2["firstBreak"]["index"] == target + 1, f"break at wrong index: {chain2['firstBreak']}"
+    # Legacy (unchained) entries are tolerated, chained portion still verifies.
+    legacy = json.dumps({"at": "2020-01-01T00:00:00Z", "action": "legacy_event"})
+    audit_path.write_text(
+        legacy + "\n" + "\n".join(json.dumps(r) for r in lines) + "\n", encoding="utf-8"
+    )
+    chain3 = api.handle("audit_chain_status", {})
+    chain3 = chain3.get("value", chain3) if isinstance(chain3, dict) else chain3
+    assert chain3["legacy"] == 1, f"expected 1 legacy entry: {chain3}"
+    assert chain3["chained"] == len(lines), f"chained count mismatch with legacy: {chain3}"
+    assert chain3["verified"] is True, f"legacy-prefixed chain should verify: {chain3}"
+    shutil.rmtree(root, ignore_errors=True)
+    print("  audit chain tamper-evidence ok")
+
+
 def main() -> None:
     assert_corrupt_workspace_recovery()
     assert_corrupt_sqlite_startup_recovery()
@@ -2774,6 +2829,7 @@ def main() -> None:
     assert_structured_backend_error_codes()
     assert_release_hardening_diagnostics()
     assert_support_bundle_redaction_is_strict()
+    assert_audit_chain_is_tamper_evident()
     print("edge cases ok")
 
 

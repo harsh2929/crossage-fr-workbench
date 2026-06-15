@@ -405,6 +405,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "enforce_storage_budget": "_cmd_enforce_storage_budget",
         "add_calibration_label": "_cmd_add_calibration_label",
         "audit_events": "_cmd_audit_events",
+        "audit_chain_status": "_cmd_audit_chain_status",
         "record_audit": "_cmd_record_audit",
         "save_settings": "_cmd_save_settings",
     }
@@ -988,6 +989,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def _cmd_audit_events(self, params, progress=None):
         return self.project.audit_events(int(params.get("limit", 100)), int(params.get("offset", 0)))
+
+    def _cmd_audit_chain_status(self, params, progress=None):
+        return self.project.verify_audit_chain()
 
     def _cmd_record_audit(self, params, progress=None):
         row = params.get("row", {})

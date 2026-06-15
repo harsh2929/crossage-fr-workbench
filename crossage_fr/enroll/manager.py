@@ -4291,10 +4291,12 @@ class ProjectState:
         json_path = export_root / f"vintrace-activity-log-{stamp}.json"
         csv_path = export_root / f"vintrace-activity-log-{stamp}.csv"
         rows = self._read_audit_rows()
+        chain = self.verify_audit_chain()
         payload = {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "workspace": str(self.root),
             "counts": {"events": len(rows)},
+            "chain": chain,
             "events": rows,
         }
         json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -6022,11 +6024,123 @@ class ProjectState:
             reverse=True,
         )
 
+    @staticmethod
+    def _audit_canonical(payload: dict[str, Any]) -> str:
+        # Deterministic serialization for hashing; the hash field is never part of its own digest.
+        return json.dumps(
+            {key: value for key, value in payload.items() if key != "hash"},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+
+    def _audit_tail_tip(self) -> tuple[int, str]:
+        # Return (last_seq, last_hash) for the most recent chained entry, read from disk so the
+        # chain stays sound even when a second process (e.g. the MCP server) appended last.
+        # Callers must already hold self._state_lock(). Reads only the file tail for speed.
+        if not self.audit_path.exists():
+            return (0, "")
+        try:
+            size = self.audit_path.stat().st_size
+            with self.audit_path.open("rb") as handle:
+                window = 65536
+                if size > window:
+                    handle.seek(size - window)
+                    handle.readline()  # discard the partial first line
+                chunk = handle.read()
+        except OSError:
+            return (0, "")
+        tip = (0, "")
+        for raw in chunk.split(b"\n"):
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            try:
+                value = json.loads(stripped.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if isinstance(value, dict) and isinstance(value.get("hash"), str) and value.get("hash"):
+                tip = (int(value.get("seq", 0) or 0), value["hash"])
+        return tip
+
     def _append_audit(self, row: dict[str, object]) -> None:
-        audit_row = {"at": datetime.utcnow().isoformat(timespec="seconds") + "Z", **row}
         with self._state_lock():
+            last_seq, last_hash = self._audit_tail_tip()
+            audit_row: dict[str, Any] = {
+                "at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                **row,
+            }
+            # Chain fields are authoritative and cannot be overridden by the caller-supplied row.
+            audit_row["seq"] = last_seq + 1
+            audit_row["prevHash"] = last_hash
+            audit_row["hash"] = hashlib.sha256(
+                self._audit_canonical(audit_row).encode("utf-8")
+            ).hexdigest()
             with self.audit_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(audit_row) + "\n")
+
+    def verify_audit_chain(self) -> dict[str, Any]:
+        # Re-read the audit log and verify the SHA-256 hash chain. Entries that predate chaining
+        # (no "hash" field) are tolerated as legacy and counted, not treated as breaks.
+        result: dict[str, Any] = {
+            "verified": True,
+            "length": 0,
+            "chained": 0,
+            "legacy": 0,
+            "head": "",
+            "tail": "",
+            "firstBreak": None,
+        }
+        if not self.audit_path.exists():
+            return result
+        prev_hash = ""
+        index = 0
+        try:
+            with self.audit_path.open("r", encoding="utf-8") as handle:
+                for raw in handle:
+                    stripped = raw.strip()
+                    if not stripped:
+                        continue
+                    index += 1
+                    try:
+                        value = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        if result["firstBreak"] is None:
+                            result["firstBreak"] = {"index": index, "reason": "unparseable-line"}
+                        continue
+                    if not isinstance(value, dict):
+                        continue
+                    stored_hash = value.get("hash")
+                    if not isinstance(stored_hash, str) or not stored_hash:
+                        result["legacy"] += 1
+                        continue
+                    result["chained"] += 1
+                    recomputed = hashlib.sha256(
+                        self._audit_canonical(value).encode("utf-8")
+                    ).hexdigest()
+                    stored_prev = value.get("prevHash", "")
+                    if result["firstBreak"] is None:
+                        if recomputed != stored_hash:
+                            result["firstBreak"] = {
+                                "index": index,
+                                "reason": "hash-mismatch",
+                                "seq": value.get("seq"),
+                            }
+                        elif stored_prev != prev_hash:
+                            result["firstBreak"] = {
+                                "index": index,
+                                "reason": "prev-hash-mismatch",
+                                "seq": value.get("seq"),
+                            }
+                    if not result["head"]:
+                        result["head"] = stored_hash
+                    result["tail"] = stored_hash
+                    prev_hash = stored_hash
+        except OSError as exc:
+            result["firstBreak"] = {"index": index, "reason": f"read-error:{exc.__class__.__name__}"}
+        result["length"] = index
+        result["verified"] = result["firstBreak"] is None
+        return result
 
     def audit_events(self, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         limit = max(1, min(500, int(limit)))

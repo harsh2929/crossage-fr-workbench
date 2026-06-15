@@ -94,7 +94,8 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "add_calibration_label",
   "set_performance_mode",
   "save_settings",
-  "audit_events"
+  "audit_events",
+  "audit_chain_status"
 ]);
 
 function assertPlainObject(value, label = "Payload") {
