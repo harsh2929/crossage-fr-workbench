@@ -106,6 +106,7 @@ export interface AppConfig {
   effectiveTwoPassScan?: boolean;
   effectiveVerificationDetectorSize?: number;
   safeMode: boolean;
+  safeModeZeroAdmittance?: boolean;
   safeModeThreshold: number;
   storageBudgetBytes: number;
   maxMediaFileBytes: number;

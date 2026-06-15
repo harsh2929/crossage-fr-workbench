@@ -838,6 +838,7 @@ def save_settings(
     verification_detector_size: int,
     safe_mode: bool,
     safe_mode_threshold: float,
+    safe_mode_zero_admittance: bool | None = None,
     performance_mode: str | None = None,
     storage_budget_bytes: int = 0,
     max_media_file_bytes: int | None = None,
@@ -850,7 +851,14 @@ def save_settings(
 ) -> dict[str, Any]:
     """Update thresholds, clustering minimum, Safe Mode settings, storage budget, and optional scan exclusions."""
     current = _api().project.config
-    relaxes_safe_mode = (current.safe_mode and not safe_mode) or safe_mode_threshold > current.safe_mode_threshold
+    new_zero_admittance = (
+        current.safe_mode_zero_admittance if safe_mode_zero_admittance is None else bool(safe_mode_zero_admittance)
+    )
+    relaxes_safe_mode = (
+        (current.safe_mode and not safe_mode)
+        or safe_mode_threshold > current.safe_mode_threshold
+        or (current.safe_mode_zero_admittance and not new_zero_admittance)
+    )
     relaxes_review_thresholds = (
         confident < current.thresholds.confident
         or likely < current.thresholds.likely
@@ -876,6 +884,7 @@ def save_settings(
             "verificationDetectorSize": verification_detector_size,
             "performanceMode": performance_mode if performance_mode is not None else current.performance_mode,
             "safeMode": safe_mode,
+            "safeModeZeroAdmittance": new_zero_admittance,
             "safeModeThreshold": safe_mode_threshold,
             "storageBudgetBytes": storage_budget_bytes,
             "maxMediaFileBytes": max_media_file_bytes if max_media_file_bytes is not None else current.max_media_file_bytes,

@@ -43,6 +43,7 @@ class RuntimeConfig:
     require_consent: bool = True
     safe_mode: bool = True
     safe_mode_threshold: float = 0.58
+    safe_mode_zero_admittance: bool = False
     face_detector_size: int = 512
     two_pass_scan: bool = True
     verification_detector_size: int = 640
@@ -142,6 +143,7 @@ def _validate_config(config: RuntimeConfig) -> RuntimeConfig:
     config.review_only = _require_bool(config.review_only, "review_only")
     config.require_consent = _require_bool(config.require_consent, "require_consent")
     config.safe_mode = _require_bool(config.safe_mode, "safe_mode")
+    config.safe_mode_zero_admittance = _require_bool(config.safe_mode_zero_admittance, "safe_mode_zero_admittance")
     config.safe_mode_threshold = _require_unit_float(config.safe_mode_threshold, "safe_mode_threshold")
     config.face_detector_size = _require_detector_size(config.face_detector_size)
     config.two_pass_scan = _require_bool(config.two_pass_scan, "two_pass_scan")

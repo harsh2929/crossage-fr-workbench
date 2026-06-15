@@ -1010,32 +1010,16 @@ class ProjectState:
             embeddings: list[EmbeddingResult],
             image: Any,
         ) -> bool:
-            model_score = assessment.model_score
-            if model_score is None:
-                return False
-            if model_score >= max(0.32, self.config.safe_mode_threshold * 0.55):
-                return False
             image_width = max(1, int(getattr(image, "width", 0) or 0))
             image_height = max(1, int(getattr(image, "height", 0) or 0))
-            if image_width < 64 or image_height < 64:
-                return False
-            aspect = image_width / max(1, image_height)
-            if aspect < 0.55 or aspect > 1.75:
-                return False
-            for embedding in embeddings:
-                if not embedding.bbox:
-                    continue
-                x1, y1, x2, y2 = embedding.bbox
-                width = max(0, min(image_width, x2) - max(0, x1))
-                height = max(0, min(image_height, y2) - max(0, y1))
-                if not width or not height:
-                    continue
-                coverage = (width * height) / max(1, image_width * image_height)
-                center_x = (max(0, x1) + min(image_width, x2)) / 2 / image_width
-                center_y = (max(0, y1) + min(image_height, y2)) / 2 / image_height
-                if coverage >= 0.12 and 0.18 <= center_x <= 0.82 and 0.12 <= center_y <= 0.72:
-                    return True
-            return False
+            return self._face_crop_admittable(
+                assessment.model_score,
+                self.config.safe_mode_threshold,
+                image_width,
+                image_height,
+                [embedding.bbox for embedding in embeddings],
+                self.config.safe_mode_zero_admittance,
+            )
 
         def queue_image(
             image_path: Path,
@@ -4499,6 +4483,8 @@ class ProjectState:
             "policy": {
                 "safeMode": bool(self.config.safe_mode),
                 "safeModeThreshold": float(self.config.safe_mode_threshold),
+                "safeModeZeroAdmittance": bool(self.config.safe_mode_zero_admittance),
+                "faceCropCarveOutActive": not bool(self.config.safe_mode_zero_admittance),
                 "protectedMediaExcludedFromMatching": True,
                 "protectedMediaExcludedFromClustering": True,
                 "originalMediaIsNeverModified": True,
@@ -6037,6 +6023,44 @@ class ProjectState:
             ),
             reverse=True,
         )
+
+    @staticmethod
+    def _face_crop_admittable(
+        model_score: float | None,
+        safe_mode_threshold: float,
+        image_width: int,
+        image_height: int,
+        bboxes: list[Any],
+        zero_admittance: bool,
+    ) -> bool:
+        # Decide whether a Safe-Mode-flagged image may still enter matching because it is a
+        # benign, centered, single-face portrait. With zero-admittance on (e.g. the CSAM
+        # vertical) this carve-out is fully disabled: no borderline-sensitive media is admitted.
+        if zero_admittance:
+            return False
+        if model_score is None:
+            return False
+        if model_score >= max(0.32, safe_mode_threshold * 0.55):
+            return False
+        if image_width < 64 or image_height < 64:
+            return False
+        aspect = image_width / max(1, image_height)
+        if aspect < 0.55 or aspect > 1.75:
+            return False
+        for bbox in bboxes:
+            if not bbox:
+                continue
+            x1, y1, x2, y2 = bbox
+            width = max(0, min(image_width, x2) - max(0, x1))
+            height = max(0, min(image_height, y2) - max(0, y1))
+            if not width or not height:
+                continue
+            coverage = (width * height) / max(1, image_width * image_height)
+            center_x = (max(0, x1) + min(image_width, x2)) / 2 / image_width
+            center_y = (max(0, y1) + min(image_height, y2)) / 2 / image_height
+            if coverage >= 0.12 and 0.18 <= center_x <= 0.82 and 0.12 <= center_y <= 0.72:
+                return True
+        return False
 
     @staticmethod
     def _media_mtime_date(path: Path) -> str | None:

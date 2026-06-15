@@ -2841,6 +2841,35 @@ def assert_candidate_age_gap_is_surfaced() -> None:
     print("  candidate age-gap surfacing ok")
 
 
+def assert_safe_mode_zero_admittance() -> None:
+    from crossage_fr.enroll import ProjectState as _PS
+
+    good_bbox = [(40, 40, 240, 240)]  # centered, ~51% coverage in a 280x280 image
+    # Normal carve-out: benign centered face with a low NSFW score is admitted.
+    assert _PS._face_crop_admittable(0.10, 0.58, 280, 280, good_bbox, False) is True
+    # Zero-admittance disables the carve-out entirely, even for a perfect centered face.
+    assert _PS._face_crop_admittable(0.10, 0.58, 280, 280, good_bbox, True) is False
+    # A high NSFW score is never admitted regardless of geometry.
+    assert _PS._face_crop_admittable(0.90, 0.58, 280, 280, good_bbox, False) is False
+    # The flag round-trips through save_settings + reload and surfaces in state config.
+    root = Path(tempfile.mkdtemp(prefix="crossage-zero-admit-"))
+    workspace = root / "workspace"
+    api = make_api(workspace)
+    assert api.state()["config"].get("safeModeZeroAdmittance") is False
+    api.handle("save_settings", {"safeMode": True, "safeModeZeroAdmittance": True})
+    reopened = make_api(workspace)
+    assert reopened.project.config.safe_mode_zero_admittance is True, "flag should persist across reload"
+    assert reopened.state()["config"].get("safeModeZeroAdmittance") is True
+    audit = reopened.handle("export_safe_mode_audit", {})
+    audit_value = audit.get("value", audit)
+    import json as _json
+    policy = _json.loads(Path(audit_value["jsonPath"]).read_text(encoding="utf-8"))["policy"]
+    assert policy["safeModeZeroAdmittance"] is True
+    assert policy["faceCropCarveOutActive"] is False
+    shutil.rmtree(root, ignore_errors=True)
+    print("  safe mode zero-admittance ok")
+
+
 def main() -> None:
     assert_corrupt_workspace_recovery()
     assert_corrupt_sqlite_startup_recovery()
@@ -2896,6 +2925,7 @@ def main() -> None:
     assert_audit_chain_is_tamper_evident()
     assert_candidate_carries_capture_dates()
     assert_candidate_age_gap_is_surfaced()
+    assert_safe_mode_zero_admittance()
     print("edge cases ok")
 
 

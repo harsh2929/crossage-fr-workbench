@@ -1101,6 +1101,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         self.project.config.ffmpeg_path = ffmpeg_path
         self.project.config.ffprobe_path = ffprobe_path
         self.project.config.safe_mode = bool(params.get("safeMode", self.project.config.safe_mode))
+        self.project.config.safe_mode_zero_admittance = bool(
+            params.get("safeModeZeroAdmittance", self.project.config.safe_mode_zero_admittance)
+        )
         self.project.config.safe_mode_threshold = safe_mode_threshold
         self.project.apply_video_decoder_config()
         self.project._append_audit(
@@ -1136,6 +1139,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     "ffprobe_path_set": bool(ffprobe_path),
                 },
                 "safe_mode": self.project.config.safe_mode,
+                "safe_mode_zero_admittance": self.project.config.safe_mode_zero_admittance,
                 "safe_mode_threshold": safe_mode_threshold,
                 "source": str(params.get("source", "desktop")),
                 "reason": str(params.get("reason", ""))[:800],
@@ -1567,6 +1571,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             },
             "resumable": True,
             "safeMode": bool(self.project.config.safe_mode),
+            "safeModeZeroAdmittance": bool(self.project.config.safe_mode_zero_admittance),
             "performanceMode": self.project.config.performance_mode,
             "effectivePerformanceMode": effective_mode,
             "effectiveFaceDetectorSize": config.face_detector_size,
@@ -2886,6 +2891,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "effectiveTwoPassScan": effective_config.two_pass_scan,
                 "effectiveVerificationDetectorSize": effective_config.verification_detector_size,
                 "safeMode": self.project.config.safe_mode,
+                "safeModeZeroAdmittance": self.project.config.safe_mode_zero_admittance,
                 "safeModeThreshold": self.project.config.safe_mode_threshold,
                 "storageBudgetBytes": self.project.config.storage_budget_bytes,
                 "maxMediaFileBytes": self.project.config.max_media_file_bytes,

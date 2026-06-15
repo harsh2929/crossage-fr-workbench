@@ -371,6 +371,7 @@ type SettingsDraft = {
   twoPassScan: boolean;
   verificationDetectorSize: number;
   safeMode: boolean;
+  safeModeZeroAdmittance?: boolean;
   safeModeThreshold: number;
   storageBudgetBytes: number;
   maxMediaFileBytes: number;
@@ -1141,6 +1142,7 @@ function settingsValuesEqual(left: SettingsValues, right: SettingsValues) {
     left.twoPassScan === right.twoPassScan &&
     left.verificationDetectorSize === right.verificationDetectorSize &&
     left.safeMode === right.safeMode &&
+    (left.safeModeZeroAdmittance ?? false) === (right.safeModeZeroAdmittance ?? false) &&
     sameSettingValue(left.safeModeThreshold, right.safeModeThreshold) &&
     left.storageBudgetBytes === right.storageBudgetBytes &&
     left.maxMediaFileBytes === right.maxMediaFileBytes &&
@@ -2128,6 +2130,7 @@ export default function App() {
       twoPassScan: next.config.twoPassScan,
       verificationDetectorSize: next.config.verificationDetectorSize,
       safeMode: next.config.safeMode,
+      safeModeZeroAdmittance: next.config.safeModeZeroAdmittance ?? false,
       safeModeThreshold: next.config.safeModeThreshold,
       storageBudgetBytes: next.config.storageBudgetBytes ?? 0,
       maxMediaFileBytes: next.config.maxMediaFileBytes ?? 0,
@@ -4138,6 +4141,7 @@ export default function App() {
       verificationDetectorSize: draft.verificationDetectorSize,
       performanceMode: performanceChoice,
       safeMode: draft.safeMode,
+      safeModeZeroAdmittance: draft.safeModeZeroAdmittance ?? false,
       safeModeThreshold: draft.safeModeThreshold,
       storageBudgetBytes: draft.storageBudgetBytes,
       maxMediaFileBytes: draft.maxMediaFileBytes,
@@ -9374,7 +9378,8 @@ function SettingsView(props: {
   }
   const safeModeRelaxed = props.state.config.safeMode && (
     !props.settings.safeMode ||
-    props.settings.safeModeThreshold > props.state.config.safeModeThreshold + 0.001
+    props.settings.safeModeThreshold > props.state.config.safeModeThreshold + 0.001 ||
+    ((props.state.config.safeModeZeroAdmittance ?? false) && !(props.settings.safeModeZeroAdmittance ?? false))
   );
   const build = props.state.buildInfo;
   const buildCommit = build?.commit && build.commit !== "local" ? build.commit.slice(0, 12) : build?.packaged ? "packaged" : "local";
@@ -9502,6 +9507,19 @@ function SettingsView(props: {
               value={props.settings.safeModeThreshold}
               onChange={(value) => setCustomSettings({ safeModeThreshold: value })}
             />
+            <label className="switch-row">
+              <span>
+                <strong>Zero-admittance (strict)</strong>
+                <small>Never let borderline-sensitive images enter matching, even a centered single-face portrait. Recommended for child-safety / CSAM victim-ID work.</small>
+              </span>
+              <input
+                type="checkbox"
+                checked={props.settings.safeModeZeroAdmittance ?? false}
+                disabled={!props.settings.safeMode}
+                onChange={(event) => setCustomSettings({ safeModeZeroAdmittance: event.currentTarget.checked })}
+                aria-label="Safe Mode zero-admittance"
+              />
+            </label>
             <label>Group similar photos when at least
               <input
                 type="number"
