@@ -2753,6 +2753,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "videoDurationMs": candidate.video_duration_ms,
             "sourceHash": candidate.source_hash,
             "createdAt": candidate.created_at,
+            "captureDate": candidate.capture_date,
+            "referenceCaptureDate": candidate.reference_capture_date,
+            "ageGapYears": candidate.age_gap_years,
+            "ageGapConfidence": candidate.age_gap_confidence,
         }
 
     def _candidate_risk_flags(self, candidate: Any) -> list[str]:
@@ -2945,6 +2949,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     "videoDurationMs": candidate.video_duration_ms,
                     "sourceHash": candidate.source_hash,
                     "createdAt": candidate.created_at,
+                    "captureDate": candidate.capture_date,
+                    "referenceCaptureDate": candidate.reference_capture_date,
+                    "ageGapYears": candidate.age_gap_years,
+                    "ageGapConfidence": candidate.age_gap_confidence,
                 }
                 for candidate in top_candidates
             ],

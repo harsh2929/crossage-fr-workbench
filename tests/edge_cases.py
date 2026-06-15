@@ -2777,6 +2777,35 @@ def assert_audit_chain_is_tamper_evident() -> None:
     print("  audit chain tamper-evidence ok")
 
 
+def assert_candidate_carries_capture_dates() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-capture-date-"))
+    workspace = root / "workspace"
+    refs = root / "refs"
+    scan = root / "scan"
+    make_face(refs / "person_a.jpg")
+    make_face(scan / "candidate_a.jpg", shirt=(92, 116, 88))
+    api = make_api(workspace)
+    api.handle("set_consent", {"value": True})
+    assert api.handle("enroll", {"personName": "Person A", "ageBucket": "adult", "folder": str(refs)})["added"] >= 1
+    scanned = api.handle("scan", {"folder": str(scan), "source": "capture-date-test"})
+    candidates = scanned["state"]["candidates"]
+    assert candidates, "expected at least one candidate"
+    matched = [c for c in candidates if c.get("bestRefId")]
+    assert matched, f"expected a matched candidate, bands={[c.get('band') for c in candidates]}"
+    cand = matched[0]
+    assert cand.get("captureDate"), f"candidate missing captureDate: {cand}"
+    assert cand.get("referenceCaptureDate"), f"candidate missing referenceCaptureDate: {cand}"
+    # Capture dates must survive a workspace reload (round-trip through persistence).
+    reopened = make_api(workspace)
+    reloaded = reopened.state()["candidates"]
+    rematched = [c for c in reloaded if c.get("candidateId") == cand["candidateId"]]
+    assert rematched, "candidate should persist across reload"
+    assert rematched[0].get("captureDate"), f"captureDate lost on reload: {rematched[0]}"
+    assert rematched[0].get("referenceCaptureDate"), f"referenceCaptureDate lost on reload: {rematched[0]}"
+    shutil.rmtree(root, ignore_errors=True)
+    print("  candidate capture dates ok")
+
+
 def main() -> None:
     assert_corrupt_workspace_recovery()
     assert_corrupt_sqlite_startup_recovery()
@@ -2830,6 +2859,7 @@ def main() -> None:
     assert_release_hardening_diagnostics()
     assert_support_bundle_redaction_is_strict()
     assert_audit_chain_is_tamper_evident()
+    assert_candidate_carries_capture_dates()
     print("edge cases ok")
 
 

@@ -308,6 +308,10 @@ export interface ReviewCandidate {
   note: string;
   riskFlags?: string[];
   createdAt: string;
+  captureDate?: string | null;
+  referenceCaptureDate?: string | null;
+  ageGapYears?: number | null;
+  ageGapConfidence?: string | null;
 }
 
 export interface ScanMetrics {

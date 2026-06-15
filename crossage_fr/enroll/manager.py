@@ -1055,6 +1055,7 @@ class ProjectState:
             ensure_not_cancelled()
             ensure_stable_signature(image_path, signature)
             metadata.setdefault("source_hash", content_hash)
+            metadata.setdefault("capture_date", self._safe_capture_date(image_path, image=image, sha256=content_hash))
             embeddings: list[EmbeddingResult] | None = None
             cache_hit = False
             if apply_safe_mode and self.config.safe_mode:
@@ -1227,6 +1228,7 @@ class ProjectState:
                     model_name=embedding.model_name,
                     note=candidate_note,
                     risk_flags=candidate_risk_flags,
+                    reference_capture_date=self._reference_capture_date(decision.best_ref_id),
                     **embedding_metadata,
                 )
                 self.candidates[candidate.candidate_id] = candidate
@@ -1470,6 +1472,7 @@ class ProjectState:
                                     "video_timestamp_ms": sample.timestamp_ms,
                                     "video_frame_index": sample.frame_index,
                                     "video_duration_ms": sample.duration_ms,
+                                    "capture_date": self._media_mtime_date(path),
                                 },
                                 apply_safe_mode=False,
                             )
@@ -6023,6 +6026,26 @@ class ProjectState:
             ),
             reverse=True,
         )
+
+    @staticmethod
+    def _media_mtime_date(path: Path) -> str | None:
+        try:
+            return datetime.fromtimestamp(os.path.getmtime(path)).date().isoformat()
+        except OSError:
+            return None
+
+    def _safe_capture_date(self, path: Path, image: Any | None = None, sha256: str = "") -> str | None:
+        # Source-media capture date: EXIF DateTimeOriginal when present, else file mtime.
+        try:
+            return image_record_for_path(path, image=image, sha256=sha256).capture_date
+        except Exception:
+            return self._media_mtime_date(path)
+
+    def _reference_capture_date(self, ref_id: str | None) -> str | None:
+        if not ref_id:
+            return None
+        ref = self.references.get(ref_id)
+        return ref.capture_date if ref else None
 
     @staticmethod
     def _audit_canonical(payload: dict[str, Any]) -> str:

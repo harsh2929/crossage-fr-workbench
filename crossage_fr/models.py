@@ -70,6 +70,10 @@ class ReviewCandidate:
     source_hash: str = ""
     pose_bucket: str = "unknown"
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat(timespec="seconds") + "Z")
+    capture_date: str | None = None
+    reference_capture_date: str | None = None
+    age_gap_years: float | None = None
+    age_gap_confidence: str | None = None
 
 
 RISK_FLAG_NOTE_MARKERS = {
