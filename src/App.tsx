@@ -3468,6 +3468,21 @@ export default function App() {
     );
   }
 
+  async function setJurisdictionPreset(preset: string) {
+    const result = await invoke<CommandResult<{ preset: string; label: string; retentionReviewedDays: number }>>(
+      "Applying jurisdiction preset",
+      "set_jurisdiction_preset",
+      { preset }
+    );
+    const value = result.value;
+    if (value) {
+      setNotice({
+        tone: "ok",
+        text: `Applied ${value.label}: reviewed-match retention ${value.retentionReviewedDays} days. Operator default, not legal advice — confirm with counsel.`
+      });
+    }
+  }
+
   async function exportSafeModeAudit() {
     const result = await invoke<CommandResult<SafeModeAuditExportValue>>("Exporting Safe Mode audit", "export_safe_mode_audit");
     const value = result.value;
@@ -4694,6 +4709,7 @@ export default function App() {
             exportConsentReceipt={exportConsentReceipt}
             loadRetentionPolicyReport={loadRetentionPolicyReport}
             exportSafeModeAudit={exportSafeModeAudit}
+            setJurisdictionPreset={setJurisdictionPreset}
             exportReviewLedger={exportReviewLedger}
             exportWorkspaceBackup={exportWorkspaceBackup}
             verifyLatestWorkspaceBackup={verifyLatestWorkspaceBackup}
@@ -9218,6 +9234,7 @@ function SettingsView(props: {
   exportConsentReceipt(): void;
   loadRetentionPolicyReport(): void;
   exportSafeModeAudit(): void;
+  setJurisdictionPreset(preset: string): void;
   exportReviewLedger(): void;
   exportWorkspaceBackup(): void;
   verifyLatestWorkspaceBackup(): void;
@@ -9953,6 +9970,9 @@ function SettingsView(props: {
         report={props.privacyReport}
         retentionPolicy={props.retentionPolicy}
         busy={props.busy}
+        jurisdictionPreset={props.state.config.jurisdictionPreset ?? "standard"}
+        retentionReviewedDays={props.state.config.retentionReviewedDays ?? 90}
+        setJurisdictionPreset={props.setJurisdictionPreset}
         loadPrivacyReport={props.loadPrivacyReport}
         loadRetentionPolicyReport={props.loadRetentionPolicyReport}
         exportConsentReceipt={props.exportConsentReceipt}
@@ -11640,10 +11660,21 @@ function DiagnosticsPanel({
   );
 }
 
+const JURISDICTION_OPTIONS: { id: string; label: string }[] = [
+  { id: "standard", label: "Standard (local-first default)" },
+  { id: "gdpr", label: "EU — GDPR / EU AI Act" },
+  { id: "bipa-il", label: "US — Illinois BIPA" },
+  { id: "ccpa-cpra", label: "US — California CCPA/CPRA" },
+  { id: "colorado", label: "US — Colorado CPA" }
+];
+
 function PrivacyControlPanel({
   report,
   retentionPolicy,
   busy,
+  jurisdictionPreset,
+  retentionReviewedDays,
+  setJurisdictionPreset,
   loadPrivacyReport,
   loadRetentionPolicyReport,
   exportConsentReceipt,
@@ -11653,6 +11684,9 @@ function PrivacyControlPanel({
   report: PrivacyReport | null;
   retentionPolicy: RetentionPolicyReport | null;
   busy: boolean;
+  jurisdictionPreset: string;
+  retentionReviewedDays: number;
+  setJurisdictionPreset(preset: string): void;
   loadPrivacyReport(): void;
   loadRetentionPolicyReport(): void;
   exportConsentReceipt(): void;
@@ -11662,6 +11696,22 @@ function PrivacyControlPanel({
   return (
     <div className="panel settings-panel data-ops-panel">
       <div className="panel-title"><EyeOff size={18} /> Privacy controls</div>
+      <label className="switch-row">
+        <span>
+          <strong>Jurisdiction preset</strong>
+          <small>Sets consent strictness and reviewed-match retention ({retentionReviewedDays} days). Operator default, not legal advice.</small>
+        </span>
+        <select
+          value={jurisdictionPreset}
+          disabled={busy}
+          onChange={(event) => setJurisdictionPreset(event.currentTarget.value)}
+          aria-label="Jurisdiction preset"
+        >
+          {JURISDICTION_OPTIONS.map((option) => (
+            <option key={option.id} value={option.id}>{option.label}</option>
+          ))}
+        </select>
+      </label>
       {report ? (
         <>
           <div className="workspace-health-grid">

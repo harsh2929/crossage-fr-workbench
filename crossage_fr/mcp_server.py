@@ -787,6 +787,22 @@ def read_audit_events(limit: int = 100, offset: int = 0) -> dict[str, Any]:
 
 
 @safe_tool()
+def list_jurisdictions() -> dict[str, Any]:
+    """List the per-jurisdiction consent/retention presets (operator defaults, not legal advice)."""
+    return _call("list_jurisdictions")
+
+
+@safe_tool()
+def set_jurisdiction_preset(preset: str) -> dict[str, Any]:
+    """Apply a per-jurisdiction consent/retention preset (e.g. gdpr, bipa-il, ccpa-cpra, colorado, standard).
+
+    Operator-configurable defaults only — NOT legal advice or certification.
+    """
+    result = _call("set_jurisdiction_preset", {"preset": preset})
+    return {"applied": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
 def audit_chain_status() -> dict[str, Any]:
     """Verify the tamper-evident SHA-256 hash chain over the audit log.
 

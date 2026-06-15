@@ -2920,6 +2920,42 @@ def assert_per_subject_consent() -> None:
     print("  per-subject consent ok")
 
 
+def assert_jurisdiction_presets() -> None:
+    from crossage_fr.compliance.jurisdictions import jurisdiction_preset, list_jurisdictions
+
+    ids = {j["id"] for j in list_jurisdictions()}
+    assert {"standard", "gdpr", "bipa-il", "ccpa-cpra", "colorado"} <= ids, ids
+    assert jurisdiction_preset("does-not-exist") is None
+    root = Path(tempfile.mkdtemp(prefix="crossage-jurisdiction-"))
+    workspace = root / "workspace"
+    api = make_api(workspace)
+    assert api.state()["config"]["jurisdictionPreset"] == "standard"
+    gdpr = jurisdiction_preset("gdpr")
+    res = api.handle("set_jurisdiction_preset", {"preset": "gdpr"})
+    assert res["value"]["preset"] == "gdpr"
+    cfg = api.state()["config"]
+    assert cfg["jurisdictionPreset"] == "gdpr"
+    assert cfg["retentionReviewedDays"] == gdpr["retentionReviewedDays"]
+    assert api.project.config.per_subject_consent is True, "gdpr preset should enable per-subject consent"
+    # The retention report reflects the configured window.
+    report = api.handle("retention_policy_report", {})
+    report = report.get("value", report) if isinstance(report, dict) else report
+    assert report["policy"]["recommendedReviewedRetentionDays"] == gdpr["retentionReviewedDays"]
+    assert report["policy"]["jurisdictionPreset"] == "gdpr"
+    # Unknown preset is rejected.
+    try:
+        api.handle("set_jurisdiction_preset", {"preset": "atlantis"})
+        raise AssertionError("unknown preset should raise")
+    except ValueError:
+        pass
+    # Persists across reload.
+    reopened = make_api(workspace)
+    assert reopened.project.config.jurisdiction_preset == "gdpr"
+    assert reopened.project.config.retention_reviewed_days == gdpr["retentionReviewedDays"]
+    shutil.rmtree(root, ignore_errors=True)
+    print("  jurisdiction presets ok")
+
+
 def main() -> None:
     assert_corrupt_workspace_recovery()
     assert_corrupt_sqlite_startup_recovery()
@@ -2977,6 +3013,7 @@ def main() -> None:
     assert_candidate_age_gap_is_surfaced()
     assert_safe_mode_zero_admittance()
     assert_per_subject_consent()
+    assert_jurisdiction_presets()
     print("edge cases ok")
 
 

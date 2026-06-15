@@ -433,6 +433,36 @@ class ProjectState:
             "activeSubjectCount": sum(1 for record in subjects.values() if record.get("active")),
         }
 
+    def set_jurisdiction_preset(self, preset_id: str) -> dict[str, Any]:
+        # Apply a per-jurisdiction CONSENT/RETENTION preset. Operator-configurable defaults
+        # only; not legal advice (see crossage_fr.compliance.jurisdictions).
+        from crossage_fr.compliance import jurisdiction_preset
+
+        preset = jurisdiction_preset(preset_id)
+        if preset is None:
+            raise ValueError(f"Unknown jurisdiction preset: {preset_id!r}.")
+        self.config.jurisdiction_preset = preset["id"]
+        self.config.retention_reviewed_days = int(preset["retentionReviewedDays"])
+        self.config.require_consent = bool(preset["requireExplicitConsent"])
+        self.config.per_subject_consent = bool(preset["perSubjectConsent"])
+        self._append_audit(
+            {
+                "action": "set_jurisdiction_preset",
+                "preset": preset["id"],
+                "retentionReviewedDays": int(preset["retentionReviewedDays"]),
+                "perSubjectConsent": bool(preset["perSubjectConsent"]),
+            }
+        )
+        self.save()
+        return {
+            "preset": preset["id"],
+            "label": preset["label"],
+            "retentionReviewedDays": int(preset["retentionReviewedDays"]),
+            "requireConsent": bool(preset["requireExplicitConsent"]),
+            "perSubjectConsent": bool(preset["perSubjectConsent"]),
+            "notes": preset["notes"],
+        }
+
     def model_compatibility_report(self, active_model_name: str) -> dict[str, Any]:
         active = str(active_model_name or "").strip()
         counts: dict[str, int] = {}
@@ -4499,7 +4529,8 @@ class ProjectState:
             "reviewedOlderThanDays": older_than,
             "oldestReviewedAgeDays": oldest_reviewed_days,
             "policy": {
-                "recommendedReviewedRetentionDays": 90,
+                "recommendedReviewedRetentionDays": int(self.config.retention_reviewed_days),
+                "jurisdictionPreset": str(self.config.jurisdiction_preset),
                 "reviewedStatuses": ["accepted", "rejected", "uncertain"],
                 "pendingRowsAreKept": True,
                 "originalMediaIsNeverDeleted": True,

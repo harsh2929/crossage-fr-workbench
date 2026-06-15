@@ -406,6 +406,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "add_calibration_label": "_cmd_add_calibration_label",
         "audit_events": "_cmd_audit_events",
         "audit_chain_status": "_cmd_audit_chain_status",
+        "list_jurisdictions": "_cmd_list_jurisdictions",
+        "set_jurisdiction_preset": "_cmd_set_jurisdiction_preset",
         "record_audit": "_cmd_record_audit",
         "save_settings": "_cmd_save_settings",
     }
@@ -998,6 +1000,15 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def _cmd_audit_chain_status(self, params, progress=None):
         return self.project.verify_audit_chain()
+
+    def _cmd_list_jurisdictions(self, params, progress=None):
+        from crossage_fr.compliance import JURISDICTION_DISCLAIMER, list_jurisdictions
+
+        return {"jurisdictions": list_jurisdictions(), "disclaimer": JURISDICTION_DISCLAIMER}
+
+    def _cmd_set_jurisdiction_preset(self, params, progress=None):
+        result = self.project.set_jurisdiction_preset(str(params.get("preset", "")))
+        return {"value": result, "state": self.state()}
 
     def _cmd_record_audit(self, params, progress=None):
         row = params.get("row", {})
@@ -2885,6 +2896,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "modelPack": self.project.config.model_pack,
                 "modelRoot": self.project.config.model_root,
                 "perSubjectConsent": bool(self.project.config.per_subject_consent),
+                "jurisdictionPreset": str(self.project.config.jurisdiction_preset),
+                "retentionReviewedDays": int(self.project.config.retention_reviewed_days),
                 "thresholds": {
                     "confident": self.project.config.thresholds.confident,
                     "likely": self.project.config.thresholds.likely,

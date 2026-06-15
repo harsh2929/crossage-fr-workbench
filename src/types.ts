@@ -106,6 +106,8 @@ export interface AppConfig {
   effectiveTwoPassScan?: boolean;
   effectiveVerificationDetectorSize?: number;
   perSubjectConsent?: boolean;
+  jurisdictionPreset?: string;
+  retentionReviewedDays?: number;
   safeMode: boolean;
   safeModeZeroAdmittance?: boolean;
   safeModeThreshold: number;
