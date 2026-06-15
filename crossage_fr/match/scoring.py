@@ -6,6 +6,7 @@ import math
 
 from crossage_fr.config import Thresholds
 from crossage_fr.match.age_gap import compute_age_gap
+from crossage_fr.match.calibration import as_norm_score
 from crossage_fr.models import ReferenceFace, ReviewCandidate
 from crossage_fr.store import SearchHit
 
@@ -23,6 +24,28 @@ SINGLE_REFERENCE_MARGIN = 0.035
 # must not be auto-"confident" off a single bad crop. Deliberately conservative and
 # precision-only: it NEVER touches the cross-age relaxed band, so recall is unchanged.
 LOW_QUALITY_CONFIDENT_FLOOR = 0.25
+# Phase-4 (2): above this normalized alignment residual the recognizer crop is built
+# from bad landmarks / extreme pose and must not yield an auto-"confident" match.
+# Precision-only and cross-age-SAFE: it never touches the relaxed band (cross-age
+# faces are often the hardest to align, so penalizing them would cut the very recall
+# the product exists for). Conservative default; only clearly-broken geometry fires.
+ALIGNMENT_SUSPECT_THRESHOLD = 0.15
+
+
+def _demote_alignment_suspect(
+    decision: MatchDecision, thresholds: Thresholds, candidate_align_error: float | None
+) -> MatchDecision:
+    if candidate_align_error is None or candidate_align_error <= ALIGNMENT_SUSPECT_THRESHOLD:
+        return decision
+    if decision.band != "confident":
+        return decision
+    demoted_score = min(decision.score, thresholds.confident - 1e-4)
+    return replace(
+        decision,
+        score=float(demoted_score),
+        band=band_for_score(float(demoted_score), thresholds),
+        flags=tuple(dict.fromkeys((*decision.flags, "alignment-suspect"))),
+    )
 # Phase 2.1: makes the enrolled age_bucket / capture_date OPERATIVE at match time. A
 # small ADDITIVE confidence boost when a same-era reference supports the match (e.g. a
 # child query supported by a child reference), so a true match is less likely to lose
@@ -61,6 +84,30 @@ def _apply_age_consistency(
                 flags=tuple(dict.fromkeys((*decision.flags, "age-consistent"))),
             )
     return decision
+
+
+# Phase-4 §5.5 (AS-norm/IDA): a "confident" match must stand OUT from the probe's own
+# impostor cohort. Below this many std-devs of separation the probe matches other people
+# about as well as the target (a generic / low-information face) and must not be
+# auto-confident. Precision-only and cross-age-SAFE -- never touches the relaxed band.
+COHORT_SEPARATION_FLOOR = 0.5
+
+
+def _demote_low_cohort_separation(
+    decision: MatchDecision, thresholds: Thresholds, candidate_cohort_scores: list[float] | None
+) -> MatchDecision:
+    if not candidate_cohort_scores or decision.band != "confident" or decision.raw_cosine is None:
+        return decision
+    z = as_norm_score(float(decision.raw_cosine), candidate_cohort_scores)
+    if z >= COHORT_SEPARATION_FLOOR:
+        return decision
+    demoted_score = min(decision.score, thresholds.confident - 1e-4)
+    return replace(
+        decision,
+        score=float(demoted_score),
+        band=band_for_score(float(demoted_score), thresholds),
+        flags=tuple(dict.fromkeys((*decision.flags, "low-cohort-separation"))),
+    )
 
 
 def _demote_low_quality_confident(
@@ -162,6 +209,8 @@ def group_hits(
     pose_bucket: str | None = None,
     candidate_quality: float | None = None,
     candidate_capture_date: str | None = None,
+    candidate_align_error: float | None = None,
+    candidate_cohort_scores: list[float] | None = None,
 ) -> MatchDecision | None:
     candidate_pose = _normalized_pose_bucket(pose_bucket)
     hard_pose = candidate_pose in {"profile", "edge-face", "three-quarter"}
@@ -264,7 +313,19 @@ def group_hits(
             raw_cosine=best_decision.raw_cosine,
         )
     best_decision = _apply_age_consistency(best_decision, grouped, thresholds, candidate_capture_date)
-    return _demote_low_quality_confident(best_decision, thresholds, candidate_quality)
+    # §5.5: derive the probe's impostor cohort from its hits to OTHER people (free, no new
+    # store) when not given explicitly; empty (single enrolled person) -> graceful no-op.
+    cohort_scores = candidate_cohort_scores
+    if cohort_scores is None and best_decision is not None:
+        derived = [
+            float(hit.score)
+            for hit in hits
+            if refs.get(hit.item_id) is not None and refs[hit.item_id].person_name != best_decision.person_name
+        ]
+        cohort_scores = derived or None
+    best_decision = _demote_low_cohort_separation(best_decision, thresholds, cohort_scores)
+    best_decision = _demote_low_quality_confident(best_decision, thresholds, candidate_quality)
+    return _demote_alignment_suspect(best_decision, thresholds, candidate_align_error)
 
 
 # ---------------------------------------------------------------------------

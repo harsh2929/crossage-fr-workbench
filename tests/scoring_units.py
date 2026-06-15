@@ -13,6 +13,7 @@ from __future__ import annotations
 from crossage_fr.config import Thresholds
 from crossage_fr.match import accuracy_at_threshold, accuracy_from_label_rows, valid_candidate, valid_reference
 from crossage_fr.match.age_gap import CROSS_AGE_GAP_FLAG, ESTIMATED_BAND, compute_age_gap
+from crossage_fr.match.review_order import review_lane, review_priority
 from crossage_fr.match.scoring import band_for_score, finite_number, group_hits, valid_vector
 from crossage_fr.models import ReferenceFace, ReviewCandidate
 from crossage_fr.store import SearchHit
@@ -83,6 +84,37 @@ def test_age_consistent_same_era_support_is_additive_and_degrade_safe() -> None:
     assert "age-consistent" not in far.flags
 
 
+def test_misaligned_face_cannot_be_confident_but_cross_age_unharmed() -> None:
+    refs = {"r1": _ref("r1", "Alice")}
+    th = Thresholds()
+    confident_hits = [SearchHit(item_id="r1", score=0.50)]
+    # Well-aligned crop keeps its confident band.
+    assert group_hits(confident_hits, refs, th, candidate_align_error=0.02).band == "confident"
+    # A badly-aligned crop (bad landmarks / extreme pose) cannot be auto-confident.
+    poor = group_hits(confident_hits, refs, th, candidate_align_error=0.30)
+    assert poor.band == "likely"
+    assert "alignment-suspect" in poor.flags
+    # The cross-age relaxed band is NEVER penalized for alignment (recall-safe; cross-age
+    # faces are often the hardest to align).
+    relaxed = group_hits([SearchHit(item_id="r1", score=0.22)], refs, th, candidate_align_error=0.30)
+    assert "alignment-suspect" not in relaxed.flags
+
+
+def test_low_cohort_separation_cannot_be_confident_but_cross_age_unharmed() -> None:
+    refs = {"r1": _ref("r1", "Alice")}
+    th = Thresholds()
+    confident_hits = [SearchHit(item_id="r1", score=0.50)]
+    # Probe stands out from its impostor cohort (other people score ~0.10) -> confident.
+    assert group_hits(confident_hits, refs, th, candidate_cohort_scores=[0.10] * 6).band == "confident"
+    # Probe matches other people about as well as the target (generic face) -> demote.
+    poor = group_hits(confident_hits, refs, th, candidate_cohort_scores=[0.52, 0.51, 0.53, 0.50, 0.49])
+    assert poor.band == "likely"
+    assert "low-cohort-separation" in poor.flags
+    # Cross-age relaxed band is never penalized for cohort separation (recall-safe).
+    relaxed = group_hits([SearchHit(item_id="r1", score=0.22)], refs, th, candidate_cohort_scores=[0.49] * 6)
+    assert "low-cohort-separation" not in relaxed.flags
+
+
 def test_low_quality_crop_cannot_be_confident_but_cross_age_unharmed() -> None:
     refs = {"r1": _ref("r1", "Alice")}
     th = Thresholds()  # confident 0.40 / likely 0.28 / relaxed_child 0.20
@@ -110,6 +142,28 @@ def test_group_hits_captures_raw_cosine_not_fused_score() -> None:
     assert decision is not None
     assert decision.raw_cosine == 0.50
     assert decision.score > 0.50  # fused score includes the multi-reference support bonus
+
+
+def test_review_lane_abstains_information_limited_faces() -> None:
+    # Badly-aligned AND tiny (sub-resolution) face -> low-information (abstain lane).
+    assert review_lane(band="confident", align_error=0.30, ied_px=15.0) == "low-information"
+    # Very low quality -> low-information regardless of band.
+    assert review_lane(band="likely", quality=0.05) == "low-information"
+    # Strong, well-resolved match -> surface (top of the queue).
+    assert review_lane(band="confident", align_error=0.02, ied_px=80.0, quality=0.7) == "surface"
+    # A cross-age "maybe" is surfaced but in the middle review lane, never abstained.
+    assert review_lane(band="child-bucket maybe", ied_px=80.0, quality=0.5) == "review"
+
+
+def test_review_priority_orders_surface_then_review_then_low_info() -> None:
+    # Lane dominates: a surfaced match outranks a review/low-info one even at lower
+    # confidence -- the abstention structure is the point.
+    assert review_priority(lane="surface", probability=0.8) > review_priority(lane="review", probability=0.95)
+    assert review_priority(lane="review", probability=0.9) > review_priority(lane="low-information", probability=0.9)
+    # Within a lane, higher confidence ranks higher (find the likely matches first).
+    assert review_priority(lane="surface", probability=0.9) > review_priority(lane="surface", probability=0.3)
+    # Falls back to the raw score when no calibrated probability is available.
+    assert review_priority(lane="surface", score=0.7) > review_priority(lane="surface", score=0.2)
 
 
 def test_accuracy_from_label_rows() -> None:
@@ -176,8 +230,12 @@ def test_valid_reference_and_candidate() -> None:
 
 
 def main() -> None:
+    test_review_lane_abstains_information_limited_faces()
+    test_review_priority_orders_surface_then_review_then_low_info()
     test_accuracy_from_label_rows()
     test_age_consistent_same_era_support_is_additive_and_degrade_safe()
+    test_misaligned_face_cannot_be_confident_but_cross_age_unharmed()
+    test_low_cohort_separation_cannot_be_confident_but_cross_age_unharmed()
     test_low_quality_crop_cannot_be_confident_but_cross_age_unharmed()
     test_group_hits_captures_raw_cosine_not_fused_score()
     test_accuracy_at_threshold()

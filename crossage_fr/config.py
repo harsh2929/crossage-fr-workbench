@@ -72,6 +72,8 @@ class RuntimeConfig:
     excluded_file_paths: list[str] = field(default_factory=list)
     # Persisted Platt calibrator [a, b] (score -> P(same identity)); empty = uncalibrated.
     calibration_platt: list[float] = field(default_factory=list)
+    # Per-identity Platt calibrators {person: [a, b]} (§5.6 personalization); empty = none.
+    calibration_platt_by_person: dict[str, list[float]] = field(default_factory=dict)
     # Recognizer the calibrator was fit on; a model switch makes the calibrator stale.
     calibration_model: str = ""
     thresholds: Thresholds = field(default_factory=Thresholds)
@@ -161,6 +163,20 @@ def _require_platt(value: object) -> list[float]:
     return result
 
 
+def _require_platt_map(value: object) -> dict[str, list[float]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("calibration_platt_by_person must be a mapping.")
+    result: dict[str, list[float]] = {}
+    for key, params in list(value.items())[:5000]:
+        person = str(key).strip()[:200]
+        if not person:
+            continue
+        result[person] = _require_platt(params)
+    return result
+
+
 def _require_performance_mode(value: object) -> str:
     mode = str(value or "auto").strip().lower()
     if mode not in PERFORMANCE_MODES:
@@ -204,6 +220,7 @@ def _validate_config(config: RuntimeConfig) -> RuntimeConfig:
     config.excluded_extensions = _normalize_extensions(config.excluded_extensions)
     config.excluded_file_paths = _require_string_list(config.excluded_file_paths, "excluded_file_paths", limit=400)
     config.calibration_platt = _require_platt(config.calibration_platt)
+    config.calibration_platt_by_person = _require_platt_map(config.calibration_platt_by_person)
     config.calibration_model = str(config.calibration_model or "")[:200]
     config.thresholds.confident = _require_unit_float(config.thresholds.confident, "thresholds.confident")
     config.thresholds.likely = _require_unit_float(config.thresholds.likely, "thresholds.likely")

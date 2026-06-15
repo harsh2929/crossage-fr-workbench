@@ -46,6 +46,9 @@ class EmbeddingResult:
     # Recognition-aware FIQA score [0,1] when a FIQA model is installed (Phase 2.2);
     # 0.0 when the embedding-norm fallback was used.
     fiqa_score: float = 0.0
+    # Normalized alignment residual: ~0 = canonical face geometry, high = bad
+    # landmarks / extreme pose the recognizer crop cannot trust. 0.0 = unknown.
+    align_error: float = 0.0
 
 
 @dataclass(slots=True)
@@ -100,6 +103,16 @@ class ReviewCandidate:
     # Top raw cosine before fusion bonuses -- decouples recognizer similarity from
     # heuristic banding for honest calibration/eval (None for pre-existing rows).
     raw_cosine: float | None = None
+    # Normalized alignment residual of the matched crop (Phase-4: ~0 good, high = bad
+    # landmarks / extreme pose) and native inter-eye distance in px. Feed review
+    # demotion + active-learning ordering / abstention.
+    align_error: float = 0.0
+    ied_px: float = 0.0
+    # Active-learning review ordering (Phase-4): a priority score and a lane
+    # ("surface" / "review" / "low-information") so the queue shows likely-true
+    # matches first and pushes information-limited faces out of the way.
+    review_priority: float = 0.0
+    review_lane: str = ""
 
     def __post_init__(self) -> None:
         # §5.4 invariant (enforced at the data-model level so EVERY construction —

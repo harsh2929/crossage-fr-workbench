@@ -280,6 +280,8 @@ Phase 0 and Phase 1 are implemented and unit-tested (TDD; `npm run test:quality`
 | 3.2 flip-TTA | ✅ done | `flip_average` + `_recognize`; **off by default**, quality norm kept from the single crop (verification's trap avoided), verified on the real model |
 | 3.3 fairness instrumentation | ✅ done | `det_report_by_cohort` + first-class `fairnessGap`; `accuracy_fairness_report()`. Slices non-protected cohorts (pose/age) only, by privacy design |
 | 3.4 model-pack versioning | ✅ done | labels tagged with `model_name`; calibrator fit on the dominant pack + `calibration_model` tag; `match_probability` refuses a stale (cross-model) calibrator |
+| 4.A alignment-failure handling | ✅ done | `alignment_error` (Umeyama residual to canonical 5-pt) captured per face; precision-only **alignment-suspect demotion** (cross-age-safe); empirically separates frontal (~0.04) from profile (~0.41) |
+| 4.B active-learning review ordering | ✅ done | `review_order` module (surface/review/**abstain** lanes + calibrated-confidence-first priority); `ordered_review_candidates()` re-ranks the queue, pushing information-limited faces to the bottom |
 
 ## 5. The roadmap — phased by impact × effort (verification corrections folded in)
 

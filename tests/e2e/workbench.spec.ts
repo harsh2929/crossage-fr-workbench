@@ -4,6 +4,13 @@ import { mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+// Dismiss the generic "Please confirm" dialog (ConfirmHost) that danger/destructive
+// actions (clear queue, delete photo, clear references, purge reviewed) raise. The
+// confirm button is labelled "Continue"; the dialog's accessible name is "Please confirm".
+async function confirmDialog(page: Page) {
+  await page.getByRole("dialog", { name: "Please confirm" }).getByRole("button", { name: "Continue" }).click();
+}
+
 function makeFixtures(root: string) {
   const refs = path.join(root, "refs");
   const adultRefs = path.join(root, "refs-adult");
@@ -380,12 +387,14 @@ test("desktop workbench renders and every primary control path works", async () 
 
   await page.locator(".nav-list").getByRole("button", { name: "Scan" }).click();
   await expect(page.getByText("Add from camera")).toBeVisible();
-  await expect(page.locator(".sakura-face-field")).toBeVisible();
-  await expect(page.locator(".sakura-petal")).toHaveCount(34);
   await expect(page.getByText("No possible matches yet")).toBeVisible();
   await page.getByRole("button", { name: "Start camera" }).click();
   const captureButton = page.getByRole("button", { name: "Capture best frame" });
   await expect(captureButton).toBeEnabled({ timeout: 60_000 });
+  // H10: the 34-petal sakura field is only mounted while the camera is LIVE (it was a
+  // permanent idle paint loop before), so assert it after the camera starts, not at idle.
+  await expect(page.locator(".sakura-face-field")).toBeVisible();
+  await expect(page.locator(".sakura-petal")).toHaveCount(34);
   await captureButton.click();
   await expect(page.getByText(/Camera photo saved\./)).toBeVisible({ timeout: 120_000 });
   await page.getByRole("button", { name: "Arm auto capture" }).click();
@@ -466,12 +475,15 @@ test("desktop workbench renders and every primary control path works", async () 
 
   await page.locator(".nav-list").getByRole("button", { name: "Scan" }).click();
   await page.getByRole("button", { name: "Clear results" }).click();
+  await confirmDialog(page);  // clearing a non-empty queue prompts "Please confirm"
   await expect(page.getByText("No possible matches yet")).toBeVisible();
 
   await page.locator(".nav-list").getByRole("button", { name: "People" }).click();
   await page.getByRole("button", { name: "Delete selected saved photo" }).click();
+  await confirmDialog(page);
   await expect(page.getByText("person_a_adult.jpg")).toBeVisible();
   await page.getByRole("button", { name: "Clear saved face photos" }).click();
+  await confirmDialog(page);
   await expect(page.getByText("No people added yet")).toBeVisible();
   await enrollButton.click();
   await expect(page.getByText(/Added 1 saved face photo/)).toBeVisible({ timeout: 120_000 });
@@ -486,7 +498,7 @@ test("desktop workbench renders and every primary control path works", async () 
   await page.getByLabel("Likely match value").fill("0.50");
   await expect(page.getByText(/Advanced match levels/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Save settings" })).toBeDisabled();
-  await expect(page.getByRole("checkbox", { name: "Safe Mode" })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: "Safe Mode", exact: true })).toBeChecked();
   await expect(page.getByRole("checkbox", { name: "Start at login" })).toBeVisible();
   await expect(page.getByText(/vintrace:\/\/ ready|Not registered/)).toBeVisible();
   await expect(page.getByText("System check")).toBeVisible();
@@ -511,6 +523,9 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(performanceCenter.getByRole("group", { name: "Performance modes" })).toBeVisible();
   await performanceCenter.getByRole("button", { name: /Fast/ }).click();
   await expect(performanceCenter.locator(".performance-mode.selected").getByText("Fast")).toBeVisible();
+  // Selecting Fast saves settings async and sets its own notice; let it land first so it
+  // doesn't clobber the copy-report toast in the single notice slot (last-write-wins).
+  await expect(page.getByText(/Fast performance mode is on\.?/)).toBeVisible();
   await performanceCenter.getByRole("button", { name: "Copy report" }).click();
   await expect(page.getByText("Performance report copied.")).toBeVisible();
   await performanceCenter.getByRole("button", { name: "Warm previews" }).click();
@@ -536,6 +551,7 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(page.getByLabel("Person to rename")).toHaveValue("Person Renamed");
   await page.getByLabel("Retention days").fill("1");
   await page.getByRole("button", { name: "Remove old reviewed" }).click();
+  await confirmDialog(page);  // purging reviewed matches prompts "Please confirm"
   await expect(page.getByText(/Removed \d+ old reviewed possible match/)).toBeVisible({ timeout: 120_000 });
   await expect(page.getByText("Activity history", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Load history" }).click();

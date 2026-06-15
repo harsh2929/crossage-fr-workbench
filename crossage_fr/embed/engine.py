@@ -125,6 +125,61 @@ def nms_boxes(boxes: np.ndarray, iou_thresh: float = 0.4) -> list[int]:
     return keep
 
 
+# Canonical ArcFace 5-point destination template (112x112): left-eye, right-eye,
+# nose, mouth-left, mouth-right. Matches insightface face_align.arcface_dst.
+ARCFACE_DST = np.array(
+    [
+        [38.2946, 51.6963],
+        [73.5318, 51.5014],
+        [56.0252, 71.7366],
+        [41.5493, 92.3655],
+        [70.7299, 92.2041],
+    ],
+    dtype="float64",
+)
+_ARCFACE_EYE_SPAN = float(np.linalg.norm(ARCFACE_DST[1] - ARCFACE_DST[0]))
+
+
+def alignment_error(kps: np.ndarray | None) -> float:
+    """Normalized residual of fitting the 5 detected keypoints to the canonical face
+    template via a similarity transform (Umeyama). ~0 when the points form a normal
+    face arrangement (any rotation/scale/translation); LARGE when they do not --
+    extreme pose, occlusion, or a wrong/low-confidence landmark set. Recognition
+    accuracy swings enormously with alignment, so a badly-fit face should not be
+    trusted as a confident match. Returns 0.0 (unknown) for missing/insufficient kps.
+    """
+    if kps is None:
+        return 0.0
+    try:
+        src = np.asarray(kps, dtype="float64")
+        if src.ndim != 2 or src.shape[0] < 5 or src.shape[1] < 2:
+            return 0.0
+        src = src[:5, :2]
+    except (TypeError, ValueError):
+        return 0.0
+    dst = ARCFACE_DST
+    n = src.shape[0]
+    src_mean = src.mean(axis=0)
+    dst_mean = dst.mean(axis=0)
+    src_c = src - src_mean
+    dst_c = dst - dst_mean
+    cov = (dst_c.T @ src_c) / n
+    try:
+        u, s, vt = np.linalg.svd(cov)
+    except np.linalg.LinAlgError:
+        return 0.0
+    d = np.ones(2)
+    if np.linalg.det(u @ vt) < 0:
+        d[-1] = -1.0
+    rot = u @ np.diag(d) @ vt
+    var_src = float((src_c ** 2).sum() / n)
+    scale = float((s * d).sum() / var_src) if var_src > 1e-12 else 0.0
+    translation = dst_mean - scale * (rot @ src_mean)
+    transformed = (scale * (src @ rot.T)) + translation
+    residual = float(np.sqrt(((transformed - dst) ** 2).sum(axis=1).mean()))
+    return residual / _ARCFACE_EYE_SPAN if _ARCFACE_EYE_SPAN > 0 else residual
+
+
 def inter_eye_distance(kps: np.ndarray | None) -> float:
     """Native inter-eye distance in pixels from the first two (eye) keypoints.
 
@@ -423,6 +478,7 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
                 pose_bucket = self._pose_bucket_for_face(source_bgr, face.bbox, kps_for_index, rescue=rescue)
                 det_score = float(getattr(face, "det_score", 0.0) or 0.0)
                 ied_px = inter_eye_distance(kps_for_index)
+                align_err = alignment_error(kps_for_index)
                 results.append(
                     EmbeddingResult(
                         vector=vector.tolist(),
@@ -435,6 +491,7 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
                         det_score=det_score,
                         ied_px=ied_px,
                         fiqa_score=float(fiqa_score) if fiqa_score is not None else 0.0,
+                        align_error=align_err,
                     )
                 )
                 if rescue and len(results) >= 3:

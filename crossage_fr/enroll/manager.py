@@ -36,7 +36,15 @@ from crossage_fr.match import (
     valid_reference,
 )
 from crossage_fr.match.age_gap import compute_age_gap, confidence_for_gap
-from crossage_fr.match.calibration import PlattCalibrator, fit_score_calibrator, threshold_for_fmr
+from crossage_fr.match.review_order import review_lane, review_priority
+from crossage_fr.match.calibration import (
+    PlattCalibrator,
+    fit_per_identity_calibrators,
+    fit_score_calibrator,
+    threshold_for_fmr,
+)
+from crossage_fr.match.pooling import pool_template
+from crossage_fr.match.validation import held_out_gate
 from crossage_fr.benchmark_quality import BENCHMARK_DISCLAIMER
 from crossage_fr.benchmarks.det_eval import det_report, det_report_by_cohort
 from crossage_fr.models import EmbeddingResult, ReferenceFace, ReviewCandidate, new_id, normalize_risk_flags
@@ -1230,7 +1238,7 @@ class ProjectState:
                 accepted += 1
                 hits, compatible_refs = self._search_matching_references(embedding, k=k)
                 pose_thresholds = thresholds_for_pose(self.config.thresholds, pose_bucket) if pose_review_supported(hits, compatible_refs, self.config.thresholds, pose_bucket) else self.config.thresholds
-                decision = group_hits(hits, compatible_refs, pose_thresholds, pose_bucket=pose_bucket, candidate_quality=embedding.quality, candidate_capture_date=embedding_metadata.get("capture_date"))
+                decision = group_hits(hits, compatible_refs, pose_thresholds, pose_bucket=pose_bucket, candidate_quality=embedding.quality, candidate_capture_date=embedding_metadata.get("capture_date"), candidate_align_error=embedding.align_error)
                 decision_flags = set(decision.flags) if decision is not None else set()
                 if "pose-reranked" in decision_flags:
                     metrics["poseReranked"] += 1
@@ -1317,6 +1325,17 @@ class ProjectState:
                     candidate_risk_flags = normalize_risk_flags(
                         [*candidate_risk_flags, age_gap_flag], candidate_note
                     )
+                candidate_review_lane = review_lane(
+                    band=decision.band,
+                    align_error=embedding.align_error,
+                    ied_px=embedding.ied_px,
+                    quality=embedding.quality,
+                )
+                candidate_review_priority = review_priority(
+                    lane=candidate_review_lane,
+                    probability=self.match_probability(decision.score, embedding.model_name),
+                    score=decision.score,
+                )
                 candidate = ReviewCandidate(
                     candidate_id=new_id("cand"),
                     source_path=str(image_path),
@@ -1334,6 +1353,10 @@ class ProjectState:
                     age_gap_years=age_gap_years,
                     age_gap_confidence=age_gap_confidence,
                     raw_cosine=decision.raw_cosine,
+                    align_error=embedding.align_error,
+                    ied_px=embedding.ied_px,
+                    review_lane=candidate_review_lane,
+                    review_priority=candidate_review_priority,
                     **embedding_metadata,
                 )
                 self.candidates[candidate.candidate_id] = candidate
@@ -2073,6 +2096,7 @@ class ProjectState:
             "detScore": embedding.det_score,
             "iedPx": embedding.ied_px,
             "fiqaScore": embedding.fiqa_score,
+            "alignError": embedding.align_error,
             "bbox": list(embedding.bbox) if embedding.bbox else None,
             "modelName": embedding.model_name,
             "note": embedding.note,
@@ -2090,6 +2114,7 @@ class ProjectState:
             det_score=float(row.get("detScore", 0.0) or 0.0),
             ied_px=float(row.get("iedPx", 0.0) or 0.0),
             fiqa_score=float(row.get("fiqaScore", 0.0) or 0.0),
+            align_error=float(row.get("alignError", 0.0) or 0.0),
             bbox=bbox,
             model_name=str(row.get("modelName", "")),
             note=str(row.get("note", "")),
@@ -5467,19 +5492,95 @@ class ProjectState:
         self.save()
         return {"summary": self.calibration_summary(), "config": asdict(self.config)}
 
-    def match_probability(self, score: float, model_name: str | None = None) -> float | None:
+    def match_probability(self, score: float, model_name: str | None = None, person_name: str | None = None) -> float | None:
         """Calibrated P(same identity) for a fused match score, or None if uncalibrated
         OR stale: a calibrator fit on a different recognizer (model_name) must not be
-        applied to scores from the current one (Phase 3.4 -- different embedding spaces)."""
+        applied to scores from the current one (Phase 3.4 -- different embedding spaces).
+        Prefers a per-identity calibrator (§5.6 personalization) when one exists."""
+        if model_name and self.config.calibration_model and model_name != self.config.calibration_model:
+            return None
+        if person_name:
+            per = self.config.calibration_platt_by_person.get(person_name)
+            if per and len(per) == 2:
+                try:
+                    return PlattCalibrator.from_list(per).probability(float(score))
+                except (TypeError, ValueError):
+                    pass
         params = self.config.calibration_platt
         if not params or len(params) != 2:
-            return None
-        if model_name and self.config.calibration_model and model_name != self.config.calibration_model:
             return None
         try:
             return PlattCalibrator.from_list(params).probability(float(score))
         except (TypeError, ValueError):
             return None
+
+    # Per-identity calibration needs MANY labels for ONE person, so the guard against
+    # overfitting is a conservative per-identity label count (NOT the across-identity §6
+    # gate, which holds out whole identities -- the wrong split for personalizing to a
+    # person who must appear in both folds).
+    PERSONALIZE_MIN_PER_IDENTITY = 16
+    PERSONALIZE_MIN_PER_CLASS = 6
+
+    def apply_personalized_calibration(self) -> dict[str, Any]:
+        """§5.6: fit per-identity Platt calibrators (only for identities with enough of
+        the user's own accept/reject labels) and persist them; match_probability then
+        prefers a person's own calibrator over the global one. Same-embedding-space only
+        (dominant recognizer). Returns which identities were personalized."""
+        rows = self.db.calibration_label_rows()
+        models = [str(r.get("modelName") or "") for r in rows if r.get("modelName")]
+        dominant = max(set(models), key=models.count) if models else ""
+        scoped = [r for r in rows if str(r.get("modelName") or "") == dominant] if dominant else list(rows)
+        per = fit_per_identity_calibrators(
+            scoped,
+            min_per_identity=self.PERSONALIZE_MIN_PER_IDENTITY,
+            min_per_class=self.PERSONALIZE_MIN_PER_CLASS,
+            score_key="matchScore",
+        )
+        self.config.calibration_platt_by_person = {person: cal.to_list() for person, cal in per.items()}
+        self._append_audit({"action": "apply_personalized_calibration", "identities": len(per)})
+        self.save()
+        return {"identities": sorted(per.keys()), "count": len(per)}
+
+    def validate_calibration_change(self) -> dict[str, Any]:
+        """§6: held-out (by-identity) check that the GLOBAL Platt calibrator actually
+        improves separability on THIS user's labels before it is trusted -- the guardrail
+        that converts a benchmarked gain into a real one (a paper +2pp can vanish locally)."""
+        rows = self.db.calibration_label_rows()
+
+        def fit_transform(train: list[dict[str, Any]]):
+            calibrator = fit_score_calibrator(
+                train, min_count=self.CALIBRATION_MIN_LABELS, min_per_class=self.CALIBRATION_MIN_PER_CLASS, score_key="matchScore"
+            )
+            if calibrator is None:
+                return lambda row: float(row.get("matchScore", 0.0))
+            return lambda row: calibrator.probability(float(row.get("matchScore", 0.0)))
+
+        return held_out_gate(
+            rows, fit_transform, score_key="matchScore",
+            min_labels=self.CALIBRATION_MIN_LABELS, min_per_class=self.CALIBRATION_MIN_PER_CLASS,
+        )
+
+    def validate_drop_in_recognizer(self, path: Path | str) -> dict[str, Any]:
+        """§5.1: validate a candidate recognizer ONNX before activating it via the seam,
+        so a mis-exported model is rejected with an actionable reason instead of silently
+        producing garbage embeddings."""
+        from crossage_fr.embed.model_validation import validate_recognizer_onnx
+
+        return validate_recognizer_onnx(Path(path).expanduser())
+
+    def person_template(self, person_name: str) -> list[float]:
+        """Self-consistency-pooled template embedding for a person's references (§5.3),
+        robust to outlier reference crops (weighted by set-agreement x quality). Returns
+        an empty list when the person has no usable references."""
+        vectors: list[list[float]] = []
+        qualities: list[float] = []
+        for ref in self.references.values():
+            if ref.person_name == person_name and isinstance(ref.vector, list) and ref.vector:
+                vectors.append(ref.vector)
+                qualities.append(float(getattr(ref, "quality", 0.0) or 0.0))
+        if not vectors:
+            return []
+        return pool_template(vectors, qualities)
 
     def accuracy_det_report(self) -> dict[str, Any]:
         """DET / TAR@FAR / EER report on the user's accept-reject labels (Phase 2.3).
@@ -5505,6 +5606,29 @@ class ProjectState:
             "note": "Age gap is a photo-capture-date gap (proxy for subject-age gap); small per-band samples have wide CIs.",
             "byBand": {band: det_report(rows, score_key="rawCosine") for band, rows in buckets.items()},
         }
+
+    def ordered_review_candidates(self, status: str = "pending", limit: int = 0) -> list[ReviewCandidate]:
+        """Candidates ordered for minimum reviewer-clicks-to-find-the-match (Phase-4):
+        likely-true matches first, information-limited (badly-aligned + sub-resolution,
+        or near-zero quality) faces abstained to the bottom. Recomputed against the
+        CURRENT calibrator so a re-calibration re-ranks the queue."""
+        items = [candidate for candidate in self.candidates.values() if candidate.status == status]
+
+        def priority(candidate: ReviewCandidate) -> float:
+            lane = review_lane(
+                band=candidate.band,
+                align_error=candidate.align_error,
+                ied_px=candidate.ied_px,
+                quality=candidate.quality,
+            )
+            return review_priority(
+                lane=lane,
+                probability=self.match_probability(candidate.score, candidate.model_name),
+                score=candidate.score,
+            )
+
+        items.sort(key=priority, reverse=True)
+        return items[: int(limit)] if limit and limit > 0 else items
 
     def accuracy_fairness_report(self, cohort: str = "poseBucket") -> dict[str, Any]:
         """Per-cohort DET + fairness gap on the user's labels (Phase 3.3). Defaults to

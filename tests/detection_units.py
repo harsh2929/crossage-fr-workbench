@@ -10,7 +10,9 @@ import numpy as np
 from pathlib import Path
 
 from crossage_fr.embed.engine import (
+    ARCFACE_DST,
     InsightFaceEmbeddingEngine,
+    alignment_error,
     apply_recognizer_preference,
     detect_cache_tag,
     flip_average,
@@ -146,6 +148,27 @@ def test_merge_detections_dedupes_full_frame_and_tiles() -> None:
     assert kpss is not None and kpss.shape[0] == 2
 
 
+def test_alignment_error_is_zero_for_canonical_and_similarity_invariant() -> None:
+    # Keypoints already in the canonical arrangement -> ~0 error.
+    assert alignment_error(ARCFACE_DST) < 1e-4
+    # A rotated + scaled + translated copy is the SAME face geometry -> still ~0
+    # (a similarity transform must not look like a misalignment).
+    theta = 0.3
+    rot = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]], dtype="float64")
+    transformed = (1.7 * (ARCFACE_DST @ rot.T)) + np.array([40.0, -15.0])
+    assert alignment_error(transformed) < 1e-4
+
+
+def test_alignment_error_flags_distorted_geometry() -> None:
+    # Eyes collapsed together + nose far off-centre = a non-canonical (bad-landmark
+    # / extreme-pose) arrangement the canonical template cannot fit -> high error.
+    bad = np.array([[52.0, 51.0], [60.0, 51.0], [90.0, 72.0], [42.0, 92.0], [71.0, 92.0]], dtype="float64")
+    assert alignment_error(bad) > alignment_error(ARCFACE_DST) + 0.1
+    # Missing / insufficient keypoints -> 0.0 (unknown), never a crash or false flag.
+    assert alignment_error(None) == 0.0
+    assert alignment_error(np.array([[1.0, 2.0]], dtype="float64")) == 0.0
+
+
 def test_flip_average_is_unit_norm_and_idempotent() -> None:
     # Averaging an embedding with itself is a no-op (still the normalized direction).
     same = flip_average([3.0, 4.0] + [0.0] * 510, [3.0, 4.0] + [0.0] * 510)
@@ -168,6 +191,8 @@ def test_apply_recognizer_preference_moves_drop_in_to_front() -> None:
 
 def main() -> None:
     test_apply_recognizer_preference_moves_drop_in_to_front()
+    test_alignment_error_is_zero_for_canonical_and_similarity_invariant()
+    test_alignment_error_flags_distorted_geometry()
     test_flip_average_is_unit_norm_and_idempotent()
     test_tiled_detect_translates_boxes_to_global_coords()
     test_tiled_detect_skips_small_images()

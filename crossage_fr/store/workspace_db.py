@@ -1140,7 +1140,7 @@ class WorkspaceDb:
         with self.connect() as conn:
             cursor = conn.execute(
                 """
-                SELECT match_score, raw_cosine, is_match, pose_bucket, age_gap_years, model_name
+                SELECT match_score, raw_cosine, is_match, pose_bucket, age_gap_years, model_name, expected_person
                 FROM calibration_labels
                 WHERE is_match IS NOT NULL AND match_score IS NOT NULL
                 ORDER BY created_at ASC
@@ -1158,6 +1158,7 @@ class WorkspaceDb:
                         "poseBucket": str(record["pose_bucket"] or ""),
                         "ageGapYears": None if record["age_gap_years"] is None else float(record["age_gap_years"]),
                         "modelName": str(record["model_name"] or ""),
+                        "expectedPerson": str(record["expected_person"] or ""),
                     }
                 )
             return rows

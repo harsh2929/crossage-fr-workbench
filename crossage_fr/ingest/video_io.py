@@ -10,9 +10,68 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Iterable
+from typing import Iterable, Sequence
 
+import numpy as np
 from PIL import Image
+
+
+def variance_of_laplacian(gray: "np.ndarray") -> float:
+    """Focus measure: variance of the Laplacian (high = sharp, low = blurred).
+
+    §5.3 keyframe selection — a blurred/motion-smeared frame carries little identity, so
+    among candidate frames the sharpest is the recognition-best representative. Pure NumPy
+    (4-neighbour Laplacian) so it needs no cv2 and is unit-testable in isolation.
+    """
+    arr = np.asarray(gray, dtype="float64")
+    if arr.ndim != 2 or arr.size == 0:
+        return 0.0
+    lap = (
+        -4.0 * arr
+        + np.roll(arr, 1, axis=0)
+        + np.roll(arr, -1, axis=0)
+        + np.roll(arr, 1, axis=1)
+        + np.roll(arr, -1, axis=1)
+    )
+    if lap.shape[0] > 2 and lap.shape[1] > 2:
+        lap = lap[1:-1, 1:-1]  # drop np.roll wrap-around border before measuring spread
+    return float(lap.var())
+
+
+def sharpest_index(grays: "Sequence[np.ndarray]") -> int:
+    """Index of the sharpest frame (max variance-of-Laplacian); 0 for an empty set."""
+    if not grays:
+        return 0
+    return int(max(range(len(grays)), key=lambda i: variance_of_laplacian(grays[i])))
+
+
+# Frames to probe on each side of a target index when choosing the sharpest representative.
+# 1 -> 3 decodes per sample (cheap; removes the worst motion blur). 0 disables.
+SHARPEN_WINDOW = 1
+
+
+def _sharpest_in_window(capture, cv2, index: int, frame_count: int, window: int):
+    """Decode a small neighbourhood around `index` and return (best_index, best_frame_bgr)
+    by variance-of-Laplacian. Falls back to the single target frame when window<=0."""
+    if window <= 0:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, max(0, index))
+        ok, frame = capture.read()
+        return index, (frame if ok else None)
+    lo = max(0, index - window)
+    hi = index + window if frame_count <= 0 else min(frame_count - 1, index + window)
+    best_index, best_frame, best_score = index, None, -1.0
+    for cand in range(lo, hi + 1):
+        capture.set(cv2.CAP_PROP_POS_FRAMES, cand)
+        ok, frame = capture.read()
+        if not ok or frame is None:
+            continue
+        try:
+            score = variance_of_laplacian(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        except Exception:
+            score = 0.0
+        if score > best_score:
+            best_index, best_frame, best_score = cand, frame, score
+    return best_index, best_frame
 
 
 VIDEO_EXTENSIONS = {
@@ -189,9 +248,10 @@ def sample_video_frames(
         target_dir.mkdir(parents=True, exist_ok=True)
         samples: list[VideoFrameSample] = []
         for index in indices:
-            capture.set(cv2.CAP_PROP_POS_FRAMES, max(0, index))
-            ok, frame = capture.read()
-            if not ok or frame is None:
+            # §5.3: pick the SHARPEST frame in a small neighbourhood, so a motion-blurred
+            # representative is replaced by a crisp one (blur destroys identity signal).
+            index, frame = _sharpest_in_window(capture, cv2, index, frame_count, SHARPEN_WINDOW)
+            if frame is None:
                 continue
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             image = Image.fromarray(rgb).convert("RGB")
