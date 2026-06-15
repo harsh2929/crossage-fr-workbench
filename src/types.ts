@@ -284,6 +284,15 @@ export interface CameraSaveResult {
   filePath: string;
 }
 
+export interface WorkspaceListItem {
+  workspaceId: string;
+  path: string;
+  alias: string;
+  lastOpenedAt: string;
+  active: boolean;
+  available: boolean;
+}
+
 export interface ReviewCandidate {
   candidateId: string;
   sourcePath: string;

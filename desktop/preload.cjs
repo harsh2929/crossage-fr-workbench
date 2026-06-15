@@ -98,7 +98,9 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "audit_chain_status",
   "list_jurisdictions",
   "set_jurisdiction_preset",
-  "export_compliance_pack"
+  "export_compliance_pack",
+  "list_workspaces",
+  "add_workspace"
 ]);
 
 function assertPlainObject(value, label = "Payload") {

@@ -2995,6 +2995,38 @@ def assert_compliance_pack() -> None:
     print("  compliance pack ok")
 
 
+def assert_multi_workspace_registry() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-multi-ws-"))
+    ws_a = root / "workspace-a"
+    ws_b = root / "workspace-b"
+    api_a = make_api(ws_a)
+    listed = api_a.handle("list_workspaces", {})
+    paths = {w["path"] for w in listed["workspaces"]}
+    assert str(ws_a.resolve()) in paths, f"workspace A should be listed: {paths}"
+    assert any(w["active"] for w in listed["workspaces"] if w["path"] == str(ws_a.resolve()))
+    # Opening a second workspace registers it and switches active.
+    api_b = make_api(ws_b)
+    listed_b = api_b.handle("list_workspaces", {})
+    paths_b = {w["path"] for w in listed_b["workspaces"]}
+    assert {str(ws_a.resolve()), str(ws_b.resolve())} <= paths_b, f"both workspaces listed: {paths_b}"
+    active_b = [w for w in listed_b["workspaces"] if w["active"]]
+    assert active_b and active_b[0]["path"] == str(ws_b.resolve()), "B should be active after opening it"
+    # Switching back via set_workspace re-activates A and keeps both listed.
+    api_b.handle("set_workspace", {"path": str(ws_a)})
+    listed_again = api_b.handle("list_workspaces", {})
+    assert len({w["path"] for w in listed_again["workspaces"]}) >= 2
+    active_again = [w for w in listed_again["workspaces"] if w["active"]]
+    assert active_again and active_again[0]["path"] == str(ws_a.resolve()), "A should be active again"
+    # add_workspace registers a third workspace without switching.
+    ws_c = root / "workspace-c"
+    res = api_b.handle("add_workspace", {"path": str(ws_c)})
+    assert str(ws_c.resolve()) in {w["path"] for w in res["workspaces"]}
+    still_active = [w for w in res["workspaces"] if w["active"]]
+    assert still_active and still_active[0]["path"] == str(ws_a.resolve()), "add_workspace must not switch active"
+    shutil.rmtree(root, ignore_errors=True)
+    print("  multi-workspace registry ok")
+
+
 def main() -> None:
     assert_corrupt_workspace_recovery()
     assert_corrupt_sqlite_startup_recovery()
@@ -3054,6 +3086,7 @@ def main() -> None:
     assert_per_subject_consent()
     assert_jurisdiction_presets()
     assert_compliance_pack()
+    assert_multi_workspace_registry()
     print("edge cases ok")
 
 

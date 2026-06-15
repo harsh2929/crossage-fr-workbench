@@ -416,6 +416,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "list_jurisdictions": "_cmd_list_jurisdictions",
         "set_jurisdiction_preset": "_cmd_set_jurisdiction_preset",
         "export_compliance_pack": "_cmd_export_compliance_pack",
+        "list_workspaces": "_cmd_list_workspaces",
+        "add_workspace": "_cmd_add_workspace",
         "record_audit": "_cmd_record_audit",
         "save_settings": "_cmd_save_settings",
     }
@@ -1021,6 +1023,21 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     def _cmd_export_compliance_pack(self, params, progress=None):
         result = self.export_compliance_pack()
         return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_list_workspaces(self, params, progress=None):
+        from crossage_fr.workspace_registry import list_known_workspaces
+
+        return {"workspaces": list_known_workspaces(), "active": str(self.project.root)}
+
+    def _cmd_add_workspace(self, params, progress=None):
+        from crossage_fr.workspace_registry import ensure_workspace_metadata, list_known_workspaces, record_workspace
+
+        target = Path(str(params.get("path", ""))).expanduser()
+        if not str(params.get("path", "")).strip():
+            raise ValueError("Choose a folder to register as a workspace.")
+        metadata = ensure_workspace_metadata(target, actor=self.actor)
+        record_workspace(target, metadata)
+        return {"workspaces": list_known_workspaces(), "registered": str(target.resolve())}
 
     def _cmd_record_audit(self, params, progress=None):
         row = params.get("row", {})

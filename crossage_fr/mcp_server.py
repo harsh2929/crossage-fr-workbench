@@ -803,6 +803,12 @@ def set_jurisdiction_preset(preset: str) -> dict[str, Any]:
 
 
 @safe_tool()
+def list_workspaces() -> dict[str, Any]:
+    """List known Vintrace workspaces (alias, last-opened, which is active) for switching context."""
+    return _call("list_workspaces")
+
+
+@safe_tool()
 def export_compliance_pack() -> dict[str, Any]:
     """Export a governance-evidence ZIP: consent + tamper-evident audit + retention + model
     provenance, plus generated DRAFT DPIA/FRIA/Annex-IV documents.

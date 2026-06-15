@@ -124,6 +124,7 @@ import type {
   WorkspaceBackupVerification,
   WorkspaceLockStatus,
   WorkspaceHealth,
+  WorkspaceListItem,
   WorkspaceOptimizeResult,
   WorkspaceRepairResult,
   WorkspaceRelinkResult,
@@ -1639,6 +1640,7 @@ export default function App() {
   const [publicDatasetBenchmark, setPublicDatasetBenchmark] = useState<PublicDatasetBenchmarkResult | null>(null);
   const [publicDatasetModelComparison, setPublicDatasetModelComparison] = useState<PublicDatasetModelComparisonResult | null>(null);
   const [privacyReport, setPrivacyReport] = useState<PrivacyReport | null>(null);
+  const [recentWorkspaces, setRecentWorkspaces] = useState<WorkspaceListItem[]>([]);
   const [mediaTrashReport, setMediaTrashReport] = useState<MediaTrashReportValue | null>(null);
   const [mediaTrashCleanup, setMediaTrashCleanup] = useState<MediaTrashCleanupValue | null>(null);
   const [retentionPolicy, setRetentionPolicy] = useState<RetentionPolicyReport | null>(null);
@@ -1998,6 +2000,7 @@ export default function App() {
       const safeNext = normalizeAppState(next, state);
       recordLatency("Startup", "initial_state", startedAt);
       applyState(safeNext);
+      void loadWorkspaces();
       setNotice({ tone: "ok", text: "Backend ready." });
       const startupMode = resolvePerformanceMode(normalizePerformanceChoice(safeNext.config.performanceMode), safeNext.platform);
       const startupPreviewLimit = performanceProfiles[startupMode].previewWarmupLimit;
@@ -2308,6 +2311,25 @@ export default function App() {
     await window.crossAge.revealPath(value.zipPath);
   }
 
+  async function loadWorkspaces() {
+    try {
+      const result = await invoke<{ workspaces: WorkspaceListItem[] }>("Listing workspaces", "list_workspaces");
+      setRecentWorkspaces(result?.workspaces ?? []);
+    } catch {
+      // Non-fatal: the switcher is a convenience.
+    }
+  }
+
+  async function switchWorkspace(path: string) {
+    if (!path) return;
+    await window.crossAge.stopFolderWatch();
+    settingsDirtyRef.current = false;
+    await invoke<AppState>("Switching app folder", "set_workspace", { path });
+    await refreshWorkspaceLockStatus();
+    await loadWorkspaces();
+    setNotice({ tone: "ok", text: "Workspace switched. Please confirm permission again." });
+  }
+
   async function chooseWorkspace() {
     const folder = await window.crossAge.chooseFolder();
     if (!folder) return;
@@ -2315,6 +2337,7 @@ export default function App() {
     settingsDirtyRef.current = false;
     await invoke<AppState>("Opening app folder", "set_workspace", { path: folder });
     await refreshWorkspaceLockStatus();
+    await loadWorkspaces();
     setNotice({ tone: "ok", text: "App folder opened. Please confirm permission again." });
   }
 
@@ -4718,6 +4741,8 @@ export default function App() {
             exportSupportBundle={exportSupportBundle}
             revealWorkspace={revealWorkspace}
             openWorkspaceFolder={openWorkspaceFolder}
+            recentWorkspaces={recentWorkspaces}
+            switchWorkspace={switchWorkspace}
             people={settingsPeople}
             exportReport={exportReport}
             exportScanHistory={exportScanHistory}
@@ -9244,6 +9269,8 @@ function SettingsView(props: {
   exportSupportBundle(includePaths?: boolean): void;
   revealWorkspace(): void;
   openWorkspaceFolder(): void;
+  recentWorkspaces: WorkspaceListItem[];
+  switchWorkspace(path: string): void;
   people: string[];
   exportReport(): void;
   exportScanHistory(): void;
@@ -9806,6 +9833,26 @@ function SettingsView(props: {
             <span>Open folder</span>
           </button>
         </div>
+        {props.recentWorkspaces.length > 1 && (
+          <label className="switch-row">
+            <span>
+              <strong>Switch workspace</strong>
+              <small>Each case stays isolated in its own folder. Only known workspaces are listed.</small>
+            </span>
+            <select
+              value={props.recentWorkspaces.find((item) => item.active)?.path ?? ""}
+              disabled={props.busy}
+              onChange={(event) => props.switchWorkspace(event.currentTarget.value)}
+              aria-label="Switch workspace"
+            >
+              {props.recentWorkspaces.map((item) => (
+                <option key={item.path} value={item.path} disabled={!item.available}>
+                  {item.alias}{item.active ? " (current)" : ""}{item.available ? "" : " — missing"}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
       <WorkspaceHealthPanel
         health={props.workspaceHealth}
