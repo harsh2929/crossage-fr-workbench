@@ -2956,6 +2956,45 @@ def assert_jurisdiction_presets() -> None:
     print("  jurisdiction presets ok")
 
 
+def assert_compliance_pack() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-compliance-pack-"))
+    workspace = root / "workspace"
+    api = make_api(workspace)
+    api.handle("set_consent", {"value": True, "operator": "tester"})
+    api.handle("set_jurisdiction_preset", {"preset": "gdpr"})
+    result = api.handle("export_compliance_pack", {})
+    value = result.get("value", result)
+    pack_path = Path(value["zipPath"])
+    assert pack_path.exists(), "compliance pack zip should exist"
+    with zipfile.ZipFile(pack_path) as archive:
+        names = set(archive.namelist())
+        required = {
+            "00-manifest.json",
+            "consent-summary.json",
+            "audit-chain-status.json",
+            "retention-policy.json",
+            "model-distribution-audit.json",
+            "policy.json",
+            "DPIA-DRAFT.md",
+            "FRIA-DRAFT.md",
+            "annex-iv-technical-documentation-DRAFT.md",
+            "README.md",
+        }
+        assert required <= names, f"missing members: {required - names}"
+        # No biometric/media artifacts leak into the pack.
+        forbidden = (".jpg", ".jpeg", ".png", ".webp", ".onnx", ".npy", ".sqlite3", ".mp4")
+        assert not any(n.lower().endswith(forbidden) for n in names), names
+        # Every generated legal draft carries the DRAFT / not-certification disclaimer.
+        for doc in ("DPIA-DRAFT.md", "FRIA-DRAFT.md", "annex-iv-technical-documentation-DRAFT.md"):
+            text = archive.read(doc).decode("utf-8")
+            assert "DRAFT" in text and "NOT legal advice" in text, f"{doc} missing disclaimer"
+        # The retention window reflects the applied jurisdiction.
+        retention = json.loads(archive.read("retention-policy.json").decode("utf-8"))
+        assert retention["policy"]["recommendedReviewedRetentionDays"] == 30, retention["policy"]
+    shutil.rmtree(root, ignore_errors=True)
+    print("  compliance pack ok")
+
+
 def main() -> None:
     assert_corrupt_workspace_recovery()
     assert_corrupt_sqlite_startup_recovery()
@@ -3014,6 +3053,7 @@ def main() -> None:
     assert_safe_mode_zero_admittance()
     assert_per_subject_consent()
     assert_jurisdiction_presets()
+    assert_compliance_pack()
     print("edge cases ok")
 
 

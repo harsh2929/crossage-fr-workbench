@@ -803,6 +803,17 @@ def set_jurisdiction_preset(preset: str) -> dict[str, Any]:
 
 
 @safe_tool()
+def export_compliance_pack() -> dict[str, Any]:
+    """Export a governance-evidence ZIP: consent + tamper-evident audit + retention + model
+    provenance, plus generated DRAFT DPIA/FRIA/Annex-IV documents.
+
+    All generated legal documents are DRAFTs requiring DPO/counsel review — not certification.
+    """
+    result = _call("export_compliance_pack")
+    return {"pack": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
 def audit_chain_status() -> dict[str, Any]:
     """Verify the tamper-evident SHA-256 hash chain over the audit log.
 

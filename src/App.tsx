@@ -3483,6 +3483,23 @@ export default function App() {
     }
   }
 
+  async function exportCompliancePack() {
+    const result = await invoke<CommandResult<{ zipPath: string; members: string[] }>>(
+      "Exporting compliance pack",
+      "export_compliance_pack"
+    );
+    const value = result.value;
+    if (!value) {
+      setNotice({ tone: "error", text: "Compliance pack did not return a path." });
+      return;
+    }
+    setNotice({
+      tone: "ok",
+      text: `Compliance pack exported (${value.members.length} files). DPIA/FRIA/Annex-IV are DRAFTS — have counsel review before use.`
+    });
+    await window.crossAge.revealPath(value.zipPath);
+  }
+
   async function exportSafeModeAudit() {
     const result = await invoke<CommandResult<SafeModeAuditExportValue>>("Exporting Safe Mode audit", "export_safe_mode_audit");
     const value = result.value;
@@ -4710,6 +4727,7 @@ export default function App() {
             loadRetentionPolicyReport={loadRetentionPolicyReport}
             exportSafeModeAudit={exportSafeModeAudit}
             setJurisdictionPreset={setJurisdictionPreset}
+            exportCompliancePack={exportCompliancePack}
             exportReviewLedger={exportReviewLedger}
             exportWorkspaceBackup={exportWorkspaceBackup}
             verifyLatestWorkspaceBackup={verifyLatestWorkspaceBackup}
@@ -9235,6 +9253,7 @@ function SettingsView(props: {
   loadRetentionPolicyReport(): void;
   exportSafeModeAudit(): void;
   setJurisdictionPreset(preset: string): void;
+  exportCompliancePack(): void;
   exportReviewLedger(): void;
   exportWorkspaceBackup(): void;
   verifyLatestWorkspaceBackup(): void;
@@ -9973,6 +9992,7 @@ function SettingsView(props: {
         jurisdictionPreset={props.state.config.jurisdictionPreset ?? "standard"}
         retentionReviewedDays={props.state.config.retentionReviewedDays ?? 90}
         setJurisdictionPreset={props.setJurisdictionPreset}
+        exportCompliancePack={props.exportCompliancePack}
         loadPrivacyReport={props.loadPrivacyReport}
         loadRetentionPolicyReport={props.loadRetentionPolicyReport}
         exportConsentReceipt={props.exportConsentReceipt}
@@ -11675,6 +11695,7 @@ function PrivacyControlPanel({
   jurisdictionPreset,
   retentionReviewedDays,
   setJurisdictionPreset,
+  exportCompliancePack,
   loadPrivacyReport,
   loadRetentionPolicyReport,
   exportConsentReceipt,
@@ -11687,6 +11708,7 @@ function PrivacyControlPanel({
   jurisdictionPreset: string;
   retentionReviewedDays: number;
   setJurisdictionPreset(preset: string): void;
+  exportCompliancePack(): void;
   loadPrivacyReport(): void;
   loadRetentionPolicyReport(): void;
   exportConsentReceipt(): void;
@@ -11758,6 +11780,10 @@ function PrivacyControlPanel({
         <button className="secondary" onClick={exportSafeModeAudit} disabled={busy}>
           <ShieldCheck size={17} />
           <span>Safe Mode audit</span>
+        </button>
+        <button className="secondary" onClick={exportCompliancePack} disabled={busy}>
+          <FileText size={17} />
+          <span>Compliance pack</span>
         </button>
         <button className="secondary danger" onClick={() => deleteFaceData(false)} disabled={busy}>
           <Trash2 size={17} />
