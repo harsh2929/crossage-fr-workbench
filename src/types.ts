@@ -105,6 +105,7 @@ export interface AppConfig {
   effectiveFaceDetectorSize?: number;
   effectiveTwoPassScan?: boolean;
   effectiveVerificationDetectorSize?: number;
+  perSubjectConsent?: boolean;
   safeMode: boolean;
   safeModeZeroAdmittance?: boolean;
   safeModeThreshold: number;

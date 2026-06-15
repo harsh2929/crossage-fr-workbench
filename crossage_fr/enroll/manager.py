@@ -400,7 +400,27 @@ class ProjectState:
     def consent_on_file(self) -> bool:
         return bool(self.consent.get("active"))
 
+    @staticmethod
+    def _person_key(name: str) -> str:
+        return str(name or "").strip().casefold()
+
+    def subject_consents(self) -> dict[str, dict[str, Any]]:
+        subjects = self.consent.get("subjects")
+        return dict(subjects) if isinstance(subjects, dict) else {}
+
+    def consent_for_person(self, person_name: str) -> bool:
+        # Baseline is always the workspace-level gate. With per-subject consent enabled, the
+        # named subject must also carry an active consent record. Additive: with the flag off
+        # this is exactly the workspace gate, so existing flows are unchanged.
+        if not self.consent_on_file():
+            return False
+        if not getattr(self.config, "per_subject_consent", False):
+            return True
+        record = self.subject_consents().get(self._person_key(person_name))
+        return bool(record and record.get("active"))
+
     def consent_summary(self) -> dict[str, Any]:
+        subjects = self.subject_consents()
         return {
             "active": self.consent_on_file(),
             "operator": str(self.consent.get("operator", "")),
@@ -408,6 +428,9 @@ class ProjectState:
             "scope": str(self.consent.get("scope", self.root)),
             "confirmedAt": self.consent.get("confirmedAt"),
             "updatedAt": self.consent.get("updatedAt"),
+            "perSubjectConsent": bool(getattr(self.config, "per_subject_consent", False)),
+            "subjectCount": len(subjects),
+            "activeSubjectCount": sum(1 for record in subjects.values() if record.get("active")),
         }
 
     def model_compatibility_report(self, active_model_name: str) -> dict[str, Any]:
@@ -441,12 +464,35 @@ class ProjectState:
         operator: str = "",
         note: str = "",
         scope: str = "",
+        person_name: str = "",
+        lawful_basis: str = "",
     ) -> None:
         timestamp = now_iso()
-        previous = self.consent_on_file()
-        if value:
+        subjects = self.subject_consents()
+        person = self._person_key(person_name)
+        if person:
+            # Per-subject consent record; workspace-level consent is left untouched.
+            previous = bool(subjects.get(person, {}).get("active"))
+            record = dict(subjects.get(person, {}))
+            record.update(
+                {
+                    "active": bool(value),
+                    "personName": str(person_name).strip()[:200],
+                    "source": source,
+                    "operator": operator[:120],
+                    "note": note[:800],
+                    "lawfulBasis": str(lawful_basis)[:200],
+                    "updatedAt": timestamp,
+                }
+            )
+            if value and not record.get("confirmedAt"):
+                record["confirmedAt"] = timestamp
+            subjects[person] = record
+            self.consent = {**self.consent, "schemaVersion": 2, "subjects": subjects}
+            audit_action = "set_subject_consent"
+        elif value:
             self.consent = {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "active": True,
                 "workspaceId": self.workspace_metadata.get("workspaceId"),
                 "source": source,
@@ -455,27 +501,34 @@ class ProjectState:
                 "note": note[:800],
                 "confirmedAt": self.consent.get("confirmedAt") or timestamp,
                 "updatedAt": timestamp,
+                "subjects": subjects,
             }
+            previous = False
+            audit_action = "set_consent"
         else:
+            previous = self.consent_on_file()
             self.consent = {
                 **self.consent,
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "active": False,
                 "source": source,
                 "operator": operator[:120],
                 "scope": (scope or str(self.root))[:600],
                 "note": note[:800],
                 "updatedAt": timestamp,
+                "subjects": subjects,
             }
+            audit_action = "set_consent"
         self._append_audit(
             {
-                "action": "set_consent",
+                "action": audit_action,
                 "value": bool(value),
                 "previous": previous,
                 "source": source,
                 "operator": operator[:120],
                 "scope": (scope or str(self.root))[:600],
                 "note": note[:800],
+                **({"person": person, "lawfulBasis": str(lawful_basis)[:200]} if person else {}),
             }
         )
         self.save()
@@ -4362,9 +4415,11 @@ class ProjectState:
                 **self.consent_summary(),
                 "note": str(self.consent.get("note", "")),
                 "workspaceId": self.consent.get("workspaceId"),
+                "subjects": self.subject_consents(),
             },
             "policy": {
                 "requireConsent": bool(self.config.require_consent),
+                "perSubjectConsent": bool(self.config.per_subject_consent),
                 "reviewOnly": bool(self.config.review_only),
                 "safeMode": bool(self.config.safe_mode),
                 "safeModeThreshold": float(self.config.safe_mode_threshold),

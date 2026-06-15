@@ -477,18 +477,24 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return self.set_workspace(Path(str(params["path"])))
 
     def _cmd_set_consent(self, params, progress=None):
-        self.consent_on_file = bool(params.get("value"))
+        person_name = str(params.get("personName", "")).strip()
+        value = bool(params.get("value"))
         self.project.set_consent(
-            self.consent_on_file,
+            value,
             source=str(params.get("source", self.actor)),
             operator=str(params.get("operator", "")),
             note=str(params.get("note", "")),
             scope=str(params.get("scope", self.project.root)),
+            person_name=person_name,
+            lawful_basis=str(params.get("lawfulBasis", "")),
         )
+        # A per-subject grant must never flip the workspace-level gate.
+        if not person_name:
+            self.consent_on_file = value
         return self.state()
 
     def _cmd_enroll(self, params, progress=None):
-        self._require_consent()
+        self._require_consent_for_person(str(params.get("personName", "")))
         engine = self._engine_instance()
         added, errors = self.project.enroll_folder(
             str(params.get("personName", "")),
@@ -499,7 +505,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return {"added": added, "errors": errors, "state": self.state()}
 
     def _cmd_enroll_age_groups(self, params, progress=None):
-        self._require_consent()
+        self._require_consent_for_person(str(params.get("personName", "")))
         groups_param = params.get("groups", [])
         if not isinstance(groups_param, list):
             raise ValueError("Age-group enrollment expects a list of folders.")
@@ -1100,6 +1106,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         self.project.config.excluded_file_paths = excluded_file_paths
         self.project.config.ffmpeg_path = ffmpeg_path
         self.project.config.ffprobe_path = ffprobe_path
+        self.project.config.per_subject_consent = bool(
+            params.get("perSubjectConsent", self.project.config.per_subject_consent)
+        )
         self.project.config.safe_mode = bool(params.get("safeMode", self.project.config.safe_mode))
         self.project.config.safe_mode_zero_admittance = bool(
             params.get("safeModeZeroAdmittance", self.project.config.safe_mode_zero_admittance)
@@ -2875,6 +2884,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "config": {
                 "modelPack": self.project.config.model_pack,
                 "modelRoot": self.project.config.model_root,
+                "perSubjectConsent": bool(self.project.config.per_subject_consent),
                 "thresholds": {
                     "confident": self.project.config.thresholds.confident,
                     "likely": self.project.config.thresholds.likely,
@@ -3034,6 +3044,17 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     def _require_consent(self) -> None:
         if self.project.config.require_consent and not self.consent_on_file:
             raise PermissionError("Consent must be marked before processing images and videos.")
+
+    def _require_consent_for_person(self, person_name: str) -> None:
+        self._require_consent()
+        if (
+            self.project.config.require_consent
+            and self.project.config.per_subject_consent
+            and not self.project.consent_for_person(person_name)
+        ):
+            raise PermissionError(
+                f"Per-subject consent is required: record consent for '{person_name}' before enrolling them."
+            )
 
     def _progress(self, progress: Any | None, payload: dict[str, Any]) -> None:
         if progress is None:

@@ -2870,6 +2870,56 @@ def assert_safe_mode_zero_admittance() -> None:
     print("  safe mode zero-admittance ok")
 
 
+def assert_per_subject_consent() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-subject-consent-"))
+    workspace = root / "workspace"
+    api = make_api(workspace)
+    # Workspace-level consent unchanged by default.
+    api.handle("set_consent", {"value": True})
+    assert api.project.consent_on_file() is True
+    # A per-subject grant must NOT flip workspace-level consent, and is preserved.
+    api.handle("set_consent", {"value": True, "personName": "Alice", "lawfulBasis": "guardian"})
+    assert api.project.consent_on_file() is True, "workspace consent must be preserved"
+    assert api.consent_on_file is True, "api workspace flag must be preserved on subject grant"
+    subjects = api.project.subject_consents()
+    assert subjects.get("alice", {}).get("active") is True
+    assert subjects["alice"]["lawfulBasis"] == "guardian"
+    # Subjects survive a workspace-level consent toggle.
+    api.handle("set_consent", {"value": False})
+    api.handle("set_consent", {"value": True})
+    assert api.project.subject_consents().get("alice", {}).get("active") is True, "subjects preserved across toggle"
+    # Receipt exposes the per-subject breakdown.
+    receipt = api.handle("export_consent_receipt", {})
+    rv = receipt.get("value", receipt)
+    import json as _json
+    payload = _json.loads(Path(rv["jsonPath"]).read_text(encoding="utf-8"))
+    rsubjects = payload["consent"].get("subjects") or {}
+    assert any(s.get("personName") == "Alice" for s in rsubjects.values()), f"receipt missing subject: {rsubjects}"
+    # With the flag ON, enrolling an unconsented subject is blocked; a consented one is allowed.
+    api.handle("save_settings", {"perSubjectConsent": True})
+    bobrefs = root / "bobrefs"
+    make_face(bobrefs / "bob.jpg")
+    try:
+        api.handle("enroll", {"personName": "Bob", "ageBucket": "adult", "folder": str(bobrefs)})
+        raise AssertionError("enroll should be blocked without per-subject consent")
+    except PermissionError:
+        pass
+    alicerefs = root / "alicerefs"
+    make_face(alicerefs / "alice.jpg")
+    res = api.handle("enroll", {"personName": "Alice", "ageBucket": "adult", "folder": str(alicerefs)})
+    assert res["added"] >= 1, "Alice enroll should be allowed with per-subject consent"
+    # Backward compat: a v1 consent.json (no subjects) still loads.
+    (workspace / "consent.json").write_text(
+        _json.dumps({"schemaVersion": 1, "active": True, "confirmedAt": "2020-01-01T00:00:00Z"}),
+        encoding="utf-8",
+    )
+    reopened = make_api(workspace)
+    assert reopened.project.consent_on_file() is True
+    assert reopened.project.subject_consents() == {}
+    shutil.rmtree(root, ignore_errors=True)
+    print("  per-subject consent ok")
+
+
 def main() -> None:
     assert_corrupt_workspace_recovery()
     assert_corrupt_sqlite_startup_recovery()
@@ -2926,6 +2976,7 @@ def main() -> None:
     assert_candidate_carries_capture_dates()
     assert_candidate_age_gap_is_surfaced()
     assert_safe_mode_zero_admittance()
+    assert_per_subject_consent()
     print("edge cases ok")
 
 

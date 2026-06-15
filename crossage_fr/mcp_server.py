@@ -461,6 +461,19 @@ def set_workspace(path: str) -> dict[str, Any]:
     return _state_summary(result)
 
 
+def _validate_operator_token(action: str, operator_token: str) -> None:
+    # MCP-02: human-only operator actions (granting consent, deleting the audit log) require a
+    # one-time token the agent cannot mint, set as VINTRACE_MCP_OPERATOR_TOKEN on the server.
+    required = env_value("MCP_OPERATOR_TOKEN")
+    if not required:
+        raise ValueError(
+            f"{action} over MCP requires an operator approval token. Set VINTRACE_MCP_OPERATOR_TOKEN "
+            "on the server (and pass it as operator_token), or perform this action in the Vintrace desktop app."
+        )
+    if operator_token != required:
+        raise ValueError(f"Invalid operator approval token; {action.lower()} was refused.")
+
+
 @safe_tool()
 def mark_consent(
     confirmed: bool,
@@ -468,28 +481,34 @@ def mark_consent(
     note: str = "",
     confirm: bool = False,
     operator_token: str = "",
+    person_name: str = "",
+    lawful_basis: str = "",
 ) -> dict[str, Any]:
-    """Record consent for processing in this workspace.
+    """Record consent for processing in this workspace, or for one named subject.
 
     MCP-02: the agent CANNOT grant consent on its own authority. Granting
     (confirmed=True) requires a one-time operator token the agent cannot mint —
     set VINTRACE_MCP_OPERATOR_TOKEN on the server and pass it as operator_token,
     or grant consent in the Vintrace desktop app. Revoking (confirmed=False)
-    needs no token.
+    needs no token. Pass person_name to record a per-subject consent (with an
+    optional lawful_basis) instead of the workspace-level consent.
     """
     _confirmed(confirm, "change consent status")
     if confirmed:
-        required = env_value("MCP_OPERATOR_TOKEN")
-        if not required:
-            raise ValueError(
-                "Granting consent over MCP requires an operator approval token. Set "
-                "VINTRACE_MCP_OPERATOR_TOKEN on the server (and pass it as operator_token), "
-                "or grant consent in the Vintrace desktop app."
-            )
-        if operator_token != required:
-            raise ValueError("Invalid operator approval token; consent was not granted.")
-    state = _call("set_consent", {"value": confirmed, "source": "mcp", "operator": operator, "note": note, "scope": str(WORKSPACE)})
-    return {**_state_summary(state), "operator": operator, "note": note}
+        _validate_operator_token("Granting consent", operator_token)
+    state = _call(
+        "set_consent",
+        {
+            "value": confirmed,
+            "source": "mcp",
+            "operator": operator,
+            "note": note,
+            "scope": str(WORKSPACE),
+            "personName": person_name,
+            "lawfulBasis": lawful_basis,
+        },
+    )
+    return {**_state_summary(state), "operator": operator, "note": note, "personName": person_name}
 
 
 @safe_tool()
