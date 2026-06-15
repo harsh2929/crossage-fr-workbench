@@ -3027,6 +3027,45 @@ def assert_multi_workspace_registry() -> None:
     print("  multi-workspace registry ok")
 
 
+def assert_examination_report() -> None:
+    import datetime as _dt
+
+    root = Path(tempfile.mkdtemp(prefix="crossage-exam-report-"))
+    workspace = root / "workspace"
+    refs = root / "refs"
+    scan = root / "scan"
+    make_face(refs / "person_a.jpg")
+    make_face(scan / "candidate_a.jpg", shirt=(92, 116, 88))
+    old = _dt.datetime(2014, 1, 1).timestamp()
+    os.utime(refs / "person_a.jpg", (old, old))
+    api = make_api(workspace)
+    api.handle("set_consent", {"value": True, "operator": "Examiner Q"})
+    api.handle("enroll", {"personName": "Person A", "ageBucket": "adult", "folder": str(refs)})
+    scanned = api.handle("scan", {"folder": str(scan), "source": "exam"})
+    matched = [c for c in scanned["state"]["candidates"] if c.get("bestRefId")]
+    assert matched, "expected a matched candidate"
+    api.handle("set_status", {"candidateId": matched[0]["candidateId"], "status": "accepted"})
+    result = api.handle("export_examination_report", {"personName": "Person A"})
+    value = result.get("value", result)
+    md_path = Path(value["markdownPath"])
+    json_path = Path(value["jsonPath"])
+    assert md_path.exists() and json_path.exists(), "report files should exist"
+    assert value["candidateCount"] >= 1
+    md = md_path.read_text(encoding="utf-8")
+    # DRAFT / not-an-identification framing is mandatory.
+    assert "DRAFT" in md and "NOT a positive identification" in md, "examiner disclaimer missing"
+    assert "Examiner Q" in md, "examiner should be recorded"
+    assert "Tamper-evident audit" in md, "audit-chain reference missing"
+    assert "Models & provenance" in md, "model provenance section missing"
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    assert data["auditChain"]["verified"] is True, "audit chain should verify"
+    assert data["candidates"][0]["status"] == "accepted"
+    # The cross-age gap evidence is carried into the report.
+    assert data["candidates"][0]["ageGapConfidence"] in {"very-low", "low", "moderate", "high"}
+    shutil.rmtree(root, ignore_errors=True)
+    print("  examination report ok")
+
+
 def main() -> None:
     assert_corrupt_workspace_recovery()
     assert_corrupt_sqlite_startup_recovery()
@@ -3087,6 +3126,7 @@ def main() -> None:
     assert_jurisdiction_presets()
     assert_compliance_pack()
     assert_multi_workspace_registry()
+    assert_examination_report()
     print("edge cases ok")
 
 

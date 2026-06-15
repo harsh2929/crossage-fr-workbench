@@ -3506,6 +3506,24 @@ export default function App() {
     }
   }
 
+  async function exportExaminationReport() {
+    const result = await invoke<CommandResult<{ markdownPath: string; candidateCount: number }>>(
+      "Exporting examination report",
+      "export_examination_report",
+      { personName: "" }
+    );
+    const value = result.value;
+    if (!value) {
+      setNotice({ tone: "error", text: "Examination report did not return a path." });
+      return;
+    }
+    setNotice({
+      tone: "ok",
+      text: `Examination report exported (${value.candidateCount} decisions). DRAFT — an investigative lead record, not an identification.`
+    });
+    await window.crossAge.revealPath(value.markdownPath);
+  }
+
   async function exportCompliancePack() {
     const result = await invoke<CommandResult<{ zipPath: string; members: string[] }>>(
       "Exporting compliance pack",
@@ -4753,6 +4771,7 @@ export default function App() {
             exportSafeModeAudit={exportSafeModeAudit}
             setJurisdictionPreset={setJurisdictionPreset}
             exportCompliancePack={exportCompliancePack}
+            exportExaminationReport={exportExaminationReport}
             exportReviewLedger={exportReviewLedger}
             exportWorkspaceBackup={exportWorkspaceBackup}
             verifyLatestWorkspaceBackup={verifyLatestWorkspaceBackup}
@@ -9281,6 +9300,7 @@ function SettingsView(props: {
   exportSafeModeAudit(): void;
   setJurisdictionPreset(preset: string): void;
   exportCompliancePack(): void;
+  exportExaminationReport(): void;
   exportReviewLedger(): void;
   exportWorkspaceBackup(): void;
   verifyLatestWorkspaceBackup(): void;
@@ -10040,6 +10060,7 @@ function SettingsView(props: {
         retentionReviewedDays={props.state.config.retentionReviewedDays ?? 90}
         setJurisdictionPreset={props.setJurisdictionPreset}
         exportCompliancePack={props.exportCompliancePack}
+        exportExaminationReport={props.exportExaminationReport}
         loadPrivacyReport={props.loadPrivacyReport}
         loadRetentionPolicyReport={props.loadRetentionPolicyReport}
         exportConsentReceipt={props.exportConsentReceipt}
@@ -11743,6 +11764,7 @@ function PrivacyControlPanel({
   retentionReviewedDays,
   setJurisdictionPreset,
   exportCompliancePack,
+  exportExaminationReport,
   loadPrivacyReport,
   loadRetentionPolicyReport,
   exportConsentReceipt,
@@ -11756,6 +11778,7 @@ function PrivacyControlPanel({
   retentionReviewedDays: number;
   setJurisdictionPreset(preset: string): void;
   exportCompliancePack(): void;
+  exportExaminationReport(): void;
   loadPrivacyReport(): void;
   loadRetentionPolicyReport(): void;
   exportConsentReceipt(): void;
@@ -11831,6 +11854,10 @@ function PrivacyControlPanel({
         <button className="secondary" onClick={exportCompliancePack} disabled={busy}>
           <FileText size={17} />
           <span>Compliance pack</span>
+        </button>
+        <button className="secondary" onClick={exportExaminationReport} disabled={busy}>
+          <FileText size={17} />
+          <span>Examination report</span>
         </button>
         <button className="secondary danger" onClick={() => deleteFaceData(false)} disabled={busy}>
           <Trash2 size={17} />

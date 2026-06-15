@@ -99,6 +99,7 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "list_jurisdictions",
   "set_jurisdiction_preset",
   "export_compliance_pack",
+  "export_examination_report",
   "list_workspaces",
   "add_workspace"
 ]);

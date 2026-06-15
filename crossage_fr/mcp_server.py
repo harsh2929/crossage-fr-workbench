@@ -803,6 +803,18 @@ def set_jurisdiction_preset(preset: str) -> dict[str, Any]:
 
 
 @safe_tool()
+def export_examination_report(person_name: str = "") -> dict[str, Any]:
+    """Export a DRAFT court-aware examination report (markdown + JSON) for one person or all
+    reviewed candidates: method, model provenance, per-decision cross-age uncertainty, consent
+    basis, and the tamper-evident audit reference.
+
+    DRAFT only — an investigative lead record, NOT a positive identification or expert testimony.
+    """
+    result = _call("export_examination_report", {"personName": person_name})
+    return {"report": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
 def list_workspaces() -> dict[str, Any]:
     """List known Vintrace workspaces (alias, last-opened, which is active) for switching context."""
     return _call("list_workspaces")
