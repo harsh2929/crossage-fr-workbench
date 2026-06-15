@@ -463,7 +463,14 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "add_calibration_label",
   "set_performance_mode",
   "save_settings",
-  "audit_events"
+  "audit_events",
+  "audit_chain_status",
+  "list_jurisdictions",
+  "set_jurisdiction_preset",
+  "export_compliance_pack",
+  "export_examination_report",
+  "list_workspaces",
+  "add_workspace"
 ]);
 
 app.setAppUserModelId(APP_USER_MODEL_ID);

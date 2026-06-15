@@ -42,29 +42,54 @@ def _python_commands() -> set[str]:
         return set(re.findall(r'"([a-z_]+)":\s*"_cmd_\w+"', src))
 
 
-def _preload_allowlist() -> set[str]:
-    src = (ROOT / "desktop" / "preload.cjs").read_text(encoding="utf-8")
+def _cjs_allowlist(relative: str) -> set[str]:
+    # The renderer->main IPC boundary enforces TRUSTED_BACKEND_COMMANDS in BOTH preload.cjs
+    # (renderer side) AND main.cjs (validateBackendPayload). A command added to one but not the
+    # other is silently blocked at runtime, so both must be checked.
+    src = (ROOT / "desktop" / relative).read_text(encoding="utf-8")
     match = re.search(r"TRUSTED_BACKEND_COMMANDS = new Set\(\[(.*?)\]\)", src, re.DOTALL)
-    assert match, "could not locate TRUSTED_BACKEND_COMMANDS in preload.cjs"
+    assert match, f"could not locate TRUSTED_BACKEND_COMMANDS in {relative}"
     return set(re.findall(r'"([a-z_]+)"', match.group(1)))
+
+
+def _preload_allowlist() -> set[str]:
+    return _cjs_allowlist("preload.cjs")
+
+
+def _main_allowlist() -> set[str]:
+    return _cjs_allowlist("main.cjs")
 
 
 def main() -> None:
     py = _python_commands()
     allow = _preload_allowlist()
+    main_allow = _main_allowlist()
     assert py, "no backend commands found — extraction regex is broken"
     assert allow, "no preload allowlist commands found — extraction regex is broken"
+    assert main_allow, "no main.cjs allowlist commands found — extraction regex is broken"
 
     # 1) No dead allowlist entries: everything the renderer may call must exist.
     dead = sorted(allow - py)
     assert not dead, f"preload allowlists commands the backend does not handle: {dead}"
+    dead_main = sorted(main_allow - py)
+    assert not dead_main, f"main.cjs allowlists commands the backend does not handle: {dead_main}"
 
-    # 2) Every renderer-reachable backend command must be allowlisted.
+    # 2) Every renderer-reachable backend command must be allowlisted in BOTH cjs boundaries.
     missing = sorted(py - INTERNAL_COMMANDS - allow)
     assert not missing, (
         "backend commands missing from the preload allowlist "
         f"(add to the allowlist or to INTERNAL_COMMANDS): {missing}"
     )
+    missing_main = sorted(py - INTERNAL_COMMANDS - main_allow)
+    assert not missing_main, (
+        "backend commands missing from the main.cjs allowlist "
+        f"(validateBackendPayload would block them): {missing_main}"
+    )
+    # 3b) The two allowlists must agree (a command in one but not the other is a silent runtime block).
+    only_preload = sorted(allow - main_allow)
+    only_main = sorted(main_allow - allow)
+    assert not only_preload, f"commands in preload.cjs but not main.cjs (blocked at IPC): {only_preload}"
+    assert not only_main, f"commands in main.cjs but not preload.cjs: {only_main}"
 
     # 3) INTERNAL_COMMANDS must be real backend commands (no stale entries).
     stale_internal = sorted(INTERNAL_COMMANDS - py)
