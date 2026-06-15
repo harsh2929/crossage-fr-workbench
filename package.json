@@ -27,6 +27,13 @@
     "test:pipeline": "PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/pipeline_smoke.py",
     "test:edge": "PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/edge_cases.py",
     "test:age-gap": "PYTHONPATH=. .venv/bin/python tests/age_gap_units.py",
+    "test:quality": "PYTHONPATH=. .venv/bin/python tests/quality_units.py",
+    "test:detection": "PYTHONPATH=. .venv/bin/python tests/detection_units.py",
+    "test:calibration": "PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/calibration_units.py",
+    "test:benchmark-units": "PYTHONPATH=. .venv/bin/python tests/benchmark_units.py",
+    "test:det-eval": "PYTHONPATH=. .venv/bin/python tests/det_eval_units.py",
+    "test:clustering": "PYTHONPATH=. .venv/bin/python tests/clustering_units.py",
+    "test:fiqa": "PYTHONPATH=. .venv/bin/python tests/fiqa_units.py",
     "test:mcp": ".venv/bin/python tests/mcp_smoke.py",
     "test:filesystem-chaos": "node desktop/scripts/run-python.cjs tests/filesystem_chaos.py",
     "test:backup-roundtrip": "node desktop/scripts/run-python.cjs tests/workspace_backup_roundtrip.py",
@@ -54,7 +61,7 @@
     "test:e2e:a11y": "cross-env VINTRACE_A11Y=1 playwright test tests/e2e/accessibility-keyboard.spec.ts",
     "test:e2e:packaged": "cross-env VINTRACE_PACKAGED_SMOKE=1 playwright test tests/e2e/packaged.spec.ts",
     "test:e2e:soak": "cross-env VINTRACE_SOAK=1 playwright test tests/e2e/memory-soak.spec.ts",
-    "test": "npm run build && npm run test:localization && npm run test:main-util && npm run test:pipeline && npm run test:age-gap && npm run test:edge && npm run test:filesystem-chaos && npm run test:backup-roundtrip && npm run test:dataset-benchmark && npm run test:dataset-gates && npm run test:model-downloader && npm run test:mcp && npm run test:perf-budget && npm run test:e2e"
+    "test": "npm run build && npm run test:localization && npm run test:main-util && npm run test:pipeline && npm run test:age-gap && npm run test:quality && npm run test:detection && npm run test:calibration && npm run test:benchmark-units && npm run test:det-eval && npm run test:clustering && npm run test:fiqa && npm run test:edge && npm run test:filesystem-chaos && npm run test:backup-roundtrip && npm run test:dataset-benchmark && npm run test:dataset-gates && npm run test:model-downloader && npm run test:mcp && npm run test:perf-budget && npm run test:e2e"
   },
   "dependencies": {
     "electron-updater": "^6.8.9",

@@ -35,7 +35,10 @@ from crossage_fr.match import (
     valid_candidate,
     valid_reference,
 )
-from crossage_fr.match.age_gap import compute_age_gap
+from crossage_fr.match.age_gap import compute_age_gap, confidence_for_gap
+from crossage_fr.match.calibration import PlattCalibrator, fit_score_calibrator, threshold_for_fmr
+from crossage_fr.benchmark_quality import BENCHMARK_DISCLAIMER
+from crossage_fr.benchmarks.det_eval import det_report, det_report_by_cohort
 from crossage_fr.models import EmbeddingResult, ReferenceFace, ReviewCandidate, new_id, normalize_risk_flags
 from crossage_fr.storage import safe_is_mount, safe_resolve
 from crossage_fr.store import VectorStore
@@ -61,6 +64,15 @@ try:
     UNMATCHED_CLUSTER_BATCH_SIZE = max(100, int(os.environ.get("CROSSAGE_UNMATCHED_CLUSTER_BATCH_SIZE", "1000")))
 except ValueError:
     UNMATCHED_CLUSTER_BATCH_SIZE = 1000
+
+# Phase 2.4: unmatched faces are clustered ONCE globally at the terminal flush so a
+# single person can't fragment across periodic batches. Periodic clustering only fires
+# as a memory safety valve once the accumulated set exceeds this (high) cap; below it,
+# everything is held and clustered in one pass. Streaming kNN is the >1M follow-up.
+try:
+    UNMATCHED_CLUSTER_GLOBAL_CAP = max(2000, int(os.environ.get("CROSSAGE_UNMATCHED_CLUSTER_GLOBAL_CAP", "20000")))
+except ValueError:
+    UNMATCHED_CLUSTER_GLOBAL_CAP = 20000
 
 try:
     SCAN_DB_COMMIT_INTERVAL = max(25, int(os.environ.get("CROSSAGE_SCAN_DB_COMMIT_INTERVAL", "250")))
@@ -601,6 +613,7 @@ class ProjectState:
                         vector=embedding.vector,
                         source_hash=record.sha256,
                         pose_bucket=embedding.pose_bucket,
+                        capture_date_provenance=record.capture_date_provenance,
                     )
                     self.references[ref.ref_id] = ref
                     self.vector_store.add(ref.ref_id, ref.vector)
@@ -752,6 +765,9 @@ class ProjectState:
                         vector=embedding.vector,
                         source_hash=record.sha256,
                         pose_bucket=embedding.pose_bucket,
+                        capture_date_provenance=(
+                            record.capture_date_provenance if record.capture_date else ref.capture_date_provenance
+                        ),
                     )
                     self.references[new_ref.ref_id] = new_ref
                     self.vector_store.add(new_ref.ref_id, new_ref.vector)
@@ -967,8 +983,10 @@ class ProjectState:
 
         def flush_unmatched(force: bool = False) -> None:
             nonlocal added, cluster_label_offset, unmatched
-            flush_size = max(UNMATCHED_CLUSTER_BATCH_SIZE, int(self.config.cluster_min_size))
-            if not unmatched or (not force and len(unmatched) < flush_size):
+            # Cluster once globally at the terminal (force) flush; only overflow past the
+            # high cap triggers an early batched pass (which keeps the label offset).
+            overflow_cap = max(UNMATCHED_CLUSTER_GLOBAL_CAP, int(self.config.cluster_min_size))
+            if not unmatched or (not force and len(unmatched) < overflow_cap):
                 return
             self._emit_scan_progress(on_progress, "clustering", metrics)
             batch = unmatched
@@ -1123,7 +1141,10 @@ class ProjectState:
             ensure_not_cancelled()
             ensure_stable_signature(image_path, signature)
             metadata.setdefault("source_hash", content_hash)
-            metadata.setdefault("capture_date", self._safe_capture_date(image_path, image=image, sha256=content_hash))
+            if "capture_date" not in metadata:
+                _cap_date, _cap_prov = self._safe_capture_date_with_provenance(image_path, image=image, sha256=content_hash)
+                metadata["capture_date"] = _cap_date
+                metadata["capture_date_provenance"] = _cap_prov
             embeddings: list[EmbeddingResult] | None = None
             cache_hit = False
             if apply_safe_mode and self.config.safe_mode:
@@ -1209,7 +1230,7 @@ class ProjectState:
                 accepted += 1
                 hits, compatible_refs = self._search_matching_references(embedding, k=k)
                 pose_thresholds = thresholds_for_pose(self.config.thresholds, pose_bucket) if pose_review_supported(hits, compatible_refs, self.config.thresholds, pose_bucket) else self.config.thresholds
-                decision = group_hits(hits, compatible_refs, pose_thresholds, pose_bucket=pose_bucket)
+                decision = group_hits(hits, compatible_refs, pose_thresholds, pose_bucket=pose_bucket, candidate_quality=embedding.quality, candidate_capture_date=embedding_metadata.get("capture_date"))
                 decision_flags = set(decision.flags) if decision is not None else set()
                 if "pose-reranked" in decision_flags:
                     metrics["poseReranked"] += 1
@@ -1285,8 +1306,12 @@ class ProjectState:
                     candidate_note = self._append_candidate_note(candidate_note, "Recovered by the side-face detector; review before accepting.")
                 candidate_risk_flags = normalize_risk_flags(candidate_risk_flags, candidate_note)
                 reference_capture_date = self._reference_capture_date(decision.best_ref_id)
+                reference_capture_date_provenance = self._reference_capture_date_provenance(decision.best_ref_id)
                 age_gap_years, age_gap_confidence, age_gap_flag = compute_age_gap(
-                    embedding_metadata.get("capture_date"), reference_capture_date
+                    embedding_metadata.get("capture_date"),
+                    reference_capture_date,
+                    candidate_provenance=embedding_metadata.get("capture_date_provenance", "unknown"),
+                    reference_provenance=reference_capture_date_provenance,
                 )
                 if age_gap_flag:
                     candidate_risk_flags = normalize_risk_flags(
@@ -1305,8 +1330,10 @@ class ProjectState:
                     note=candidate_note,
                     risk_flags=candidate_risk_flags,
                     reference_capture_date=reference_capture_date,
+                    reference_capture_date_provenance=reference_capture_date_provenance,
                     age_gap_years=age_gap_years,
                     age_gap_confidence=age_gap_confidence,
+                    raw_cosine=decision.raw_cosine,
                     **embedding_metadata,
                 )
                 self.candidates[candidate.candidate_id] = candidate
@@ -1551,6 +1578,9 @@ class ProjectState:
                                     "video_frame_index": sample.frame_index,
                                     "video_duration_ms": sample.duration_ms,
                                     "capture_date": self._media_mtime_date(path),
+                                    # §5.4: a video frame's date is the file mtime, not an EXIF
+                                    # event date, so the age gap is always "estimated".
+                                    "capture_date_provenance": "mtime",
                                 },
                                 apply_safe_mode=False,
                             )
@@ -2028,7 +2058,9 @@ class ProjectState:
         return (f"{value}\n{addition}" if value else addition)[:1200]
 
     def _embedding_cache_version(self, engine: EmbeddingEngine) -> str:
-        return str(getattr(engine, "model_name", "unknown"))
+        version = str(getattr(engine, "model_name", "unknown"))
+        detect_tag = str(getattr(engine, "detect_cache_tag", "") or "")
+        return f"{version}|{detect_tag}" if detect_tag else version
 
     def _embedding_detector_size(self, engine: EmbeddingEngine) -> int:
         return int(getattr(engine, "detector_size", self.config.face_detector_size))
@@ -2037,6 +2069,10 @@ class ProjectState:
         return {
             "vector": embedding.vector,
             "quality": embedding.quality,
+            "qualityNorm": embedding.quality_norm,
+            "detScore": embedding.det_score,
+            "iedPx": embedding.ied_px,
+            "fiqaScore": embedding.fiqa_score,
             "bbox": list(embedding.bbox) if embedding.bbox else None,
             "modelName": embedding.model_name,
             "note": embedding.note,
@@ -2050,6 +2086,10 @@ class ProjectState:
         return EmbeddingResult(
             vector=[float(value) for value in vector],
             quality=float(row.get("quality", 0.0)),
+            quality_norm=float(row.get("qualityNorm", 0.0) or 0.0),
+            det_score=float(row.get("detScore", 0.0) or 0.0),
+            ied_px=float(row.get("iedPx", 0.0) or 0.0),
+            fiqa_score=float(row.get("fiqaScore", 0.0) or 0.0),
             bbox=bbox,
             model_name=str(row.get("modelName", "")),
             note=str(row.get("note", "")),
@@ -2316,6 +2356,10 @@ class ProjectState:
                     "actualPerson": candidate.person_name if status == "accepted" else "",
                     "matchScore": candidate.score,
                     "isMatch": status == "accepted",
+                    "poseBucket": candidate.pose_bucket,
+                    "ageGapYears": candidate.age_gap_years,
+                    "rawCosine": candidate.raw_cosine,
+                    "modelName": candidate.model_name,
                 },
             )
         self.save()
@@ -2379,6 +2423,10 @@ class ProjectState:
                 "actualPerson": "",
                 "matchScore": candidate.score,
                 "isMatch": False,
+                "poseBucket": candidate.pose_bucket,
+                "ageGapYears": candidate.age_gap_years,
+                "rawCosine": candidate.raw_cosine,
+                "modelName": candidate.model_name,
             },
         )
         self._append_audit(
@@ -5274,6 +5322,10 @@ class ProjectState:
             "manifestPath": str(manifest_path),
             "labelsJsonPath": str(labels_json_path),
             "labelsCsvPath": str(labels_csv_path),
+            # This pack uses synthetic fixtures with predetermined scores to self-test
+            # the gate/label plumbing -- it is NOT a measurement of recognition accuracy.
+            "fixture": True,
+            "disclaimer": "Self-test fixture with synthetic scores; not a measurement of recognition accuracy. " + BENCHMARK_DISCLAIMER,
             "counts": {
                 "cases": len(cases),
                 "matches": sum(1 for row in labels if row["isMatch"]),
@@ -5350,34 +5402,114 @@ class ProjectState:
         result = [row for row in rows if isinstance(row, dict)]
         return result[: max(1, min(100, int(limit or 20)))]
 
+    # Minimum labels (and per-class minimum) before fitting a calibrator. The legacy
+    # writer fired at 8 labels off a min-positive/max-negative midpoint, which a single
+    # overlapping hard negative could push the wrong way; this is the documented fix.
+    CALIBRATION_MIN_LABELS = 20
+    CALIBRATION_MIN_PER_CLASS = 5
+    # Target false-match rates that define each band's operating point on the user's
+    # own labeled impostors (recall-first cross-age band tolerates more false matches).
+    CALIBRATION_TARGET_FMR = {"confident": 0.01, "likely": 0.10, "relaxed_child": 0.30}
+
     def apply_calibration_to_config(self) -> dict[str, Any]:
-        summary = self.calibration_summary()
-        recommended = summary.get("recommendedLikelyThreshold")
-        if recommended is None:
-            evaluation = self.accuracy_evaluation()
-            likely_metrics = evaluation["metrics"]["likely"]
-            if likely_metrics["labeled"] < 8:
-                raise ValueError("Review more accepted and rejected matches before applying calibration.")
-            recommended = self.config.thresholds.likely
-            if likely_metrics["falsePositives"] > likely_metrics["falseNegatives"]:
-                recommended = min(0.92, recommended + 0.04)
-            elif likely_metrics["falseNegatives"] > 0:
-                recommended = max(0.08, recommended - 0.03)
-        likely = max(0.05, min(0.9, float(recommended)))
+        # Replaces the (min_positive + max_negative)/2 midpoint with a probabilistic
+        # fit + FMR-targeted thresholds on the user's accept/reject labels. Fits on the
+        # fused match score (what band_for_score actually bands), keeping the operating
+        # point self-consistent with the live decision path. NOTE: this is a regularized
+        # GLOBAL fit; a held-out split is preferable once enough labels accumulate.
+        all_rows = self.db.calibration_label_rows()
+        # Phase 3.4: cosines from different recognizers live in different embedding
+        # spaces, so only fit on the dominant model's labels and TAG the result with it.
+        models = [str(row.get("modelName") or "") for row in all_rows if row.get("modelName")]
+        dominant_model = max(set(models), key=models.count) if models else ""
+        rows = [row for row in all_rows if str(row.get("modelName") or "") == dominant_model] if dominant_model else all_rows
+        calibrator = fit_score_calibrator(
+            rows,
+            min_count=self.CALIBRATION_MIN_LABELS,
+            min_per_class=self.CALIBRATION_MIN_PER_CLASS,
+            score_key="matchScore",
+        )
+        if calibrator is None:
+            raise ValueError(
+                "Review more accepted and rejected matches before applying calibration "
+                f"(need at least {self.CALIBRATION_MIN_LABELS} labels with "
+                f"{self.CALIBRATION_MIN_PER_CLASS}+ of each)."
+            )
+        scores = [float(row["matchScore"]) for row in rows]
+        labels = [1.0 if row["isMatch"] else 0.0 for row in rows]
+
+        def _band_threshold(target_fmr: float) -> float:
+            return max(0.02, min(0.98, threshold_for_fmr(scores, labels, target_fmr)))
+
+        confident = _band_threshold(self.CALIBRATION_TARGET_FMR["confident"])
+        likely = _band_threshold(self.CALIBRATION_TARGET_FMR["likely"])
+        relaxed = _band_threshold(self.CALIBRATION_TARGET_FMR["relaxed_child"])
+        # Enforce strictly-descending bands (config validation requires it).
+        likely = min(likely, confident)
+        relaxed = min(relaxed, likely)
+        self.config.thresholds.confident = confident
         self.config.thresholds.likely = likely
-        self.config.thresholds.confident = max(likely, min(0.98, likely + 0.12))
-        self.config.thresholds.relaxed_child = max(0.02, min(likely, likely - 0.08))
+        self.config.thresholds.relaxed_child = relaxed
+        self.config.calibration_platt = calibrator.to_list()
+        self.config.calibration_model = dominant_model
         self._append_audit(
             {
                 "action": "apply_calibration_to_config",
                 "likely": self.config.thresholds.likely,
                 "confident": self.config.thresholds.confident,
                 "relaxed_child": self.config.thresholds.relaxed_child,
-                "labels": summary.get("totalLabels", 0),
+                "platt": self.config.calibration_platt,
+                "calibration_model": dominant_model,
+                "labels": len(rows),
+                "labels_dropped_other_model": len(all_rows) - len(rows),
             }
         )
         self.save()
         return {"summary": self.calibration_summary(), "config": asdict(self.config)}
+
+    def match_probability(self, score: float, model_name: str | None = None) -> float | None:
+        """Calibrated P(same identity) for a fused match score, or None if uncalibrated
+        OR stale: a calibrator fit on a different recognizer (model_name) must not be
+        applied to scores from the current one (Phase 3.4 -- different embedding spaces)."""
+        params = self.config.calibration_platt
+        if not params or len(params) != 2:
+            return None
+        if model_name and self.config.calibration_model and model_name != self.config.calibration_model:
+            return None
+        try:
+            return PlattCalibrator.from_list(params).probability(float(score))
+        except (TypeError, ValueError):
+            return None
+
+    def accuracy_det_report(self) -> dict[str, Any]:
+        """DET / TAR@FAR / EER report on the user's accept-reject labels (Phase 2.3).
+
+        Uses raw cosine (decoupled from heuristic banding) so the numbers are honest
+        and comparable; carries a resolvable-FAR floor, bootstrap CIs, and a disclaimer
+        that these are not standard FR verification numbers.
+        """
+        return det_report(self.db.calibration_label_rows(), score_key="rawCosine")
+
+    def accuracy_det_report_by_age_gap(self) -> dict[str, Any]:
+        """Per-age-gap-band DET reports (Phase 2.1) so the cross-age headline becomes
+        falsifiable per gap instead of hidden inside one pooled number. Bands are the
+        NIST-grounded confidence bands; the gap is a photo-date gap (capture_date diff),
+        which is a noisy proxy for true subject-age gap -- reported honestly as such.
+        """
+        buckets: dict[str, list[dict[str, Any]]] = {}
+        for row in self.db.calibration_label_rows():
+            years = row.get("ageGapYears")
+            band = "unknown" if years is None else confidence_for_gap(float(years))
+            buckets.setdefault(band, []).append(row)
+        return {
+            "note": "Age gap is a photo-capture-date gap (proxy for subject-age gap); small per-band samples have wide CIs.",
+            "byBand": {band: det_report(rows, score_key="rawCosine") for band, rows in buckets.items()},
+        }
+
+    def accuracy_fairness_report(self, cohort: str = "poseBucket") -> dict[str, Any]:
+        """Per-cohort DET + fairness gap on the user's labels (Phase 3.3). Defaults to
+        the pose cohort; the app slices only non-protected operational cohorts."""
+        return det_report_by_cohort(self.db.calibration_label_rows(), cohort, score_key="rawCosine")
 
     def export_accuracy_labels(self, folder: Path | None = None) -> dict[str, Any]:
         export_root = (folder or self.root / "exports").expanduser().resolve()
@@ -6156,11 +6288,23 @@ class ProjectState:
             return None
 
     def _safe_capture_date(self, path: Path, image: Any | None = None, sha256: str = "") -> str | None:
-        # Source-media capture date: EXIF DateTimeOriginal when present, else file mtime.
+        return self._safe_capture_date_with_provenance(path, image=image, sha256=sha256)[0]
+
+    def _safe_capture_date_with_provenance(self, path: Path, image: Any | None = None, sha256: str = "") -> tuple[str | None, str]:
+        # §5.4: source-media capture date + provenance — EXIF event date when present,
+        # else the mtime fallback (which downstream suppresses the age-gap NIST band).
         try:
-            return image_record_for_path(path, image=image, sha256=sha256).capture_date
+            record = image_record_for_path(path, image=image, sha256=sha256)
+            return record.capture_date, record.capture_date_provenance
         except Exception:
-            return self._media_mtime_date(path)
+            mtime = self._media_mtime_date(path)
+            return mtime, ("mtime" if mtime else "none")
+
+    def _reference_capture_date_provenance(self, ref_id: str | None) -> str:
+        if not ref_id:
+            return "unknown"
+        ref = self.references.get(ref_id)
+        return getattr(ref, "capture_date_provenance", "unknown") if ref else "unknown"
 
     def _reference_capture_date(self, ref_id: str | None) -> str | None:
         if not ref_id:

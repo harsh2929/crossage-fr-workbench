@@ -266,7 +266,14 @@ def average_hash(image: Image.Image) -> str:
     return f"{bits:016x}"
 
 
-def capture_date(path: Path, image: Image.Image) -> str | None:
+def capture_date_with_provenance(path: Path, image: Image.Image) -> tuple[str | None, str]:
+    """Return (capture_date_iso, provenance).
+
+    §5.4 governance: distinguishing a real EXIF event date from the mtime fallback
+    is load-bearing. For a digitized historical photo, mtime is the *scan* date —
+    an age gap derived from it is meaningless, so downstream the uncertainty banner
+    is suppressed unless provenance is "exif". provenance is "exif" | "mtime" | "none".
+    """
     try:
         exif = image.getexif()
     except Exception:
@@ -278,17 +285,22 @@ def capture_date(path: Path, image: Image.Image) -> str | None:
             continue
         for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
             try:
-                return datetime.strptime(str(value), fmt).date().isoformat()
+                return datetime.strptime(str(value), fmt).date().isoformat(), "exif"
             except ValueError:
                 pass
     try:
-        return datetime.fromtimestamp(os.path.getmtime(path)).date().isoformat()
+        return datetime.fromtimestamp(os.path.getmtime(path)).date().isoformat(), "mtime"
     except OSError:
-        return None
+        return None, "none"
+
+
+def capture_date(path: Path, image: Image.Image) -> str | None:
+    return capture_date_with_provenance(path, image)[0]
 
 
 def image_record_for_path(path: Path, image: Image.Image | None = None, sha256: str | None = None) -> ImageRecord:
     image = image or load_image(path)
+    captured, provenance = capture_date_with_provenance(path, image)
     return ImageRecord(
         image_id=new_id("img"),
         path=str(path),
@@ -296,5 +308,6 @@ def image_record_for_path(path: Path, image: Image.Image | None = None, sha256: 
         phash=average_hash(image),
         width=image.width,
         height=image.height,
-        capture_date=capture_date(path, image),
+        capture_date=captured,
+        capture_date_provenance=provenance,
     )

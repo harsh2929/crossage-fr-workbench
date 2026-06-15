@@ -157,6 +157,10 @@ class WorkspaceDb:
                     match_score REAL,
                     is_match INTEGER,
                     safe_label TEXT NOT NULL DEFAULT '',
+                    pose_bucket TEXT NOT NULL DEFAULT '',
+                    age_gap_years REAL,
+                    raw_cosine REAL,
+                    model_name TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_calibration_labels_created
@@ -230,6 +234,13 @@ class WorkspaceDb:
             self._ensure_column(conn, "review_candidates", "risk_flags", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "review_candidates", "close_runner_up", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "review_candidates", "single_reference_match", "INTEGER NOT NULL DEFAULT 0")
+            # Phase 1.2: stratification keys for per-bucket probabilistic calibration.
+            self._ensure_column(conn, "calibration_labels", "pose_bucket", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "calibration_labels", "age_gap_years", "REAL")
+            self._ensure_column(conn, "calibration_labels", "raw_cosine", "REAL")
+            # Phase 3.4: tag each label with the recognizer that produced it so a model
+            # switch can't silently mix incomparable embedding spaces in calibration.
+            self._ensure_column(conn, "calibration_labels", "model_name", "TEXT NOT NULL DEFAULT ''")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_review_candidates_folder
@@ -1088,13 +1099,20 @@ class WorkspaceDb:
         )
 
     def add_calibration_label(self, label_id: str, row: dict[str, Any]) -> None:
+        def _opt_float(value: Any) -> float | None:
+            try:
+                return None if value is None else float(value)
+            except (TypeError, ValueError):
+                return None
+
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO calibration_labels(
                     label_id, source_path, file_hash, expected_person, actual_person,
-                    match_score, is_match, safe_label, created_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    match_score, is_match, safe_label, pose_bucket, age_gap_years,
+                    raw_cosine, model_name, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     label_id,
@@ -1105,9 +1123,44 @@ class WorkspaceDb:
                     row.get("matchScore"),
                     None if row.get("isMatch") is None else (1 if bool(row.get("isMatch")) else 0),
                     str(row.get("safeLabel", "")),
+                    str(row.get("poseBucket", "") or ""),
+                    _opt_float(row.get("ageGapYears")),
+                    _opt_float(row.get("rawCosine")),
+                    str(row.get("modelName", "") or ""),
                     now_iso(),
                 ),
             )
+
+    def calibration_label_rows(self) -> list[dict[str, Any]]:
+        """Labeled (score, raw_cosine, is_match, pose, age-gap) rows for calibration.
+
+        Only rows with a definite match/non-match and a usable score are returned;
+        raw_cosine falls back to match_score for pre-1.2 rows that predate capture.
+        """
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                SELECT match_score, raw_cosine, is_match, pose_bucket, age_gap_years, model_name
+                FROM calibration_labels
+                WHERE is_match IS NOT NULL AND match_score IS NOT NULL
+                ORDER BY created_at ASC
+                """
+            )
+            rows: list[dict[str, Any]] = []
+            for record in cursor.fetchall():
+                match_score = float(record["match_score"])
+                raw = record["raw_cosine"]
+                rows.append(
+                    {
+                        "matchScore": match_score,
+                        "rawCosine": match_score if raw is None else float(raw),
+                        "isMatch": bool(record["is_match"]),
+                        "poseBucket": str(record["pose_bucket"] or ""),
+                        "ageGapYears": None if record["age_gap_years"] is None else float(record["age_gap_years"]),
+                        "modelName": str(record["model_name"] or ""),
+                    }
+                )
+            return rows
 
     def calibration_summary(self) -> dict[str, Any]:
         with self.connect() as conn:

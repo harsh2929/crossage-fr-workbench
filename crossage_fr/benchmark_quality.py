@@ -7,6 +7,32 @@ import json
 import math
 
 
+BENCHMARK_DISCLAIMER = (
+    "These are closed-set top-1 product metrics at fixed cosine thresholds, NOT "
+    "standard face-recognition verification accuracy (TAR@FAR / DET) -- they are not "
+    "comparable to LFW/IJB-C/paper numbers. Reported intervals are Wilson 95% score "
+    "intervals; small samples remain statistically weak even when the point estimate is high."
+)
+
+
+def wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score confidence interval for a binomial proportion.
+
+    Exposes how much sampling noise a point estimate carries -- e.g. a 0.99 on 40
+    items is far weaker than a 0.99 on 6000. Returns (0.0, 1.0) for an empty sample.
+    """
+    n = int(total)
+    if n <= 0:
+        return (0.0, 1.0)
+    s = max(0, min(int(successes), n))
+    p = s / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = (p + z2 / (2 * n)) / denom
+    half = (z * math.sqrt(p * (1.0 - p) / n + z2 / (4.0 * n * n))) / denom
+    return (max(0.0, center - half), min(1.0, center + half))
+
+
 DEFAULT_DATASET_GATES: dict[str, dict[str, float | int | bool]] = {
     "calfw": {"minEvaluated": 40, "minPrecision": 0.99, "minRecall": 0.99, "minAccuracy": 0.99, "maxWrongIdentity": 0},
     "cplfw": {"minEvaluated": 40, "minPrecision": 0.95, "minRecall": 0.90, "minAccuracy": 0.92, "minProfileRecall": 0.90, "maxWrongIdentity": 1},

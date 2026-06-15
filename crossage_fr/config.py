@@ -39,6 +39,10 @@ class Thresholds:
 class RuntimeConfig:
     model_pack: str = "antelopev2"
     model_root: str = ""
+    # Optional drop-in recognizer filename to prefer (e.g. an LVFace ONNX); empty =
+    # the built-in default priority. Switching recognizers re-spaces embeddings, so a
+    # change requires re-enrollment + recalibration (the calibrator is model-tagged).
+    recognizer_filename: str = ""
     review_only: bool = True
     require_consent: bool = True
     per_subject_consent: bool = False
@@ -48,6 +52,8 @@ class RuntimeConfig:
     safe_mode_threshold: float = 0.58
     safe_mode_zero_admittance: bool = False
     face_detector_size: int = 512
+    multi_scale_detect: bool = True
+    flip_tta: bool = False
     two_pass_scan: bool = True
     verification_detector_size: int = 640
     performance_mode: str = "auto"
@@ -64,6 +70,10 @@ class RuntimeConfig:
     excluded_path_keywords: list[str] = field(default_factory=list)
     excluded_extensions: list[str] = field(default_factory=list)
     excluded_file_paths: list[str] = field(default_factory=list)
+    # Persisted Platt calibrator [a, b] (score -> P(same identity)); empty = uncalibrated.
+    calibration_platt: list[float] = field(default_factory=list)
+    # Recognizer the calibrator was fit on; a model switch makes the calibrator stale.
+    calibration_model: str = ""
     thresholds: Thresholds = field(default_factory=Thresholds)
 
 
@@ -133,6 +143,24 @@ def _normalize_extensions(value: object) -> list[str]:
     return result
 
 
+def _require_platt(value: object) -> list[float]:
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("calibration_platt must be a list.")
+    items = list(value)
+    if not items:
+        return []
+    if len(items) != 2:
+        raise ValueError("calibration_platt must be empty or [a, b].")
+    result: list[float] = []
+    for item in items:
+        if isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(float(item)):
+            raise ValueError("calibration_platt entries must be finite numbers.")
+        result.append(float(item))
+    return result
+
+
 def _require_performance_mode(value: object) -> str:
     mode = str(value or "auto").strip().lower()
     if mode not in PERFORMANCE_MODES:
@@ -143,6 +171,7 @@ def _require_performance_mode(value: object) -> str:
 def _validate_config(config: RuntimeConfig) -> RuntimeConfig:
     config.model_pack = str(config.model_pack)
     config.model_root = str(config.model_root)
+    config.recognizer_filename = str(config.recognizer_filename or "")[:200]
     config.review_only = _require_bool(config.review_only, "review_only")
     config.require_consent = _require_bool(config.require_consent, "require_consent")
     config.per_subject_consent = _require_bool(config.per_subject_consent, "per_subject_consent")
@@ -152,6 +181,8 @@ def _validate_config(config: RuntimeConfig) -> RuntimeConfig:
     config.safe_mode_zero_admittance = _require_bool(config.safe_mode_zero_admittance, "safe_mode_zero_admittance")
     config.safe_mode_threshold = _require_unit_float(config.safe_mode_threshold, "safe_mode_threshold")
     config.face_detector_size = _require_detector_size(config.face_detector_size)
+    config.multi_scale_detect = _require_bool(config.multi_scale_detect, "multi_scale_detect")
+    config.flip_tta = _require_bool(config.flip_tta, "flip_tta")
     config.two_pass_scan = _require_bool(config.two_pass_scan, "two_pass_scan")
     config.verification_detector_size = _require_detector_size(config.verification_detector_size)
     config.performance_mode = _require_performance_mode(config.performance_mode)
@@ -172,6 +203,8 @@ def _validate_config(config: RuntimeConfig) -> RuntimeConfig:
     config.excluded_path_keywords = _require_string_list(config.excluded_path_keywords, "excluded_path_keywords")
     config.excluded_extensions = _normalize_extensions(config.excluded_extensions)
     config.excluded_file_paths = _require_string_list(config.excluded_file_paths, "excluded_file_paths", limit=400)
+    config.calibration_platt = _require_platt(config.calibration_platt)
+    config.calibration_model = str(config.calibration_model or "")[:200]
     config.thresholds.confident = _require_unit_float(config.thresholds.confident, "thresholds.confident")
     config.thresholds.likely = _require_unit_float(config.thresholds.likely, "thresholds.likely")
     config.thresholds.relaxed_child = _require_unit_float(config.thresholds.relaxed_child, "thresholds.relaxed_child")

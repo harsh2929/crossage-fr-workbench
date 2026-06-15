@@ -1320,19 +1320,40 @@ const AGE_GAP_CONFIDENCE_LABEL: Record<string, string> = {
 
 const AGE_GAP_CAPTION =
   "NIST IFPC 2025: wide age-gap recognition is unreliable. Treat this as an investigative lead, not an identification — confirm by human review.";
+// §5.4 governance: when a capture date came from the file's modification time (no
+// EXIF) — or the provenance is unknown for a pre-upgrade candidate — the age gap
+// may be the scan date, not the event date, so it is meaningless. We must NOT show
+// the NIST reliability band for it; we show an honest "estimated/unverified" note.
+const AGE_GAP_ESTIMATED_CAPTION =
+  "Capture date is estimated from the file date (no original EXIF date), so this age gap is unverified and may be inaccurate. Do not treat it as a reliability signal.";
 
 function ageGapSummary(
   candidate: ReviewCandidate,
-): { years: number; confidence: string; label: string; caption: string } | null {
+): { years: number; confidence: string; label: string; caption: string; estimated: boolean } | null {
   const years = candidate.ageGapYears;
   const confidence = candidate.ageGapConfidence;
   if (years == null || !confidence) return null;
   const yearsText = years < 1 ? "under 1 yr" : `${Math.round(years)} yr`;
+  // The gap is trustworthy only when BOTH dates are real EXIF event dates.
+  const estimated =
+    confidence === "estimated" ||
+    candidate.captureDateProvenance !== "exif" ||
+    candidate.referenceCaptureDateProvenance !== "exif";
+  if (estimated) {
+    return {
+      years,
+      confidence: "estimated",
+      label: `Capture dates estimated · age gap ~${yearsText} (unverified)`,
+      caption: AGE_GAP_ESTIMATED_CAPTION,
+      estimated: true,
+    };
+  }
   return {
     years,
     confidence,
     label: `Cross-age gap ~${yearsText} · ${AGE_GAP_CONFIDENCE_LABEL[confidence] ?? confidence}`,
     caption: AGE_GAP_CAPTION,
+    estimated: false,
   };
 }
 
@@ -9216,7 +9237,7 @@ function CandidateExplanation({ candidate, state }: { candidate: ReviewCandidate
       <p className={candidate.quality < thresholds.qualityMin || candidate.score < thresholds.confident ? "evidence-warning active" : "evidence-warning"}>
         Vintrace suggests possible matches only. Treat this as a lead, not an automatic identification.
       </p>
-      {ageGap && (ageGap.confidence === "low" || ageGap.confidence === "very-low") && (
+      {ageGap && (ageGap.estimated || ageGap.confidence === "low" || ageGap.confidence === "very-low") && (
         <p className="evidence-warning active" role="note">
           {ageGap.caption}
         </p>

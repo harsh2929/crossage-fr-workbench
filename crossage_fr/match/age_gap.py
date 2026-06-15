@@ -58,20 +58,36 @@ def confidence_for_gap(years: float) -> str:
     return _WIDE_GAP_BAND
 
 
+ESTIMATED_BAND = "estimated"
+
+
 def compute_age_gap(
     candidate_date: str | None,
     reference_date: str | None,
+    *,
+    candidate_provenance: str = "exif",
+    reference_provenance: str = "exif",
 ) -> tuple[float | None, str | None, str | None]:
     """Compute (age_gap_years, confidence_band, review_flag).
 
     Returns (None, None, None) when either date is missing/unparseable — the feature is
     purely additive and must never block a candidate when dates are unknown.
+
+    §5.4 governance: the NIST confidence band and the cross-age review flag are only
+    trustworthy when BOTH dates are real EXIF event dates. If either date is the
+    mtime fallback (the scan date for a digitized historical photo) the numeric gap
+    may be meaningless, so we return the gap as informational with confidence
+    "estimated" and NO review flag — the reviewer is told the gap is unverified
+    rather than shown a false NIST reliability band.
     """
     cand = _parse_date(candidate_date)
     ref = _parse_date(reference_date)
     if cand is None or ref is None:
         return (None, None, None)
     years = round(abs((cand - ref).days) / 365.25, 2)
+    verified = candidate_provenance == "exif" and reference_provenance == "exif"
+    if not verified:
+        return (years, ESTIMATED_BAND, None)
     confidence = confidence_for_gap(years)
     flag = CROSS_AGE_GAP_FLAG if years >= FLAG_THRESHOLD_YEARS else None
     return (years, confidence, flag)

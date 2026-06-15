@@ -2576,6 +2576,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "referenceCaptureDate": candidate.reference_capture_date,
                 "ageGapYears": candidate.age_gap_years,
                 "ageGapConfidence": candidate.age_gap_confidence,
+                "captureDateProvenance": candidate.capture_date_provenance,
+                "referenceCaptureDateProvenance": candidate.reference_capture_date_provenance,
                 "riskFlags": normalize_risk_flags(candidate.risk_flags, candidate.note),
                 "note": candidate.note,
                 "modelName": candidate.model_name,
@@ -3173,6 +3175,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "referenceCaptureDate": candidate.reference_capture_date,
             "ageGapYears": candidate.age_gap_years,
             "ageGapConfidence": candidate.age_gap_confidence,
+            "captureDateProvenance": candidate.capture_date_provenance,
+            "referenceCaptureDateProvenance": candidate.reference_capture_date_provenance,
         }
 
     def _candidate_risk_flags(self, candidate: Any) -> list[str]:
@@ -3373,6 +3377,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     "referenceCaptureDate": candidate.reference_capture_date,
                     "ageGapYears": candidate.age_gap_years,
                     "ageGapConfidence": candidate.age_gap_confidence,
+                    "captureDateProvenance": candidate.capture_date_provenance,
+                    "referenceCaptureDateProvenance": candidate.reference_capture_date_provenance,
                 }
                 for candidate in top_candidates
             ],

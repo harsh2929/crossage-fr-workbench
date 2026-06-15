@@ -756,8 +756,12 @@ class NoEmbeddingEngine(StaticUnmatchedEngine):
         return []
 
 
-def assert_unmatched_clustering_flushes_in_batches() -> None:
-    root = Path(tempfile.mkdtemp(prefix="crossage-edge-cluster-batch-"))
+def assert_unmatched_clustering_is_global_not_fragmented() -> None:
+    # Phase 2.4: four IDENTICAL unmatched embeddings must form ONE cluster. The old
+    # per-batch flush split identical faces across batch boundaries (the fragmentation
+    # bug); clustering now runs once globally at the terminal flush, so even a tiny
+    # batch size can no longer break one person into multiple "Unmatched cluster N".
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-cluster-global-"))
     scan = root / "scan"
     for index in range(4):
         make_face(scan / f"unknown-{index}.jpg", shirt=(60 + index * 38, 80 + index * 22, 120 + index * 11))
@@ -775,7 +779,8 @@ def assert_unmatched_clustering_flushes_in_batches() -> None:
     assert metrics["unmatched"] == 4
     assert metrics["clustered"] == 4
     assert project.scan_history[0]["metrics"]["clustered"] == 4
-    assert {candidate.person_name for candidate in project.candidates.values()} == {"Unmatched cluster 1", "Unmatched cluster 2"}
+    # One global cluster, not two batch-fragmented ones.
+    assert {candidate.person_name for candidate in project.candidates.values()} == {"Unmatched cluster 1"}
 
 
 def assert_embedding_cache_reuses_face_work() -> None:
@@ -1797,30 +1802,33 @@ def assert_operational_use_case_commands() -> None:
         },
     )
     assert imported["value"]["imported"] == 1
-    api.handle(
-        "add_calibration_label",
-        {
-            "row": {
-                "sourcePath": str(scan / "candidate.jpg"),
-                "expectedPerson": "Person Prime",
-                "actualPerson": "Person Prime",
-                "matchScore": 0.9,
-                "isMatch": True,
-            }
-        },
-    )
-    api.handle(
-        "add_calibration_label",
-        {
-            "row": {
-                "sourcePath": str(scan / "notes.txt"),
-                "expectedPerson": "Person Prime",
-                "actualPerson": "Other",
-                "matchScore": 0.12,
-                "isMatch": False,
-            }
-        },
-    )
+    # Probabilistic calibration (Phase 1.1) needs enough labels with both classes,
+    # so seed a small but sufficient accept/reject set (10 positives + 10 negatives).
+    for i in range(10):
+        api.handle(
+            "add_calibration_label",
+            {
+                "row": {
+                    "sourcePath": str(scan / f"candidate{i}.jpg"),
+                    "expectedPerson": "Person Prime",
+                    "actualPerson": "Person Prime",
+                    "matchScore": 0.60 + 0.03 * i,
+                    "isMatch": True,
+                }
+            },
+        )
+        api.handle(
+            "add_calibration_label",
+            {
+                "row": {
+                    "sourcePath": str(scan / f"impostor{i}.jpg"),
+                    "expectedPerson": "Person Prime",
+                    "actualPerson": "Other",
+                    "matchScore": 0.10 + 0.01 * i,
+                    "isMatch": False,
+                }
+            },
+        )
     calibrated = api.handle("apply_calibration", {})
     assert calibrated["state"]["calibration"]["positivePairs"] >= 1
     assert calibrated["state"]["config"]["thresholds"]["likely"] > 0.12
@@ -2806,18 +2814,27 @@ def assert_candidate_carries_capture_dates() -> None:
     print("  candidate capture dates ok")
 
 
-def assert_candidate_age_gap_is_surfaced() -> None:
-    import datetime as _dt
+def _write_exif_date(path: Path, date_str: str) -> None:
+    # §5.4: a genuinely old photo carries a real EXIF capture date — NOT an old
+    # mtime (a digitized historical photo's mtime is the *scan* date). Write the
+    # EXIF DateTime tag (306) so capture_date provenance reads as "exif".
+    image = Image.open(path)
+    exif = image.getexif()
+    exif[306] = date_str
+    image.save(path, exif=exif, quality=95)
 
+
+def assert_candidate_age_gap_is_surfaced() -> None:
     root = Path(tempfile.mkdtemp(prefix="crossage-age-gap-"))
     workspace = root / "workspace"
     refs = root / "refs"
     scan = root / "scan"
     make_face(refs / "person_a.jpg")
     make_face(scan / "candidate_a.jpg", shirt=(92, 116, 88))
-    # Age the reference photo ~12 years so a real wide cross-age gap exists.
-    old = _dt.datetime(2014, 1, 1).timestamp()
-    os.utime(refs / "person_a.jpg", (old, old))
+    # A trustworthy wide cross-age gap requires REAL EXIF event dates on both the
+    # reference (old) and the candidate (recent) — the reference ~12 years before.
+    _write_exif_date(refs / "person_a.jpg", "2014:01:01 00:00:00")
+    _write_exif_date(scan / "candidate_a.jpg", "2026:01:01 00:00:00")
     api = make_api(workspace)
     api.handle("set_consent", {"value": True})
     assert api.handle("enroll", {"personName": "Person A", "ageBucket": "adult", "folder": str(refs)})["added"] >= 1
@@ -2827,6 +2844,9 @@ def assert_candidate_age_gap_is_surfaced() -> None:
     cand = matched[0]
     assert cand.get("ageGapYears") is not None, f"missing ageGapYears: {cand}"
     assert cand["ageGapYears"] >= 6, f"expected a wide gap, got {cand['ageGapYears']}"
+    # §5.4 governance: both dates are EXIF-verified, so the real NIST band shows.
+    assert cand.get("captureDateProvenance") == "exif", f"candidate provenance not exif: {cand.get('captureDateProvenance')}"
+    assert cand.get("referenceCaptureDateProvenance") == "exif", f"reference provenance not exif: {cand.get('referenceCaptureDateProvenance')}"
     assert cand.get("ageGapConfidence") == "very-low", f"expected very-low: {cand.get('ageGapConfidence')}"
     # The cross-age-gap review flag is carried on the candidate (surfaced in the detailed view).
     proj_cand = api.project.candidates[cand["candidateId"]]
@@ -2839,6 +2859,35 @@ def assert_candidate_age_gap_is_surfaced() -> None:
     assert match[0].get("ageGapConfidence") == "very-low", "detailed view should expose age-gap confidence"
     shutil.rmtree(root, ignore_errors=True)
     print("  candidate age-gap surfacing ok")
+
+
+def assert_mtime_age_gap_is_estimated_not_nist() -> None:
+    # §5.4 governance: when the capture date is the mtime fallback (no EXIF), the
+    # age gap must be labeled "estimated" with NO cross-age-gap NIST flag — even
+    # for a numerically wide gap — so the reviewer is never shown a false
+    # reliability band derived from a scan date.
+    from datetime import datetime
+
+    root = Path(tempfile.mkdtemp(prefix="crossage-age-gap-mtime-"))
+    refs = root / "refs"
+    scan = root / "scan"
+    make_face(refs / "person_b.jpg")  # no EXIF -> provenance mtime
+    make_face(scan / "candidate_b.jpg", shirt=(92, 116, 88))
+    old = datetime(2014, 1, 1).timestamp()
+    os.utime(refs / "person_b.jpg", (old, old))  # old mtime, but still NOT an event date
+    api = make_api(root / "workspace")
+    api.handle("set_consent", {"value": True})
+    api.handle("enroll", {"personName": "Person B", "ageBucket": "adult", "folder": str(refs)})
+    scanned = api.handle("scan", {"folder": str(scan), "source": "age-gap-mtime"})
+    matched = [c for c in scanned["state"]["candidates"] if c.get("bestRefId")]
+    assert matched, "expected a matched candidate"
+    cand = matched[0]
+    assert cand.get("referenceCaptureDateProvenance") == "mtime"
+    assert cand.get("ageGapConfidence") == "estimated", f"mtime gap must be estimated, got {cand.get('ageGapConfidence')}"
+    proj_cand = api.project.candidates[cand["candidateId"]]
+    assert "cross-age-gap" not in proj_cand.risk_flags, "an mtime-derived gap must NOT raise the NIST cross-age flag"
+    shutil.rmtree(root, ignore_errors=True)
+    print("  mtime age-gap estimated (no false NIST band) ok")
 
 
 def assert_safe_mode_zero_admittance() -> None:
@@ -3060,8 +3109,10 @@ def assert_examination_report() -> None:
     data = json.loads(json_path.read_text(encoding="utf-8"))
     assert data["auditChain"]["verified"] is True, "audit chain should verify"
     assert data["candidates"][0]["status"] == "accepted"
-    # The cross-age gap evidence is carried into the report.
-    assert data["candidates"][0]["ageGapConfidence"] in {"very-low", "low", "moderate", "high"}
+    # The cross-age gap evidence is carried into the report. §5.4 governance:
+    # "estimated" is a valid band when a capture date is mtime-derived (no EXIF) —
+    # the report must show that honestly rather than a false NIST reliability band.
+    assert data["candidates"][0]["ageGapConfidence"] in {"very-low", "low", "moderate", "high", "estimated"}
     shutil.rmtree(root, ignore_errors=True)
     print("  examination report ok")
 
@@ -3078,7 +3129,7 @@ def main() -> None:
     assert_static_app_contracts()
     assert_model_downloader_integrity_and_safe_extract()
     assert_corrupt_installed_models_fail_integrity()
-    assert_unmatched_clustering_flushes_in_batches()
+    assert_unmatched_clustering_is_global_not_fragmented()
     assert_embedding_cache_reuses_face_work()
     assert_model_spaces_are_isolated_for_matching()
     assert_api_scan_requires_backfill_for_mixed_model_spaces()
@@ -3121,6 +3172,7 @@ def main() -> None:
     assert_audit_chain_is_tamper_evident()
     assert_candidate_carries_capture_dates()
     assert_candidate_age_gap_is_surfaced()
+    assert_mtime_age_gap_is_estimated_not_nist()
     assert_safe_mode_zero_admittance()
     assert_per_subject_consent()
     assert_jurisdiction_presets()

@@ -325,6 +325,8 @@ export interface ReviewCandidate {
   referenceCaptureDate?: string | null;
   ageGapYears?: number | null;
   ageGapConfidence?: string | null;
+  captureDateProvenance?: string | null;
+  referenceCaptureDateProvenance?: string | null;
 }
 
 export interface ScanMetrics {
