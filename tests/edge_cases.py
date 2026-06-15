@@ -2806,6 +2806,41 @@ def assert_candidate_carries_capture_dates() -> None:
     print("  candidate capture dates ok")
 
 
+def assert_candidate_age_gap_is_surfaced() -> None:
+    import datetime as _dt
+
+    root = Path(tempfile.mkdtemp(prefix="crossage-age-gap-"))
+    workspace = root / "workspace"
+    refs = root / "refs"
+    scan = root / "scan"
+    make_face(refs / "person_a.jpg")
+    make_face(scan / "candidate_a.jpg", shirt=(92, 116, 88))
+    # Age the reference photo ~12 years so a real wide cross-age gap exists.
+    old = _dt.datetime(2014, 1, 1).timestamp()
+    os.utime(refs / "person_a.jpg", (old, old))
+    api = make_api(workspace)
+    api.handle("set_consent", {"value": True})
+    assert api.handle("enroll", {"personName": "Person A", "ageBucket": "adult", "folder": str(refs)})["added"] >= 1
+    scanned = api.handle("scan", {"folder": str(scan), "source": "age-gap-test"})
+    matched = [c for c in scanned["state"]["candidates"] if c.get("bestRefId")]
+    assert matched, "expected a matched candidate"
+    cand = matched[0]
+    assert cand.get("ageGapYears") is not None, f"missing ageGapYears: {cand}"
+    assert cand["ageGapYears"] >= 6, f"expected a wide gap, got {cand['ageGapYears']}"
+    assert cand.get("ageGapConfidence") == "very-low", f"expected very-low: {cand.get('ageGapConfidence')}"
+    # The cross-age-gap review flag is carried on the candidate (surfaced in the detailed view).
+    proj_cand = api.project.candidates[cand["candidateId"]]
+    assert "cross-age-gap" in proj_cand.risk_flags, f"missing cross-age-gap flag: {proj_cand.risk_flags}"
+    detailed = api.handle("query_candidates", {"status": "pending", "limit": 50})
+    detailed_rows = detailed.get("items", [])
+    match = [c for c in detailed_rows if c.get("candidateId") == cand["candidateId"]]
+    assert match, "candidate should appear in query_candidates"
+    assert "cross-age-gap" in (match[0].get("riskFlags") or []), "detailed view should expose the flag"
+    assert match[0].get("ageGapConfidence") == "very-low", "detailed view should expose age-gap confidence"
+    shutil.rmtree(root, ignore_errors=True)
+    print("  candidate age-gap surfacing ok")
+
+
 def main() -> None:
     assert_corrupt_workspace_recovery()
     assert_corrupt_sqlite_startup_recovery()
@@ -2860,6 +2895,7 @@ def main() -> None:
     assert_support_bundle_redaction_is_strict()
     assert_audit_chain_is_tamper_evident()
     assert_candidate_carries_capture_dates()
+    assert_candidate_age_gap_is_surfaced()
     print("edge cases ok")
 
 

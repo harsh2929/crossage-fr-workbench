@@ -1304,7 +1304,33 @@ function candidateRiskLabels(candidate: ReviewCandidate) {
   if (flags.has("single-reference-close-runner-up") || flags.has("single-reference-match")) labels.push("One saved photo");
   if (flags.has("single-reference-hard-pose")) labels.push("Hard angle");
   if (flags.has("pose-reranked")) labels.push("Pose check");
+  if (flags.has("cross-age-gap")) labels.push("Cross-age gap");
   return [...new Set(labels)];
+}
+
+const AGE_GAP_CONFIDENCE_LABEL: Record<string, string> = {
+  high: "High confidence",
+  moderate: "Moderate confidence",
+  low: "Low confidence",
+  "very-low": "Very low confidence",
+};
+
+const AGE_GAP_CAPTION =
+  "NIST IFPC 2025: wide age-gap recognition is unreliable. Treat this as an investigative lead, not an identification — confirm by human review.";
+
+function ageGapSummary(
+  candidate: ReviewCandidate,
+): { years: number; confidence: string; label: string; caption: string } | null {
+  const years = candidate.ageGapYears;
+  const confidence = candidate.ageGapConfidence;
+  if (years == null || !confidence) return null;
+  const yearsText = years < 1 ? "under 1 yr" : `${Math.round(years)} yr`;
+  return {
+    years,
+    confidence,
+    label: `Cross-age gap ~${yearsText} · ${AGE_GAP_CONFIDENCE_LABEL[confidence] ?? confidence}`,
+    caption: AGE_GAP_CAPTION,
+  };
 }
 
 function modelFamilyName(value: string | null | undefined) {
@@ -9067,6 +9093,7 @@ function CandidateExplanation({ candidate, state }: { candidate: ReviewCandidate
     "--likely-position": `${Math.round(clamp(thresholds.likely) * 100)}%`,
     "--child-position": `${Math.round(clamp(thresholds.relaxedChild) * 100)}%`
   } as CSSProperties;
+  const ageGap = ageGapSummary(candidate);
   const rows = [
     { label: "Why shown", value: candidate.band === "clustered review" ? "Similar photos were grouped together" : `${scoreTarget} match strength` },
     { label: "Photo quality", value: `${scoreLabel(candidate.quality)} ${qualityTarget}` },
@@ -9075,6 +9102,7 @@ function CandidateExplanation({ candidate, state }: { candidate: ReviewCandidate
     { label: "Saved photo", value: bestReference ? basename(bestReference.sourcePath) : candidate.band === "clustered review" ? "Similar group only" : "Unavailable" },
     { label: "Saved photo strength", value: `${referenceStrength.score}/100 ${referenceStrength.status}` },
     { label: "Review flags", value: riskLabels.length ? riskLabels.join(", ") : "None" },
+    ...(ageGap ? [{ label: "Cross-age gap", value: ageGap.label }] : []),
     { label: "Search engine", value: engineLabel(candidate.modelName) },
     { label: "Decision", value: state.config.reviewOnly ? "You decide" : "Review recommended" }
   ];
@@ -9106,6 +9134,11 @@ function CandidateExplanation({ candidate, state }: { candidate: ReviewCandidate
       <p className={candidate.quality < thresholds.qualityMin || candidate.score < thresholds.confident ? "evidence-warning active" : "evidence-warning"}>
         Vintrace suggests possible matches only. Treat this as a lead, not an automatic identification.
       </p>
+      {ageGap && (ageGap.confidence === "low" || ageGap.confidence === "very-low") && (
+        <p className="evidence-warning active" role="note">
+          {ageGap.caption}
+        </p>
+      )}
     </div>
   );
 }

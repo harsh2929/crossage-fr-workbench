@@ -35,6 +35,7 @@ from crossage_fr.match import (
     valid_candidate,
     valid_reference,
 )
+from crossage_fr.match.age_gap import compute_age_gap
 from crossage_fr.models import EmbeddingResult, ReferenceFace, ReviewCandidate, new_id, normalize_risk_flags
 from crossage_fr.storage import safe_is_mount, safe_resolve
 from crossage_fr.store import VectorStore
@@ -1216,6 +1217,14 @@ class ProjectState:
                 if rescue_used:
                     candidate_note = self._append_candidate_note(candidate_note, "Recovered by the side-face detector; review before accepting.")
                 candidate_risk_flags = normalize_risk_flags(candidate_risk_flags, candidate_note)
+                reference_capture_date = self._reference_capture_date(decision.best_ref_id)
+                age_gap_years, age_gap_confidence, age_gap_flag = compute_age_gap(
+                    embedding_metadata.get("capture_date"), reference_capture_date
+                )
+                if age_gap_flag:
+                    candidate_risk_flags = normalize_risk_flags(
+                        [*candidate_risk_flags, age_gap_flag], candidate_note
+                    )
                 candidate = ReviewCandidate(
                     candidate_id=new_id("cand"),
                     source_path=str(image_path),
@@ -1228,7 +1237,9 @@ class ProjectState:
                     model_name=embedding.model_name,
                     note=candidate_note,
                     risk_flags=candidate_risk_flags,
-                    reference_capture_date=self._reference_capture_date(decision.best_ref_id),
+                    reference_capture_date=reference_capture_date,
+                    age_gap_years=age_gap_years,
+                    age_gap_confidence=age_gap_confidence,
                     **embedding_metadata,
                 )
                 self.candidates[candidate.candidate_id] = candidate
