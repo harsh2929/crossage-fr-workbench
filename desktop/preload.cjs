@@ -25,6 +25,8 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "duplicate_people",
   "apply_review_rules",
   "query_candidates",
+  "list_photo_folders",
+  "list_photo_folder_items",
   "clear_queue",
   "purge_candidates",
   "purge_duplicate_candidates",

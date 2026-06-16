@@ -353,6 +353,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "duplicate_people": "_cmd_duplicate_people",
         "apply_review_rules": "_cmd_apply_review_rules",
         "query_candidates": "_cmd_query_candidates",
+        "list_photo_folders": "_cmd_list_photo_folders",
+        "list_photo_folder_items": "_cmd_list_photo_folder_items",
         "clear_queue": "_cmd_clear_queue",
         "purge_candidates": "_cmd_purge_candidates",
         "purge_duplicate_candidates": "_cmd_purge_duplicate_candidates",
@@ -694,6 +696,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def _cmd_query_candidates(self, params, progress=None):
         return self.query_candidates(params)
+
+    def _cmd_list_photo_folders(self, params, progress=None):
+        return self.list_photo_folders(params)
+
+    def _cmd_list_photo_folder_items(self, params, progress=None):
+        return self.list_photo_folder_items(params)
 
     def _cmd_clear_queue(self, params, progress=None):
         self.project.clear_candidates()
@@ -3330,6 +3338,168 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def _candidate_risk_flags(self, candidate: Any) -> list[str]:
         return normalize_risk_flags(getattr(candidate, "risk_flags", []), getattr(candidate, "note", ""))
+
+    # --- Photos tab: browse photos as folders -------------------------------
+    # "All Photos" = every scanned media file (scan_files manifest). Each person
+    # folder = that person's accepted-or-high-confidence matches. "Unknown
+    # Person N" folders = the unmatched clusters already produced at scan time.
+    # All read-only; previews are generated lazily under a per-call budget,
+    # exactly like query_candidates.
+
+    def _photo_person_match(self, candidate: Any) -> bool:
+        """A photo belongs in a named person's folder when the match is accepted
+        OR high-confidence (score >= the confident threshold), matching the
+        query_candidates `high` lane. Unmatched clusters never qualify here."""
+        if candidate.person_name.startswith("Unmatched cluster"):
+            return False
+        if candidate.status == "accepted":
+            return True
+        return float(candidate.score) >= float(self.project.config.thresholds.confident)
+
+    def _photo_item_row(
+        self,
+        *,
+        source_path: str,
+        media_kind: str,
+        preview_create: bool,
+        candidate: Any | None = None,
+    ) -> dict[str, Any]:
+        preview_path = self.project.preview_path_for(source_path, create=False)
+        if not preview_path and preview_create:
+            preview_path = self.project.preview_path_for(source_path, create=True)
+        return {
+            "id": candidate.candidate_id if candidate is not None else source_path,
+            "sourcePath": source_path,
+            "previewPath": preview_path,
+            "personName": candidate.person_name if candidate is not None else None,
+            "mediaKind": media_kind,
+            "captureDate": candidate.capture_date if candidate is not None else None,
+        }
+
+    def list_photo_folder_items(self, params: dict[str, Any]) -> dict[str, Any]:
+        folder_id = str(params.get("folderId", "")).strip()
+        offset = max(0, int(params.get("offset", 0) or 0))
+        limit = max(1, min(500, int(params.get("limit", 100) or 100)))
+        preview_budget = max(0, min(64, int(params.get("previewBudget", 0) or 0)))
+
+        if folder_id == "all":
+            from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS
+
+            total = int(self.project.db.count_scan_media())
+            rows = self.project.db.list_scan_media(offset=offset, limit=limit)
+            items: list[dict[str, Any]] = []
+            remaining = preview_budget
+            for row in rows:
+                src = row["path"]
+                kind = "video" if Path(src).suffix.lower() in VIDEO_EXTENSIONS else "image"
+                before = self.project.preview_path_for(src, create=False)
+                item = self._photo_item_row(
+                    source_path=src, media_kind=kind, preview_create=remaining > 0
+                )
+                if remaining > 0 and not before and item.get("previewPath"):
+                    remaining -= 1
+                items.append(item)
+            return {
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+                "returned": len(items),
+                "items": items,
+            }
+
+        if folder_id.startswith("person:"):
+            name = folder_id[len("person:"):]
+            match = lambda c: c.person_name == name and self._photo_person_match(c)  # noqa: E731
+        elif folder_id.startswith("unknown:"):
+            name = folder_id[len("unknown:"):]
+            match = lambda c: c.person_name == name and c.person_name.startswith("Unmatched cluster")  # noqa: E731
+        else:
+            raise ValueError("Unknown photo folder id.")
+
+        seen: set[str] = set()
+        matched: list[Any] = []
+        for candidate in self.project.candidates.values():
+            if not match(candidate):
+                continue
+            if candidate.source_path in seen:
+                continue
+            seen.add(candidate.source_path)
+            matched.append(candidate)
+        matched.sort(
+            key=lambda c: (c.capture_date or "", c.created_at, c.candidate_id), reverse=True
+        )
+        total = len(matched)
+        page = matched[offset:offset + limit]
+        items = []
+        remaining = preview_budget
+        for candidate in page:
+            before = self.project.preview_path_for(candidate.source_path, create=False)
+            item = self._photo_item_row(
+                source_path=candidate.source_path,
+                media_kind=candidate.media_kind or "image",
+                preview_create=remaining > 0,
+                candidate=candidate,
+            )
+            if remaining > 0 and not before and item.get("previewPath"):
+                remaining -= 1
+            items.append(item)
+        return {
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "returned": len(page),
+            "items": items,
+        }
+
+    def list_photo_folders(self, params: dict[str, Any]) -> dict[str, Any]:
+        # Tally distinct source photos per person / unknown cluster (one tile per
+        # photo even when a photo holds several faces).
+        people: dict[str, set[str]] = {}
+        unknown: dict[str, set[str]] = {}
+        people_cover: dict[str, str] = {}
+        unknown_cover: dict[str, str] = {}
+        for candidate in self.project.candidates.values():
+            name = candidate.person_name
+            if name.startswith("Unmatched cluster"):
+                unknown.setdefault(name, set()).add(candidate.source_path)
+                unknown_cover.setdefault(name, candidate.source_path)
+            elif self._photo_person_match(candidate):
+                people.setdefault(name, set()).add(candidate.source_path)
+                people_cover.setdefault(name, candidate.source_path)
+
+        def cover(path: str | None) -> str | None:
+            return self.project.preview_path_for(path, create=False) if path else None
+
+        folders: list[dict[str, Any]] = [
+            {
+                "id": "all",
+                "kind": "all",
+                "name": "All Photos",
+                "count": int(self.project.db.count_scan_media()),
+                "coverPreviewPath": None,
+            }
+        ]
+        for name, paths in sorted(people.items(), key=lambda kv: (-len(kv[1]), kv[0].lower())):
+            folders.append(
+                {
+                    "id": f"person:{name}",
+                    "kind": "person",
+                    "name": name,
+                    "count": len(paths),
+                    "coverPreviewPath": cover(people_cover.get(name)),
+                }
+            )
+        for name, paths in sorted(unknown.items(), key=lambda kv: (-len(kv[1]), kv[0].lower())):
+            folders.append(
+                {
+                    "id": f"unknown:{name}",
+                    "kind": "unknown",
+                    "name": name,
+                    "count": len(paths),
+                    "coverPreviewPath": cover(unknown_cover.get(name)),
+                }
+            )
+        return {"folders": folders}
 
     def state(self, preview_create_budget: int = 8, candidate_limit: int = 500) -> dict[str, Any]:
         candidate_limit = max(250, min(10_000, int(candidate_limit)))

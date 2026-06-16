@@ -394,6 +394,8 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "duplicate_people",
   "apply_review_rules",
   "query_candidates",
+  "list_photo_folders",
+  "list_photo_folder_items",
   "clear_queue",
   "purge_candidates",
   "purge_duplicate_candidates",
@@ -1827,6 +1829,15 @@ function decorateState(value) {
     apply(value);
   } else if (Array.isArray(value.items)) {
     value.items = value.items.map(decorateCandidate);
+  } else if (Array.isArray(value.folders)) {
+    // Photos tab rail: grant + decorate each folder's cover thumbnail so it
+    // resolves over vintrace-media:// like any other preview.
+    value.folders = value.folders.map((folder) => {
+      const next = { ...folder };
+      grantQueryMediaPath(next.coverPreviewPath);
+      decoratePath(next, "coverPreviewPath", "coverPreviewUrl");
+      return next;
+    });
   }
   return value;
 }

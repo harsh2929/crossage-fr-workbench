@@ -854,6 +854,47 @@ class WorkspaceDb:
             ),
         )
 
+    # The "All Photos" folder is every scanned media file. The scanner only ever
+    # records media files into scan_files (the walk filters by IMAGE|VIDEO
+    # extensions), so the only rows to drop are hard read errors and files in
+    # deliberately-excluded subfolders. A path re-scanned across runs collapses
+    # to one row (newest processed_at wins).
+    _SCAN_MEDIA_WHERE = "status != 'error' AND phase != 'excluded'"
+
+    def count_scan_media(self, conn: sqlite3.Connection | None = None) -> int:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.count_scan_media(local_conn)
+        row = conn.execute(
+            f"SELECT COUNT(DISTINCT path) AS n FROM scan_files WHERE {self._SCAN_MEDIA_WHERE}"
+        ).fetchone()
+        return int(row["n"] if row else 0)
+
+    def list_scan_media(
+        self,
+        *,
+        offset: int = 0,
+        limit: int = 100,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.list_scan_media(offset=offset, limit=limit, conn=local_conn)
+        # One row per distinct path; the row carrying MAX(processed_at) wins (SQLite
+        # returns the bare columns from the MAX() row), newest-scanned first.
+        rows = conn.execute(
+            f"""
+            SELECT path, MAX(processed_at) AS processed_at, status, phase, candidate_id
+            FROM scan_files
+            WHERE {self._SCAN_MEDIA_WHERE}
+            GROUP BY path
+            ORDER BY processed_at DESC, path ASC
+            LIMIT ? OFFSET ?
+            """,
+            (max(1, int(limit)), max(0, int(offset))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def update_scan_run(
         self,
         run_id: str,
