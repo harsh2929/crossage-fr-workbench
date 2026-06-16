@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 const TRUSTED_BACKEND_COMMANDS = new Set([
   "get_state",
@@ -8,6 +8,7 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "set_workspace",
   "set_consent",
   "enroll",
+  "enroll_paths",
   "enroll_age_groups",
   "scan",
   "scan_paths",
@@ -167,6 +168,22 @@ const safeEnv = typeof process !== "undefined" && process.env ? process.env : {}
 contextBridge.exposeInMainWorld("crossAge", Object.freeze({
   invoke: invokeBackend,
   chooseFolder: () => safeInvoke("dialog:choose-folder"),
+  // Multi-select image/video file picker for the "Add a person" flow. Returns
+  // [{ path, url }] where url is a vintrace-media:// thumbnail URL (main grants
+  // each path so the protocol can serve it).
+  chooseImages: () => safeInvoke("dialog:choose-images"),
+  // Resolve a dropped File to its absolute path. webUtils is available even in a
+  // sandboxed preload; this is the supported Electron way to read a drop path.
+  getPathForFile: (file) => {
+    try {
+      return webUtils.getPathForFile(file) || "";
+    } catch (_error) {
+      return "";
+    }
+  },
+  // Grant a batch of file/folder paths and get their thumbnail URLs back, so
+  // dropped or folder-sampled images can be previewed before enrolling.
+  prepareMedia: (paths) => safeInvoke("media:prepare-paths", { paths: Array.isArray(paths) ? paths : [] }),
   saveCameraFrame: (dataUrl) => safeInvoke("camera:save-frame", { dataUrl }),
   cancelScan: () => safeInvoke("scan:cancel"),
   cancelMediaAction: () => safeInvoke("media-action:cancel"),

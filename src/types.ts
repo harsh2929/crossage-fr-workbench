@@ -1863,9 +1863,22 @@ export type ExternalOpenPayload =
   | { type: "watch-folder"; path: string; source?: string }
   | { type: "scan-files"; paths: string[]; source?: string };
 
+/** A path the main process has granted, with a vintrace-media:// thumbnail URL. */
+export interface MediaRef {
+  path: string;
+  url: string;
+  isDir: boolean;
+}
+
 export interface CrossAgeApi {
   invoke<T = unknown>(command: string, params?: Record<string, unknown>): Promise<T>;
   chooseFolder(): Promise<string | null>;
+  /** Multi-select image picker; returns granted paths + thumbnail URLs. */
+  chooseImages(): Promise<MediaRef[]>;
+  /** Resolve a dropped File to its absolute path (Electron webUtils). */
+  getPathForFile(file: File): string;
+  /** Grant file/folder paths and get back thumbnail URLs + directory flags. */
+  prepareMedia(paths: string[]): Promise<MediaRef[]>;
   saveCameraFrame(dataUrl: string): Promise<CameraSaveResult>;
   cancelScan(): Promise<{ cancelled: boolean; path: string }>;
   cancelMediaAction(): Promise<{ cancelled: boolean; path: string }>;

@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Vintrace — Opening</title>
+<style>
+  :root {
+    --bg-top: #101622;
+    --bg-mid: #080b12;
+    --bg-bot: #03050a;
+    --text: #f6f7fb;
+    --text-72: rgba(246, 247, 251, 0.72);
+    --text-56: rgba(246, 247, 251, 0.56);
+    --text-38: rgba(246, 247, 251, 0.38);
+    --blue: #007aff;
+    --cyan: #64d2ff;
+    --violet: #bf5af2;
+    --hairline: rgba(246, 247, 251, 0.08);
+    --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    font-family: -apple-system, "SF Pro Display", "SF Pro Text", BlinkMacSystemFont, system-ui, sans-serif;
+    color: var(--text);
+    background:
+      radial-gradient(120% 80% at 50% 30%, rgba(10, 15, 24, 0) 38%, rgba(2, 4, 9, 0.55) 100%),
+      linear-gradient(180deg, var(--bg-top) 0%, var(--bg-mid) 58%, var(--bg-bot) 100%);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+
+  /* ============ STAGE ============ */
+  .stage {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    /* static hairline grid — never animated */
+    background-image:
+      linear-gradient(var(--hairline) 1px, transparent 1px),
+      linear-gradient(90deg, var(--hairline) 1px, transparent 1px);
+    background-size: 46px 46px, 46px 46px;
+    background-position: center center;
+    -webkit-mask-image: radial-gradient(circle at 50% 42%, #000 0%, #000 30%, transparent 66%);
+            mask-image: radial-gradient(circle at 50% 42%, #000 0%, #000 30%, transparent 66%);
+  }
+
+  /* world wrapper carries the vignette + holds everything; not animated */
+  .world {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+  }
+
+  /* one soft ambient layer — DRIFTS only via translate3d */
+  .ambient {
+    position: absolute;
+    top: 32%;
+    left: 50%;
+    width: 640px;
+    height: 640px;
+    margin: -320px 0 0 -320px;
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at 50% 50%, rgba(0, 122, 255, 0.16) 0%, rgba(100, 210, 255, 0.08) 34%, transparent 64%);
+    filter: blur(46px);
+    opacity: 0;
+    will-change: transform, opacity;
+    animation:
+      ambient-in 1.4s var(--ease-out) 0.1s forwards,
+      ambient-drift 13s var(--ease-soft) 1.5s infinite alternate;
+  }
+
+  /* ============ COMPOSITION ============ */
+  .composition {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 34px;
+    padding: 24px;
+    transform: translateY(8px);
+  }
+
+  /* ----- precision ring instrument ----- */
+  .instrument {
+    position: relative;
+    width: 188px;
+    height: 188px;
+    display: grid;
+    place-items: center;
+    opacity: 0;
+    transform: scale(0.92);
+    will-change: transform, opacity;
+    animation: rise 0.95s var(--ease-out) 0.18s forwards;
+  }
+
+  /* outer thin conic ring — rotates slowly */
+  .ring-outer {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    will-change: transform;
+    animation: spin 14s linear infinite;
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+            mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+    background:
+      conic-gradient(
+        from 0deg,
+        rgba(100, 210, 255, 0) 0deg,
+        rgba(100, 210, 255, 0.0) 40deg,
+        rgba(0, 122, 255, 0.9) 120deg,
+        rgba(100, 210, 255, 1) 200deg,
+        rgba(0, 122, 255, 0.35) 250deg,
+        rgba(100, 210, 255, 0) 360deg
+      );
+  }
+
+  /* tick container — static, optically aligned (does not animate) */
+  .ring-ticks {
+    position: absolute;
+    inset: 12px;
+    border-radius: 50%;
+    border: 1px solid rgba(246, 247, 251, 0.07);
+  }
+
+  /* inner fine arc — counter-rotates */
+  .ring-inner {
+    position: absolute;
+    inset: 26px;
+    border-radius: 50%;
+    will-change: transform;
+    animation: spin-rev 9s linear infinite;
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1.5px));
+            mask: radial-gradient(farthest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1.5px));
+    background:
+      conic-gradient(
+        from 200deg,
+        rgba(100, 210, 255, 0) 0deg,
+        rgba(100, 210, 255, 0) 300deg,
+        rgba(100, 210, 255, 0.85) 340deg,
+        rgba(191, 90, 242, 0.5) 360deg
+      );
+  }
+
+  /* single scanner sweep line — orbits */
+  .sweep {
+    position: absolute;
+    inset: 18px;
+    border-radius: 50%;
+    will-change: transform;
+    animation: spin 4.8s linear infinite;
+  }
+  .sweep::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 50%;
+    height: 1px;
+    transform-origin: left center;
+    background: linear-gradient(90deg, rgba(100, 210, 255, 0.55) 0%, rgba(100, 210, 255, 0) 86%);
+  }
+
+  /* faint static dial track behind everything in the instrument */
+  .dial {
+    position: absolute;
+    inset: 6px;
+    border-radius: 50%;
+    border: 1px solid rgba(246, 247, 251, 0.05);
+    box-shadow:
+      inset 0 0 0 1px rgba(0, 122, 255, 0.04),
+      inset 0 1px 0 rgba(246, 247, 251, 0.05);
+  }
+
+  /* ----- the V badge core ----- */
+  .badge {
+    position: relative;
+    width: 58px;
+    height: 58px;
+    border-radius: 8px;
+    display: grid;
+    place-items: center;
+    background:
+      linear-gradient(160deg, #0a4fb0 0%, #007aff 46%, #2f93ff 100%);
+    box-shadow:
+      0 10px 26px rgba(0, 70, 160, 0.45),
+      0 2px 5px rgba(0, 0, 0, 0.4),
+      inset 0 1px 0 rgba(255, 255, 255, 0.34),
+      inset 0 -1px 1px rgba(0, 30, 80, 0.5);
+    will-change: transform;
+    animation: breathe 4.4s var(--ease-soft) infinite;
+  }
+  .badge::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 8px;
+    background: radial-gradient(120% 80% at 50% 0%, rgba(255, 255, 255, 0.28), transparent 60%);
+    pointer-events: none;
+  }
+  .badge svg {
+    width: 34px;
+    height: 34px;
+    display: block;
+    position: relative;
+    z-index: 1;
+  }
+
+  /* ----- text card ----- */
+  .card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 4px;
+  }
+  .reveal {
+    opacity: 0;
+    transform: translateY(10px);
+    will-change: transform, opacity;
+    animation: rise 0.85s var(--ease-out) forwards;
+  }
+  .d1 { animation-delay: 0.34s; }
+  .d2 { animation-delay: 0.44s; }
+  .d3 { animation-delay: 0.54s; }
+  .d4 { animation-delay: 0.64s; }
+  .d5 { animation-delay: 0.74s; }
+
+  .name {
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    line-height: 1.1;
+  }
+  .status {
+    margin-top: 9px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-72);
+    letter-spacing: 0.01em;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .status .dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--cyan);
+    box-shadow: 0 0 8px rgba(100, 210, 255, 0.8);
+    will-change: transform, opacity;
+    animation: pulse 1.8s var(--ease-soft) infinite;
+  }
+  .sub {
+    font-size: 12px;
+    color: var(--text-56);
+    letter-spacing: 0.005em;
+  }
+
+  /* ----- progress ----- */
+  .progress-wrap {
+    width: 280px;
+    display: flex;
+    flex-direction: column;
+    gap: 13px;
+    align-items: center;
+  }
+  .track {
+    position: relative;
+    width: 100%;
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(246, 247, 251, 0.09);
+    overflow: hidden;
+    box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.35);
+  }
+  .fill {
+    position: absolute;
+    inset: 0;
+    border-radius: 999px;
+    transform-origin: left center;
+    transform: scaleX(0.18);
+    background: linear-gradient(90deg, #007aff 0%, #64d2ff 100%);
+    box-shadow: 0 0 10px rgba(100, 210, 255, 0.4);
+    /* the ONE allowed exception: progress uses transform: scaleX with slow easing */
+    transition: transform 0.9s var(--ease-out);
+    will-change: transform;
+  }
+
+  /* ----- step chips ----- */
+  .chips {
+    display: flex;
+    gap: 8px;
+  }
+  .chip {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    color: var(--text-38);
+    padding: 5px 11px;
+    border-radius: 999px;
+    border: 1px solid rgba(246, 247, 251, 0.08);
+    background: rgba(246, 247, 251, 0.025);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: color 0.5s var(--ease-soft), border-color 0.5s var(--ease-soft), background-color 0.5s var(--ease-soft);
+  }
+  .chip .tick {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: rgba(246, 247, 251, 0.22);
+    transition: background-color 0.5s var(--ease-soft), box-shadow 0.5s var(--ease-soft);
+  }
+  .chip.done {
+    color: var(--cyan);
+    border-color: rgba(100, 210, 255, 0.32);
+    background: rgba(0, 122, 255, 0.1);
+  }
+  .chip.done .tick {
+    background: var(--cyan);
+    box-shadow: 0 0 7px rgba(100, 210, 255, 0.8);
+  }
+
+  /* ============ KEYFRAMES ============ */
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes spin-rev { to { transform: rotate(-360deg); } }
+
+  @keyframes breathe {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.035); }
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 0.45; transform: scale(0.82); }
+    50% { opacity: 1; transform: scale(1); }
+  }
+
+  @keyframes rise {
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  @keyframes ambient-in {
+    to { opacity: 1; }
+  }
+  @keyframes ambient-drift {
+    0%   { transform: translate3d(-16px, -10px, 0) scale(1); }
+    100% { transform: translate3d(18px, 12px, 0) scale(1.06); }
+  }
+
+  /* ============ REDUCED MOTION ============ */
+  @media (prefers-reduced-motion: reduce) {
+    .ring-outer, .ring-inner, .sweep, .badge, .ambient {
+      animation: none !important;
+    }
+    .ambient { opacity: 1; transform: none; }
+    .instrument, .reveal {
+      opacity: 1 !important;
+      transform: none !important;
+      animation: none !important;
+    }
+    /* keep a minimal, GPU-cheap pulse so it never looks hung */
+    .status .dot {
+      animation: pulse 2.4s var(--ease-soft) infinite;
+    }
+    .fill { transition: transform 0.9s var(--ease-out); }
+  }
+</style>
+</head>
+<body>
+  <div class="stage" aria-hidden="true"></div>
+
+  <div class="world" role="status" aria-label="Vintrace is opening">
+    <div class="ambient"></div>
+
+    <div class="composition">
+      <!-- precision ring instrument -->
+      <div class="instrument">
+        <div class="dial"></div>
+        <div class="ring-outer"></div>
+        <div class="ring-ticks"></div>
+        <div class="ring-inner"></div>
+        <div class="sweep"></div>
+        <div class="badge">
+          <svg viewBox="0 0 34 34" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M6 7 L17 27 L28 7" stroke="#ffffff" stroke-width="3.4"
+                  stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+      </div>
+
+      <!-- text card -->
+      <div class="card">
+        <div class="name reveal d1">Vintrace</div>
+        <div class="status reveal d2"><span class="dot"></span><span>Opening app</span></div>
+        <div class="sub reveal d3">Loading private on-device review data.</div>
+      </div>
+
+      <!-- progress -->
+      <div class="progress-wrap reveal d4">
+        <div class="track"><div class="fill" id="fill"></div></div>
+        <div class="chips">
+          <div class="chip" id="chip-0"><span class="tick"></span>Shell</div>
+          <div class="chip" id="chip-1"><span class="tick"></span>Engine</div>
+          <div class="chip" id="chip-2"><span class="tick"></span>App folder</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Tiny vanilla driver: fake progress 18% -> 94%, lighting chips in sequence.
+    (function () {
+      var fill = document.getElementById('fill');
+      var chips = [
+        document.getElementById('chip-0'),
+        document.getElementById('chip-1'),
+        document.getElementById('chip-2')
+      ];
+      var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      // progress fractions (scaleX): start, then staged climb to ~0.94
+      var steps = [0.18, 0.42, 0.68, 0.84, 0.94];
+      var i = 0;
+
+      function setProgress(v) { fill.style.transform = 'scaleX(' + v + ')'; }
+
+      // initial
+      setProgress(steps[0]);
+
+      function advance() {
+        i++;
+        if (i < steps.length) {
+          setProgress(steps[i]);
+          // light chips as we cross thresholds
+          if (i === 1) chips[0].classList.add('done');
+          if (i === 2) chips[1].classList.add('done');
+          if (i === 4) chips[2].classList.add('done');
+          setTimeout(advance, 900 + Math.random() * 360);
+        }
+      }
+
+      // kick off after entrance settles
+      setTimeout(advance, reduce ? 500 : 900);
+    })();
+  </script>
+</body>
+</html>

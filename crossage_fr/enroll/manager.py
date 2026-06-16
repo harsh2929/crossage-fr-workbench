@@ -608,38 +608,10 @@ class ProjectState:
             excluded_dirs=excluded_dirs,
             exclusion_reason=self.scan_exclusion_reason,
         ):
-            try:
-                source_hash = sha256_file(path)
-                if source_hash in known_hashes:
-                    continue
-                image = load_image(path)
-                record = image_record_for_path(path, image=image, sha256=source_hash)
-                embeddings = engine.embed_loaded_image(image, path)
-                if not embeddings and self.config.two_pass_scan:
-                    rescue_method = getattr(engine, "embed_loaded_image_rescue", None)
-                    embeddings = rescue_method(image, path) if callable(rescue_method) else []
-                for embedding in embeddings:
-                    if embedding.quality < self.config.thresholds.quality_min:
-                        continue
-                    ref = ReferenceFace(
-                        ref_id=new_id("ref"),
-                        person_name=person_name,
-                        age_bucket=age_bucket,
-                        source_path=str(path),
-                        capture_date=record.capture_date,
-                        quality=embedding.quality,
-                        model_name=embedding.model_name,
-                        vector=embedding.vector,
-                        source_hash=record.sha256,
-                        pose_bucket=embedding.pose_bucket,
-                        capture_date_provenance=record.capture_date_provenance,
-                    )
-                    self.references[ref.ref_id] = ref
-                    self.vector_store.add(ref.ref_id, ref.vector)
-                    added += 1
-                known_hashes.add(record.sha256)
-            except (ImageLoadError, OSError, ValueError) as exc:
-                errors.append(f"{path.name}: {exc}")
+            count, error = self._enroll_one(path, person_name, age_bucket, engine, known_hashes)
+            added += count
+            if error:
+                errors.append(error)
         if added:
             self._invalidate_reference_indexes()
         self._append_audit(
@@ -648,6 +620,123 @@ class ProjectState:
                 "person_name": person_name,
                 "age_bucket": age_bucket,
                 "folder": str(folder.expanduser()),
+                "added": added,
+                "errors": len(errors),
+            }
+        )
+        self.save()
+        return added, errors
+
+    def _enroll_one(
+        self,
+        path: Path,
+        person_name: str,
+        age_bucket: str,
+        engine: EmbeddingEngine,
+        known_hashes: set[str],
+    ) -> tuple[int, str | None]:
+        """Embed one image and store any qualifying faces as references.
+
+        Shared by enroll_folder and enroll_paths. Returns (faces_added, error_or_None).
+        De-duplicates by source hash via the caller-owned ``known_hashes`` set.
+        """
+        try:
+            source_hash = sha256_file(path)
+            if source_hash in known_hashes:
+                return 0, None
+            image = load_image(path)
+            record = image_record_for_path(path, image=image, sha256=source_hash)
+            embeddings = engine.embed_loaded_image(image, path)
+            if not embeddings and self.config.two_pass_scan:
+                rescue_method = getattr(engine, "embed_loaded_image_rescue", None)
+                embeddings = rescue_method(image, path) if callable(rescue_method) else []
+            added = 0
+            for embedding in embeddings:
+                if embedding.quality < self.config.thresholds.quality_min:
+                    continue
+                ref = ReferenceFace(
+                    ref_id=new_id("ref"),
+                    person_name=person_name,
+                    age_bucket=age_bucket,
+                    source_path=str(path),
+                    capture_date=record.capture_date,
+                    quality=embedding.quality,
+                    model_name=embedding.model_name,
+                    vector=embedding.vector,
+                    source_hash=record.sha256,
+                    pose_bucket=embedding.pose_bucket,
+                    capture_date_provenance=record.capture_date_provenance,
+                )
+                self.references[ref.ref_id] = ref
+                self.vector_store.add(ref.ref_id, ref.vector)
+                added += 1
+            known_hashes.add(record.sha256)
+            return added, None
+        except (ImageLoadError, OSError, ValueError) as exc:
+            return 0, f"{path.name}: {exc}"
+
+    def _expand_enroll_paths(self, paths: Iterable[str | Path], recursive: bool = True) -> list[Path]:
+        """Turn a mixed list of file/folder paths into an ordered, de-duplicated
+        list of image paths to enroll. Explicit image files are taken as-is;
+        directories are walked (honoring the workspace exclusion rules, so junk
+        dirs like ``.git`` are skipped); non-image files are dropped.
+        """
+        seen: set[str] = set()
+        result: list[Path] = []
+
+        def add(candidate: Path) -> None:
+            key = str(safe_resolve(candidate))
+            if key in seen:
+                return
+            seen.add(key)
+            result.append(candidate)
+
+        for raw in paths:
+            path = Path(str(raw)).expanduser()
+            try:
+                is_dir = path.is_dir()
+                is_file = path.is_file()
+            except OSError:
+                continue
+            if is_dir:
+                for image in iter_image_paths(path, recursive=recursive, exclusion_reason=self.scan_exclusion_reason):
+                    add(image)
+            elif is_file and path.suffix.lower() in IMAGE_EXTENSIONS:
+                add(path)
+        return result
+
+    def enroll_paths(
+        self,
+        person_name: str,
+        age_bucket: str,
+        paths: Iterable[str | Path],
+        engine: EmbeddingEngine,
+        recursive: bool = True,
+    ) -> tuple[int, list[str]]:
+        """Enroll reference faces from a list of individual files and/or folders.
+
+        Powers the redesigned 'Add a person' flow (pick photos / drop / folder).
+        """
+        person_name = person_name.strip()
+        if not person_name:
+            raise ValueError("A person name is required for enrollment.")
+        paths = list(paths)
+        added = 0
+        errors: list[str] = []
+        known_hashes = {ref.source_hash or self._path_key(ref.source_path) for ref in self.references.values()}
+        for path in self._expand_enroll_paths(paths, recursive=recursive):
+            count, error = self._enroll_one(path, person_name, age_bucket, engine, known_hashes)
+            added += count
+            if error:
+                errors.append(error)
+        if added:
+            self._invalidate_reference_indexes()
+        self._append_audit(
+            {
+                "action": "enroll_paths",
+                "person_name": person_name,
+                "age_bucket": age_bucket,
+                "paths": len(paths),
                 "added": added,
                 "errors": len(errors),
             }

@@ -336,6 +336,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "set_workspace": "_cmd_set_workspace",
         "set_consent": "_cmd_set_consent",
         "enroll": "_cmd_enroll",
+        "enroll_paths": "_cmd_enroll_paths",
         "enroll_age_groups": "_cmd_enroll_age_groups",
         "scan": "_cmd_scan",
         "scan_paths": "_cmd_scan_paths",
@@ -529,6 +530,20 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             engine,
             recursive=recursive,
             excluded_dirs=excluded_dirs,
+        )
+        return {"added": added, "errors": errors, "state": self.state()}
+
+    def _cmd_enroll_paths(self, params, progress=None):
+        self._require_consent_for_person(str(params.get("personName", "")))
+        engine = self._engine_instance()
+        paths_param = params.get("paths", [])
+        if not isinstance(paths_param, list):
+            raise ValueError("enroll_paths expects a list of file or folder paths.")
+        added, errors = self.project.enroll_paths(
+            str(params.get("personName", "")),
+            str(params.get("ageBucket", "unknown")),
+            [str(item) for item in paths_param],
+            engine,
         )
         return {"added": added, "errors": errors, "state": self.state()}
 

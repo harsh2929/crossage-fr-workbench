@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Vintrace — hero + camera redesign (plasma scheme)</title>
+<style>
+  /* Dark-theme context + the new "plasma" design scheme applied to the two
+     primitive focal visuals: the dashboard hero orb/rings and the camera
+     standby viewfinder. Class names match src/App.tsx exactly so the CSS ports
+     straight into src/styles.css. */
+  :root {
+    --text: #f5f5f7;
+    --secondary: #a1a1a6;
+    --content-strong: rgba(34, 36, 42, 0.98);
+    --separator-soft: rgba(235, 235, 245, 0.1);
+    /* plasma palette (shared with the boot silk) */
+    --p-blue: #2a9bff;
+    --p-cyan: #7fe3ff;
+    --p-violet: #6a4dff;
+    --p-magenta: #ff8ad8;
+    --p-amber: #ffd08a;
+    --ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-inout: cubic-bezier(0.4, 0, 0.2, 1);
+    --review-progress: 64%;
+    --match-progress: 52%;
+    --protect-progress: 30%;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
+    color: var(--text);
+    background:
+      radial-gradient(circle at 18% 8%, rgba(120, 90, 255, 0.12), transparent 30%),
+      radial-gradient(circle at 80% 4%, rgba(100, 210, 255, 0.12), transparent 26%),
+      linear-gradient(180deg, #1c1d22 0%, #111216 100%), #111216;
+    -webkit-font-smoothing: antialiased;
+    padding: 28px;
+    display: grid;
+    gap: 20px;
+  }
+  .panel {
+    background: var(--content-strong);
+    border: 1px solid var(--separator-soft);
+    border-radius: 16px;
+    padding: 22px 24px;
+  }
+
+  /* ====================== DASHBOARD HERO ====================== */
+  .dashboard-hero {
+    align-items: center;
+    /* plasma-tinted ambient instead of the old pink/blue clip glows */
+    background:
+      radial-gradient(circle at 82% 38%, rgba(106, 77, 255, 0.16), transparent 36%),
+      radial-gradient(circle at 60% 4%, rgba(127, 227, 255, 0.1), transparent 30%),
+      var(--content-strong);
+    display: grid;
+    gap: 12px;
+    grid-template-columns: minmax(0, 1fr) minmax(160px, 230px) auto;
+    overflow: hidden;
+    position: relative;
+  }
+  /* a slow, soft plasma sheen drifting across the hero — replaces the harsh
+     white diagonal light-bar. Motion is transform-only. */
+  .dashboard-hero::before {
+    content: "";
+    position: absolute;
+    inset: -40%;
+    pointer-events: none;
+    z-index: 0;
+    background:
+      radial-gradient(38% 60% at 30% 40%, rgba(106, 77, 255, 0.18), transparent 60%),
+      radial-gradient(34% 56% at 64% 62%, rgba(127, 227, 255, 0.14), transparent 62%),
+      radial-gradient(30% 50% at 50% 30%, rgba(255, 138, 216, 0.1), transparent 64%);
+    filter: blur(26px);
+    opacity: 0.85;
+    will-change: transform;
+    animation: heroSheen 22s var(--ease-inout) infinite alternate;
+  }
+  @keyframes heroSheen {
+    0%   { transform: translate3d(-4%, 2%, 0) rotate(-3deg) scale(1); }
+    100% { transform: translate3d(5%, -3%, 0) rotate(3deg) scale(1.08); }
+  }
+  .dashboard-hero > * { position: relative; z-index: 1; }
+  .section-kicker {
+    color: var(--secondary);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  .dashboard-hero h1 {
+    font-size: clamp(25px, 2.5vw, 38px);
+    line-height: 1.08;
+    margin: 6px 0;
+  }
+  .dashboard-hero p { color: var(--secondary); margin: 0; max-width: 720px; }
+
+  /* ---- the living plasma orb + plasma progress arcs ---- */
+  .dashboard-visual {
+    aspect-ratio: 1;
+    border-radius: 50%;
+    display: grid;
+    min-height: 168px;
+    place-items: center;
+    position: relative;
+  }
+  /* glass dial backing + soft outer plasma glow (no more flat white disc) */
+  .dashboard-visual::before {
+    content: "";
+    position: absolute;
+    inset: 14%;
+    border-radius: inherit;
+    background:
+      radial-gradient(circle at 50% 38%, rgba(127, 227, 255, 0.1), transparent 60%),
+      radial-gradient(circle, rgba(20, 22, 34, 0.6) 0 60%, transparent 61%);
+    border: 1px solid rgba(235, 235, 245, 0.08);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.1),
+      0 18px 48px rgba(106, 77, 255, 0.22),
+      0 0 40px rgba(127, 227, 255, 0.12);
+  }
+  /* thin glowing progress arcs in the plasma palette */
+  .visual-orbit { border-radius: 50%; inset: 0; position: absolute; }
+  .visual-orbit.review {
+    background: conic-gradient(from -90deg, var(--p-cyan) var(--review-progress), rgba(235, 235, 245, 0.07) 0);
+    mask: radial-gradient(circle, transparent 59%, #000 60% 64%, transparent 65%);
+    filter: drop-shadow(0 0 6px rgba(127, 227, 255, 0.45));
+  }
+  .visual-orbit.match {
+    background: conic-gradient(from 22deg, var(--p-violet) var(--match-progress), rgba(235, 235, 245, 0.06) 0);
+    inset: 9%;
+    mask: radial-gradient(circle, transparent 58%, #000 59% 64%, transparent 65%);
+    filter: drop-shadow(0 0 6px rgba(106, 77, 255, 0.45));
+  }
+  .visual-orbit.protect {
+    background: conic-gradient(from 138deg, var(--p-magenta) var(--protect-progress), rgba(235, 235, 245, 0.05) 0);
+    inset: 18%;
+    mask: radial-gradient(circle, transparent 57%, #000 58% 65%, transparent 66%);
+    filter: drop-shadow(0 0 6px rgba(255, 138, 216, 0.4));
+  }
+  /* the living plasma core: a blurred conic swirl (silk-like) + specular */
+  .dashboard-visual i {
+    position: relative;
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    overflow: hidden;
+    box-shadow:
+      0 0 0 5px rgba(20, 22, 34, 0.55),
+      0 0 26px rgba(127, 227, 255, 0.5),
+      0 10px 26px rgba(106, 77, 255, 0.35);
+    animation: orbBreathe 4.6s var(--ease-inout) infinite;
+  }
+  .dashboard-visual i::before {
+    content: "";
+    position: absolute;
+    inset: -30%;
+    background: conic-gradient(from 0deg,
+      var(--p-blue), var(--p-cyan), var(--p-violet), var(--p-magenta), var(--p-amber), var(--p-blue));
+    filter: blur(7px) saturate(1.15);
+    will-change: transform;
+    animation: orbSpin 9s linear infinite;
+  }
+  .dashboard-visual i::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: radial-gradient(circle at 36% 28%, rgba(255, 255, 255, 0.85), transparent 42%);
+  }
+  @keyframes orbSpin { to { transform: rotate(360deg); } }
+  @keyframes orbBreathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+
+  .dashboard-actions, .readiness-strip {
+    align-items: center; display: flex; flex-wrap: wrap; gap: 8px;
+  }
+  .dashboard-actions { grid-column: auto; }
+  .readiness-strip { grid-column: 1 / -1; }
+  button.secondary {
+    align-items: center; background: rgba(58, 58, 64, 0.7);
+    border: 1px solid rgba(235, 235, 245, 0.16); border-radius: 10px; color: #f5f5f7;
+    cursor: pointer; display: inline-flex; gap: 8px; font: inherit; font-size: 14px;
+    font-weight: 500; padding: 9px 14px;
+  }
+  .readiness-pill {
+    align-items: center; border-radius: 999px; display: inline-flex; gap: 7px;
+    font-size: 12px; padding: 6px 11px;
+  }
+  .readiness-pill.ok { background: rgba(48, 209, 88, 0.14); border: 1px solid rgba(48, 209, 88, 0.3); color: #8ff0a4; }
+  .readiness-pill.warn { background: rgba(255, 159, 10, 0.14); border: 1px solid rgba(255, 159, 10, 0.32); color: #ffd08a; }
+  .readiness-pill strong { font-weight: 700; }
+  svg { display: block; }
+
+  /* ====================== CAMERA STANDBY ====================== */
+  .camera-panel { display: grid; gap: 12px; max-width: 640px; }
+  .panel-title { align-items: center; display: flex; gap: 10px; font-weight: 600; font-size: 16px; }
+  .panel-title svg { color: var(--p-cyan); }
+  .scanner-state {
+    border: 1px solid var(--separator-soft); border-radius: 999px; color: var(--secondary);
+    font-size: 12px; font-weight: 700; margin-inline-start: auto; padding: 4px 10px;
+  }
+
+  .scanner-stage {
+    aspect-ratio: 16 / 9;
+    /* plasma-tinted depth instead of pink/green clip glows */
+    background:
+      radial-gradient(circle at 50% 46%, rgba(106, 77, 255, 0.16), transparent 26%),
+      radial-gradient(circle at 50% 52%, rgba(127, 227, 255, 0.1), transparent 36%),
+      linear-gradient(180deg, #121521, #06080e);
+    border: 1px solid rgba(106, 77, 255, 0.36);
+    border-radius: 12px;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+      inset 0 -70px 110px rgba(0, 0, 0, 0.45),
+      0 18px 40px rgba(0, 0, 0, 0.22),
+      0 0 0 1px rgba(127, 227, 255, 0.04);
+    min-height: 252px;
+    overflow: hidden;
+    position: relative;
+  }
+  /* refined cyan corner brackets (glowing) */
+  .scanner-stage::before {
+    content: "";
+    position: absolute;
+    top: 50%; left: 50%;
+    width: min(40%, 260px); height: min(56%, 280px);
+    transform: translate(-50%, -50%);
+    z-index: 4;
+    pointer-events: none;
+    background:
+      linear-gradient(90deg, var(--p-cyan), transparent 22% 78%, var(--p-cyan)),
+      linear-gradient(var(--p-cyan), transparent 22% 78%, var(--p-cyan));
+    filter: drop-shadow(0 0 5px rgba(127, 227, 255, 0.6));
+    opacity: 0.9;
+    mask:
+      linear-gradient(#000 0 0) top left / 30px 2px no-repeat,
+      linear-gradient(#000 0 0) top left / 2px 30px no-repeat,
+      linear-gradient(#000 0 0) top right / 30px 2px no-repeat,
+      linear-gradient(#000 0 0) top right / 2px 30px no-repeat,
+      linear-gradient(#000 0 0) bottom left / 30px 2px no-repeat,
+      linear-gradient(#000 0 0) bottom left / 2px 30px no-repeat,
+      linear-gradient(#000 0 0) bottom right / 30px 2px no-repeat,
+      linear-gradient(#000 0 0) bottom right / 2px 30px no-repeat;
+  }
+  /* a slow scan sweep so standby feels alive (transform-only) */
+  .scanner-stage::after {
+    content: "";
+    position: absolute;
+    inset-inline: 0;
+    top: 0;
+    height: 30%;
+    z-index: 3;
+    pointer-events: none;
+    background: linear-gradient(180deg, transparent, rgba(127, 227, 255, 0.16), transparent);
+    will-change: transform;
+    animation: scanSweep 4.4s var(--ease-inout) infinite;
+  }
+  @keyframes scanSweep {
+    0% { transform: translateY(-40%); opacity: 0; }
+    20%, 80% { opacity: 1; }
+    100% { transform: translateY(330%); opacity: 0; }
+  }
+
+  .scanner-grid {
+    position: absolute; inset: 0; z-index: 2; pointer-events: none;
+    background-image:
+      linear-gradient(rgba(127, 227, 255, 0.08) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(127, 227, 255, 0.08) 1px, transparent 1px);
+    background-size: 42px 42px;
+    opacity: 0.5;
+    -webkit-mask-image: radial-gradient(circle at 50% 48%, #000 0%, #000 30%, transparent 70%);
+            mask-image: radial-gradient(circle at 50% 48%, #000 0%, #000 30%, transparent 70%);
+  }
+  .scanner-vignette {
+    position: absolute; inset: 0; z-index: 3; pointer-events: none;
+    background:
+      radial-gradient(circle at 50% 48%, transparent 34%, rgba(0, 0, 0, 0.34) 74%),
+      linear-gradient(180deg, rgba(0, 0, 0, 0.06), rgba(0, 0, 0, 0.4));
+  }
+  /* plasma standby ring (gradient ring via conic + mask, breathing glow) */
+  .scanner-ring {
+    position: absolute; z-index: 4; pointer-events: none;
+    top: 50%; left: 50%;
+    width: min(34%, 240px); height: min(56%, 268px);
+    transform: translate(-50%, -50%);
+    border-radius: 999px;
+    background: conic-gradient(from 0deg,
+      rgba(127, 227, 255, 0.7), rgba(106, 77, 255, 0.7), rgba(255, 138, 216, 0.6),
+      rgba(127, 227, 255, 0.7));
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1.5px));
+            mask: radial-gradient(farthest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1.5px));
+    filter: drop-shadow(0 0 10px rgba(127, 227, 255, 0.35));
+    will-change: transform;
+    animation: ringSpin 16s linear infinite;
+  }
+  @keyframes ringSpin { to { transform: translate(-50%, -50%) rotate(360deg); } }
+
+  .scanner-idle {
+    position: absolute; inset: 0; z-index: 8;
+    display: grid; place-content: center; justify-items: center; gap: 12px;
+    text-align: center; padding: 30px; color: #f5f5f7;
+  }
+  /* glowing plasma disc behind the camera glyph */
+  .scanner-idle .glyph {
+    position: relative;
+    width: 64px; height: 64px;
+    display: grid; place-items: center;
+    border-radius: 50%;
+    background: radial-gradient(circle at 50% 40%, rgba(127, 227, 255, 0.22), rgba(106, 77, 255, 0.12) 60%, transparent 72%);
+    box-shadow: 0 0 28px rgba(127, 227, 255, 0.25);
+    color: #eaf6ff;
+    animation: glyphBreathe 4s var(--ease-inout) infinite;
+  }
+  @keyframes glyphBreathe { 0%, 100% { transform: scale(1); opacity: 0.92; } 50% { transform: scale(1.05); opacity: 1; } }
+  .scanner-idle strong { font-size: 21px; font-weight: 600; letter-spacing: -0.01em; }
+  .scanner-idle span { color: rgba(245, 245, 247, 0.74); max-width: 420px; font-size: 13.5px; }
+
+  .scanner-console {
+    display: grid; gap: 10px;
+    grid-template-columns: minmax(138px, 0.9fr) minmax(0, 1.15fr) minmax(180px, 1fr);
+  }
+  .scan-score, .signal {
+    background: rgba(20, 22, 30, 0.5); border: 1px solid rgba(235, 235, 245, 0.08);
+    border-radius: 10px; padding: 10px 12px; display: grid; gap: 6px;
+  }
+  .scan-score span, .signal span { color: var(--secondary); font-size: 12px; }
+  .scan-score strong { font-size: 16px; }
+  .signal-grid { display: grid; gap: 8px; }
+  progress, meter { width: 100%; height: 5px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .dashboard-hero::before, .dashboard-visual i, .dashboard-visual i::before,
+    .scanner-stage::after, .scanner-ring, .scanner-idle .glyph { animation: none !important; }
+  }
+</style>
+</head>
+<body>
+  <!-- DASHBOARD HERO -->
+  <div class="panel dashboard-hero">
+    <div>
+      <span class="section-kicker">Home</span>
+      <h1>Review possible matches</h1>
+      <p>34 possible matches need your decision.</p>
+    </div>
+    <div class="dashboard-visual" aria-hidden="true">
+      <span class="visual-orbit review"></span>
+      <span class="visual-orbit match"></span>
+      <span class="visual-orbit protect"></span>
+      <i></i>
+    </div>
+    <div class="dashboard-actions">
+      <button class="secondary"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10"/></svg><span>Scan</span></button>
+      <button class="secondary"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg><span>Review matches</span></button>
+      <button class="secondary"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg><span>Add person</span></button>
+    </div>
+    <div class="readiness-strip">
+      <span class="readiness-pill ok"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span>Permission</span><strong>Set</strong></span>
+      <span class="readiness-pill ok"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span>People</span><strong>69</strong></span>
+      <span class="readiness-pill ok"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span>Safe Mode</span><strong>On</strong></span>
+      <span class="readiness-pill warn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span>Folder watch</span><strong>Idle</strong></span>
+    </div>
+  </div>
+
+  <!-- CAMERA STANDBY -->
+  <section class="panel camera-panel">
+    <div class="panel-title">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3"/></svg>
+      <span>Add from camera</span>
+      <strong class="scanner-state">Camera standby</strong>
+    </div>
+    <div class="scanner-stage">
+      <div class="scanner-grid"></div>
+      <div class="scanner-vignette"></div>
+      <div class="scanner-ring"></div>
+      <div class="scanner-idle">
+        <span class="glyph"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg></span>
+        <strong>Camera standby</strong>
+        <span>Ready to capture and match locally.</span>
+      </div>
+    </div>
+    <div class="scanner-console">
+      <div class="scan-score"><span>Capture quality</span><strong>—</strong><progress max="1" value="0"></progress></div>
+      <div class="signal-grid">
+        <label class="signal"><span>Light</span><meter min="0" max="1" value="0.6"></meter></label>
+        <label class="signal"><span>Clarity</span><meter min="0" max="1" value="0.5"></meter></label>
+      </div>
+      <div class="scan-score"><span>Use the camera to add a fresh review photo.</span></div>
+    </div>
+  </section>
+</body>
+</html>

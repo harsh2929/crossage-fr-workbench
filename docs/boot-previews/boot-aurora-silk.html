@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Vintrace — Opening</title>
+<style>
+  :root {
+    --text: #f6f7fb;
+    --text-72: rgba(246, 247, 251, 0.72);
+    --text-56: rgba(246, 247, 251, 0.56);
+    --text-40: rgba(246, 247, 251, 0.40);
+    --accent: #007aff;
+    --cyan: #64d2ff;
+    --violet: #bf5af2;
+    --ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-inout: cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { height: 100%; margin: 0; }
+
+  body {
+    font-family: -apple-system, "SF Pro Display", "SF Pro Text", BlinkMacSystemFont, system-ui, sans-serif;
+    color: var(--text);
+    background: linear-gradient(180deg, #101622 0%, #080b12 58%, #03050a 100%);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+  }
+
+  /* ---------- STAGE ---------- */
+  .stage {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: grid;
+    place-items: center;
+    isolation: isolate;
+  }
+
+  /* ---------- THE ONE AURORA (single soft blurred ambient layer) ---------- */
+  /* It only DRIFTS via translate3d and BREATHES in opacity. Blur radius and
+     size are static. This is the single luminous gesture. */
+  .aurora {
+    position: absolute;
+    z-index: -2;
+    top: 50%;
+    left: 50%;
+    width: 130vmax;
+    height: 90vmax;
+    margin-top: -45vmax;
+    margin-left: -65vmax;
+    pointer-events: none;
+    border-radius: 50%;
+    background:
+      radial-gradient(60% 55% at 38% 40%, rgba(100, 210, 255, 0.42) 0%, rgba(100, 210, 255, 0) 60%),
+      radial-gradient(55% 50% at 64% 58%, rgba(0, 122, 255, 0.40) 0%, rgba(0, 122, 255, 0) 62%),
+      radial-gradient(48% 46% at 52% 30%, rgba(191, 90, 242, 0.16) 0%, rgba(191, 90, 242, 0) 66%);
+    filter: blur(72px);
+    opacity: 0.5;
+    will-change: transform, opacity;
+    transform: translate3d(-6%, 4%, 0) rotate(-8deg);
+    animation:
+      auroraDrift 18s var(--ease-inout) infinite alternate,
+      auroraBreathe 7s var(--ease-inout) infinite alternate;
+  }
+
+  @keyframes auroraDrift {
+    0%   { transform: translate3d(-7%, 5%, 0) rotate(-9deg) scale(1.0); }
+    100% { transform: translate3d(7%, -5%, 0) rotate(5deg) scale(1.08); }
+  }
+  @keyframes auroraBreathe {
+    0%   { opacity: 0.34; }
+    100% { opacity: 0.62; }
+  }
+
+  /* faint vignette so the aurora reads as light through glass — static, not animated */
+  .vignette {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: radial-gradient(120% 90% at 50% 42%, transparent 38%, rgba(3, 5, 10, 0.55) 100%);
+  }
+
+  /* ---------- FROSTED CARD ---------- */
+  .card {
+    position: relative;
+    width: 380px;
+    max-width: calc(100vw - 48px);
+    padding: 38px 38px 34px;
+    border-radius: 22px;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.07) 0%, rgba(255, 255, 255, 0.025) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    -webkit-backdrop-filter: blur(28px) saturate(135%);
+    backdrop-filter: blur(28px) saturate(135%);
+    box-shadow:
+      0 1px 0 0 rgba(255, 255, 255, 0.10) inset,
+      0 0 0 1px rgba(0, 0, 0, 0.20),
+      0 30px 80px -20px rgba(0, 0, 0, 0.65),
+      0 8px 24px -12px rgba(0, 0, 0, 0.5);
+    text-align: center;
+    /* entrance */
+    opacity: 0;
+    will-change: transform, opacity;
+    transform: translate3d(0, 14px, 0) scale(0.985);
+    animation: cardIn 1s var(--ease-soft) 0.05s forwards;
+  }
+
+  @keyframes cardIn {
+    to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+  }
+
+  /* hairline inner top highlight */
+  .card::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 22px;
+    padding: 1px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0) 32%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  /* ---------- MARK ---------- */
+  .mark {
+    position: relative;
+    width: 58px;
+    height: 58px;
+    margin: 0 auto 20px;
+    border-radius: 8px;
+    display: grid;
+    place-items: center;
+    background: linear-gradient(160deg, #0a84ff 0%, #007aff 48%, #0064d6 100%);
+    box-shadow:
+      0 1px 0 0 rgba(255, 255, 255, 0.45) inset,
+      0 10px 24px -8px rgba(0, 122, 255, 0.55),
+      0 2px 6px rgba(0, 0, 0, 0.4);
+    /* entrance (separate node, staggered) */
+    opacity: 0;
+    will-change: transform, opacity;
+    transform: translate3d(0, 8px, 0) scale(0.9);
+    animation: markIn 0.9s var(--ease-soft) 0.18s forwards;
+  }
+
+  @keyframes markIn {
+    to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+  }
+
+  /* slow conic sheen ring around the badge — rotates via transform only */
+  .mark .sheen {
+    position: absolute;
+    inset: -1.5px;
+    border-radius: 9px;
+    padding: 1.5px;
+    background: conic-gradient(
+      from 0deg,
+      rgba(255, 255, 255, 0) 0deg,
+      rgba(255, 255, 255, 0) 200deg,
+      rgba(100, 210, 255, 0.85) 300deg,
+      rgba(255, 255, 255, 0.95) 340deg,
+      rgba(100, 210, 255, 0.0) 360deg
+    );
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    will-change: transform;
+    transform: rotate(0deg);
+    animation: sheenSpin 9s linear infinite;
+  }
+
+  @keyframes sheenSpin {
+    to { transform: rotate(360deg); }
+  }
+
+  .mark svg { position: relative; display: block; }
+
+  /* ---------- TEXT ---------- */
+  .name {
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    margin: 0 0 14px;
+    /* entrance */
+    opacity: 0;
+    will-change: transform, opacity;
+    transform: translate3d(0, 8px, 0);
+    animation: textIn 0.8s var(--ease-soft) 0.30s forwards;
+  }
+
+  .status {
+    font-size: 13.5px;
+    font-weight: 500;
+    letter-spacing: -0.005em;
+    color: var(--text-72);
+    margin: 0 0 4px;
+    opacity: 0;
+    will-change: transform, opacity;
+    transform: translate3d(0, 8px, 0);
+    animation: textIn 0.8s var(--ease-soft) 0.38s forwards;
+  }
+
+  .sub {
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: 0.005em;
+    color: var(--text-56);
+    margin: 0 0 26px;
+    opacity: 0;
+    will-change: transform, opacity;
+    transform: translate3d(0, 8px, 0);
+    animation: textIn 0.8s var(--ease-soft) 0.46s forwards;
+  }
+
+  @keyframes textIn {
+    to { opacity: 1; transform: translate3d(0, 0, 0); }
+  }
+
+  /* ---------- PROGRESS BAR ---------- */
+  /* The ONE allowed width-ish transition: we drive a scaleX track via transform.
+     transform-origin left so it grows from the start. */
+  .progress {
+    position: relative;
+    height: 4px;
+    width: 100%;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.09);
+    overflow: hidden;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+    opacity: 0;
+    animation: textIn 0.8s var(--ease-soft) 0.54s forwards;
+  }
+
+  .progress .fill {
+    position: absolute;
+    inset: 0;
+    transform-origin: left center;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #007aff 0%, #64d2ff 100%);
+    box-shadow: 0 0 12px rgba(100, 210, 255, 0.45);
+    will-change: transform;
+    transform: scaleX(0.18);
+    transition: transform 1.1s var(--ease-soft);
+  }
+
+  /* ---------- STEP CHIPS ---------- */
+  .chips {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin-top: 22px;
+    opacity: 0;
+    animation: textIn 0.8s var(--ease-soft) 0.62s forwards;
+  }
+
+  .chip {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    color: var(--text-40);
+    padding: 5px 11px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: rgba(255, 255, 255, 0.025);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: color 0.6s var(--ease-inout), border-color 0.6s var(--ease-inout), background-color 0.6s var(--ease-inout);
+  }
+
+  .chip .dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: 0.5;
+    transition: opacity 0.6s var(--ease-inout);
+  }
+
+  .chip.done {
+    color: var(--cyan);
+    border-color: rgba(100, 210, 255, 0.30);
+    background: rgba(0, 122, 255, 0.12);
+  }
+  .chip.done .dot { opacity: 1; }
+
+  /* ---------- REDUCED MOTION ---------- */
+  @media (prefers-reduced-motion: reduce) {
+    .aurora {
+      animation: auroraBreathe 6s var(--ease-inout) infinite alternate;
+      transform: translate3d(0, 0, 0) rotate(-4deg);
+    }
+    .mark .sheen { animation: none; opacity: 0.5; }
+    .card, .mark, .name, .status, .sub, .progress, .chips {
+      animation-duration: 0.001s;
+      animation-delay: 0s;
+      opacity: 1;
+      transform: none;
+    }
+    .progress .fill { transition: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="aurora" aria-hidden="true"></div>
+    <div class="vignette" aria-hidden="true"></div>
+
+    <main class="card" role="status" aria-live="polite" aria-label="Opening Vintrace">
+      <div class="mark" aria-hidden="true">
+        <span class="sheen"></span>
+        <svg width="30" height="30" viewBox="0 0 30 30" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M5 6 L15 23 L25 6" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+      <h1 class="name">Vintrace</h1>
+      <p class="status">Opening app</p>
+      <p class="sub">Loading private on-device review data.</p>
+
+      <div class="progress" aria-hidden="true">
+        <div class="fill" id="fill"></div>
+      </div>
+
+      <div class="chips" aria-hidden="true">
+        <span class="chip" id="chip-0"><span class="dot"></span>Shell</span>
+        <span class="chip" id="chip-1"><span class="dot"></span>Engine</span>
+        <span class="chip" id="chip-2"><span class="dot"></span>App folder</span>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    // Tiny vanilla driver: fake progress 18% -> 94% and stagger chip lighting.
+    (function () {
+      var fill = document.getElementById('fill');
+      var chips = [
+        document.getElementById('chip-0'),
+        document.getElementById('chip-1'),
+        document.getElementById('chip-2')
+      ];
+      var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      function setProgress(pct) {
+        // scaleX 0..1 maps to 0..100%
+        fill.style.transform = 'scaleX(' + (pct / 100) + ')';
+      }
+
+      // start
+      setProgress(18);
+
+      var steps = [
+        { at: 700,  pct: 46, chip: 0 },
+        { at: 1700, pct: 72, chip: 1 },
+        { at: 2900, pct: 94, chip: 2 }
+      ];
+
+      if (reduce) {
+        // freeze near-final but show it isn't hung: settle once.
+        setProgress(94);
+        chips.forEach(function (c) { c.classList.add('done'); });
+        return;
+      }
+
+      steps.forEach(function (s) {
+        setTimeout(function () {
+          setProgress(s.pct);
+          if (chips[s.chip]) chips[s.chip].classList.add('done');
+        }, s.at);
+      });
+    })();
+  </script>
+</body>
+</html>

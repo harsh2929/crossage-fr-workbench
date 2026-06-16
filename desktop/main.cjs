@@ -377,6 +377,7 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "set_workspace",
   "set_consent",
   "enroll",
+  "enroll_paths",
   "enroll_age_groups",
   "scan",
   "scan_paths",
@@ -1733,7 +1734,7 @@ function notifyForCommand(command, result) {
     const extra = protectedCount ? ` ${protectedCount} protected.` : "";
     notify("Scan complete", `${added} candidate(s) queued.${extra}`);
   }
-  if (command === "enroll" || command === "enroll_age_groups") {
+  if (command === "enroll" || command === "enroll_age_groups" || command === "enroll_paths") {
     notify("Enrollment complete", `${Number(result.added || 0)} reference face(s) enrolled.`);
   }
 }
@@ -1985,6 +1986,11 @@ function validateBackendPayload(payload = {}) {
 function grantPathsFromBackendRequest(command, params) {
   if (["set_workspace", "enroll", "scan", "analyze_folder", "folder_tree", "export_report", "export_candidates", "preview_candidate_media_action", "manage_candidate_media"].includes(command)) {
     grantUserPath(params.path || params.folder);
+  }
+  if (command === "enroll_paths" && Array.isArray(params.paths)) {
+    for (const candidate of params.paths) {
+      grantUserPath(candidate);
+    }
   }
   if (command === "restore_workspace_backup") {
     grantUserPath(params.path);
@@ -3430,6 +3436,55 @@ ipcMain.handle("dialog:choose-folder", async (event) => {
   }
   grantUserPath(result.filePaths[0]);
   return result.filePaths[0];
+});
+
+// Multi-select image picker for the "Add a person" flow. Grants each picked file
+// and returns its vintrace-media:// thumbnail URL so the renderer can preview it
+// before enrolling.
+ipcMain.handle("dialog:choose-images", async (event) => {
+  assertTrustedSender(event);
+  const toMedia = (filePath) => {
+    grantUserPath(filePath);
+    return { path: filePath, url: mediaUrlFor(filePath), isDir: false };
+  };
+  if (process.env.CROSSAGE_TEST_DIALOG_PATHS) {
+    const paths = process.env.CROSSAGE_TEST_DIALOG_PATHS.split(path.delimiter).filter(Boolean);
+    process.env.CROSSAGE_TEST_DIALOG_PATHS = "";
+    return paths.map(toMedia);
+  }
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openFile", "multiSelections"],
+    filters: [
+      { name: "Images", extensions: [...IMAGE_EXTENSIONS].map((ext) => ext.replace(/^\./, "")) },
+      { name: "All files", extensions: ["*"] }
+    ]
+  });
+  if (result.canceled || !result.filePaths.length) {
+    return [];
+  }
+  return result.filePaths.map(toMedia);
+});
+
+// Grant a batch of file/folder paths (dropped files, or folder sample images) and
+// return their thumbnail URLs, so they can be previewed before enrolling.
+ipcMain.handle("media:prepare-paths", async (event, payload) => {
+  assertTrustedSender(event);
+  const paths = Array.isArray(payload && payload.paths) ? payload.paths : [];
+  const out = [];
+  for (const candidate of paths) {
+    if (typeof candidate !== "string" || !candidate.trim()) {
+      continue;
+    }
+    grantUserPath(candidate);
+    let isDir = false;
+    try {
+      isDir = fs.statSync(candidate).isDirectory();
+    } catch (_error) {
+      isDir = false;
+    }
+    out.push({ path: candidate, url: mediaUrlFor(candidate), isDir });
+  }
+  return out;
 });
 
 ipcMain.handle("camera:save-frame", async (event, payload = {}) => {

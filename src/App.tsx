@@ -1,6 +1,10 @@
+import type { RefObject } from "react";
 import {
   Activity,
   AlertCircle,
+  Pencil,
+  Plus,
+  Upload,
   Aperture,
   ArrowLeft,
   ArrowRight,
@@ -139,7 +143,9 @@ import type {
   UpdateStatus
 } from "./types";
 import { computeScannedCounts, countExcludedBranches, excludeNode, includeNode } from "./lib/folderTreeSelection";
+import { filterPeople, groupReferencesByPerson, type Person } from "./lib/peopleGrouping";
 import { PhotosView } from "./views/PhotosView";
+import { initBootBackground } from "./lib/bootBackground";
 import { formatErrorMessage, formatUiMessage, languageOptions, localizeDom, normalizeLanguage, translate, translateUiText } from "./i18n";
 import type { LanguageCode, TranslationKey, UiMessageKey } from "./i18n";
 
@@ -1624,11 +1630,17 @@ export default function App() {
   const [bootError, setBootError] = useState<string | null>(null);
   const [bootStartedAt, setBootStartedAt] = useState(() => Date.now());
   const [bootClock, setBootClock] = useState(() => Date.now());
+  const bootCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [notice, setNotice] = useState<NoticeState | null>(null);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
   const [selectedRefId, setSelectedRefId] = useState<string | null>(null);
   const [personName, setPersonName] = useState("");
   const [ageBucket, setAgeBucket] = useState<AgeBucket>("unknown");
+  // Redesigned "Add a person" flow: photos/folders staged before saving, plus the
+  // people-gallery search. Ephemeral; cleared after a successful add.
+  const [enrollStaging, setEnrollStaging] = useState<StagedItem[]>([]);
+  const [peopleSearch, setPeopleSearch] = useState("");
+  const enrollNameInputRef = useRef<HTMLInputElement>(null);
   const [enrollFolder, setEnrollFolder] = useState("");
   const [ageGroupFolders, setAgeGroupFolders] = useState<AgeFolderMap>(() => emptyAgeFolders());
   const [scanFolder, setScanFolder] = useState("");
@@ -2026,6 +2038,21 @@ export default function App() {
     }
     const timer = window.setInterval(() => setBootClock(Date.now()), 1000);
     return () => window.clearInterval(timer);
+  }, [state]);
+
+  // Living "Plasma Silk" boot background: start the WebGL shader while the boot
+  // screen is mounted; tear it down (rAF + GL context + listeners) the instant
+  // the app state loads and the boot screen unmounts.
+  useEffect(() => {
+    if (state) {
+      return undefined;
+    }
+    const canvas = bootCanvasRef.current;
+    if (!canvas) {
+      return undefined;
+    }
+    const root = canvas.closest(".boot") as HTMLElement | null;
+    return initBootBackground(canvas, root);
   }, [state]);
 
   async function loadInitialState() {
@@ -2588,6 +2615,91 @@ export default function App() {
       operator: "desktop user",
       note: note || `Confirmed for ${scope}`,
       scope
+    });
+  }
+
+  async function chooseEnrollImages() {
+    const picked = await window.crossAge.chooseImages();
+    if (!picked || !picked.length) return;
+    setEnrollStaging((prev) => mergeStaged(prev, picked.map((media) => ({
+      id: crypto.randomUUID(), kind: "file" as const, path: media.path, url: media.url,
+    }))));
+  }
+
+  async function stageFolderForEnroll(folderPath: string) {
+    try {
+      const analysis = await invoke<FolderAnalysis>("Reading folder", "analyze_folder", { folder: folderPath }, { quiet: true });
+      const samples = (analysis.imageSamples || []).slice(0, 6);
+      const media = samples.length ? await window.crossAge.prepareMedia(samples) : [];
+      setEnrollStaging((prev) => prev.some((item) => item.path === folderPath)
+        ? prev
+        : [...prev, {
+            id: crypto.randomUUID(),
+            kind: "folder" as const,
+            path: folderPath,
+            count: analysis.imageCount || 0,
+            sampleUrls: media.map((entry) => entry.url),
+          }]);
+    } catch (error) {
+      setErrorNotice(error, "Could not read that folder.");
+    }
+  }
+
+  async function chooseEnrollFolderToStage() {
+    const folder = await window.crossAge.chooseFolder();
+    if (folder) await stageFolderForEnroll(folder);
+  }
+
+  async function handleEnrollDrop(files: File[]) {
+    const paths = files.map((file) => window.crossAge.getPathForFile(file)).filter(Boolean);
+    if (!paths.length) return;
+    const media = await window.crossAge.prepareMedia(paths);
+    const fileItems = media
+      .filter((entry) => !entry.isDir)
+      .map((entry) => ({ id: crypto.randomUUID(), kind: "file" as const, path: entry.path, url: entry.url }));
+    if (fileItems.length) setEnrollStaging((prev) => mergeStaged(prev, fileItems));
+    for (const dir of media.filter((entry) => entry.isDir)) {
+      await stageFolderForEnroll(dir.path);
+    }
+  }
+
+  function removeStagedItem(id: string) {
+    setEnrollStaging((prev) => prev.filter((item) => item.id !== id));
+  }
+
+  function clearEnrollStaging() {
+    setEnrollStaging([]);
+  }
+
+  async function addStagedPhotos() {
+    const name = personName.trim();
+    if (!name) {
+      setNotice({ tone: "warn", text: "Enter a name before adding photos." });
+      enrollNameInputRef.current?.focus();
+      return;
+    }
+    if (!enrollStaging.length) {
+      setNotice({ tone: "warn", text: "Add at least one photo first." });
+      return;
+    }
+    const paths = enrollStaging.map((item) => item.path);
+    const result = await invoke<CommandResult>("Adding photos", "enroll_paths", { personName: name, ageBucket, paths });
+    const added = result.added ?? 0;
+    const skipped = result.errors?.length ?? 0;
+    setEnrollStaging([]);
+    const skippedText = skipped ? ` ${skipped} skipped (no face found).` : "";
+    setNotice({ tone: added ? "ok" : "warn", text: `Added ${added} photo${added === 1 ? "" : "s"} to ${name}.${skippedText}` });
+  }
+
+  async function removeReference(refId: string) {
+    await invoke<AppState>("Deleting photo", "delete_reference", { refId });
+  }
+
+  function addMoreForPerson(name: string) {
+    setPersonName(name);
+    window.requestAnimationFrame(() => {
+      enrollNameInputRef.current?.focus();
+      enrollNameInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     });
   }
 
@@ -4558,54 +4670,41 @@ export default function App() {
       <main
         className={bootError ? "boot boot-failed" : "boot"}
         aria-busy={!bootError}
-        style={{ "--boot-progress": `${bootProgress}%` } as CSSProperties}
+        style={{ "--boot-fill": (bootError ? 100 : bootProgress) / 100 } as CSSProperties}
       >
-        <div className="boot-liquid-field" aria-hidden="true">
-          <div className="boot-glass-pane" />
-          <div className="fluid-current current-rose" />
-          <div className="fluid-current current-aqua" />
-          <div className="fluid-current current-violet" />
-          <div className="water-ripple ripple-one" />
-          <div className="water-ripple ripple-two" />
-          <div className="water-ripple ripple-three" />
-          <div className="boot-caustics" />
-          <div className="boot-grain" />
-        </div>
-        <section className="boot-stage" aria-label="Vintrace startup">
-          <div className="boot-kicker">
-            <span />
-            <span />
-            <span />
+        <canvas className="boot-bg-canvas" ref={bootCanvasRef} aria-hidden="true" />
+        <div className="boot-bg-fallback" aria-hidden="true" />
+        <div className="boot-vignette" aria-hidden="true" />
+        <section className="boot-card" role="status" aria-live="polite" aria-label="Opening Vintrace">
+          <div className="boot-mark" aria-hidden="true">
+            <span className="boot-ring-base" />
+            {!bootError && <span className="boot-ring" />}
+            {!bootError && <span className="boot-sweep" />}
+            <img src={appIconUrl} alt="" />
           </div>
-          <div className="boot-card" role="status" aria-live="polite">
-            <div className="boot-mark">
-              <div className="boot-mark-aura" />
-              <img src={appIconUrl} alt="" />
+          <h1 className="boot-name">Vintrace</h1>
+          <p className="boot-status">
+            <span className="boot-status-dot" />
+            <span>{bootStatus}</span>
+          </p>
+          <p className="boot-sub">{bootDetail}</p>
+          <div className="boot-progress" aria-hidden="true"><span className="boot-fill" /><span className="boot-fill-glint" /></div>
+          {bootError ? (
+            <div className="boot-actions">
+              <button type="button" onClick={loadInitialState}>
+                <RefreshCcw size={15} />
+                <span>Retry</span>
+              </button>
             </div>
-            <div className="boot-copy">
-              <strong>Vintrace</strong>
-              <span>{bootStatus}</span>
-              <small>{bootDetail}</small>
-              <div className="boot-progress" aria-hidden="true"><span /></div>
-              {bootError ? (
-                <div className="boot-actions">
-                  <button type="button" onClick={loadInitialState}>
-                    <RefreshCcw size={15} />
-                    <span>Retry</span>
-                  </button>
-                </div>
-              ) : (
-                <div className="boot-step-list" aria-hidden="true">
-                  {bootSteps.map((step) => (
-                    <span key={step.label} className={step.done ? "done" : ""}>{step.label}</span>
-                  ))}
-                </div>
-              )}
+          ) : (
+            <div className="boot-chips" aria-hidden="true">
+              {bootSteps.map((step) => (
+                <span key={step.label} className={step.done ? "boot-chip done" : "boot-chip"}>
+                  <span className="boot-chip-tick" />{step.label}
+                </span>
+              ))}
             </div>
-            <div className="boot-spinner-shell">
-              {bootError ? <AlertCircle size={22} /> : <Loader2 className="spin" size={23} />}
-            </div>
-          </div>
+          )}
         </section>
       </main>
     );
@@ -4790,27 +4889,20 @@ export default function App() {
             setPersonName={setPersonName}
             ageBucket={ageBucket}
             setAgeBucket={setAgeBucket}
-            enrollFolder={enrollFolder}
-            setEnrollFolder={setEnrollFolder}
-            ageGroupFolders={ageGroupFolders}
-            setAgeGroupFolder={setAgeGroupFolder}
-            chooseAgeGroupFolder={chooseAgeGroupFolder}
-            chooseFolder={chooseEnrollFolder}
-            folderTree={enrollFolderTree}
-            treeLoading={enrollTreeLoading}
-            treeError={enrollTreeError}
-            recursive={enrollRecursive}
-            setRecursive={setEnrollRecursive}
-            excludedDirs={enrollExcludedDirs}
-            setExcludedDirs={setEnrollExcludedDirs}
-            enroll={enroll}
-            enrollAgeGroups={enrollAgeGroups}
-            disabled={enrollDisabled}
-            ageGroupDisabled={ageGroupDisabled}
-            selectedRefId={selectedRefId}
-            setSelectedRefId={setSelectedRefId}
-            deleteReference={deleteReference}
-            clearReferences={clearReferences}
+            nameInputRef={enrollNameInputRef}
+            staging={enrollStaging}
+            chooseImages={chooseEnrollImages}
+            chooseFolder={chooseEnrollFolderToStage}
+            onDropFiles={handleEnrollDrop}
+            removeStaged={removeStagedItem}
+            clearStaging={clearEnrollStaging}
+            addStaged={addStagedPhotos}
+            peopleSearch={peopleSearch}
+            setPeopleSearch={setPeopleSearch}
+            renamePerson={renamePerson}
+            deletePerson={deletePerson}
+            deletePhoto={removeReference}
+            addMoreForPerson={addMoreForPerson}
             busy={Boolean(busy)}
           />
         )}
@@ -6585,126 +6677,318 @@ function SubfolderPicker(props: {
   );
 }
 
+// A photo or folder queued in the "Add a person" staging tray before it is saved.
+type StagedItem =
+  | { id: string; kind: "file"; path: string; url: string }
+  | { id: string; kind: "folder"; path: string; count: number; sampleUrls: string[] };
+
+function stagedPhotoCount(items: StagedItem[]): number {
+  return items.reduce((sum, item) => sum + (item.kind === "folder" ? item.count : 1), 0);
+}
+
+function mergeStaged(prev: StagedItem[], items: StagedItem[]): StagedItem[] {
+  const have = new Set(prev.map((item) => item.path));
+  return [...prev, ...items.filter((item) => !have.has(item.path))];
+}
+
+function FaceThumb(props: { url?: string | null; alt: string; onRemove?: () => void; removeLabel?: string }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <div className="face-thumb">
+      {props.url && !failed
+        ? <img loading="lazy" decoding="async" src={props.url} alt={props.alt} onError={() => setFailed(true)} />
+        : <div className="face-thumb-fallback"><ImageIcon size={18} /></div>}
+      {props.onRemove && (
+        <button type="button" className="face-thumb-remove" onClick={props.onRemove} title={props.removeLabel || "Remove"} aria-label={props.removeLabel || "Remove"}>
+          <X size={12} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function StagingTray(props: { items: StagedItem[]; onRemove(id: string): void; onClear(): void; busy: boolean }) {
+  if (!props.items.length) return null;
+  const total = stagedPhotoCount(props.items);
+  return (
+    <div className="staging-tray">
+      <div className="staging-head">
+        <span className="staging-count">{total} photo{total === 1 ? "" : "s"} ready</span>
+        <button type="button" className="ghost compact-action" onClick={props.onClear} disabled={props.busy} aria-label="Clear staged photos"><X size={14} /><span>Clear</span></button>
+      </div>
+      <div className="staging-grid">
+        {props.items.map((item) => item.kind === "file"
+          ? <FaceThumb key={item.id} url={item.url} alt={basename(item.path)} onRemove={() => props.onRemove(item.id)} removeLabel="Remove photo" />
+          : (
+            <div key={item.id} className="staging-folder" title={item.path}>
+              <div className="staging-folder-stack">
+                {item.sampleUrls.length
+                  ? item.sampleUrls.slice(0, 3).map((url, index) => <img key={index} src={url} alt="" loading="lazy" decoding="async" />)
+                  : <FolderOpen size={18} />}
+              </div>
+              <span className="staging-folder-label"><FolderOpen size={12} /> {basename(item.path) || item.path} · {item.count}</span>
+              <button type="button" className="face-thumb-remove" onClick={() => props.onRemove(item.id)} aria-label="Remove folder"><X size={12} /></button>
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+function AddPersonPanel(props: {
+  personName: string;
+  setPersonName(value: string): void;
+  ageBucket: AgeBucket;
+  setAgeBucket(value: AgeBucket): void;
+  nameInputRef: RefObject<HTMLInputElement | null>;
+  staging: StagedItem[];
+  chooseImages(): void;
+  chooseFolder(): void;
+  onDropFiles(files: File[]): void;
+  removeStaged(id: string): void;
+  clearStaging(): void;
+  addStaged(): void;
+  busy: boolean;
+}) {
+  const [dragOver, setDragOver] = useState(false);
+  const trimmedName = props.personName.trim();
+  const total = stagedPhotoCount(props.staging);
+  const canAdd = trimmedName.length > 0 && props.staging.length > 0 && !props.busy;
+  return (
+    <div className="panel form-panel add-person-panel">
+      <div className="panel-title"><UserPlus size={18} /> Add a person</div>
+      <p className="compact">Name them, add a few clear photos, and they&rsquo;ll appear in your people list.</p>
+      <ol className="add-steps">
+        <li className="add-step">
+          <span className="add-step-num">1</span>
+          <div className="add-step-body">
+            <span className="add-step-label">Who is this?</span>
+            <div className="add-identity">
+              <input
+                ref={props.nameInputRef}
+                className="add-name"
+                aria-label="Person name"
+                placeholder="Name shown in results"
+                value={props.personName}
+                onChange={(event) => props.setPersonName(event.currentTarget.value)}
+              />
+              <label className="add-age">
+                <span>Age</span>
+                <select value={props.ageBucket} onChange={(event) => props.setAgeBucket(event.currentTarget.value as AgeBucket)}>
+                  {ageBuckets.map((bucket) => <option key={bucket} value={bucket}>{ageBucketLabel(bucket)}</option>)}
+                </select>
+              </label>
+            </div>
+          </div>
+        </li>
+        <li className="add-step">
+          <span className="add-step-num">2</span>
+          <div className="add-step-body">
+            <span className="add-step-label">Add their photos</span>
+            <div
+              className={dragOver ? "dropzone dragging" : "dropzone"}
+              onDragOver={(event) => { event.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(event) => { event.preventDefault(); setDragOver(false); props.onDropFiles(Array.from(event.dataTransfer.files)); }}
+            >
+              <Upload size={24} className="dropzone-icon" />
+              <span className="dropzone-text">Drag photos or a folder here</span>
+              <span className="dropzone-or">or</span>
+              <div className="dropzone-actions">
+                <button type="button" className="secondary" onClick={props.chooseImages} disabled={props.busy}><ImageIcon size={16} /><span>Choose photos</span></button>
+                <button type="button" className="secondary" onClick={props.chooseFolder} disabled={props.busy}><FolderOpen size={16} /><span>Choose folder</span></button>
+              </div>
+            </div>
+          </div>
+        </li>
+        <li className="add-step">
+          <span className="add-step-num">3</span>
+          <div className="add-step-body">
+            <span className="add-step-label">Review &amp; add</span>
+            {props.staging.length === 0
+              ? <p className="compact add-step-hint">Photos you add will preview here before they&rsquo;re saved.</p>
+              : <StagingTray items={props.staging} onRemove={props.removeStaged} onClear={props.clearStaging} busy={props.busy} />}
+            <button className="primary add-commit" onClick={props.addStaged} disabled={!canAdd}>
+              {props.busy ? <Loader2 className="spin" size={17} /> : <Check size={17} />}
+              <span>
+                {props.staging.length
+                  ? `Add ${total} photo${total === 1 ? "" : "s"}${trimmedName ? ` to “${trimmedName}”` : ""}`
+                  : "Add photos"}
+              </span>
+            </button>
+          </div>
+        </li>
+      </ol>
+    </div>
+  );
+}
+
+function PersonCard(props: {
+  person: Person;
+  onRename(oldName: string, newName: string): void;
+  onDeletePerson(name: string): void;
+  onDeletePhoto(refId: string): void;
+  onAddMore(name: string): void;
+  busy: boolean;
+}) {
+  const { person } = props;
+  const [expanded, setExpanded] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [draft, setDraft] = useState(person.name);
+  const shown = expanded ? person.photos : person.photos.slice(0, 5);
+  const overflow = person.count - shown.length;
+  const commitRename = () => {
+    const next = draft.trim();
+    if (next && next !== person.name) props.onRename(person.name, next);
+    setRenaming(false);
+  };
+  return (
+    <div className="person-card">
+      <div className="person-head">
+        {renaming ? (
+          <input
+            className="person-rename"
+            autoFocus
+            value={draft}
+            onChange={(event) => setDraft(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") commitRename();
+              if (event.key === "Escape") { setDraft(person.name); setRenaming(false); }
+            }}
+            onBlur={commitRename}
+            aria-label={`New name for ${person.name}`}
+          />
+        ) : (
+          <button className="person-name" onClick={() => setExpanded((value) => !value)} title="Show all photos">
+            <span className="person-avatar">{(person.name[0] || "?").toUpperCase()}</span>
+            <span className="person-name-text">{person.name}</span>
+          </button>
+        )}
+        <div className="person-coverage">
+          {person.ageCoverage.length
+            ? person.ageCoverage.map((bucket) => <span key={bucket} className="age-chip">{ageBucketLabel(bucket)}</span>)
+            : <span className="age-chip muted">no age tag</span>}
+        </div>
+        <span className="person-count" title={`${person.count} photo${person.count === 1 ? "" : "s"}`}>{person.count}</span>
+        <div className="person-actions">
+          <button className="icon-button" title="Rename" aria-label={`Rename ${person.name}`} onClick={() => { setDraft(person.name); setRenaming(true); }} disabled={props.busy}><Pencil size={15} /></button>
+          <button className="icon-button" title="Add more photos" aria-label={`Add more photos for ${person.name}`} onClick={() => props.onAddMore(person.name)} disabled={props.busy}><Plus size={15} /></button>
+          <button className="icon-button danger" title="Delete person" aria-label={`Delete ${person.name}`} onClick={() => props.onDeletePerson(person.name)} disabled={props.busy}><Trash2 size={15} /></button>
+        </div>
+      </div>
+      <div className="person-thumbs">
+        {shown.map((ref) => (
+          <FaceThumb key={ref.refId} url={ref.previewUrl || ref.sourceUrl} alt={`${person.name} face`} onRemove={() => props.onDeletePhoto(ref.refId)} removeLabel="Delete this photo" />
+        ))}
+        {!expanded && overflow > 0 && (
+          <button className="person-more" onClick={() => setExpanded(true)} aria-label={`Show ${overflow} more photos`}>+{overflow}</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PeopleGallery(props: {
+  references: AppState["references"];
+  search: string;
+  setSearch(value: string): void;
+  onRename(oldName: string, newName: string): void;
+  onDeletePerson(name: string): void;
+  onDeletePhoto(refId: string): void;
+  onAddMore(name: string): void;
+  busy: boolean;
+}) {
+  const people = useMemo(() => groupReferencesByPerson(props.references), [props.references]);
+  const filtered = useMemo(() => filterPeople(people, props.search), [people, props.search]);
+  const totalPhotos = props.references.length;
+  return (
+    <div className="panel table-panel people-gallery">
+      <div className="panel-title">
+        <Users size={18} /> People you&rsquo;ve added
+        <span className="title-count">{people.length}</span>
+        <div className="spacer" />
+        {people.length > 0 && (
+          <div className="people-search">
+            <Search size={14} />
+            <input aria-label="Search people by name" placeholder="Search names&hellip;" value={props.search} onChange={(event) => props.setSearch(event.currentTarget.value)} />
+          </div>
+        )}
+      </div>
+      {people.length === 0 ? (
+        <EmptyState icon={Users} label="No people added yet" detail="Add your first person on the left &mdash; name them and drop in a few photos." />
+      ) : filtered.length === 0 ? (
+        <EmptyState icon={Search} label="No matches" detail={`No people match “${props.search.trim()}”.`} />
+      ) : (
+        <>
+          <p className="people-summary compact">{people.length} {people.length === 1 ? "person" : "people"} &middot; {totalPhotos} photo{totalPhotos === 1 ? "" : "s"}</p>
+          <div className="people-list">
+            {filtered.map((person) => (
+              <PersonCard
+                key={person.name}
+                person={person}
+                onRename={props.onRename}
+                onDeletePerson={props.onDeletePerson}
+                onDeletePhoto={props.onDeletePhoto}
+                onAddMore={props.onAddMore}
+                busy={props.busy}
+              />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function EnrollView(props: {
   state: AppState;
   personName: string;
   setPersonName(value: string): void;
   ageBucket: AgeBucket;
   setAgeBucket(value: AgeBucket): void;
-  enrollFolder: string;
-  setEnrollFolder(value: string): void;
-  ageGroupFolders: AgeFolderMap;
-  setAgeGroupFolder(ageBucket: AgeBucket, folder: string): void;
-  chooseAgeGroupFolder(ageBucket: AgeBucket): void;
+  nameInputRef: RefObject<HTMLInputElement | null>;
+  staging: StagedItem[];
+  chooseImages(): void;
   chooseFolder(): void;
-  folderTree: FolderTree | null;
-  treeLoading: boolean;
-  treeError: string | null;
-  recursive: boolean;
-  setRecursive(value: boolean): void;
-  excludedDirs: Set<string>;
-  setExcludedDirs(value: Set<string>): void;
-  enroll(): void;
-  enrollAgeGroups(): void;
-  disabled: boolean;
-  ageGroupDisabled: boolean;
-  selectedRefId: string | null;
-  setSelectedRefId(value: string): void;
-  deleteReference(): void;
-  clearReferences(): void;
+  onDropFiles(files: File[]): void;
+  removeStaged(id: string): void;
+  clearStaging(): void;
+  addStaged(): void;
+  peopleSearch: string;
+  setPeopleSearch(value: string): void;
+  renamePerson(oldName: string, newName: string): void;
+  deletePerson(name: string): void;
+  deletePhoto(refId: string): void;
+  addMoreForPerson(name: string): void;
   busy: boolean;
 }) {
   return (
-    <section className="split-page">
-      <div className="panel form-panel">
-        <div className="panel-title"><UserPlus size={18} /> Add a person to find</div>
-        <p className="compact">Add a few clear photos of one person. Vintrace saves these as the example photos it compares against during scans.</p>
-        <label>Person name<input aria-label="Person name" placeholder="Name shown in results" value={props.personName} onChange={(event) => props.setPersonName(event.currentTarget.value)} /></label>
-        <label>Age range in these photos
-          <select value={props.ageBucket} onChange={(event) => props.setAgeBucket(event.currentTarget.value as AgeBucket)}>
-            {ageBuckets.map((bucket) => <option key={bucket} value={bucket}>{ageBucketLabel(bucket)}</option>)}
-          </select>
-        </label>
-        <div className="field">
-          <label htmlFor="enroll-folder">Folder with this person's photos</label>
-          <div className="path-input">
-            <input id="enroll-folder" aria-label="Person photo folder" title={props.enrollFolder} value={props.enrollFolder} onChange={(event) => props.setEnrollFolder(event.currentTarget.value)} />
-            <button className="icon-button" onClick={props.chooseFolder} disabled={props.busy} title="Choose folder" aria-label="Choose person photo folder"><FolderOpen size={17} /></button>
-          </div>
-        </div>
-        <SubfolderPicker
-          mode="enroll"
-          folder={props.enrollFolder}
-          tree={props.folderTree}
-          loading={props.treeLoading}
-          error={props.treeError}
-          recursive={props.recursive}
-          setRecursive={props.setRecursive}
-          excludedDirs={props.excludedDirs}
-          setExcludedDirs={props.setExcludedDirs}
-          busy={props.busy}
-        />
-        <button className="primary" onClick={props.enroll} disabled={props.disabled}>
-          {props.busy ? <Loader2 className="spin" size={17} /> : <UserPlus size={17} />}
-          <span>Add photos</span>
-        </button>
-        <div className="age-set">
-          <div className="section-kicker">Optional: add different ages</div>
-          <p className="compact">Use this when you have separate folders from childhood, teen years, and adulthood.</p>
-          {referenceAgeBuckets.map((bucket) => (
-            <div className="age-folder-row" key={bucket}>
-              <label htmlFor={`age-folder-${bucket}`}>{ageBucketLabel(bucket)}</label>
-              <div className="path-input">
-                <input
-                  id={`age-folder-${bucket}`}
-                  aria-label={`${ageBucketLabel(bucket)} photo folder`}
-                  title={props.ageGroupFolders[bucket]}
-                  value={props.ageGroupFolders[bucket]}
-                  onChange={(event) => props.setAgeGroupFolder(bucket, event.currentTarget.value)}
-                />
-                <button
-                  className="icon-button"
-                  onClick={() => props.chooseAgeGroupFolder(bucket)}
-                  disabled={props.busy}
-                  title={`Choose ${ageBucketLabel(bucket).toLowerCase()} photo folder`}
-                  aria-label={`Choose ${ageBucketLabel(bucket)} photo folder`}
-                >
-                  <FolderOpen size={17} />
-                </button>
-              </div>
-            </div>
-          ))}
-          <button className="secondary" onClick={props.enrollAgeGroups} disabled={props.ageGroupDisabled}>
-            {props.busy ? <Loader2 className="spin" size={17} /> : <Archive size={17} />}
-            <span>Add age folders</span>
-          </button>
-        </div>
-        <ReferenceCoverageCoach references={props.state.references} />
-      </div>
-      <div className="panel table-panel">
-        <div className="panel-title">
-          <Archive size={18} /> Saved face photos
-          <span className="title-count">{props.state.references.length}</span>
-          <div className="spacer" />
-          <button className="ghost danger compact-action" onClick={props.deleteReference} disabled={!props.selectedRefId || props.busy} title="Delete selected saved photo" aria-label="Delete selected saved photo"><Trash2 size={16} /><span>Delete</span></button>
-          <button className="ghost danger compact-action" onClick={props.clearReferences} disabled={!props.state.references.length || props.busy} title="Clear saved face photos" aria-label="Clear saved face photos"><X size={16} /><span>Clear</span></button>
-        </div>
-        <div className="table">
-          {props.state.references.length === 0 ? <EmptyState icon={Archive} label="No people added yet" detail="Add a folder of face photos before scanning." /> : (
-            <>
-              <TableHeader columns={["Person", "Photo quality", "File"]} kind="reference" />
-              {props.state.references.map((ref) => (
-            <button key={ref.refId} className={props.selectedRefId === ref.refId ? "row reference-row selected" : "row reference-row"} onClick={() => props.setSelectedRefId(ref.refId)}>
-              <span><strong>{ref.personName}</strong><small>{ageBucketLabel(ref.ageBucket)}</small></span>
-              <span aria-label={`quality ${scoreLabel(ref.quality)}`}>{scoreLabel(ref.quality)}</span>
-              <span title={ref.sourcePath}>{basename(ref.sourcePath)}</span>
-              <ChevronRight size={16} />
-            </button>
-              ))}
-            </>
-          )}
-        </div>
-      </div>
+    <section className="split-page enroll-page">
+      <AddPersonPanel
+        personName={props.personName}
+        setPersonName={props.setPersonName}
+        ageBucket={props.ageBucket}
+        setAgeBucket={props.setAgeBucket}
+        nameInputRef={props.nameInputRef}
+        staging={props.staging}
+        chooseImages={props.chooseImages}
+        chooseFolder={props.chooseFolder}
+        onDropFiles={props.onDropFiles}
+        removeStaged={props.removeStaged}
+        clearStaging={props.clearStaging}
+        addStaged={props.addStaged}
+        busy={props.busy}
+      />
+      <PeopleGallery
+        references={props.state.references}
+        search={props.peopleSearch}
+        setSearch={props.setPeopleSearch}
+        onRename={props.renamePerson}
+        onDeletePerson={props.deletePerson}
+        onDeletePhoto={props.deletePhoto}
+        onAddMore={props.addMoreForPerson}
+        busy={props.busy}
+      />
     </section>
   );
 }
@@ -7437,7 +7721,7 @@ function CameraScanner(props: {
         )}
         {!live && (
           <div className="scanner-idle">
-            <Camera size={34} />
+            <span className="scanner-glyph"><Camera size={32} /></span>
             <strong>{error || "Camera standby"}</strong>
             <span>{error ? "Check camera permission, then try again." : matchReady ? "Ready to capture and match locally." : "Ready to capture now. Add people later to match it."}</span>
           </div>
