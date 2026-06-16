@@ -24,6 +24,7 @@ import {
   Gauge,
   HardDrive,
   Image as ImageIcon,
+  Images,
   KeyRound,
   Lock,
   Loader2,
@@ -133,13 +134,16 @@ import type {
   WorkspaceRelinkResult,
   CandidateQueryResult,
   DiagnosticsReport,
+  PhotoFolderList,
+  PhotoItemsPage,
   UpdateStatus
 } from "./types";
 import { computeScannedCounts, countExcludedBranches, excludeNode, includeNode } from "./lib/folderTreeSelection";
+import { PhotosView } from "./views/PhotosView";
 import { formatErrorMessage, formatUiMessage, languageOptions, localizeDom, normalizeLanguage, translate, translateUiText } from "./i18n";
 import type { LanguageCode, TranslationKey, UiMessageKey } from "./i18n";
 
-type TabKey = "dashboard" | "enroll" | "scan" | "review" | "settings";
+type TabKey = "dashboard" | "enroll" | "scan" | "review" | "photos" | "settings";
 type UiMessageValues = Record<string, string | number>;
 type NoticeState = { tone: "ok" | "warn" | "error"; text: string; messageKey?: UiMessageKey; values?: UiMessageValues; errorCode?: string; action?: string };
 
@@ -241,6 +245,7 @@ const tabs: Array<{ key: TabKey; labelKey: TranslationKey; icon: typeof Gauge }>
   { key: "enroll", labelKey: "nav.enroll", icon: UserPlus },
   { key: "scan", labelKey: "nav.scan", icon: Search },
   { key: "review", labelKey: "nav.review", icon: ShieldCheck },
+  { key: "photos", labelKey: "nav.photos", icon: Images },
   { key: "settings", labelKey: "nav.settings", icon: Settings }
 ];
 
@@ -2256,6 +2261,14 @@ export default function App() {
       recordLatency(label, command, startedAt);
       if (!options.quiet) setBusy(null);
     }
+  }
+
+  async function listPhotoFolders() {
+    return window.crossAge.invoke<PhotoFolderList>("list_photo_folders", {});
+  }
+
+  async function listPhotoFolderItems(params: Record<string, unknown>) {
+    return window.crossAge.invoke<PhotoItemsPage>("list_photo_folder_items", params);
   }
 
   async function queryCandidates(params: Record<string, unknown>) {
@@ -4889,6 +4902,13 @@ export default function App() {
             undoReview={undoLastReview}
             renderBatchSize={runtimePerformanceProfile.reviewBatchSize}
             showListThumbnails={runtimePerformanceProfile.showListThumbnails}
+            busy={Boolean(busy)}
+          />
+        )}
+        {!workspaceLocked && activeTab === "photos" && (
+          <PhotosView
+            listPhotoFolders={listPhotoFolders}
+            listPhotoFolderItems={listPhotoFolderItems}
             busy={Boolean(busy)}
           />
         )}

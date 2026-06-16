@@ -329,6 +329,42 @@ export interface ReviewCandidate {
   referenceCaptureDateProvenance?: string | null;
 }
 
+// Photos tab: browse photos as folders. A PhotoFolder is "All Photos", one
+// enrolled person, or an auto-clustered "Unknown Person N" group. PhotoItem is
+// a single tile; *Url fields are added by main.cjs decorateState (the backend
+// returns only paths).
+export interface PhotoFolder {
+  id: string; // "all" | "person:<name>" | "unknown:<cluster>"
+  kind: "all" | "person" | "unknown";
+  name: string;
+  count: number;
+  coverPreviewPath?: string | null;
+  coverPreviewUrl?: string;
+}
+
+export interface PhotoFolderList {
+  folders: PhotoFolder[];
+}
+
+export interface PhotoItem {
+  id: string;
+  sourcePath: string;
+  sourceUrl?: string;
+  previewPath?: string | null;
+  previewUrl?: string;
+  personName?: string | null;
+  mediaKind?: "image" | "video" | string;
+  captureDate?: string | null;
+}
+
+export interface PhotoItemsPage {
+  total: number;
+  offset: number;
+  limit: number;
+  returned: number;
+  items: PhotoItem[];
+}
+
 export interface ScanMetrics {
   total: number;
   processed: number;

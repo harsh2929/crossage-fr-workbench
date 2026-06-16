@@ -16,6 +16,7 @@ export type TranslationKey =
   | "nav.enroll"
   | "nav.scan"
   | "nav.review"
+  | "nav.photos"
   | "nav.settings"
   | "topbar.guide"
   | "topbar.choose"
@@ -147,6 +148,7 @@ const en: TranslationTable = {
   "nav.enroll": "People",
   "nav.scan": "Scan",
   "nav.review": "Review",
+  "nav.photos": "Photos",
   "nav.settings": "Settings",
   "topbar.guide": "Guide",
   "topbar.choose": "Choose",
@@ -224,6 +226,7 @@ const translations: Record<LanguageCode, TranslationTable> = {
     "nav.enroll": "लोग",
     "nav.scan": "स्कैन",
     "nav.review": "समीक्षा",
+    "nav.photos": "तस्वीरें",
     "nav.settings": "सेटिंग्स",
     "topbar.guide": "गाइड",
     "topbar.choose": "चुनें",
@@ -298,6 +301,7 @@ const translations: Record<LanguageCode, TranslationTable> = {
     "nav.enroll": "Personas",
     "nav.scan": "Escanear",
     "nav.review": "Revisar",
+    "nav.photos": "Fotos",
     "nav.settings": "Ajustes",
     "topbar.guide": "Guía",
     "topbar.choose": "Elegir",
@@ -372,6 +376,7 @@ const translations: Record<LanguageCode, TranslationTable> = {
     "nav.enroll": "人物",
     "nav.scan": "扫描",
     "nav.review": "审核",
+    "nav.photos": "照片",
     "nav.settings": "设置",
     "topbar.guide": "指南",
     "topbar.choose": "选择",
@@ -446,6 +451,7 @@ const translations: Record<LanguageCode, TranslationTable> = {
     "nav.enroll": "Personnes",
     "nav.scan": "Scanner",
     "nav.review": "Revoir",
+    "nav.photos": "Photos",
     "nav.settings": "Réglages",
     "topbar.guide": "Guide",
     "topbar.choose": "Choisir",
@@ -520,6 +526,7 @@ const translations: Record<LanguageCode, TranslationTable> = {
     "nav.enroll": "الأشخاص",
     "nav.scan": "المسح",
     "nav.review": "المراجعة",
+    "nav.photos": "الصور",
     "nav.settings": "الإعدادات",
     "topbar.guide": "الدليل",
     "topbar.choose": "اختيار",
@@ -594,6 +601,7 @@ const translations: Record<LanguageCode, TranslationTable> = {
     "nav.enroll": "人物",
     "nav.scan": "スキャン",
     "nav.review": "レビュー",
+    "nav.photos": "写真",
     "nav.settings": "設定",
     "topbar.guide": "ガイド",
     "topbar.choose": "選択",
