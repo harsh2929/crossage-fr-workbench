@@ -7,6 +7,7 @@ import math
 from crossage_fr.config import Thresholds
 from crossage_fr.match.age_gap import compute_age_gap
 from crossage_fr.match.calibration import as_norm_score
+from crossage_fr.match.pooling import weak_pooled_support
 from crossage_fr.models import ReferenceFace, ReviewCandidate
 from crossage_fr.store import SearchHit
 
@@ -107,6 +108,26 @@ def _demote_low_cohort_separation(
         score=float(demoted_score),
         band=band_for_score(float(demoted_score), thresholds),
         flags=tuple(dict.fromkeys((*decision.flags, "low-cohort-separation"))),
+    )
+
+
+def _demote_weak_pooled_support(
+    decision: MatchDecision, thresholds: Thresholds, template_cosines: dict[str, float] | None
+) -> MatchDecision:
+    # §5.3: a "confident" match must also agree with the matched person's robust pooled
+    # template, not lean on one outlier reference crop. Precision-only and cross-age-SAFE
+    # (never touches the relaxed band). No-op when no template is available for the person.
+    if not template_cosines or decision.band != "confident" or decision.raw_cosine is None:
+        return decision
+    template_cosine_value = template_cosines.get(decision.person_name)
+    if template_cosine_value is None or not weak_pooled_support(float(decision.raw_cosine), float(template_cosine_value)):
+        return decision
+    demoted_score = min(decision.score, thresholds.confident - 1e-4)
+    return replace(
+        decision,
+        score=float(demoted_score),
+        band=band_for_score(float(demoted_score), thresholds),
+        flags=tuple(dict.fromkeys((*decision.flags, "weak-pooled-support"))),
     )
 
 
@@ -211,6 +232,7 @@ def group_hits(
     candidate_capture_date: str | None = None,
     candidate_align_error: float | None = None,
     candidate_cohort_scores: list[float] | None = None,
+    candidate_template_cosines: dict[str, float] | None = None,
 ) -> MatchDecision | None:
     candidate_pose = _normalized_pose_bucket(pose_bucket)
     hard_pose = candidate_pose in {"profile", "edge-face", "three-quarter"}
@@ -324,6 +346,7 @@ def group_hits(
         ]
         cohort_scores = derived or None
     best_decision = _demote_low_cohort_separation(best_decision, thresholds, cohort_scores)
+    best_decision = _demote_weak_pooled_support(best_decision, thresholds, candidate_template_cosines)
     best_decision = _demote_low_quality_confident(best_decision, thresholds, candidate_quality)
     return _demote_alignment_suspect(best_decision, thresholds, candidate_align_error)
 

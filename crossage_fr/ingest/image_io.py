@@ -146,19 +146,53 @@ def image_decoder_report() -> dict[str, object]:
     }
 
 
-def iter_image_paths(root: Path) -> Iterable[Path]:
+def iter_image_paths(
+    root: Path,
+    recursive: bool = True,
+    excluded_dirs: set[Path] | None = None,
+    exclusion_reason: Callable[..., str] | None = None,
+) -> Iterable[Path]:
+    """Yield image paths under ``root``.
+
+    With no extra arguments the behaviour is unchanged (recursive, images-only,
+    no exclusions) so existing callers — benchmarks included — are untouched.
+
+    - ``recursive=False`` enumerates only the top-level folder.
+    - ``excluded_dirs`` is a set of resolved directory paths whose subtrees are skipped.
+    - ``exclusion_reason`` is an optional ``(path, is_dir) -> reason`` callable
+      (e.g. ``ProjectState.scan_exclusion_reason``); any truthy reason skips the
+      directory or file. This is how enroll opts into the workspace exclusion rules.
+    """
+    from crossage_fr.storage import safe_resolve
+
     root = root.expanduser().resolve()
     if root.is_file() and root.suffix.lower() in IMAGE_EXTENSIONS:
         yield root
         return
     if not root.exists():
         return
+    excluded = excluded_dirs or set()
     for current, dirnames, filenames in os.walk(root):
         dirnames.sort()
+        if not recursive:
+            dirnames[:] = []
+        else:
+            kept = []
+            for name in dirnames:
+                child = Path(current) / name
+                if excluded and safe_resolve(child) in excluded:
+                    continue
+                if exclusion_reason is not None and exclusion_reason(child, True):
+                    continue
+                kept.append(name)
+            dirnames[:] = kept
         for filename in sorted(filenames):
             path = Path(current) / filename
-            if path.suffix.lower() in IMAGE_EXTENSIONS:
-                yield path
+            if path.suffix.lower() not in IMAGE_EXTENSIONS:
+                continue
+            if exclusion_reason is not None and exclusion_reason(path, False):
+                continue
+            yield path
 
 
 def _representative_frame(image: Image.Image) -> Image.Image:

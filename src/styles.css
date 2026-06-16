@@ -1555,7 +1555,13 @@ button:not(:disabled):active {
 }
 
 .notice.busy {
+  align-items: center;
   color: var(--accent);
+}
+
+/* Cancel control surfaced in the busy banner while a scan is in flight. */
+.inline-cancel-scan {
+  margin-left: 6px;
 }
 
 .page-grid {
@@ -4671,6 +4677,21 @@ textarea:focus {
   padding: 12px;
 }
 
+/* These panel titles sit in the narrow left review column (minmax(330px, 440px)).
+   Let their trailing controls wrap to a second row instead of overflowing. */
+.media-history-panel .panel-title,
+.review-queue-panel .panel-title {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+.panel-title-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .media-action-stats {
   display: grid;
   gap: 8px;
@@ -7259,4 +7280,133 @@ input[type="range"] {
   .thumb {
     background: #202229;
   }
+}
+
+/* Subfolder include/exclude picker (Scan & Enroll folder pickers) */
+.subfolder-picker {
+  display: grid;
+  gap: 8px;
+  margin: 2px 0;
+}
+
+.subfolder-tree {
+  max-height: 240px;
+  overflow-y: auto;
+  display: grid;
+  gap: 1px;
+  padding: 4px;
+  border-radius: 9px;
+  background: var(--content);
+  border: 1px solid var(--separator-soft);
+}
+
+.subfolder-branch {
+  display: block;
+}
+
+.subfolder-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: 7px;
+}
+
+.subfolder-row:hover {
+  background: var(--fill);
+}
+
+.subfolder-row.excluded {
+  opacity: 0.5;
+}
+
+.subfolder-twisty {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--secondary);
+  cursor: pointer;
+  padding: 0;
+}
+
+.subfolder-twisty:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.subfolder-twisty-spacer {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+}
+
+.subfolder-label {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.subfolder-label input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.subfolder-icon {
+  flex: 0 0 auto;
+  color: var(--secondary);
+}
+
+.subfolder-name {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+
+.subfolder-count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.subfolder-count.warn {
+  color: var(--orange);
+}
+
+.subfolder-children {
+  display: block;
+}
+
+.subfolder-status {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--secondary);
+}
+
+.subfolder-status.warn {
+  color: var(--orange);
+}
+
+.subfolder-summary {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
 }

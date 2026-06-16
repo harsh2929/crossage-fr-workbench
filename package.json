@@ -37,6 +37,8 @@
     "test:fiqa": "PYTHONPATH=. .venv/bin/python tests/fiqa_units.py",
     "test:validation": "PYTHONPATH=. .venv/bin/python tests/validation_units.py",
     "test:pooling": "PYTHONPATH=. .venv/bin/python tests/pooling_units.py",
+    "test:folder-tree": "PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/folder_tree_units.py",
+    "test:folder-tree-selection": "node tests/folder_tree_selection.test.mjs",
     "test:model-validation": "PYTHONPATH=. .venv/bin/python tests/model_validation_units.py",
     "test:mcp": ".venv/bin/python tests/mcp_smoke.py",
     "test:filesystem-chaos": "node desktop/scripts/run-python.cjs tests/filesystem_chaos.py",

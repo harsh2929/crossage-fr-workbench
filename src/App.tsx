@@ -8,6 +8,7 @@ import {
   BookOpen,
   Camera,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Copy as CopyIcon,
@@ -75,6 +76,8 @@ import type {
   AppCommand,
   ExternalOpenPayload,
   FolderAnalysis,
+  FolderTree,
+  FolderTreeNode,
   FolderWatchStatus,
   DuplicatePeopleResult,
   InstallerDiagnosticsResult,
@@ -132,6 +135,7 @@ import type {
   DiagnosticsReport,
   UpdateStatus
 } from "./types";
+import { computeScannedCounts, countExcludedBranches, excludeNode, includeNode } from "./lib/folderTreeSelection";
 import { formatErrorMessage, formatUiMessage, languageOptions, localizeDom, normalizeLanguage, translate, translateUiText } from "./i18n";
 import type { LanguageCode, TranslationKey, UiMessageKey } from "./i18n";
 
@@ -1637,6 +1641,36 @@ export default function App() {
   const [modelDownloadProgress, setModelDownloadProgress] = useState<ModelDownloadProgress | null>(null);
   const [mediaActionProgress, setMediaActionProgress] = useState<MediaActionProgress | null>(null);
   const [folderAnalysis, setFolderAnalysis] = useState<FolderAnalysis | null>(null);
+  // Subfolder include/exclude picker — ephemeral per pick, never persisted. One
+  // set of state each for the Scan and Enroll folder pickers. The excluded sets
+  // hold only top-most excluded branch paths (see lib/folderTreeSelection).
+  const [scanFolderTree, setScanFolderTree] = useState<FolderTree | null>(null);
+  const [scanTreeLoading, setScanTreeLoading] = useState(false);
+  const [scanTreeError, setScanTreeError] = useState<string | null>(null);
+  const [scanRecursive, setScanRecursive] = useState(true);
+  const [scanExcludedDirs, setScanExcludedDirs] = useState<Set<string>>(() => new Set());
+  const [enrollFolderTree, setEnrollFolderTree] = useState<FolderTree | null>(null);
+  const [enrollTreeLoading, setEnrollTreeLoading] = useState(false);
+  const [enrollTreeError, setEnrollTreeError] = useState<string | null>(null);
+  const [enrollRecursive, setEnrollRecursive] = useState(true);
+  const [enrollExcludedDirs, setEnrollExcludedDirs] = useState<Set<string>>(() => new Set());
+  const folderTreeRequestId = useRef(0);
+  // Whenever the chosen folder changes — picked, typed, or set programmatically
+  // (camera/resume) — discard the previous folder's tree and exclusions. Without
+  // this, exclusions from folder A would be sent for a later folder B and the
+  // backend would (correctly) reject them as outside the chosen folder.
+  useEffect(() => {
+    setScanFolderTree(null);
+    setScanTreeError(null);
+    setScanExcludedDirs(new Set());
+    setScanRecursive(true);
+  }, [scanFolder]);
+  useEffect(() => {
+    setEnrollFolderTree(null);
+    setEnrollTreeError(null);
+    setEnrollExcludedDirs(new Set());
+    setEnrollRecursive(true);
+  }, [enrollFolder]);
   const [savedScanSources, setSavedScanSources] = useState<SavedScanSource[]>([]);
   const [scanQueue, setScanQueue] = useState<ScanQueueItem[]>([]);
   const [scanQueueRunning, setScanQueueRunning] = useState(false);
@@ -2367,6 +2401,66 @@ export default function App() {
     if (folder) setter(folder);
   }
 
+  // Subfolder include/exclude picker plumbing. The tree comes from the backend
+  // `folder_tree` command so the picker reflects exactly what the scan/enroll
+  // walk would enumerate. A shared request id discards stale responses (only one
+  // picker — scan or enroll — is ever visible at a time).
+  async function loadFolderTree(folder: string, mode: "scan" | "enroll") {
+    const trimmed = folder.trim();
+    const setTree = mode === "scan" ? setScanFolderTree : setEnrollFolderTree;
+    const setLoading = mode === "scan" ? setScanTreeLoading : setEnrollTreeLoading;
+    const setError = mode === "scan" ? setScanTreeError : setEnrollTreeError;
+    if (!trimmed) {
+      setTree(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+    const requestId = folderTreeRequestId.current + 1;
+    folderTreeRequestId.current = requestId;
+    setLoading(true);
+    setError(null);
+    try {
+      const tree = await invoke<FolderTree>("Listing subfolders", "folder_tree", { folder: trimmed }, { quiet: true });
+      if (requestId !== folderTreeRequestId.current) return;
+      setTree(tree);
+    } catch (error) {
+      if (requestId !== folderTreeRequestId.current) return;
+      setTree(null);
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (requestId === folderTreeRequestId.current) setLoading(false);
+    }
+  }
+
+  async function chooseScanFolder() {
+    const folder = await window.crossAge.chooseFolder();
+    if (!folder) return;
+    setScanFolder(folder);
+    setScanRecursive(true);
+    setScanExcludedDirs(new Set());
+    void loadFolderTree(folder, "scan");
+  }
+
+  async function chooseEnrollFolder() {
+    const folder = await window.crossAge.chooseFolder();
+    if (!folder) return;
+    setEnrollFolder(folder);
+    setEnrollRecursive(true);
+    setEnrollExcludedDirs(new Set());
+    void loadFolderTree(folder, "enroll");
+  }
+
+  // Ephemeral recurse + exclusion params sent to scan/enroll/analyze. Exclusions
+  // are only meaningful when recursing, so they're dropped when recursion is off.
+  function scanScopeParams(): { recursive: boolean; excludedDirs: string[] } {
+    return { recursive: scanRecursive, excludedDirs: scanRecursive ? Array.from(scanExcludedDirs) : [] };
+  }
+
+  function enrollScopeParams(): { recursive: boolean; excludedDirs: string[] } {
+    return { recursive: enrollRecursive, excludedDirs: enrollRecursive ? Array.from(enrollExcludedDirs) : [] };
+  }
+
   async function chooseModelRoot() {
     const folder = await window.crossAge.chooseFolder();
     if (!folder) return;
@@ -2491,7 +2585,8 @@ export default function App() {
     const result = await invoke<CommandResult>("Adding person photos", "enroll", {
       personName,
       ageBucket,
-      folder: enrollFolder
+      folder: enrollFolder,
+      ...enrollScopeParams()
     });
     const added = result.added ?? 0;
     const skipped = skippedSummary(result.errors?.length ?? 0);
@@ -2562,6 +2657,7 @@ export default function App() {
       source: "manual",
       resume: true,
       total: knownTotal,
+      ...scanScopeParams(),
       ...compatibilityParams
     });
     if (savedScanSources.some((source) => source.path === scanFolder.trim())) {
@@ -2692,7 +2788,7 @@ export default function App() {
     const folder = scanFolder.trim();
     const requestId = folderAnalysisRequestId.current + 1;
     folderAnalysisRequestId.current = requestId;
-    const analysis = await invoke<FolderAnalysis>("Checking folder", "analyze_folder", { folder });
+    const analysis = await invoke<FolderAnalysis>("Checking folder", "analyze_folder", { folder, ...scanScopeParams() });
     if (requestId !== folderAnalysisRequestId.current || scanFolder.trim() !== folder) {
       return;
     }
@@ -4356,6 +4452,15 @@ export default function App() {
   const isDemoMode = safeText(state?.engine).startsWith("local-image-fingerprint");
   const workspaceLocked = Boolean(workspaceLock?.locked);
   const canProcess = Boolean(state?.consentOnFile) && !busy && !workspaceLocked;
+  // A scan is cancellable while its busy label is showing (covers the count/prepare
+  // window before progress streams) or while live progress is non-terminal. Lets the
+  // status-row banner offer an immediate, always-visible "Cancel scan" the moment a
+  // scan starts, from any tab -- not only the Scan tab's ScanActivity controls.
+  const scanInFlight = Boolean(
+    (busy && /scan|resum|retry/i.test(busy)) ||
+    (scanProgress && !["complete", "cancelled", "error"].includes(scanProgress.phase))
+  );
+  const scanCancelRequested = Boolean(localScanMarkers?.cancelRequested);
   const enrollDisabled = !canProcess || !personName.trim() || !enrollFolder.trim();
   const ageGroupDisabled = !canProcess || !personName.trim() || !referenceAgeBuckets.some((bucket) => ageGroupFolders[bucket].trim());
   const scanDisabled = !canProcess || !scanFolder.trim() || !state?.references.length;
@@ -4592,7 +4697,21 @@ export default function App() {
 
         <div className="status-row">
           {busy ? (
-            <div className="notice busy" role="status" aria-live="polite" aria-atomic="true"><Loader2 className="spin" size={16} /> {uiText(busy)}</div>
+            <div className="notice busy" role="status" aria-live="polite" aria-atomic="true">
+              <Loader2 className="spin" size={16} /> {uiText(busy)}
+              {scanInFlight && (
+                <button
+                  type="button"
+                  className="ghost compact-action danger inline-cancel-scan"
+                  onClick={cancelActiveScan}
+                  disabled={scanCancelRequested}
+                  aria-label="Cancel scan"
+                >
+                  <X size={14} />
+                  <span>{scanCancelRequested ? "Cancelling…" : "Cancel scan"}</span>
+                </button>
+              )}
+            </div>
           ) : notice ? (
             <div className={`notice ${notice.tone}`} role={notice.tone === "error" ? "alert" : "status"} aria-live={notice.tone === "error" ? "assertive" : "polite"} aria-atomic="true">
               {notice.tone === "error" ? <AlertCircle size={16} /> : <Check size={16} />}
@@ -4658,7 +4777,14 @@ export default function App() {
             ageGroupFolders={ageGroupFolders}
             setAgeGroupFolder={setAgeGroupFolder}
             chooseAgeGroupFolder={chooseAgeGroupFolder}
-            chooseFolder={() => chooseFolder(setEnrollFolder)}
+            chooseFolder={chooseEnrollFolder}
+            folderTree={enrollFolderTree}
+            treeLoading={enrollTreeLoading}
+            treeError={enrollTreeError}
+            recursive={enrollRecursive}
+            setRecursive={setEnrollRecursive}
+            excludedDirs={enrollExcludedDirs}
+            setExcludedDirs={setEnrollExcludedDirs}
             enroll={enroll}
             enrollAgeGroups={enrollAgeGroups}
             disabled={enrollDisabled}
@@ -4675,7 +4801,14 @@ export default function App() {
             state={state}
             scanFolder={scanFolder}
             setScanFolder={setScanFolder}
-            chooseFolder={() => chooseFolder(setScanFolder)}
+            chooseFolder={chooseScanFolder}
+            folderTree={scanFolderTree}
+            treeLoading={scanTreeLoading}
+            treeError={scanTreeError}
+            recursive={scanRecursive}
+            setRecursive={setScanRecursive}
+            excludedDirs={scanExcludedDirs}
+            setExcludedDirs={setScanExcludedDirs}
             scan={scan}
             resumeLastScan={resumeLastScan}
             restartLastScan={restartLastScan}
@@ -6284,6 +6417,149 @@ function DownloadIcon() {
   return <Archive size={17} />;
 }
 
+function FolderTreeRow(props: {
+  node: FolderTreeNode;
+  depth: number;
+  mode: "scan" | "enroll";
+  excludedDirs: Set<string>;
+  ancestorExcluded: boolean;
+  toggleNode(node: FolderTreeNode, exclude: boolean): void;
+  disabled: boolean;
+}) {
+  const { node, depth, mode, excludedDirs, ancestorExcluded } = props;
+  const [expanded, setExpanded] = useState(false);
+  const selfExcluded = excludedDirs.has(node.path);
+  const effectivelyExcluded = ancestorExcluded || selfExcluded;
+  const hasChildren = node.children.length > 0;
+  const images = node.totalImages;
+  const videos = node.totalVideos;
+  const countLabel = mode === "scan"
+    ? `${images.toLocaleString()} image${images === 1 ? "" : "s"}${videos ? ` · ${videos.toLocaleString()} video${videos === 1 ? "" : "s"}` : ""}`
+    : `${images.toLocaleString()} image${images === 1 ? "" : "s"}`;
+  return (
+    <div className="subfolder-branch" role="treeitem" aria-expanded={hasChildren ? expanded : undefined}>
+      <div className={`subfolder-row${effectivelyExcluded ? " excluded" : ""}`} style={{ paddingLeft: `${depth * 18 + 4}px` }}>
+        <button
+          type="button"
+          className="subfolder-twisty"
+          onClick={() => hasChildren && setExpanded((value) => !value)}
+          aria-label={hasChildren ? (expanded ? "Collapse folder" : "Expand folder") : undefined}
+          disabled={!hasChildren}
+        >
+          {hasChildren ? (expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />) : <span className="subfolder-twisty-spacer" />}
+        </button>
+        <label className="subfolder-label">
+          <input
+            type="checkbox"
+            checked={!effectivelyExcluded}
+            disabled={props.disabled || ancestorExcluded}
+            onChange={(event) => props.toggleNode(node, !event.currentTarget.checked)}
+          />
+          <FolderOpen size={14} className="subfolder-icon" />
+          <span className="subfolder-name" title={node.path}>{node.name}</span>
+          <span className="subfolder-count">{countLabel}</span>
+          {node.truncated && <span className="subfolder-count warn">(partial)</span>}
+        </label>
+      </div>
+      {expanded && hasChildren && (
+        <div className="subfolder-children" role="group">
+          {node.children.map((child) => (
+            <FolderTreeRow
+              key={child.path}
+              node={child}
+              depth={depth + 1}
+              mode={mode}
+              excludedDirs={excludedDirs}
+              ancestorExcluded={effectivelyExcluded}
+              toggleNode={props.toggleNode}
+              disabled={props.disabled}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SubfolderPicker(props: {
+  mode: "scan" | "enroll";
+  folder: string;
+  tree: FolderTree | null;
+  loading: boolean;
+  error: string | null;
+  recursive: boolean;
+  setRecursive(value: boolean): void;
+  excludedDirs: Set<string>;
+  setExcludedDirs(value: Set<string>): void;
+  busy: boolean;
+}) {
+  const { mode, folder, tree, recursive, excludedDirs } = props;
+  if (!folder.trim()) return null;
+  const root = tree?.root ?? null;
+  const counts = root ? computeScannedCounts(root, excludedDirs, recursive, mode) : null;
+  const excludedCount = countExcludedBranches(excludedDirs);
+  const hasSubfolders = Boolean(root && root.children.length);
+  const noun = mode === "scan" ? "scanned" : "added";
+
+  const toggleNode = (node: FolderTreeNode, exclude: boolean) => {
+    props.setExcludedDirs(exclude ? excludeNode(excludedDirs, node) : includeNode(excludedDirs, node));
+  };
+
+  return (
+    <div className="subfolder-picker">
+      <label className="switch-row">
+        <span>
+          <strong>Include subfolders</strong>
+          <small>Search every subfolder of this folder. Turn off to {mode === "scan" ? "scan" : "use"} only files directly inside it.</small>
+        </span>
+        <input
+          type="checkbox"
+          checked={recursive}
+          disabled={props.busy}
+          onChange={(event) => props.setRecursive(event.currentTarget.checked)}
+          aria-label="Include subfolders"
+        />
+      </label>
+      {props.loading && <p className="compact subfolder-status"><Loader2 className="spin" size={14} /> Reading subfolders…</p>}
+      {props.error && <p className="compact subfolder-status warn">Could not list subfolders: {props.error}</p>}
+      {!props.loading && !props.error && recursive && root && (
+        hasSubfolders ? (
+          <div className="subfolder-tree" role="tree" aria-label="Subfolders to include or exclude">
+            {root.children.map((child) => (
+              <FolderTreeRow
+                key={child.path}
+                node={child}
+                depth={0}
+                mode={mode}
+                excludedDirs={excludedDirs}
+                ancestorExcluded={false}
+                toggleNode={toggleNode}
+                disabled={props.busy}
+              />
+            ))}
+          </div>
+        ) : (
+          <p className="compact subfolder-status">No subfolders — only files directly in this folder will be {noun}.</p>
+        )
+      )}
+      {!recursive && (
+        <p className="compact subfolder-status">Subfolders are off — only files directly in this folder will be {noun}.</p>
+      )}
+      {tree?.truncated && (
+        <p className="compact subfolder-status warn">This folder is very large; some subfolders are not listed. Unlisted folders are still {noun}.</p>
+      )}
+      {counts && (
+        <p className="compact subfolder-summary">
+          {recursive && excludedCount > 0 ? `${excludedCount} folder${excludedCount === 1 ? "" : "s"} excluded · ` : ""}
+          {mode === "scan"
+            ? `will scan ~${counts.images.toLocaleString()} image${counts.images === 1 ? "" : "s"}${counts.videos ? ` · ${counts.videos.toLocaleString()} video${counts.videos === 1 ? "" : "s"}` : ""}`
+            : `will add ~${counts.images.toLocaleString()} image${counts.images === 1 ? "" : "s"}`}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function EnrollView(props: {
   state: AppState;
   personName: string;
@@ -6296,6 +6572,13 @@ function EnrollView(props: {
   setAgeGroupFolder(ageBucket: AgeBucket, folder: string): void;
   chooseAgeGroupFolder(ageBucket: AgeBucket): void;
   chooseFolder(): void;
+  folderTree: FolderTree | null;
+  treeLoading: boolean;
+  treeError: string | null;
+  recursive: boolean;
+  setRecursive(value: boolean): void;
+  excludedDirs: Set<string>;
+  setExcludedDirs(value: Set<string>): void;
   enroll(): void;
   enrollAgeGroups(): void;
   disabled: boolean;
@@ -6324,6 +6607,18 @@ function EnrollView(props: {
             <button className="icon-button" onClick={props.chooseFolder} disabled={props.busy} title="Choose folder" aria-label="Choose person photo folder"><FolderOpen size={17} /></button>
           </div>
         </div>
+        <SubfolderPicker
+          mode="enroll"
+          folder={props.enrollFolder}
+          tree={props.folderTree}
+          loading={props.treeLoading}
+          error={props.treeError}
+          recursive={props.recursive}
+          setRecursive={props.setRecursive}
+          excludedDirs={props.excludedDirs}
+          setExcludedDirs={props.setExcludedDirs}
+          busy={props.busy}
+        />
         <button className="primary" onClick={props.enroll} disabled={props.disabled}>
           {props.busy ? <Loader2 className="spin" size={17} /> : <UserPlus size={17} />}
           <span>Add photos</span>
@@ -6446,6 +6741,13 @@ function ScanView(props: {
   scanFolder: string;
   setScanFolder(value: string): void;
   chooseFolder(): void;
+  folderTree: FolderTree | null;
+  treeLoading: boolean;
+  treeError: string | null;
+  recursive: boolean;
+  setRecursive(value: boolean): void;
+  excludedDirs: Set<string>;
+  setExcludedDirs(value: Set<string>): void;
   scan(): void;
   resumeLastScan(): void;
   restartLastScan(): void;
@@ -6510,6 +6812,18 @@ function ScanView(props: {
             <button className="icon-button" onClick={props.chooseFolder} disabled={props.busy} title="Choose folder" aria-label="Choose scan folder"><FolderOpen size={17} /></button>
           </div>
         </div>
+        <SubfolderPicker
+          mode="scan"
+          folder={props.scanFolder}
+          tree={props.folderTree}
+          loading={props.treeLoading}
+          error={props.treeError}
+          recursive={props.recursive}
+          setRecursive={props.setRecursive}
+          excludedDirs={props.excludedDirs}
+          setExcludedDirs={props.setExcludedDirs}
+          busy={props.busy}
+        />
         <button className="primary" onClick={props.scan} disabled={props.disabled}>
           {props.busy ? <Loader2 className="spin" size={17} /> : <Search size={17} />}
           <span>Scan folder</span>
@@ -9088,18 +9402,20 @@ function ReviewView(props: {
           <span>File actions</span>
           <span className="title-count">{mediaActionHistory?.items.length ?? 0}</span>
           <div className="spacer" />
-          <button className="ghost compact-action" onClick={() => setMediaActionHistoryOpen((value) => !value)} type="button">
-            <BookOpen size={16} />
-            <span>{mediaActionHistoryOpen ? "Hide" : "History"}</span>
-          </button>
-          <button className="ghost compact-action" onClick={() => void refreshMediaActionHistory()} type="button">
-            <RefreshCcw size={16} />
-            <span>Refresh</span>
-          </button>
-          <button className="ghost compact-action" onClick={() => void undoHistoryItem()} disabled={!mediaActionHistory?.items.some((item) => item.canUndo) || props.busy} type="button">
-            <Undo2 size={16} />
-            <span>Undo last</span>
-          </button>
+          <div className="panel-title-actions">
+            <button className="ghost compact-action" onClick={() => setMediaActionHistoryOpen((value) => !value)} type="button">
+              <BookOpen size={16} />
+              <span>{mediaActionHistoryOpen ? "Hide" : "History"}</span>
+            </button>
+            <button className="ghost compact-action" onClick={() => void refreshMediaActionHistory()} type="button">
+              <RefreshCcw size={16} />
+              <span>Refresh</span>
+            </button>
+            <button className="ghost compact-action" onClick={() => void undoHistoryItem()} disabled={!mediaActionHistory?.items.some((item) => item.canUndo) || props.busy} type="button">
+              <Undo2 size={16} />
+              <span>Undo last</span>
+            </button>
+          </div>
         </div>
         {props.mediaActionProgress && props.mediaActionProgress.phase !== "complete" && (
           <div className="media-action-progress">

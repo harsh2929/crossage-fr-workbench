@@ -409,6 +409,31 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
         self.rescue_detector_size = min(1024, max(detector_size, 768))
         self.det_model.prepare(ctx_id, input_size=(detector_size, detector_size), det_thresh=0.5)
         self.rec_model.prepare(ctx_id)
+        # Phase-4 §5.1: when a NON-default recognizer is dropped in via the seam, validate
+        # its I/O against the pipeline's assumptions (square>=112%16 input, single 512-d
+        # output) so a mis-exported ONNX is WARNED about instead of silently producing
+        # garbage embeddings. Uses the already-loaded session (no second load).
+        if self.recognizer_filename:
+            try:
+                from crossage_fr.embed.model_validation import assess_recognizer_io
+
+                session = getattr(self.rec_model, "session", None)
+                if session is not None:
+                    rec_in = session.get_inputs()[0]
+                    rec_out = session.get_outputs()
+                    out_dim = rec_out[0].shape[-1] if rec_out and rec_out[0].shape else None
+                    verdict = assess_recognizer_io(list(rec_in.shape), output_count=len(rec_out), output_dim=out_dim)
+                    if not verdict.get("ok"):
+                        import logging
+
+                        logging.getLogger(__name__).warning(
+                            "Drop-in recognizer %s may be misconfigured: %s",
+                            self.recognizer_filename,
+                            "; ".join(verdict.get("reasons", [])),
+                        )
+                        self.recognizer_validation = verdict
+            except Exception:
+                pass
         # Multi-scale normal pass: a second larger scale recovers medium/distant
         # faces a single resize-to-fit would drop. Only honored on dynamic-shape
         # ONNX detectors (static models ignore the size list).

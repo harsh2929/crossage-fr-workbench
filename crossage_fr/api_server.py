@@ -340,6 +340,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "scan": "_cmd_scan",
         "scan_paths": "_cmd_scan_paths",
         "analyze_folder": "_cmd_analyze_folder",
+        "folder_tree": "_cmd_folder_tree",
         "cancel_scan": "_cmd_cancel_scan",
         "pause_scan": "_cmd_pause_scan",
         "resume_scan": "_cmd_resume_scan",
@@ -517,11 +518,15 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     def _cmd_enroll(self, params, progress=None):
         self._require_consent_for_person(str(params.get("personName", "")))
         engine = self._engine_instance()
+        folder = Path(str(params.get("folder", ""))).expanduser()
+        recursive, excluded_dirs = self._parse_scan_scope(params, folder)
         added, errors = self.project.enroll_folder(
             str(params.get("personName", "")),
             str(params.get("ageBucket", "unknown")),
-            Path(str(params.get("folder", ""))).expanduser(),
+            folder,
             engine,
+            recursive=recursive,
+            excluded_dirs=excluded_dirs,
         )
         return {"added": added, "errors": errors, "state": self.state()}
 
@@ -546,13 +551,17 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         existing_candidate_ids = set(self.project.candidates)
         engine = self._engine_instance()
         self._require_scan_model_compatibility(engine, params)
+        scan_folder_path = Path(str(params.get("folder", ""))).expanduser()
+        recursive, excluded_dirs = self._parse_scan_scope(params, scan_folder_path)
         added, errors, metrics = self.project.scan_folder(
-            Path(str(params.get("folder", ""))).expanduser(),
+            scan_folder_path,
             engine,
             on_progress=lambda payload: self._progress(progress, {**payload, "source": source}),
             source=source,
             resume=bool(params.get("resume", True)),
             total=int(params.get("total", 0) or 0) or None,
+            recursive=recursive,
+            excluded_dirs=excluded_dirs,
         )
         verification = self._maybe_verify_new_candidates(existing_candidate_ids, metrics, progress, source)
         metrics.update({
@@ -594,11 +603,44 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         })
         return {"added": added, "errors": errors, "metrics": metrics, "state": self.state()}
 
-    def _cmd_analyze_folder(self, params, progress=None):
-        return self.analyze_folder(
+    def _parse_scan_scope(self, params, folder: Path) -> tuple[bool, set[Path] | None]:
+        """Parse the ephemeral recurse toggle + subfolder exclusions from a command.
+
+        Returns (recursive, excluded_dirs). Every excluded path must resolve to a
+        descendant of the chosen folder; anything outside is rejected at the
+        boundary rather than silently ignored.
+        """
+        recursive = bool(params.get("recursive", True))
+        raw = params.get("excludedDirs", []) or []
+        if not isinstance(raw, list):
+            raise ValueError("excludedDirs must be a list of folder paths.")
+        if not raw:
+            return recursive, None
+        root = safe_resolve(folder)
+        excluded: set[Path] = set()
+        for item in raw:
+            candidate = safe_resolve(Path(str(item)).expanduser())
+            if candidate != root and root not in candidate.parents:
+                raise ValueError("excludedDirs must be inside the chosen folder.")
+            excluded.add(candidate)
+        return recursive, excluded
+
+    def _cmd_folder_tree(self, params, progress=None):
+        return self.folder_tree(
             Path(str(params.get("folder", ""))).expanduser(),
             max_entries=int(params.get("maxEntries", ANALYZE_ENTRY_BUDGET) or ANALYZE_ENTRY_BUDGET),
             time_budget_ms=int(params.get("timeBudgetMs", ANALYZE_TIME_BUDGET_MS) or ANALYZE_TIME_BUDGET_MS),
+        )
+
+    def _cmd_analyze_folder(self, params, progress=None):
+        folder = Path(str(params.get("folder", ""))).expanduser()
+        recursive, excluded_dirs = self._parse_scan_scope(params, folder)
+        return self.analyze_folder(
+            folder,
+            max_entries=int(params.get("maxEntries", ANALYZE_ENTRY_BUDGET) or ANALYZE_ENTRY_BUDGET),
+            time_budget_ms=int(params.get("timeBudgetMs", ANALYZE_TIME_BUDGET_MS) or ANALYZE_TIME_BUDGET_MS),
+            recursive=recursive,
+            excluded_dirs=excluded_dirs,
         )
 
     def _cmd_cancel_scan(self, params, progress=None):
@@ -1354,8 +1396,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         self._reset_engine()
         return self.state()
 
-    def analyze_folder(self, folder: Path, max_entries: int = ANALYZE_ENTRY_BUDGET, time_budget_ms: int = ANALYZE_TIME_BUDGET_MS) -> dict[str, Any]:
+    def analyze_folder(
+        self,
+        folder: Path,
+        max_entries: int = ANALYZE_ENTRY_BUDGET,
+        time_budget_ms: int = ANALYZE_TIME_BUDGET_MS,
+        recursive: bool = True,
+        excluded_dirs: set[Path] | None = None,
+    ) -> dict[str, Any]:
         resolved = safe_resolve(folder)
+        excluded = excluded_dirs or set()
         storage = inspect_storage_path(resolved, self.project.root)
         entry_budget = max(1, int(max_entries or ANALYZE_ENTRY_BUDGET))
         time_budget_ms = max(1_000, int(time_budget_ms or ANALYZE_TIME_BUDGET_MS))
@@ -1434,11 +1484,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                         continue
                     if is_dir:
                         reason = self.project.scan_exclusion_reason(path, is_dir=True)
+                        if not reason and excluded and safe_resolve(path) in excluded:
+                            reason = "Skipped by subfolder selection."
                         if reason:
                             result["excludedDirectoryCount"] += 1
                             if len(result["excludedSamples"]) < 8:
                                 result["excludedSamples"].append({"path": str(path), "reason": reason})
-                        else:
+                        elif recursive:
                             stack.append(path)
                         continue
                     if not is_file:
@@ -1541,6 +1593,103 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         result["plan"] = self._build_scan_plan(result)
         result["readiness"] = self._build_scan_readiness(result)
         return result
+
+    def folder_tree(
+        self,
+        folder: Path,
+        max_entries: int = ANALYZE_ENTRY_BUDGET,
+        time_budget_ms: int = ANALYZE_TIME_BUDGET_MS,
+    ) -> dict[str, Any]:
+        """Return the directory tree under ``folder`` with per-folder media counts.
+
+        Powers the subfolder include/exclude picker. Uses the same enumeration
+        truth as the real scan — ``scan_exclusion_reason`` hides config-excluded
+        dirs (``.git`` etc.) and symlinks are not followed — so what the user sees
+        and unchecks matches what gets scanned. Budgeted like ``analyze_folder``;
+        on cap, the deepest reached node is flagged ``truncated`` and unlisted
+        folders still scan (they are never silently dropped).
+        """
+        resolved = safe_resolve(folder)
+        entry_budget = max(1, int(max_entries or ANALYZE_ENTRY_BUDGET))
+        time_budget_ms = max(1_000, int(time_budget_ms or ANALYZE_TIME_BUDGET_MS))
+        deadline = monotonic() + (time_budget_ms / 1000)
+        storage = inspect_storage_path(resolved, self.project.root)
+
+        def make_node(path: Path) -> dict[str, Any]:
+            return {
+                "name": path.name or str(path),
+                "path": str(path),
+                "imageCount": 0,
+                "videoCount": 0,
+                "totalImages": 0,
+                "totalVideos": 0,
+                "childDirCount": 0,
+                "children": [],
+                "truncated": False,
+            }
+
+        root_node = make_node(resolved)
+        entries_checked = 0
+        truncated = False
+        if storage.get("exists") and storage.get("isDirectory"):
+            # Iterative DFS so deeply nested drives can't blow the recursion limit.
+            # `order` keeps parents before children; aggregating in reverse finalises
+            # every child's subtree totals before its parent reads them.
+            stack: list[tuple[dict[str, Any], Path]] = [(root_node, resolved)]
+            order: list[dict[str, Any]] = [root_node]
+            while stack:
+                node, dir_path = stack.pop()
+                if entries_checked >= entry_budget or monotonic() >= deadline:
+                    truncated = True
+                    node["truncated"] = True
+                    continue
+                try:
+                    entries_context = os.scandir(dir_path)
+                except OSError:
+                    node["truncated"] = True
+                    continue
+                with entries_context as entries:
+                    for entry in entries:
+                        entries_checked += 1
+                        if entries_checked > entry_budget or monotonic() >= deadline:
+                            truncated = True
+                            node["truncated"] = True
+                            break
+                        path = Path(entry.path)
+                        try:
+                            is_dir = entry.is_dir(follow_symlinks=False)
+                            is_file = entry.is_file(follow_symlinks=False)
+                        except OSError:
+                            continue
+                        if is_dir:
+                            if self.project.scan_exclusion_reason(path, is_dir=True):
+                                continue
+                            child = make_node(path)
+                            node["children"].append(child)
+                            node["childDirCount"] += 1
+                            stack.append((child, path))
+                            order.append(child)
+                            continue
+                        if not is_file:
+                            continue
+                        suffix = path.suffix.lower()
+                        if suffix in IMAGE_EXTENSIONS:
+                            node["imageCount"] += 1
+                        elif suffix in VIDEO_EXTENSIONS:
+                            node["videoCount"] += 1
+            for node in reversed(order):
+                node["children"].sort(key=lambda child: child["name"].lower())
+                node["totalImages"] = node["imageCount"] + sum(c["totalImages"] for c in node["children"])
+                node["totalVideos"] = node["videoCount"] + sum(c["totalVideos"] for c in node["children"])
+
+        return {
+            "root": root_node,
+            "truncated": truncated,
+            "entriesChecked": entries_checked,
+            "entryBudget": entry_budget,
+            "exists": bool(storage.get("exists")),
+            "isDirectory": bool(storage.get("isDirectory")),
+        }
 
     def _estimate_scan_duration(self, analysis: dict[str, Any]) -> dict[str, Any]:
         image_count = int(analysis.get("imageCount", 0) or 0)

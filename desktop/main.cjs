@@ -385,6 +385,7 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "resume_scan",
   "scan_job_status",
   "analyze_folder",
+  "folder_tree",
   "set_status",
   "bulk_set_status",
   "set_candidate_note",
@@ -1971,7 +1972,7 @@ function validateBackendPayload(payload = {}) {
 }
 
 function grantPathsFromBackendRequest(command, params) {
-  if (["set_workspace", "enroll", "scan", "analyze_folder", "export_report", "export_candidates", "preview_candidate_media_action", "manage_candidate_media"].includes(command)) {
+  if (["set_workspace", "enroll", "scan", "analyze_folder", "folder_tree", "export_report", "export_candidates", "preview_candidate_media_action", "manage_candidate_media"].includes(command)) {
     grantUserPath(params.path || params.folder);
   }
   if (command === "restore_workspace_backup") {

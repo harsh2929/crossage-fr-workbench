@@ -16,6 +16,7 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "resume_scan",
   "scan_job_status",
   "analyze_folder",
+  "folder_tree",
   "set_status",
   "bulk_set_status",
   "set_candidate_note",

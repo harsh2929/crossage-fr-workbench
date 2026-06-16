@@ -100,6 +100,22 @@ def test_misaligned_face_cannot_be_confident_but_cross_age_unharmed() -> None:
     assert "alignment-suspect" not in relaxed.flags
 
 
+def test_weak_pooled_support_cannot_be_confident_but_cross_age_unharmed() -> None:
+    refs = {"r1": _ref("r1", "Alice")}
+    th = Thresholds()
+    confident_hits = [SearchHit(item_id="r1", score=0.50)]
+    # Match agrees with the person's robust pooled template -> stays confident.
+    assert group_hits(confident_hits, refs, th, candidate_template_cosines={"Alice": 0.48}).band == "confident"
+    # Strong match to one ref (0.50) but weak agreement with the pooled template (0.30)
+    # -> leaned on an outlier crop -> demoted (precision-only).
+    poor = group_hits(confident_hits, refs, th, candidate_template_cosines={"Alice": 0.30})
+    assert poor.band == "likely"
+    assert "weak-pooled-support" in poor.flags
+    # Cross-age relaxed band is never penalized for weak pooled support (recall-safe).
+    relaxed = group_hits([SearchHit(item_id="r1", score=0.22)], refs, th, candidate_template_cosines={"Alice": 0.05})
+    assert "weak-pooled-support" not in relaxed.flags
+
+
 def test_low_cohort_separation_cannot_be_confident_but_cross_age_unharmed() -> None:
     refs = {"r1": _ref("r1", "Alice")}
     th = Thresholds()
@@ -235,6 +251,7 @@ def main() -> None:
     test_accuracy_from_label_rows()
     test_age_consistent_same_era_support_is_additive_and_degrade_safe()
     test_misaligned_face_cannot_be_confident_but_cross_age_unharmed()
+    test_weak_pooled_support_cannot_be_confident_but_cross_age_unharmed()
     test_low_cohort_separation_cannot_be_confident_but_cross_age_unharmed()
     test_low_quality_crop_cannot_be_confident_but_cross_age_unharmed()
     test_group_hits_captures_raw_cosine_not_fused_score()

@@ -36,6 +36,29 @@ def self_consistency_weights(vectors: Sequence[Sequence[float]]) -> list[float]:
     return [max(0.0, float(row @ mean_dir)) for row in unit]
 
 
+def template_cosine(vector: Sequence[float], template: Sequence[float]) -> float:
+    """Cosine of an embedding to a (pooled) template; both are L2-normalized first."""
+    a = np.asarray(list(vector), dtype="float64")
+    b = np.asarray(list(template), dtype="float64")
+    if a.shape != b.shape or a.size == 0:
+        return 0.0
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float((a / na) @ (b / nb))
+
+
+def weak_pooled_support(matched_cosine: float, template_cosine_value: float, *, drop: float = 0.10) -> bool:
+    """True when a match's similarity to its best individual reference far exceeds its
+    similarity to the person's robust pooled template -- i.e. it leaned on ONE outlier
+    crop rather than the identity. A precision signal: such a match should not be
+    auto-confident. False when the template is unavailable (cosine 0) -> degrade-safe."""
+    if template_cosine_value <= 0.0:
+        return False
+    return float(matched_cosine) - float(template_cosine_value) > float(drop)
+
+
 def pool_template(
     vectors: Sequence[Sequence[float]],
     qualities: Sequence[float] | None = None,

@@ -1872,6 +1872,12 @@ export interface CrossAgeApi {
   testCamera?: boolean;
 }
 
+// Subfolder include/exclude picker tree (backend `folder_tree` command). The
+// canonical definitions live alongside the pure selection logic so that module
+// stays self-contained and unit-testable; re-exported here for a consistent
+// `./types` import surface across the app.
+export type { FolderTreeNode, FolderTree, ScanMode, MediaCounts } from "./lib/folderTreeSelection";
+
 declare global {
   interface Window {
     crossAge: CrossAgeApi;

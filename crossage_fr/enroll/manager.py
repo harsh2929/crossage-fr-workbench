@@ -43,7 +43,7 @@ from crossage_fr.match.calibration import (
     fit_score_calibrator,
     threshold_for_fmr,
 )
-from crossage_fr.match.pooling import pool_template
+from crossage_fr.match.pooling import pool_template, template_cosine
 from crossage_fr.match.validation import held_out_gate
 from crossage_fr.benchmark_quality import BENCHMARK_DISCLAIMER
 from crossage_fr.benchmarks.det_eval import det_report, det_report_by_cohort
@@ -589,6 +589,8 @@ class ProjectState:
         age_bucket: str,
         folder: Path,
         engine: EmbeddingEngine,
+        recursive: bool = True,
+        excluded_dirs: set[Path] | None = None,
     ) -> tuple[int, list[str]]:
         person_name = person_name.strip()
         if not person_name:
@@ -596,7 +598,16 @@ class ProjectState:
         added = 0
         errors: list[str] = []
         known_hashes = {ref.source_hash or self._path_key(ref.source_path) for ref in self.references.values()}
-        for path in iter_image_paths(folder):
+        # Enroll now honours the workspace exclusion rules (`.git`, `node_modules`,
+        # size limits, ...) via the same hook the scan walk uses, so the subfolder
+        # picker stays truthful for both flows. Benchmarks call iter_image_paths
+        # without the hook and are unaffected.
+        for path in iter_image_paths(
+            folder,
+            recursive=recursive,
+            excluded_dirs=excluded_dirs,
+            exclusion_reason=self.scan_exclusion_reason,
+        ):
             try:
                 source_hash = sha256_file(path)
                 if source_hash in known_hashes:
@@ -858,9 +869,11 @@ class ProjectState:
         source: str = "manual",
         resume: bool = True,
         total: int | None = None,
+        recursive: bool = True,
+        excluded_dirs: set[Path] | None = None,
     ) -> tuple[int, list[str], dict[str, int]]:
         return self.scan_paths(
-            self._iter_media_paths(folder),
+            self._iter_media_paths(folder, recursive=recursive, excluded_dirs=excluded_dirs),
             engine,
             k=k,
             on_progress=on_progress,
@@ -1238,7 +1251,11 @@ class ProjectState:
                 accepted += 1
                 hits, compatible_refs = self._search_matching_references(embedding, k=k)
                 pose_thresholds = thresholds_for_pose(self.config.thresholds, pose_bucket) if pose_review_supported(hits, compatible_refs, self.config.thresholds, pose_bucket) else self.config.thresholds
-                decision = group_hits(hits, compatible_refs, pose_thresholds, pose_bucket=pose_bucket, candidate_quality=embedding.quality, candidate_capture_date=embedding_metadata.get("capture_date"), candidate_align_error=embedding.align_error)
+                # §5.3: per-person pooled-template cosines so a "confident" match that leaned
+                # on one outlier reference (low template agreement) is demoted (precision-only).
+                _templates = self._person_templates(embedding.model_name)
+                _template_cosines = {p: template_cosine(embedding.vector, t) for p, t in _templates.items()} if _templates else None
+                decision = group_hits(hits, compatible_refs, pose_thresholds, pose_bucket=pose_bucket, candidate_quality=embedding.quality, candidate_capture_date=embedding_metadata.get("capture_date"), candidate_align_error=embedding.align_error, candidate_template_cosines=_template_cosines)
                 decision_flags = set(decision.flags) if decision is not None else set()
                 if "pose-reranked" in decision_flags:
                     metrics["poseReranked"] += 1
@@ -2171,9 +2188,15 @@ class ProjectState:
             source_path = candidate.source_path
         return (source_path, candidate.best_ref_id, candidate.person_name)
 
-    def _iter_media_paths(self, folder: Path) -> Iterable[Path | ScanDiscoveryError]:
+    def _iter_media_paths(
+        self,
+        folder: Path,
+        recursive: bool = True,
+        excluded_dirs: set[Path] | None = None,
+    ) -> Iterable[Path | ScanDiscoveryError]:
         root = safe_resolve(folder)
         media_extensions = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+        excluded = excluded_dirs or set()
         try:
             is_file = root.is_file()
             exists = root.exists()
@@ -2196,6 +2219,10 @@ class ProjectState:
                         path = Path(entry.path)
                         try:
                             if entry.is_dir(follow_symlinks=False):
+                                if not recursive:
+                                    continue
+                                if excluded and safe_resolve(path) in excluded:
+                                    continue
                                 if not self.scan_exclusion_reason(path, is_dir=True):
                                     stack.append(path)
                             elif entry.is_file(follow_symlinks=False) and path.suffix.lower() in media_extensions:
@@ -5460,6 +5487,16 @@ class ProjectState:
                 f"(need at least {self.CALIBRATION_MIN_LABELS} labels with "
                 f"{self.CALIBRATION_MIN_PER_CLASS}+ of each)."
             )
+        # §6 guardrail: refuse to move the live operating point if the change REGRESSES on
+        # a held-out (by-identity) split of THIS user's own labels -- a benchmarked gain
+        # that does not generalize locally must not silently degrade the thresholds.
+        # Equal-or-better still adopts (the calibrator adds the probability map + FMR bands).
+        validation = self.validate_calibration_change()
+        if "baselineAccuracy" in validation and float(validation.get("delta", 0.0)) < -0.02:
+            self._append_audit(
+                {"action": "apply_calibration_to_config", "promoted": False, "reason": validation.get("reason", "held-out regression")}
+            )
+            return {"promoted": False, "validation": validation, "summary": self.calibration_summary(), "config": asdict(self.config)}
         scores = [float(row["matchScore"]) for row in rows]
         labels = [1.0 if row["isMatch"] else 0.0 for row in rows]
 
@@ -5490,7 +5527,7 @@ class ProjectState:
             }
         )
         self.save()
-        return {"summary": self.calibration_summary(), "config": asdict(self.config)}
+        return {"promoted": True, "validation": validation, "summary": self.calibration_summary(), "config": asdict(self.config)}
 
     def match_probability(self, score: float, model_name: str | None = None, person_name: str | None = None) -> float | None:
         """Calibrated P(same identity) for a fused match score, or None if uncalibrated
@@ -5567,6 +5604,27 @@ class ProjectState:
         from crossage_fr.embed.model_validation import validate_recognizer_onnx
 
         return validate_recognizer_onnx(Path(path).expanduser())
+
+    def _person_templates(self, model_name: str) -> dict[str, list[float]]:
+        """Cached self-consistency-pooled template per enrolled person (model-compatible,
+        >=3 references), for the live weak-pooled-support precision demotion (§5.3).
+        Invalidated when references change. Persons with <3 refs are omitted (a pooled
+        template ~= the single ref, so it adds no signal and must not flag)."""
+        key = (self._reference_index_version, str(model_name or ""))
+        cached = getattr(self, "_person_template_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        by_person: dict[str, list[list[float]]] = {}
+        quals: dict[str, list[float]] = {}
+        for ref in self.references.values():
+            if not self._compatible_reference_model_name(str(model_name or ""), ref.model_name):
+                continue
+            if isinstance(ref.vector, list) and ref.vector:
+                by_person.setdefault(ref.person_name, []).append(ref.vector)
+                quals.setdefault(ref.person_name, []).append(float(getattr(ref, "quality", 0.0) or 0.0))
+        templates = {p: pool_template(v, quals[p]) for p, v in by_person.items() if len(v) >= 3}
+        self._person_template_cache = (key, templates)
+        return templates
 
     def person_template(self, person_name: str) -> list[float]:
         """Self-consistency-pooled template embedding for a person's references (§5.3),

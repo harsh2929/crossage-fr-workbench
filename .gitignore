@@ -29,6 +29,7 @@ benchmarks/results/
 crossage_project/
 .crossage-workspace.json
 folder-watch.json
+.claude/scheduled_tasks.lock
 
 # OS/editor noise
 .DS_Store

@@ -7,7 +7,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from crossage_fr.match.pooling import pool_template, self_consistency_weights
+from crossage_fr.match.pooling import (
+    pool_template,
+    self_consistency_weights,
+    template_cosine,
+    weak_pooled_support,
+)
 from crossage_fr.ingest.video_io import sharpest_index, variance_of_laplacian
 
 
@@ -51,11 +56,29 @@ def test_variance_of_laplacian_and_sharpest_index() -> None:
     assert sharpest_index([blurred, sharp, blurred]) == 1
 
 
+def test_weak_pooled_support_flags_outlier_lean() -> None:
+    # Strong match to a best ref (0.55) but weak agreement with the robust template
+    # (0.30) -> leaned on an outlier crop -> flagged.
+    assert weak_pooled_support(0.55, 0.30, drop=0.10) is True
+    # Match agrees with the template -> not flagged.
+    assert weak_pooled_support(0.55, 0.52, drop=0.10) is False
+    # No template available (cosine 0) -> degrade-safe, never flags.
+    assert weak_pooled_support(0.55, 0.0) is False
+
+
+def test_template_cosine_basic() -> None:
+    tpl = pool_template([_unit((0, 1.0))] * 3)  # template ~ [1,0,0,...]
+    assert abs(template_cosine(_unit((0, 2.0)), tpl) - 1.0) < 1e-6   # same direction
+    assert abs(template_cosine(_unit((1, 2.0)), tpl)) < 1e-6         # orthogonal
+
+
 def main() -> None:
     test_pool_template_of_identical_vectors_is_that_vector()
     test_pool_template_downweights_an_outlier_vs_naive_mean()
     test_self_consistency_weights_rank_outlier_lowest()
     test_variance_of_laplacian_and_sharpest_index()
+    test_weak_pooled_support_flags_outlier_lean()
+    test_template_cosine_basic()
     print("pooling units ok")
 
 
