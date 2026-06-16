@@ -24,36 +24,51 @@ export function PhotosView(props: {
   // newly-selected folder's results (fast rail clicks).
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
+  // Hold the latest invoke wrappers in refs. The parent recreates these
+  // functions on every render and re-renders about once a second (a clock), so
+  // depending on their identity in effects would refetch every second and reset
+  // the grid. Refs decouple the effects from prop identity: they fire only on
+  // real state changes (mount, folder switch, scroll).
+  const foldersFnRef = useRef(listPhotoFolders);
+  foldersFnRef.current = listPhotoFolders;
+  const itemsFnRef = useRef(listPhotoFolderItems);
+  itemsFnRef.current = listPhotoFolderItems;
 
+  // Load the folder rail once on mount.
   useEffect(() => {
     let alive = true;
-    listPhotoFolders()
+    foldersFnRef.current()
       .then((res) => alive && setFolders(res.folders || []))
       .catch(() => alive && setFolders([]));
     return () => {
       alive = false;
     };
-  }, [listPhotoFolders]);
+  }, []);
 
-  const loadPage = useCallback(
-    async (folderId: string, offset: number) => {
-      setLoading(true);
-      try {
-        const page = await listPhotoFolderItems({
-          folderId,
-          offset,
-          limit: PAGE_LIMIT,
-          previewBudget: PREVIEW_BUDGET,
-        });
-        if (activeIdRef.current !== folderId) return; // stale folder, drop
-        setTotal(page.total);
-        setItems((prev) => (offset === 0 ? page.items : [...prev, ...page.items]));
-      } finally {
-        if (activeIdRef.current === folderId) setLoading(false);
+  // Stable across renders (reads the live wrapper via ref), so the paging
+  // effects below fire only on real changes, never on prop-identity churn.
+  const loadPage = useCallback(async (folderId: string, offset: number) => {
+    setLoading(true);
+    try {
+      const page = await itemsFnRef.current({
+        folderId,
+        offset,
+        limit: PAGE_LIMIT,
+        previewBudget: PREVIEW_BUDGET,
+      });
+      if (activeIdRef.current !== folderId) return; // stale folder, drop
+      setTotal(page.total);
+      setItems((prev) => (offset === 0 ? page.items : [...prev, ...page.items]));
+    } catch {
+      // A blocked/failed fetch degrades to an empty folder instead of spinning.
+      if (activeIdRef.current === folderId && offset === 0) {
+        setTotal(0);
+        setItems([]);
       }
-    },
-    [listPhotoFolderItems]
-  );
+    } finally {
+      if (activeIdRef.current === folderId) setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     setItems([]);

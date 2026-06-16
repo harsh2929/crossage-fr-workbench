@@ -48,7 +48,7 @@ import {
   Video,
   X
 } from "lucide-react";
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 // H9: the 1024px/1.46MB icon.png is the OS app-icon master (still read at
 // runtime by the Electron main process). The renderer only paints a ~40px logo,
@@ -2263,13 +2263,18 @@ export default function App() {
     }
   }
 
-  async function listPhotoFolders() {
-    return window.crossAge.invoke<PhotoFolderList>("list_photo_folders", {});
-  }
+  // Stable identities so PhotosView's data effects don't refire on every App
+  // re-render (the shell re-renders ~1/s via a clock).
+  const listPhotoFolders = useCallback(
+    () => window.crossAge.invoke<PhotoFolderList>("list_photo_folders", {}),
+    []
+  );
 
-  async function listPhotoFolderItems(params: Record<string, unknown>) {
-    return window.crossAge.invoke<PhotoItemsPage>("list_photo_folder_items", params);
-  }
+  const listPhotoFolderItems = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<PhotoItemsPage>("list_photo_folder_items", params),
+    []
+  );
 
   async function queryCandidates(params: Record<string, unknown>) {
     const startedAt = performance.now();
