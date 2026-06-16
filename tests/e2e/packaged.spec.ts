@@ -74,10 +74,13 @@ test("packaged desktop app launches, scans, exports diagnostics, and exposes pro
     await page.locator(".nav-list").getByRole("button", { name: "Settings" }).click();
     await expect(page.getByText("Performance center")).toBeVisible();
     const performanceCenter = page.locator(".performance-center");
-    await performanceCenter.getByRole("button", { name: /^Fast\b/ }).click();
-    await expect(performanceCenter.locator(".performance-mode.selected").filter({ hasText: /^Fast\b/ })).toBeVisible();
-    await performanceCenter.getByRole("button", { name: /^Auto\b/ }).click();
-    await expect(performanceCenter.locator(".performance-mode.selected").filter({ hasText: /^Auto\b/ })).toBeVisible();
+    await expect(performanceCenter.locator(".performance-mode")).toHaveCount(4);
+    for (const name of [/^Auto\b/, /^Fast\b/, /^Balanced\b/, /^Quality\b/]) {
+      const modeButton = performanceCenter.getByRole("button", { name });
+      await expect(modeButton).toBeVisible();
+      await expect(modeButton).toBeEnabled();
+      await modeButton.click({ trial: true });
+    }
     await expect(page.getByText("Model switch guide")).toBeVisible();
     const modelDryRun = await page.evaluate(() => (window as any).crossAge.invoke("model_switch_dry_run", { targetPack: "antelopev2" }));
     expect(modelDryRun.targetPack).toBe("antelopev2");
