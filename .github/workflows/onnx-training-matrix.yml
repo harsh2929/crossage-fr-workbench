@@ -1,0 +1,261 @@
+name: ONNX Training Matrix
+
+# Manual Phase 5 R&D collector. This is intentionally not on PRs because the
+# ONNX training runtime pulls large native ML wheels and is evidence-gathering,
+# not production release gating.
+
+on:
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: "How long to keep the uploaded matrix evidence artifacts"
+        required: false
+        default: 14
+        type: number
+
+permissions:
+  contents: read
+
+concurrency:
+  group: onnx-training-matrix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    name: Collect ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-latest
+          - target: windows-x64
+            runner: windows-latest
+          - target: macos-arm64
+            runner: macos-26
+          - target: macos-x64
+            runner: macos-26-intel
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      VINTRACE_EXPERIMENTAL_ONNX_TRAINING: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install ONNX training R&D dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$PWD/onnx-training-evidence/${{ matrix.target }}"
+          mkdir -p "$out"
+          python -m pip install --upgrade pip wheel setuptools
+
+          set +e
+          install_status=0
+          {
+            echo "### primary: onnxruntime-training-cpu torch"
+            python -m pip install onnxruntime-training-cpu torch
+            primary_status=$?
+            echo "primaryExit=$primary_status"
+            if [ "$primary_status" -ne 0 ]; then
+              echo "### fallback: onnxruntime-training torch"
+              python -m pip install onnxruntime-training torch
+              install_status=$?
+              echo "fallbackExit=$install_status"
+            fi
+            if [ "$primary_status" -ne 0 ] && [ "$install_status" -ne 0 ]; then
+              echo "### fallback measurement dependencies: onnxruntime onnx numpy"
+              python -m pip install onnxruntime onnx numpy
+              measurement_status=$?
+              echo "measurementDepsExit=$measurement_status"
+            fi
+          } > "$out/pip-install.log" 2>&1
+          set -e
+
+          echo "$install_status" > "$out/pip-install.exitcode"
+          cat "$out/pip-install.log"
+          if [ "$install_status" -ne 0 ]; then
+            echo "::warning::ONNX training package install failed; benchmark will still record blocked evidence if possible."
+          fi
+
+      - name: Run Phase 5 measurement
+        shell: bash
+        env:
+          PYTHON: python
+        run: |
+          set -euo pipefail
+          out="$PWD/onnx-training-evidence/${{ matrix.target }}"
+          mkdir -p "$out"
+          set +e
+          python -m crossage_fr.experiments.onnx_training "$out" > "$out/bench.log" 2>&1
+          bench_status=$?
+          set -e
+          echo "$bench_status" > "$out/bench.exitcode"
+          cat "$out/bench.log"
+          if [ "$bench_status" -ne 0 ]; then
+            exit "$bench_status"
+          fi
+
+      - name: Assert evidence files
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$PWD/onnx-training-evidence/${{ matrix.target }}"
+          test -f "$out/phase5_onnx_training_measurement.json"
+          test -f "$out/phase5_runtime_study_fragment.json"
+          test -f "$out/phase5_onnx_training_decision.json"
+
+      - name: Print target summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' "$PWD/onnx-training-evidence/${{ matrix.target }}"
+          import json
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          fragment = json.loads((root / "phase5_runtime_study_fragment.json").read_text(encoding="utf-8"))
+          decision = json.loads((root / "phase5_onnx_training_decision.json").read_text(encoding="utf-8"))
+          target = fragment["targets"][0]
+          print(json.dumps({
+              "target": target.get("target"),
+              "status": target.get("status"),
+              "trainingRuntimeAvailable": target.get("trainingRuntimeAvailable"),
+              "trainingPackageAvailable": target.get("trainingPackageAvailable"),
+              "trainingJobStatus": target.get("trainingJobStatus"),
+              "packageSizeBytes": target.get("packageSizeBytes"),
+              "blockers": target.get("blockers", []),
+              "decisionStatus": decision.get("status"),
+          }, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload target evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: onnx-training-${{ matrix.target }}
+          path: onnx-training-evidence/${{ matrix.target }}
+          if-no-files-found: warn
+          retention-days: ${{ inputs.retention_days }}
+
+  combine:
+    name: Combine runtime study
+    needs: collect
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download target evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: onnx-training-*
+          path: matrix-artifacts
+
+      - name: Combine target runtime fragments
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p combined
+          mapfile -t fragments < <(find matrix-artifacts -type f -name phase5_runtime_study_fragment.json | sort)
+          printf '%s\n' "${fragments[@]}" > combined/runtime-fragments.txt
+          if [ "${#fragments[@]}" -eq 0 ]; then
+            echo "No Phase 5 runtime fragments were downloaded." >&2
+            exit 1
+          fi
+          python -m crossage_fr.experiments.onnx_training \
+            --combine-runtime-study combined/phase5_combined_runtime_study.json \
+            "${fragments[@]}"
+
+      - name: Write combined Phase 5 decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from crossage_fr.experiments import onnx_training
+
+          root = Path("matrix-artifacts")
+          manifests = [
+              path
+              for path in sorted(root.rglob("training_artifact_manifest.json"))
+              if onnx_training.verify_training_artifact_manifest(path).get("verified")
+          ]
+          validations = [
+              path
+              for path in sorted(root.rglob("phase5_onnx_training_validation.json"))
+              if onnx_training.verify_phase5_validation_report(path).get("verified")
+          ]
+          decision = onnx_training.write_phase5_go_no_go_report(
+              "combined/phase5_onnx_training_decision.json",
+              artifact_manifest_path=manifests[0] if manifests else None,
+              runtime_study_source="combined/phase5_combined_runtime_study.json",
+              validation_source=validations[0] if validations else None,
+          )
+          summary = {
+              "decisionStatus": decision.get("status"),
+              "decisionOk": decision.get("ok"),
+              "artifactManifestPath": str(manifests[0]) if manifests else "",
+              "validationReportPath": str(validations[0]) if validations else "",
+              "blockers": decision.get("blockers", []),
+              "reportHash": decision.get("reportHash", ""),
+          }
+          Path("combined/phase5_decision_summary.json").write_text(
+              json.dumps(summary, indent=2, sort_keys=True),
+              encoding="utf-8",
+          )
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Verify combined evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from crossage_fr.experiments import onnx_training
+
+          runtime = onnx_training.verify_combined_target_runtime_study("combined/phase5_combined_runtime_study.json")
+          decision = onnx_training.verify_phase5_go_no_go_report("combined/phase5_onnx_training_decision.json")
+          print(json.dumps({
+              "runtimeVerified": runtime.get("verified"),
+              "runtimeErrors": runtime.get("errors", []),
+              "decisionVerified": decision.get("verified"),
+              "decisionErrors": decision.get("errors", []),
+          }, indent=2, sort_keys=True))
+          if not runtime.get("verified"):
+              raise SystemExit(1)
+          if not decision.get("verified"):
+              raise SystemExit(1)
+          PY
+
+      - name: Upload combined evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: onnx-training-matrix-combined
+          path: combined
+          if-no-files-found: warn
+          retention-days: ${{ inputs.retention_days }}
