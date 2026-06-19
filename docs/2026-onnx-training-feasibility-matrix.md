@@ -137,6 +137,29 @@ The generated decision report remains `no-go` unless the row-trained ONNX head
 beats the JSON adapter on the validation report without accuracy, precision, or
 recall regressions.
 
+To derive those files from a reviewed training-example export, first export
+metadata-only training examples from the app, then split them deterministically:
+
+```bash
+python -m crossage_fr.experiments.onnx_training \
+  --split-training-examples /path/to/vintrace-training-examples.json \
+  /tmp/vintrace-onnx-reviewed-row-split \
+  --validation-fraction 0.25 \
+  --min-training-count 20 \
+  --min-validation-count 20 \
+  --min-per-class 5
+```
+
+The splitter writes:
+
+- `training-rows.json`
+- `validation-rows.json`
+- `phase5_onnx_training_row_split_manifest.json`
+
+It accepts the existing app export shape with an `examples` array, scopes rows to
+one model pack, removes local path/vector fields, and fails closed when either
+split lacks the required positive/negative class balance.
+
 ## Target Matrix Collection
 
 Manual CI collector:

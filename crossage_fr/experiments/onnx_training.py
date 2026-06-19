@@ -75,6 +75,9 @@ MEASUREMENT_REPORT_FILENAME = "phase5_onnx_training_measurement.json"
 RUNTIME_STUDY_FRAGMENT_FILENAME = "phase5_runtime_study_fragment.json"
 PHASE5_DECISION_FILENAME = "phase5_onnx_training_decision.json"
 PHASE5_VALIDATION_FILENAME = "phase5_onnx_training_validation.json"
+PHASE5_ROW_SPLIT_MANIFEST_FILENAME = "phase5_onnx_training_row_split_manifest.json"
+TRAINING_ROWS_FILENAME = "training-rows.json"
+VALIDATION_ROWS_FILENAME = "validation-rows.json"
 VALIDATION_REPORT_SCOPE = "phase5-onnx-training-validation"
 
 BASELINE_RUNTIME_FAILURE_MODES = [
@@ -2072,6 +2075,275 @@ def _load_rows_source(source: str | Path, label: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _load_training_examples_source(source: str | Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    path = Path(source).expanduser()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"training examples file is missing: {path}") from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f"training examples file is not valid JSON: {path}") from exc
+    if isinstance(payload, dict):
+        if isinstance(payload.get("examples"), list):
+            rows = payload["examples"]
+        elif isinstance(payload.get("rows"), list):
+            rows = payload["rows"]
+        else:
+            raise ValueError("training examples object must contain an examples or rows array.")
+        metadata = {key: value for key, value in payload.items() if key not in {"examples", "rows"}}
+    elif isinstance(payload, list):
+        rows = payload
+        metadata = {}
+    else:
+        raise ValueError("training examples must be a JSON array or object with an examples/rows array.")
+    result = [dict(row) for row in rows if isinstance(row, dict)]
+    if len(result) != len(rows):
+        raise ValueError("training examples must contain only objects.")
+    if not result:
+        raise ValueError("training examples must not be empty.")
+    return result, metadata
+
+
+def _row_identity(row: dict[str, Any], index: int) -> str:
+    for key in ("naturalKey", "exampleId", "candidateId", "labelId", "sourceHash"):
+        value = str(row.get(key, "") or "").strip()
+        if value:
+            return f"{key}:{value}"
+    body = {
+        "index": index,
+        "expectedPerson": row.get("expectedPerson", ""),
+        "modelName": row.get("modelName", ""),
+        "matchScore": row.get("matchScore"),
+        "rawCosine": row.get("rawCosine"),
+        "isMatch": row.get("isMatch"),
+    }
+    return f"row:{_sha256_json(body)}"
+
+
+def _split_digest(row: dict[str, Any], index: int, salt: str) -> str:
+    return hashlib.sha256(f"{salt}|{_row_identity(row, index)}".encode("utf-8")).hexdigest()
+
+
+def _scrub_reviewed_row(row: dict[str, Any]) -> dict[str, Any]:
+    blocked_keys = {
+        "sourcePath",
+        "source_path",
+        "bestRefPath",
+        "best_ref_path",
+        "imagePath",
+        "image_path",
+        "thumbnailPath",
+        "thumbnail_path",
+        "mediaPath",
+        "media_path",
+        "path",
+        "vector",
+        "embedding",
+        "embeddingVector",
+        "embedding_vector",
+    }
+    scrubbed = {
+        key: value
+        for key, value in row.items()
+        if key not in blocked_keys and "vector" not in key.casefold()
+    }
+    features = scrubbed.get("features")
+    if not isinstance(features, dict):
+        scrubbed["features"] = {}
+    return scrubbed
+
+
+def _label_counts(rows: Sequence[dict[str, Any]]) -> dict[str, int]:
+    positives = sum(1 for row in rows if bool(row.get("isMatch")))
+    negatives = sum(1 for row in rows if not bool(row.get("isMatch")))
+    return {"total": len(rows), "positive": positives, "negative": negatives}
+
+
+def _desired_validation_count(total: int, *, fraction: float, min_per_class: int) -> int:
+    if total < min_per_class * 2:
+        raise ValueError(
+            f"Need at least {min_per_class * 2} rows per class to keep {min_per_class} rows in both training and validation."
+        )
+    desired = int(round(total * float(fraction)))
+    desired = max(int(min_per_class), desired)
+    return min(desired, total - int(min_per_class))
+
+
+def _stable_class_split(
+    rows: Sequence[dict[str, Any]],
+    *,
+    validation_fraction: float,
+    min_per_class: int,
+    split_salt: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    indexed = list(enumerate(rows))
+    positives = [(index, row) for index, row in indexed if bool(row.get("isMatch"))]
+    negatives = [(index, row) for index, row in indexed if not bool(row.get("isMatch"))]
+    pos_validation = _desired_validation_count(len(positives), fraction=validation_fraction, min_per_class=min_per_class)
+    neg_validation = _desired_validation_count(len(negatives), fraction=validation_fraction, min_per_class=min_per_class)
+    validation_ids = {
+        id(row)
+        for _index, row in sorted(
+            positives,
+            key=lambda item: _split_digest(item[1], item[0], f"{split_salt}|positive"),
+        )[:pos_validation]
+    }
+    validation_ids.update(
+        id(row)
+        for _index, row in sorted(
+            negatives,
+            key=lambda item: _split_digest(item[1], item[0], f"{split_salt}|negative"),
+        )[:neg_validation]
+    )
+    training = [row for row in rows if id(row) not in validation_ids]
+    validation = [row for row in rows if id(row) in validation_ids]
+    return training, validation
+
+
+def _assert_split_counts(
+    training_rows: Sequence[dict[str, Any]],
+    validation_rows: Sequence[dict[str, Any]],
+    *,
+    min_training_count: int,
+    min_validation_count: int,
+    min_per_class: int,
+) -> None:
+    train_counts = _label_counts(training_rows)
+    validation_counts = _label_counts(validation_rows)
+    if train_counts["total"] < int(min_training_count):
+        raise ValueError(f"training split has {train_counts['total']} rows; need at least {int(min_training_count)}.")
+    if validation_counts["total"] < int(min_validation_count):
+        raise ValueError(f"validation split has {validation_counts['total']} rows; need at least {int(min_validation_count)}.")
+    for name, counts in (("training", train_counts), ("validation", validation_counts)):
+        if counts["positive"] < int(min_per_class) or counts["negative"] < int(min_per_class):
+            raise ValueError(
+                f"{name} split needs at least {int(min_per_class)} positive and {int(min_per_class)} negative rows; "
+                f"got {counts['positive']} positive and {counts['negative']} negative."
+            )
+
+
+def split_reviewed_training_examples(
+    source: str | Path,
+    output_dir: str | Path,
+    *,
+    validation_fraction: float = 0.25,
+    model_name: str = "",
+    min_training_count: int = 20,
+    min_validation_count: int = 20,
+    min_per_class: int = 5,
+    split_salt: str = "phase5-onnx-training-row-split-v1",
+) -> dict[str, Any]:
+    """Write deterministic ONNX train/held-out rows from reviewed examples."""
+
+    if not 0.05 <= float(validation_fraction) <= 0.5:
+        raise ValueError("validation_fraction must be between 0.05 and 0.5.")
+    from crossage_fr.match import adapters as match_adapters
+
+    raw_rows, source_metadata = _load_training_examples_source(source)
+    canonical_rows: list[dict[str, Any]] = []
+    dropped_invalid = 0
+    for index, row in enumerate(raw_rows):
+        scrubbed = _scrub_reviewed_row(row)
+        canonical = match_adapters.canonical_row(scrubbed)
+        if canonical is None or canonical.get("isMatch") is None:
+            dropped_invalid += 1
+            continue
+        canonical["isMatch"] = bool(canonical["isMatch"])
+        canonical["splitKey"] = _row_identity(canonical, index)
+        canonical_rows.append(canonical)
+    scoped_rows, dominant_model, dropped_other_model = match_adapters.scoped_training_rows(canonical_rows, model_name=model_name)
+    scoped_rows = sorted(
+        scoped_rows,
+        key=lambda row: (
+            str(row.get("createdAt", "") or ""),
+            str(row.get("splitKey", "") or ""),
+            str(row.get("candidateId", "") or ""),
+        ),
+    )
+    if not scoped_rows:
+        raise ValueError("No reviewed examples remain after score, label, and model scoping filters.")
+    training_rows, validation_rows = _stable_class_split(
+        scoped_rows,
+        validation_fraction=validation_fraction,
+        min_per_class=int(min_per_class),
+        split_salt=split_salt,
+    )
+    _assert_split_counts(
+        training_rows,
+        validation_rows,
+        min_training_count=int(min_training_count),
+        min_validation_count=int(min_validation_count),
+        min_per_class=int(min_per_class),
+    )
+    output = Path(output_dir).expanduser()
+    output.mkdir(parents=True, exist_ok=True)
+    training_path = output / TRAINING_ROWS_FILENAME
+    validation_path = output / VALIDATION_ROWS_FILENAME
+    manifest_path = output / PHASE5_ROW_SPLIT_MANIFEST_FILENAME
+    training_payload = {
+        "schemaVersion": 1,
+        "scope": "phase5-onnx-training-rows",
+        "role": "training",
+        "modelName": dominant_model,
+        "rows": training_rows,
+    }
+    validation_payload = {
+        "schemaVersion": 1,
+        "scope": "phase5-onnx-training-rows",
+        "role": "validation",
+        "modelName": dominant_model,
+        "rows": validation_rows,
+    }
+    training_path.write_text(json.dumps(training_payload, indent=2, sort_keys=True), encoding="utf-8")
+    validation_path.write_text(json.dumps(validation_payload, indent=2, sort_keys=True), encoding="utf-8")
+    manifest = {
+        "schemaVersion": 1,
+        "generatedAtUnix": round(time.time(), 3),
+        "scope": "phase5-onnx-training-row-split",
+        "sourcePath": str(Path(source).expanduser()),
+        "sourceRowsHash": _sha256_json({"rows": raw_rows}),
+        "sourceMetadata": source_metadata,
+        "modelName": dominant_model,
+        "requestedModelName": str(model_name or ""),
+        "validationFraction": float(validation_fraction),
+        "minTrainingCount": int(min_training_count),
+        "minValidationCount": int(min_validation_count),
+        "minPerClass": int(min_per_class),
+        "splitSaltHash": hashlib.sha256(split_salt.encode("utf-8")).hexdigest(),
+        "input": {
+            "rawRows": len(raw_rows),
+            "usableRows": len(scoped_rows),
+            "droppedInvalidRows": dropped_invalid,
+            "droppedOtherModelRows": int(dropped_other_model),
+            "classCounts": _label_counts(scoped_rows),
+        },
+        "training": {
+            "path": str(training_path),
+            "rowsHash": _sha256_json({"rows": training_rows}),
+            "classCounts": _label_counts(training_rows),
+        },
+        "validation": {
+            "path": str(validation_path),
+            "rowsHash": _sha256_json({"rows": validation_rows}),
+            "classCounts": _label_counts(validation_rows),
+        },
+        "privacy": {
+            "pathsIncluded": any(any(key in row for key in ("sourcePath", "source_path", "bestRefPath", "best_ref_path")) for row in training_rows + validation_rows),
+            "vectorsIncluded": any("vector" in json.dumps(row).casefold() for row in training_rows + validation_rows),
+        },
+    }
+    manifest = _attach_report_hash(manifest)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    return {
+        "ok": True,
+        "outputDir": str(output),
+        "trainingRowsPath": str(training_path),
+        "validationRowsPath": str(validation_path),
+        "manifestPath": str(manifest_path),
+        "manifest": manifest,
+    }
+
+
 def rows_to_tiny_head_features(rows: Sequence[dict[str, Any]], *, require_labels: bool = False) -> tuple[list[list[float]], list[int]]:
     from crossage_fr.match import adapters as match_adapters
 
@@ -2345,8 +2617,74 @@ def _pop_option_value(args: list[str], option: str) -> str:
     return value
 
 
+def _pop_int_option(args: list[str], option: str) -> int:
+    value = _pop_option_value(args, option)
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{option} requires an integer value") from exc
+
+
+def _pop_float_option(args: list[str], option: str) -> float:
+    value = _pop_option_value(args, option)
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{option} requires a numeric value") from exc
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(argv if argv is not None else sys.argv[1:])
+    if args and args[0] == "--split-training-examples":
+        args.pop(0)
+        validation_fraction = 0.25
+        model_name = ""
+        min_training_count = 20
+        min_validation_count = 20
+        min_per_class = 5
+        try:
+            source_path = _pop_option_value(args, "--split-training-examples")
+            output_dir = _pop_option_value(args, "--split-training-examples")
+            while args:
+                option = args.pop(0)
+                if option == "--validation-fraction":
+                    validation_fraction = _pop_float_option(args, option)
+                elif option == "--model-name":
+                    model_name = _pop_option_value(args, option)
+                elif option == "--min-training-count":
+                    min_training_count = _pop_int_option(args, option)
+                elif option == "--min-validation-count":
+                    min_validation_count = _pop_int_option(args, option)
+                elif option == "--min-per-class":
+                    min_per_class = _pop_int_option(args, option)
+                else:
+                    raise ValueError(f"Unknown option: {option}")
+            split = split_reviewed_training_examples(
+                source_path,
+                output_dir,
+                validation_fraction=validation_fraction,
+                model_name=model_name,
+                min_training_count=min_training_count,
+                min_validation_count=min_validation_count,
+                min_per_class=min_per_class,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, indent=2, sort_keys=True))
+            return 2
+        manifest = split.get("manifest") if isinstance(split.get("manifest"), dict) else {}
+        summary = {
+            "ok": True,
+            "outputDir": split["outputDir"],
+            "trainingRowsPath": split["trainingRowsPath"],
+            "validationRowsPath": split["validationRowsPath"],
+            "manifestPath": split["manifestPath"],
+            "modelName": manifest.get("modelName", ""),
+            "training": manifest.get("training", {}).get("classCounts", {}) if isinstance(manifest.get("training"), dict) else {},
+            "validation": manifest.get("validation", {}).get("classCounts", {}) if isinstance(manifest.get("validation"), dict) else {},
+            "reportHash": manifest.get("reportHash", ""),
+        }
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
     if args and args[0] == "--combine-runtime-study":
         args.pop(0)
         try:

@@ -158,6 +158,10 @@ Latest implementation note:
   (`macos-arm64`, `macos-x64`, `windows-x64`, `linux-x64`). The combined runtime
   study is complete with no missing targets or source errors. The combined Phase
   5 decision remains `no-go` only because validation evidence is still missing.
+- 2026-06-19: Phase 5 reviewed-row splitter added. The ONNX harness can now turn
+  the app's metadata-only reviewed training-example export into deterministic
+  `training-rows.json` and `validation-rows.json` files with class-balance gates,
+  model scoping, path/vector scrubbing, and a hashed split manifest.
 
 ## How To Use This Document
 
@@ -641,11 +645,22 @@ Evidence:
   --validation-rows <json>` writes a file-backed validation report from exported
   ONNX inference scores so Phase 5 can use real held-out reviewed rows instead
   of synthetic score fixtures.
+- Reviewed-row splitter: `python -m crossage_fr.experiments.onnx_training
+  --split-training-examples <vintrace-training-examples.json> <output-dir>`
+  writes `training-rows.json`, `validation-rows.json`, and
+  `phase5_onnx_training_row_split_manifest.json` from the existing app
+  metadata-only training-example export.
 - Synthetic row-validation smoke evidence on 2026-06-18 produced a valid
   validation report with JSON adapter accuracy/precision/recall all `1.0` and
   ONNX head accuracy/precision/recall all `1.0`. The Phase 5 decision correctly
   remained `no-go` because the measured delta was `0.0` and therefore did not
   satisfy the measurable-gain gate.
+- Reviewed-export splitter smoke evidence on 2026-06-19 used an 80-row synthetic
+  app training-example export, produced 60 training rows and 20 held-out
+  validation rows with balanced positive/negative classes, removed local
+  path/vector fields, and fed the split files into the ONNX row-validation bench.
+  The validation report completed, but the Phase 5 decision correctly remained
+  `no-go` because the synthetic ONNX/JSON delta was still `0.0`.
 - ONNX artifact compatibility: the tiny forward model and generated training
   artifacts are normalized to ONNX IR version 10 when needed so
   `onnxruntime-training-cpu==1.19.2` can load artifacts generated with newer
@@ -1026,6 +1041,7 @@ Verification run on 2026-06-18:
 - `PYTHON=$PWD/.venv-ort311/bin/python VINTRACE_EXPERIMENTAL_ONNX_TRAINING=1 npm run bench:onnx-training -- <output> --training-rows <rows.json> --validation-rows <heldout.json>`
 - `PYTHON=$PWD/.venv-ort311/bin/python VINTRACE_EXPERIMENTAL_ONNX_TRAINING=1 npm run bench:onnx-training -- /tmp/vintrace-onnx-mac-cpu-row-phase5 --training-rows /tmp/vintrace-onnx-row-fixture/training-rows.json --validation-rows /tmp/vintrace-onnx-row-fixture/validation-rows.json`
 - `python -m crossage_fr.experiments.onnx_training --combine-runtime-study /tmp/phase5_combined_runtime_study.json <fragment...>`
+- `python -m crossage_fr.experiments.onnx_training --split-training-examples <vintrace-training-examples.json> <output-dir> --validation-fraction 0.25 --min-training-count 20 --min-validation-count 20 --min-per-class 5`
 - Real tiny-head generation/training/export probe under
   `/tmp/vintrace-onnx-mac-cpu-train`
 
