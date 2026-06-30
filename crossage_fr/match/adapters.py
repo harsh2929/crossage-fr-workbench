@@ -17,7 +17,31 @@ import numpy as np
 
 ADAPTER_TYPE = "logistic_regression"
 ADAPTER_VERSION = "logistic-pair-adapter-v1"
-FEATURE_VERSION = "pair-adapter-features-v1"
+FEATURE_VERSION = "pair-adapter-features-v2"
+SUPPORTED_FEATURE_VERSIONS = {
+    "pair-adapter-features-v1",
+    FEATURE_VERSION,
+}
+PAIR_CONTEXT_VERSION = "pair-context-v1"
+PAIR_CONTEXT_FORBIDDEN_TOKENS = (
+    "identity-match",
+    "non-match",
+    "expected:non-match",
+    "expected-non-match",
+)
+PAIR_CONTEXT_KEY_FIELDS = (
+    ("pose", "poseBucket"),
+    ("media", "mediaKind"),
+    ("scoreZero", "scoreZero"),
+    ("scoreLow", "scoreLow"),
+    ("crossAge", "crossAge"),
+    ("crossPose", "crossPose"),
+    ("poseUnknown", "poseUnknown"),
+    ("hardPose", "hardPose"),
+    ("closeRunnerUp", "closeRunnerUp"),
+    ("singleReference", "singleReference"),
+    ("lowQuality", "lowQuality"),
+)
 
 FEATURE_NAMES = [
     "raw_cosine",
@@ -39,6 +63,15 @@ FEATURE_NAMES = [
     "risk_single_reference",
     "risk_hard_pose",
     "review_priority",
+    "score_zero",
+    "score_low",
+    "score_low_cross_pose",
+    "score_low_hard_pose",
+    "score_low_close_runner_up",
+    "score_zero_pose_unknown",
+    "score_zero_cross_age",
+    "score_zero_cross_pose",
+    "low_quality_hard_pose",
 ]
 
 
@@ -111,6 +144,91 @@ def _risk_flags(row: dict[str, Any]) -> set[str]:
     return {str(item).strip().casefold() for item in parsed if str(item).strip()}
 
 
+def pair_context(row: dict[str, Any]) -> dict[str, Any]:
+    """Return inference-safe, app-owned context for local pair learning.
+
+    This context deliberately avoids ground-truth label fields such as
+    ``isMatch`` or benchmark-only ``identity-match``/``non-match`` difficulty
+    tags. Every value is derivable from candidate/reference metadata available
+    before a human review decision is known.
+    """
+
+    source = dict(row)
+    existing = source.get("trainingContext")
+    if isinstance(existing, dict) and existing.get("version") == PAIR_CONTEXT_VERSION and existing.get("inferenceSafe") is True:
+        existing_text = json.dumps(existing, sort_keys=True, default=str).casefold()
+        if not any(token in existing_text for token in PAIR_CONTEXT_FORBIDDEN_TOKENS):
+            return _json_safe(existing)
+    canonical = canonical_row(source) or source
+    pose = _pose_bucket(canonical)
+    media_kind = str(_value(canonical, "mediaKind", "media_kind", default="image") or "image").strip().casefold() or "image"
+    risks = sorted(_risk_flags(canonical))
+    age_gap = _value(canonical, "ageGapYears", "age_gap_years")
+    age_gap_value = _finite(age_gap, 0.0)
+    age_gap_missing = age_gap is None or str(age_gap) == ""
+    match_score = _clamp(_value(canonical, "matchScore", "match_score", default=0.0), 0.0, 1.0)
+    quality = _clamp(_value(canonical, "quality", "candidateQuality", "candidate_quality", default=0.0), 0.0, 1.0)
+    runner_margin_raw = _value(canonical, "runnerUpMargin", "runner_up_margin", "margin")
+    runner_margin_known = runner_margin_raw is not None and str(runner_margin_raw) != ""
+    runner_margin = _clamp(runner_margin_raw, 0.0, 1.0) if runner_margin_known else 1.0
+    close_runner = "close-runner-up" in risks or "ambiguous-person-margin" in risks or (runner_margin_known and runner_margin < 0.05)
+    single_reference = bool({"single-reference-match", "single-reference-close-runner-up", "single-reference-hard-pose"} & set(risks))
+    hard_pose = "single-reference-hard-pose" in risks or "pose-reranked" in risks or pose in {"profile", "edge-face"}
+    tags: set[str] = set()
+    if pose in {"profile", "edge-face", "three-quarter"}:
+        tags.add("cross-pose")
+    if pose == "unknown":
+        tags.add("pose-unknown")
+    if not age_gap_missing and abs(age_gap_value) >= 8.0:
+        tags.add("cross-age")
+    if media_kind == "video":
+        tags.add("video")
+    if close_runner:
+        tags.add("close-runner-up")
+    if single_reference:
+        tags.add("single-reference")
+    if hard_pose:
+        tags.add("hard-pose")
+    if quality and quality < 0.35:
+        tags.add("low-quality")
+    if match_score <= 0.000001:
+        tags.add("zero-score")
+    elif match_score < 0.25:
+        tags.add("low-score")
+    return _json_safe(
+        {
+            "schemaVersion": 1,
+            "version": PAIR_CONTEXT_VERSION,
+            "source": "app-owned-review-metadata",
+            "inferenceSafe": True,
+            "poseBucket": pose,
+            "mediaKind": media_kind,
+            "riskFlags": risks,
+            "scenarioTags": sorted(tags),
+            "scoreZero": match_score <= 0.000001,
+            "scoreLow": match_score < 0.25,
+            "crossAge": "cross-age" in tags,
+            "crossPose": "cross-pose" in tags,
+            "poseUnknown": pose == "unknown",
+            "mediaVideo": media_kind == "video",
+            "closeRunnerUp": close_runner,
+            "singleReference": single_reference,
+            "hardPose": hard_pose,
+            "lowQuality": bool(quality and quality < 0.35),
+        }
+    )
+
+
+def pair_context_key(row: dict[str, Any]) -> str:
+    """Stable app-owned context key used for adapter coverage diagnostics."""
+
+    context = pair_context(row)
+    return "|".join(
+        f"{label}={bool(context.get(field)) if isinstance(context.get(field), bool) else context.get(field, '')}"
+        for label, field in PAIR_CONTEXT_KEY_FIELDS
+    )
+
+
 def canonical_row(row: dict[str, Any]) -> dict[str, Any] | None:
     """Return a row shape usable by fitting, validation, and live scoring."""
     label = _bool_label(row)
@@ -168,6 +286,15 @@ def extract_pair_features(row: dict[str, Any]) -> dict[str, float]:
     review_priority = _value(canonical, "reviewPriority", "review_priority", default=0.0)
     media_kind = str(_value(canonical, "mediaKind", "media_kind", default="image") or "image").casefold()
     reference_quality = _value(canonical, "referenceQuality", "reference_quality", default=_value(canonical, "quality", default=0.0))
+    context = pair_context(canonical)
+    score_zero = 1.0 if context.get("scoreZero") is True else 0.0
+    score_low = 1.0 if context.get("scoreLow") is True else 0.0
+    cross_pose = 1.0 if context.get("crossPose") is True else 0.0
+    pose_unknown = 1.0 if context.get("poseUnknown") is True else 0.0
+    cross_age = 1.0 if context.get("crossAge") is True else 0.0
+    close_runner_up = 1.0 if context.get("closeRunnerUp") is True else 0.0
+    hard_pose = 1.0 if context.get("hardPose") is True else 0.0
+    low_quality = 1.0 if context.get("lowQuality") is True else 0.0
     features = {
         "raw_cosine": _clamp(_value(canonical, "rawCosine", "raw_cosine", "matchScore", "match_score", default=0.0), -1.0, 1.0),
         "match_score": _clamp(_value(canonical, "matchScore", "match_score", "rawCosine", "raw_cosine", default=0.0), 0.0, 1.0),
@@ -188,6 +315,15 @@ def extract_pair_features(row: dict[str, Any]) -> dict[str, float]:
         "risk_single_reference": 1.0 if "single-reference-match" in risks or "single-reference-close-runner-up" in risks else 0.0,
         "risk_hard_pose": 1.0 if "single-reference-hard-pose" in risks or "pose-reranked" in risks else 0.0,
         "review_priority": _clamp(review_priority, 0.0, 1.0),
+        "score_zero": score_zero,
+        "score_low": score_low,
+        "score_low_cross_pose": score_low * cross_pose,
+        "score_low_hard_pose": score_low * hard_pose,
+        "score_low_close_runner_up": score_low * close_runner_up,
+        "score_zero_pose_unknown": score_zero * pose_unknown,
+        "score_zero_cross_age": score_zero * cross_age,
+        "score_zero_cross_pose": score_zero * cross_pose,
+        "low_quality_hard_pose": low_quality * hard_pose,
     }
     return {name: float(features[name]) for name in FEATURE_NAMES}
 
@@ -293,7 +429,7 @@ def deserialize(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Unsupported adapter artifact type.")
     if artifact.get("versionKey") != ADAPTER_VERSION:
         raise ValueError("Unsupported adapter version.")
-    if artifact.get("featureVersion") != FEATURE_VERSION:
+    if artifact.get("featureVersion") not in SUPPORTED_FEATURE_VERSIONS:
         raise ValueError("Unsupported adapter feature version.")
     names = list(artifact.get("featureNames") or [])
     means = list(artifact.get("featureMeans") or [])

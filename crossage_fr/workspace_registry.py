@@ -72,14 +72,20 @@ def atomic_write(path: Path, writer: Callable[[Any], None], *, fsync: bool = Tru
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     restrict_file_mode(path.parent, 0o700)  # MISS-05
-    temp = path.with_suffix(path.suffix + ".tmp")
-    with temp.open("w", encoding="utf-8") as handle:
-        writer(handle)
-        handle.flush()
-        if fsync:
-            os.fsync(handle.fileno())
-    restrict_file_mode(temp, 0o600)  # MISS-05: set before it becomes the live file
-    os.replace(temp, path)
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temp.open("w", encoding="utf-8") as handle:
+            writer(handle)
+            handle.flush()
+            if fsync:
+                os.fsync(handle.fileno())
+        restrict_file_mode(temp, 0o600)  # MISS-05: set before it becomes the live file
+        os.replace(temp, path)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
     if fsync:
         _fsync_dir(path.parent)
 

@@ -62,6 +62,98 @@ def _both_classes(genuine: list[float], impostor: list[float]) -> bool:
     return len(genuine) > 0 and len(impostor) > 0
 
 
+def _confusion_at_threshold(
+    rows: Sequence[dict[str, Any]],
+    transform: Callable[[dict[str, Any]], float],
+    threshold: float,
+) -> dict[str, Any]:
+    tp = fp = tn = fn = 0
+    for row in rows:
+        try:
+            value = float(transform(row))
+        except (TypeError, ValueError):
+            continue
+        expected = bool(row.get("isMatch"))
+        predicted = value >= float(threshold)
+        if expected and predicted:
+            tp += 1
+        elif expected and not predicted:
+            fn += 1
+        elif not expected and predicted:
+            fp += 1
+        else:
+            tn += 1
+    total = tp + fp + tn + fn
+    precision = tp / max(1, tp + fp)
+    recall = tp / max(1, tp + fn)
+    false_match_rate = fp / max(1, fp + tn)
+    false_reject_rate = fn / max(1, tp + fn)
+    accuracy = (tp + tn) / max(1, total)
+    return {
+        "threshold": round(float(threshold), 6),
+        "labeled": total,
+        "truePositives": tp,
+        "falsePositives": fp,
+        "trueNegatives": tn,
+        "falseNegatives": fn,
+        "precision": round(precision, 6),
+        "recall": round(recall, 6),
+        "falseMatchRate": round(false_match_rate, 6),
+        "falseRejectRate": round(false_reject_rate, 6),
+        "accuracy": round(accuracy, 6),
+    }
+
+
+def _score_accuracy(
+    rows: Sequence[dict[str, Any]],
+    transform: Callable[[dict[str, Any]], float],
+    threshold: float,
+) -> float | None:
+    metrics = _confusion_at_threshold(rows, transform, threshold)
+    return float(metrics["accuracy"]) if metrics["labeled"] else None
+
+
+def _segment_regressions(
+    rows: Sequence[dict[str, Any]],
+    baseline: Callable[[dict[str, Any]], float],
+    candidate: Callable[[dict[str, Any]], float],
+    baseline_threshold: float,
+    candidate_threshold: float,
+    *,
+    key: str,
+    min_rows: int = 2,
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for index, row in enumerate(rows):
+        value = row.get(key)
+        if value in (None, "") and key == "expectedPerson":
+            value = f"__row_{index}"
+        if value in (None, ""):
+            continue
+        groups.setdefault(str(value), []).append(row)
+    regressions: list[dict[str, Any]] = []
+    for value, group in sorted(groups.items(), key=lambda item: item[0]):
+        if len(group) < int(min_rows):
+            continue
+        baseline_acc = _score_accuracy(group, baseline, baseline_threshold)
+        candidate_acc = _score_accuracy(group, candidate, candidate_threshold)
+        if baseline_acc is None or candidate_acc is None:
+            continue
+        delta = candidate_acc - baseline_acc
+        if delta < 0:
+            regressions.append(
+                {
+                    "key": key,
+                    "value": value,
+                    "labeled": len(group),
+                    "baselineAccuracy": round(baseline_acc, 6),
+                    "candidateAccuracy": round(candidate_acc, 6),
+                    "delta": round(delta, 6),
+                }
+            )
+    return regressions[:20]
+
+
 def held_out_gate(
     rows: Sequence[dict[str, Any]],
     fit_transform: FitTransform,
@@ -98,25 +190,57 @@ def held_out_gate(
     except Exception as exc:  # a fit failure must never silently adopt the change
         return {"promote": False, "reason": f"candidate fit failed: {type(exc).__name__}"}
 
-    def _held_out_accuracy(transform: Callable[[dict[str, Any]], float]) -> float | None:
+    def _held_out_evaluation(transform: Callable[[dict[str, Any]], float]) -> dict[str, Any] | None:
         gt, it = _genuine_impostor(train, transform)
         ge, ie = _genuine_impostor(test, transform)
         if not (_both_classes(gt, it) and _both_classes(ge, ie)):
             return None
         _, threshold = eer(gt, it)  # operating point chosen on TRAIN
-        return accuracy_at_threshold(ge, ie, threshold)  # measured on TEST
+        accuracy = accuracy_at_threshold(ge, ie, threshold)  # measured on TEST
+        metrics = _confusion_at_threshold(test, transform, threshold)
+        metrics["accuracy"] = round(float(accuracy), 6)
+        return metrics
 
-    baseline_acc = _held_out_accuracy(baseline)
-    candidate_acc = _held_out_accuracy(candidate)
-    if baseline_acc is None or candidate_acc is None:
+    baseline_metrics = _held_out_evaluation(baseline)
+    candidate_metrics = _held_out_evaluation(candidate)
+    if baseline_metrics is None or candidate_metrics is None:
         return {"promote": False, "reason": "candidate transform produced an unscorable held-out fold"}
 
+    baseline_acc = float(baseline_metrics["accuracy"])
+    candidate_acc = float(candidate_metrics["accuracy"])
     delta = candidate_acc - baseline_acc
+    baseline_threshold = float(baseline_metrics["threshold"])
+    candidate_threshold = float(candidate_metrics["threshold"])
+    identity_regressions = _segment_regressions(
+        test,
+        baseline,
+        candidate,
+        baseline_threshold,
+        candidate_threshold,
+        key="expectedPerson",
+    )
+    segment_regressions: list[dict[str, Any]] = []
+    for segment_key in ("poseBucket", "mediaKind"):
+        segment_regressions.extend(
+            _segment_regressions(
+                test,
+                baseline,
+                candidate,
+                baseline_threshold,
+                candidate_threshold,
+                key=segment_key,
+                min_rows=4,
+            )
+        )
     return {
         "promote": bool(delta > float(margin)),
         "baselineAccuracy": round(baseline_acc, 6),
         "candidateAccuracy": round(candidate_acc, 6),
         "delta": round(delta, 6),
+        "baselineMetrics": baseline_metrics,
+        "candidateMetrics": candidate_metrics,
+        "identityRegressions": identity_regressions,
+        "segmentRegressions": segment_regressions[:20],
         "trainN": len(train),
         "testN": len(test),
         "reason": "held-out test accuracy improved" if delta > float(margin) else "no held-out improvement over baseline",

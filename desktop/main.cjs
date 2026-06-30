@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, session, Menu, Tray, nativeImage, shell, Notification, clipboard, protocol, net, safeStorage, nativeTheme } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, session, Menu, Tray, nativeImage, shell, Notification, clipboard, protocol, net, safeStorage, nativeTheme, ShareMenu, systemPreferences, powerMonitor } = require("electron");
 const { spawn, spawnSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -19,6 +19,8 @@ const {
   backendRestartDelayMs,
   canonicalPathKey,
 } = require("./main/util.cjs");
+const { buildSystemPhotoSources } = require("./main/photo-sources.cjs");
+const { parseProtocolUrl } = require("./main/external-open.cjs");
 
 let autoUpdater = null;
 try {
@@ -37,10 +39,15 @@ let rendererReady = false;
 let creatingWindow = null;
 const pendingExternalOpens = [];
 const userGrantedPaths = new Set();
+const userGrantedExternalEditorPaths = new Set();
 const queryTrustedMediaPaths = new Set();
 const recentDiagnosticEvents = [];
 let workspaceLockUnlocked = true;
 let workspaceLockInitialized = false;
+let photoIndexingHeadlessInitialTimer = null;
+let photoIndexingHeadlessTimer = null;
+let photoIndexingHeadlessRunning = false;
+let photoIndexingHeadlessLastRuntimeSkipKey = "";
 const MAX_DIAGNOSTIC_EVENTS = 240;
 const MAX_DIAGNOSTIC_LOG_BYTES = 2 * 1024 * 1024;
 const MAX_BACKEND_STDERR_TAIL_BYTES = 64 * 1024;
@@ -52,6 +59,10 @@ const WATCH_SWEEP_INTERVAL_MS = Math.max(10_000, Number.parseInt(process.env.CRO
 const WATCH_SWEEP_DIR_BUDGET = Math.max(25, Number.parseInt(process.env.CROSSAGE_WATCH_SWEEP_DIR_BUDGET || "800", 10) || 800);
 const WATCH_SWEEP_FILE_BUDGET = Math.max(200, Number.parseInt(process.env.CROSSAGE_WATCH_SWEEP_FILE_BUDGET || "20000", 10) || 20_000);
 const WATCH_SWEEP_QUEUE_LIMIT = Math.max(25, Number.parseInt(process.env.CROSSAGE_WATCH_SWEEP_QUEUE_LIMIT || "500", 10) || 500);
+const PHOTO_INDEXING_HEADLESS_INITIAL_MS = Math.max(1_000, Number.parseInt(process.env.CROSSAGE_PHOTO_INDEXING_HEADLESS_INITIAL_MS || "60000", 10) || 60_000);
+const PHOTO_INDEXING_HEADLESS_INTERVAL_MS = Math.max(1_000, Number.parseInt(process.env.CROSSAGE_PHOTO_INDEXING_HEADLESS_INTERVAL_MS || "60000", 10) || 60_000);
+const PHOTO_INDEXING_HEADLESS_BATCH_SIZE = Math.max(1, Math.min(10, Number.parseInt(process.env.CROSSAGE_PHOTO_INDEXING_HEADLESS_BATCH_SIZE || "2", 10) || 2));
+const PHOTO_INDEXING_IDLE_THRESHOLD_SECONDS = Math.max(30, Number.parseInt(process.env.CROSSAGE_PHOTO_INDEXING_IDLE_THRESHOLD_SECONDS || "180", 10) || 180);
 const UPDATE_CHANNELS = new Set(["stable", "beta", "internal"]);
 let updaterConfigured = false;
 let updateState = {
@@ -395,8 +406,130 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "duplicate_people",
   "apply_review_rules",
   "query_candidates",
+  "suggest_photo_review_more_candidates",
   "list_photo_folders",
   "list_photo_folder_items",
+  "list_photo_date_buckets",
+  "search_photo_library",
+  "semantic_search_photos",
+  "list_photo_assets",
+  "list_photo_burst_stacks",
+  "set_photo_burst_selection",
+  "list_photo_keywords",
+  "save_photo_keyword",
+  "delete_photo_keyword",
+  "export_photo_keywords",
+  "import_photo_keywords",
+  "save_photo_person_profile",
+  "save_photo_pet_profile",
+  "save_photo_place_profile",
+  "save_photo_utility_profile",
+  "rename_photo_pet",
+  "assign_photo_pet",
+  "dismiss_photo_pet_review",
+  "save_photo_people_group",
+  "delete_photo_people_group",
+  "update_photo_asset_metadata",
+  "update_photo_assets_metadata",
+  "reverse_geocode_photo_location",
+  "get_photo_edit_stack",
+  "save_photo_edit_stack",
+  "revert_photo_edit_stack",
+  "list_photo_edit_stack_versions",
+  "create_photo_edit_stack_version",
+  "restore_photo_edit_stack_version",
+  "delete_photo_edit_stack_version",
+  "duplicate_photo_asset_version",
+  "duplicate_photo_asset_rendered_version",
+  "record_photo_asset_event",
+  "apply_photo_visibility_operation",
+  "list_photo_operations",
+  "photo_restore_rehearsal",
+  "photo_backup_restore_rehearsal",
+  "undo_photo_operation",
+  "permanently_delete_photos",
+  "merge_photo_duplicates",
+  "dismiss_photo_duplicate_group",
+  "import_photos",
+  "update_photo_import_session_provenance",
+  "bulk_update_photo_import_session_provenance",
+  "archive_photo_import_sessions",
+  "list_photo_import_failures",
+  "dismiss_photo_import_failure",
+  "retry_photo_import_failure",
+  "save_recovered_photo_import_failure",
+  "delete_recovered_photo_import_failure",
+  "scan_photo_recovered_orphans",
+  "photo_recovered_cleanup",
+  "rebuild_photo_previews",
+  "photo_library_preview_sweep",
+  "relink_photo_library_paths",
+  "create_photo_media_pair",
+  "relink_photo_media_pair",
+  "delete_photo_media_pair",
+  "consolidate_photo_library_assets",
+  "photo_library_backup_check",
+  "photo_library_catalog_cleanup",
+  "photo_repair_history",
+  "photo_library_settings",
+  "save_photo_library_settings",
+  "index_photo_ocr",
+  "photo_ocr_index_status",
+  "index_photo_barcodes",
+  "photo_barcode_index_status",
+  "index_photo_objects",
+  "photo_object_index_status",
+  "enqueue_photo_indexing_job",
+  "photo_indexing_jobs",
+  "run_photo_indexing_job",
+  "run_photo_indexing_queue",
+  "cancel_photo_indexing_job",
+  "dismiss_photo_indexing_job",
+  "photo_curation_preferences",
+  "save_photo_curation_preferences",
+  "photo_user_memories",
+  "save_photo_user_memory",
+  "delete_photo_user_memory",
+  "photo_slideshow_theme_templates",
+  "save_photo_slideshow_theme_template",
+  "delete_photo_slideshow_theme_template",
+  "export_photo_slideshow_theme_templates",
+  "import_photo_slideshow_theme_templates",
+  "photo_slideshow_projects",
+  "save_photo_slideshow_project",
+  "delete_photo_slideshow_project",
+  "export_photo_slideshow",
+  "export_photo_memory_movie",
+  "list_photo_saved_filters",
+  "save_photo_saved_filter",
+  "delete_photo_saved_filter",
+  "preview_photo_album_rules",
+  "save_photo_album",
+  "delete_photo_album",
+  "merge_photo_albums",
+  "migrate_photo_smart_albums",
+  "list_photo_album_folders",
+  "save_photo_album_folder",
+  "delete_photo_album_folder",
+  "move_photo_album_to_folder",
+  "reorder_photo_album_folder_children",
+  "add_photo_album_items",
+  "remove_photo_album_items",
+  "reorder_photo_album_items",
+  "suggest_photo_albums",
+  "photo_color_profile_status",
+  "validate_photo_color_profile",
+  "export_photo_selection",
+  "export_photo_contact_sheet",
+  "export_photo_video_frame",
+  "export_photo_video_trim",
+  "export_photo_live_motion",
+  "export_photo_subject_cutout",
+  "export_photo_portrait_blur",
+  "set_photo_live_key_photo",
+  "reset_photo_live_key_photo",
+  "set_photo_video_poster",
+  "reset_photo_video_poster",
   "clear_queue",
   "purge_candidates",
   "purge_duplicate_candidates",
@@ -457,9 +590,25 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "generate_accuracy_validation_pack",
   "run_accuracy_validation_pack",
   "accuracy_validation_history",
+  "self_learning_rd_status",
+  "calibration_learning_status",
+  "run_learning_jobs",
+  "reference_suggestion_status",
+  "stage_reference_suggestions",
+  "approve_reference_suggestion",
+  "reject_reference_suggestion",
+  "stage_calibration",
+  "promote_calibration",
+  "rollback_calibration",
+  "embedding_adapter_status",
+  "stage_embedding_adapter",
+  "promote_embedding_adapter",
+  "rollback_embedding_adapter",
   "apply_calibration",
   "export_accuracy_labels",
   "import_accuracy_labels",
+  "export_training_examples",
+  "import_training_examples",
   "privacy_report",
   "delete_face_data",
   "optimize_workspace",
@@ -640,52 +789,77 @@ function pathAvailable(targetPath) {
   }
 }
 
-function photoSource(id, label, detail, sourcePath, kind = "folder") {
-  return {
-    id,
-    label,
-    detail,
-    path: sourcePath,
-    kind,
-    platform: process.platform,
-    available: pathAvailable(sourcePath)
-  };
-}
-
-function uniquePhotoSources(sources) {
-  const seen = new Set();
-  return sources.filter((source) => {
-    const key = path.resolve(source.path || "");
-    if (!source.path || seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
-}
-
 function systemPhotoSources() {
   const home = safeUserPath("home") || os.homedir();
   const pictures = safeUserPath("pictures") || path.join(home, "Pictures");
-  const sources = [
-    photoSource("pictures", "Pictures folder", "Default photo folder on this computer.", pictures)
-  ];
-  if (process.platform === "darwin") {
-    const photosLibrary = path.join(pictures, "Photos Library.photoslibrary");
-    sources.push(
-      photoSource("apple-photos-originals", "Apple Photos originals", "Original media inside the local Apple Photos library package.", path.join(photosLibrary, "originals"), "apple-photos"),
-      photoSource("apple-photos-library", "Apple Photos library", "Search the Photos library package if originals are stored in another package layout.", photosLibrary, "apple-photos"),
-      photoSource("icloud-drive", "iCloud Drive", "Useful when photos are exported or synced into iCloud Drive folders.", path.join(home, "Library", "Mobile Documents", "com~apple~CloudDocs"))
-    );
-  } else if (process.platform === "win32") {
-    const oneDriveRoot = process.env.OneDrive || path.join(home, "OneDrive");
-    sources.push(
-      photoSource("windows-camera-roll", "Camera Roll", "Windows Photos camera import folder.", path.join(pictures, "Camera Roll"), "windows-photos"),
-      photoSource("windows-saved-pictures", "Saved Pictures", "Windows Photos saved media folder.", path.join(pictures, "Saved Pictures"), "windows-photos"),
-      photoSource("onedrive-pictures", "OneDrive Pictures", "Common Windows Photos and phone-sync location.", path.join(oneDriveRoot, "Pictures"), "windows-photos")
-    );
+  return buildSystemPhotoSources({
+    platform: process.platform,
+    home,
+    pictures,
+    env: process.env,
+  });
+}
+
+function photosSensitiveAuthStatus() {
+  if (process.platform !== "darwin") {
+    return {
+      supported: false,
+      available: false,
+      platform: process.platform,
+      method: "none",
+      reason: "Device authentication for Photos sensitive collections is currently available on macOS only."
+    };
   }
-  return uniquePhotoSources(sources);
+  if (!systemPreferences || typeof systemPreferences.canPromptTouchID !== "function" || typeof systemPreferences.promptTouchID !== "function") {
+    return {
+      supported: false,
+      available: false,
+      platform: process.platform,
+      method: "touch-id",
+      reason: "This Electron runtime does not expose Touch ID prompts."
+    };
+  }
+  let available = false;
+  try {
+    available = Boolean(systemPreferences.canPromptTouchID());
+  } catch {
+    available = false;
+  }
+  return {
+    supported: true,
+    available,
+    platform: process.platform,
+    method: "touch-id",
+    reason: available ? "" : "Touch ID is not available, enrolled, or allowed for this app on this Mac."
+  };
+}
+
+async function authenticatePhotosSensitiveCollection(reason) {
+  const status = photosSensitiveAuthStatus();
+  if (!status.available) {
+    return {
+      ok: false,
+      ...status,
+      canceled: false,
+      error: status.reason || "Device authentication is not available."
+    };
+  }
+  const promptReason = String(reason || "Unlock Hidden and Recently Deleted in Vintrace.").slice(0, 180);
+  try {
+    await systemPreferences.promptTouchID(promptReason);
+    return {
+      ok: true,
+      ...status,
+      canceled: false
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      ...status,
+      canceled: true,
+      error: error instanceof Error ? error.message : String(error || "Device authentication was cancelled.")
+    };
+  }
 }
 
 function activeWorkspacePath() {
@@ -1286,6 +1460,84 @@ function persistFolderWatch(folder) {
   }
 }
 
+const MAX_EXTERNAL_EDITOR_FAVORITES = 12;
+
+function externalEditorFavoritesPath() {
+  return path.join(app.getPath("userData"), "external-editors.json");
+}
+
+function externalEditorLabel(editorPath) {
+  const name = path.basename(String(editorPath || ""));
+  return process.platform === "darwin" && name.toLowerCase().endsWith(".app") ? name.slice(0, -4) : name;
+}
+
+function listExternalEditorFavorites() {
+  const config = readJsonObject(externalEditorFavoritesPath());
+  const rows = Array.isArray(config.editors) ? config.editors : [];
+  const seen = new Set();
+  const editors = [];
+  for (const row of rows) {
+    const editorPath = normalizeExternalEditorPath(row?.editorPath);
+    if (!editorPath || !isTrustedExternalEditorPath(editorPath)) {
+      continue;
+    }
+    const key = canonicalPathKey(editorPath);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    editors.push({
+      editorPath,
+      label: String(row?.label || externalEditorLabel(editorPath)).slice(0, 80),
+      lastUsedAt: String(row?.lastUsedAt || ""),
+      useCount: Math.max(1, Math.min(1_000_000, Number.parseInt(String(row?.useCount || "1"), 10) || 1))
+    });
+  }
+  return editors
+    .sort((left, right) => String(right.lastUsedAt || "").localeCompare(String(left.lastUsedAt || "")))
+    .slice(0, MAX_EXTERNAL_EDITOR_FAVORITES);
+}
+
+function persistExternalEditorFavorite(editorPath) {
+  const target = normalizeExternalEditorPath(editorPath);
+  if (!target || !isTrustedExternalEditorPath(target)) {
+    return listExternalEditorFavorites();
+  }
+  const key = canonicalPathKey(target);
+  const now = new Date().toISOString();
+  const rows = listExternalEditorFavorites().filter((item) => canonicalPathKey(item.editorPath) !== key);
+  rows.unshift({
+    editorPath: target,
+    label: externalEditorLabel(target),
+    lastUsedAt: now,
+    useCount: Math.min(1_000_000, (listExternalEditorFavorites().find((item) => canonicalPathKey(item.editorPath) === key)?.useCount || 0) + 1)
+  });
+  const editors = rows.slice(0, MAX_EXTERNAL_EDITOR_FAVORITES);
+  writeJsonAtomic(externalEditorFavoritesPath(), { version: 1, editors });
+  grantExternalEditorPath(target);
+  return editors;
+}
+
+function forgetExternalEditorFavorite(editorPath) {
+  const target = normalizeExternalEditorPath(editorPath);
+  const key = target ? canonicalPathKey(target) : "";
+  const editors = listExternalEditorFavorites().filter((item) => canonicalPathKey(item.editorPath) !== key);
+  writeJsonAtomic(externalEditorFavoritesPath(), { version: 1, editors });
+  if (key) {
+    userGrantedExternalEditorPaths.delete(key);
+  }
+  return editors;
+}
+
+function isSavedExternalEditorPath(editorPath) {
+  const target = normalizeExternalEditorPath(editorPath);
+  if (!target) {
+    return false;
+  }
+  const key = canonicalPathKey(target);
+  return listExternalEditorFavorites().some((item) => canonicalPathKey(item.editorPath) === key);
+}
+
 function auditDesktopAction(row) {
   if (!backend) {
     return;
@@ -1336,6 +1588,12 @@ function grantUserPath(filePath) {
   }
 }
 
+function grantExternalEditorPath(filePath) {
+  if (typeof filePath === "string" && filePath.trim()) {
+    userGrantedExternalEditorPaths.add(canonicalPathKey(path.resolve(filePath)));
+  }
+}
+
 function grantQueryMediaPath(filePath) {
   if (typeof filePath !== "string" || !filePath.trim()) {
     return;
@@ -1353,6 +1611,7 @@ function grantQueryMediaPath(filePath) {
 // The new workspace's paths are re-granted as its state loads.
 function clearPathTrust() {
   userGrantedPaths.clear();
+  userGrantedExternalEditorPaths.clear();
   queryTrustedMediaPaths.clear();
 }
 
@@ -1424,6 +1683,45 @@ function isTrustedShellPath(filePath) {
     return true;
   }
   return paths.has(target) || isUserGrantedPath(target);
+}
+
+function normalizeExternalEditorPath(filePath) {
+  const rawPath = String(filePath || "").trim();
+  return rawPath ? path.resolve(rawPath) : "";
+}
+
+function isTrustedExternalEditorPath(filePath) {
+  const target = normalizeExternalEditorPath(filePath);
+  if (!target) {
+    return false;
+  }
+  try {
+    const stat = fs.statSync(target);
+    if (process.platform === "darwin" && stat.isDirectory() && target.toLowerCase().endsWith(".app")) {
+      return true;
+    }
+    if (!stat.isFile()) {
+      return false;
+    }
+    if (process.platform === "win32") {
+      return /\.(?:exe|cmd|bat|com)$/i.test(target);
+    }
+    return Boolean(stat.mode & 0o111);
+  } catch {
+    return false;
+  }
+}
+
+function isGrantedExternalEditorPath(filePath) {
+  const target = normalizeExternalEditorPath(filePath);
+  return Boolean(target && userGrantedExternalEditorPaths.has(canonicalPathKey(target)));
+}
+
+function launchExternalEditor(target, editorPath) {
+  if (process.platform === "darwin" && editorPath.toLowerCase().endsWith(".app")) {
+    return spawn("/usr/bin/open", ["-a", editorPath, target], { detached: true, stdio: "ignore" });
+  }
+  return spawn(editorPath, [target], { detached: true, stdio: "ignore" });
 }
 
 function showMainWindow() {
@@ -1710,6 +2008,16 @@ function sendAppCommand(payload) {
   sendToRenderer("app:command", payload);
 }
 
+function photoShortcutFromNativeInput(input = {}) {
+  if (!input || input.type !== "keyDown" || input.isAutoRepeat) return "";
+  const key = String(input.key || "");
+  const normalized = key.toLowerCase();
+  const command = Boolean(input.meta || input.control);
+  if (command && !input.alt && normalized === "a") return "selectPage";
+  if (!command && !input.alt && !input.shift && (key === "Delete" || key === "Backspace")) return "delete";
+  return "";
+}
+
 function notify(title, body) {
   if (process.env.CROSSAGE_DISABLE_NOTIFICATIONS === "1" || process.env.CROSSAGE_TEST_CAMERA === "1") {
     return;
@@ -1787,8 +2095,36 @@ function decorateState(value) {
     grantQueryMediaPath(next.previewPath);
     grantQueryMediaPath(next.bestRefPath);
     grantQueryMediaPath(next.bestRefPreviewPath);
+    if (next.assetMetadata && typeof next.assetMetadata === "object" && !Array.isArray(next.assetMetadata)) {
+      const assetMetadata = { ...next.assetMetadata };
+      if (assetMetadata.livePhoto && typeof assetMetadata.livePhoto === "object" && !Array.isArray(assetMetadata.livePhoto)) {
+        const livePhoto = { ...assetMetadata.livePhoto };
+        grantQueryMediaPath(livePhoto.pairedVideoPath);
+        grantQueryMediaPath(livePhoto.keyPhotoPreviewPath);
+        if (livePhoto.pairedVideoPath) {
+          livePhoto.pairedVideoUrl = mediaUrlFor(livePhoto.pairedVideoPath);
+        }
+        if (livePhoto.keyPhotoPreviewPath) {
+          livePhoto.keyPhotoPreviewUrl = mediaUrlFor(livePhoto.keyPhotoPreviewPath);
+        }
+        assetMetadata.livePhoto = livePhoto;
+      }
+      next.assetMetadata = assetMetadata;
+    }
+    if (Array.isArray(next.mediaPairs)) {
+      next.mediaPairs = next.mediaPairs.map((pair) => {
+        const mediaPair = pair && typeof pair === "object" && !Array.isArray(pair) ? { ...pair } : pair;
+        if (mediaPair && typeof mediaPair === "object") {
+          grantQueryMediaPath(mediaPair.relatedSourcePath);
+        }
+        return mediaPair;
+      });
+    }
     decoratePath(next, "sourcePath", "sourceUrl");
     decoratePath(next, "previewPath", "previewUrl");
+    if (next.sourceUrl) {
+      next.originalSourceUrl = next.sourceUrl;
+    }
     if (next.previewUrl) {
       next.sourceUrl = next.previewUrl;
     }
@@ -1806,6 +2142,9 @@ function decorateState(value) {
         decoratePath(next, "sourcePath", "sourceUrl");
         decoratePath(next, "mediaSourcePath", "mediaSourceUrl");
         decoratePath(next, "previewPath", "previewUrl");
+        if (next.sourceUrl) {
+          next.originalSourceUrl = next.sourceUrl;
+        }
         if (next.previewUrl) {
           next.sourceUrl = next.previewUrl;
         }
@@ -1839,6 +2178,27 @@ function decorateState(value) {
       decoratePath(next, "coverPreviewPath", "coverPreviewUrl");
       return next;
     });
+  } else if (Array.isArray(value.buckets)) {
+    value.buckets = value.buckets.map((bucket) => {
+      const next = { ...bucket };
+      grantQueryMediaPath(next.coverPreviewPath);
+      decoratePath(next, "coverPreviewPath", "coverPreviewUrl");
+      return next;
+    });
+  } else if (Array.isArray(value.groups)) {
+    value.groups = value.groups.map((group) => ({
+      ...group,
+      items: Array.isArray(group.items)
+        ? group.items.map((item) => {
+          const next = { ...item };
+          grantQueryMediaPath(next.previewPath);
+          grantQueryMediaPath(next.coverPreviewPath);
+          decoratePath(next, "previewPath", "previewUrl");
+          decoratePath(next, "coverPreviewPath", "coverPreviewUrl");
+          return next;
+        })
+        : []
+    }));
   }
   return value;
 }
@@ -2068,6 +2428,12 @@ function registerMediaProtocol() {
 
 function hardenWebContents(window) {
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.on("before-input-event", (_event, input) => {
+    const shortcut = photoShortcutFromNativeInput(input);
+    if (shortcut) {
+      sendAppCommand({ type: "photos-shortcut", shortcut });
+    }
+  });
   window.webContents.on("will-navigate", (event, url) => {
     if (!isTrustedRendererUrl(url)) {
       event.preventDefault();
@@ -2076,33 +2442,6 @@ function hardenWebContents(window) {
   window.webContents.on("will-attach-webview", (event) => {
     event.preventDefault();
   });
-}
-
-function parseProtocolUrl(value) {
-  try {
-    const url = new URL(value);
-    if (url.protocol !== `${PROTOCOL_SCHEME}:`) {
-      return null;
-    }
-    const action = (url.hostname || url.pathname.replace(/^\/+/, "") || "open").toLowerCase();
-    const target = url.searchParams.get("workspace") || url.searchParams.get("folder") || url.searchParams.get("path");
-    if (!target) {
-      return { type: "show" };
-    }
-    const resolved = path.resolve(target);
-    if (action === "open" || action === "workspace") {
-      return { type: "workspace", path: resolved, source: "protocol" };
-    }
-    if (action === "scan") {
-      return { type: "scan-folder", path: resolved, source: "protocol" };
-    }
-    if (action === "watch") {
-      return { type: "watch-folder", path: resolved, source: "protocol" };
-    }
-  } catch {
-    return null;
-  }
-  return null;
 }
 
 function parseExternalPath(value) {
@@ -3030,6 +3369,184 @@ class PythonBackend {
   }
 }
 
+function envFlag(name) {
+  return /^(1|true|yes|on)$/i.test(String(process.env[name] || "").trim());
+}
+
+function unwrapBackendValue(result) {
+  return result && typeof result === "object" && result.value && typeof result.value === "object"
+    ? result.value
+    : result;
+}
+
+function normalizePhotoIndexingPowerMode(value) {
+  const mode = String(value || "balanced").trim().toLowerCase();
+  return mode === "low" || mode === "performance" || mode === "balanced" ? mode : "balanced";
+}
+
+function photoIndexingHeadlessPowerState() {
+  const forcedBattery = String(process.env.CROSSAGE_PHOTO_INDEXING_FORCE_BATTERY || "").trim();
+  const forcedIdleState = String(process.env.CROSSAGE_PHOTO_INDEXING_FORCE_IDLE_STATE || "").trim().toLowerCase();
+  let onBattery = false;
+  let idleState = "unknown";
+  if (forcedBattery) {
+    onBattery = envFlag("CROSSAGE_PHOTO_INDEXING_FORCE_BATTERY");
+  } else if (powerMonitor && typeof powerMonitor.isOnBatteryPower === "function") {
+    try {
+      onBattery = Boolean(powerMonitor.isOnBatteryPower());
+    } catch {
+      onBattery = false;
+    }
+  }
+  if (forcedIdleState === "active" || forcedIdleState === "idle" || forcedIdleState === "locked" || forcedIdleState === "unknown") {
+    idleState = forcedIdleState;
+  } else if (powerMonitor && typeof powerMonitor.getSystemIdleState === "function") {
+    try {
+      idleState = String(powerMonitor.getSystemIdleState(PHOTO_INDEXING_IDLE_THRESHOLD_SECONDS) || "unknown");
+    } catch {
+      idleState = "unknown";
+    }
+  }
+  return { onBattery, idleState };
+}
+
+function photoIndexingHeadlessRuntimePolicy(localSettings) {
+  const settings = localSettings && typeof localSettings === "object" ? localSettings : {};
+  const powerMode = normalizePhotoIndexingPowerMode(settings.indexingPowerMode);
+  const power = photoIndexingHeadlessPowerState();
+  if (!settings.localIntelligenceEnabled) {
+    return { allowed: false, reason: "local-intelligence-disabled", powerMode, ...power };
+  }
+  if (settings.backgroundIndexingAutoRun === false) {
+    return { allowed: false, reason: "auto-run-off", powerMode, ...power };
+  }
+  if (settings.backgroundIndexingPaused) {
+    return { allowed: false, reason: "paused", powerMode, ...power };
+  }
+  if (envFlag("CROSSAGE_PHOTO_INDEXING_IGNORE_RUNTIME_POLICY")) {
+    return { allowed: true, reason: "runtime-policy-ignored", powerMode, ...power };
+  }
+  if (power.onBattery && powerMode !== "performance" && !envFlag("CROSSAGE_PHOTO_INDEXING_ALLOW_BATTERY")) {
+    return { allowed: false, reason: "battery", powerMode, ...power };
+  }
+  if (powerMode === "low" && power.idleState !== "idle" && power.idleState !== "locked" && !envFlag("CROSSAGE_PHOTO_INDEXING_ALLOW_ACTIVE_LOW_POWER")) {
+    return { allowed: false, reason: "active-low-power", powerMode, ...power };
+  }
+  return { allowed: true, reason: "allowed", powerMode, ...power };
+}
+
+function appendPhotoIndexingHeadlessRuntimeSkip(reason, policy) {
+  const key = `${reason}:${policy.reason}:${policy.powerMode}:${policy.onBattery}:${policy.idleState}`;
+  if (photoIndexingHeadlessLastRuntimeSkipKey === key) {
+    return;
+  }
+  photoIndexingHeadlessLastRuntimeSkipKey = key;
+  appendDiagnosticEvent({
+    type: "photo_indexing_headless_runtime_skip",
+    level: "info",
+    reason,
+    runtimeReason: policy.reason,
+    powerMode: policy.powerMode,
+    onBattery: Boolean(policy.onBattery),
+    idleState: String(policy.idleState || "unknown")
+  });
+}
+
+async function runPhotoIndexingHeadlessSchedulerTick(reason = "interval") {
+  if (!backend || isQuitting || photoIndexingHeadlessRunning) {
+    return;
+  }
+  initializeWorkspaceLockForActiveWorkspace();
+  if (isWorkspaceLocked()) {
+    return;
+  }
+  photoIndexingHeadlessRunning = true;
+  try {
+    const settingsResult = await backend.invoke("photo_library_settings", {});
+    const settings = unwrapBackendValue(settingsResult);
+    const localSettings = settings && typeof settings === "object" && settings.localSettings && typeof settings.localSettings === "object"
+      ? settings.localSettings
+      : {};
+    const policy = photoIndexingHeadlessRuntimePolicy(localSettings);
+    if (!policy.allowed) {
+      appendPhotoIndexingHeadlessRuntimeSkip(reason, policy);
+      return;
+    }
+    const result = await backend.invoke("run_photo_indexing_queue", {
+      limit: 8,
+      maxJobs: PHOTO_INDEXING_HEADLESS_BATCH_SIZE,
+      automatic: true,
+      headless: true
+    });
+    const value = unwrapBackendValue(result);
+    const progress = value && typeof value === "object" && value.progress && typeof value.progress === "object"
+      ? value.progress
+      : {};
+    const ran = Number(value?.ran || 0) || 0;
+    const failed = Number(progress.failed || 0) || 0;
+    if (ran > 0 || failed > 0) {
+      appendDiagnosticEvent({
+        type: "photo_indexing_headless_scheduler",
+        level: failed > 0 ? "warn" : "info",
+        reason,
+        ran,
+        stoppedReason: String(value?.stoppedReason || value?.message || ""),
+        processed: Number(progress.processed || 0) || 0,
+        updated: Number(progress.updated || 0) || 0,
+        failed,
+        deferred: Number(progress.deferred || 0) || 0,
+        powerMode: policy.powerMode,
+        onBattery: Boolean(policy.onBattery),
+        idleState: String(policy.idleState || "unknown")
+      });
+    }
+    photoIndexingHeadlessLastRuntimeSkipKey = "";
+  } catch (error) {
+    appendDiagnosticEvent({
+      type: "photo_indexing_headless_scheduler_failed",
+      level: "warn",
+      reason,
+      message: error instanceof Error ? error.message : String(error),
+      stack: diagnosticStack(error)
+    });
+  } finally {
+    photoIndexingHeadlessRunning = false;
+  }
+}
+
+function startPhotoIndexingHeadlessScheduler() {
+  if (process.env.CROSSAGE_DISABLE_PHOTO_INDEXING_HEADLESS === "1") {
+    return;
+  }
+  if (photoIndexingHeadlessInitialTimer || photoIndexingHeadlessTimer) {
+    return;
+  }
+  if (!backend) {
+    backend = new PythonBackend();
+  }
+  photoIndexingHeadlessInitialTimer = setTimeout(() => {
+    photoIndexingHeadlessInitialTimer = null;
+    void runPhotoIndexingHeadlessSchedulerTick("initial");
+    if (!photoIndexingHeadlessTimer && !isQuitting) {
+      photoIndexingHeadlessTimer = setInterval(() => {
+        void runPhotoIndexingHeadlessSchedulerTick("interval");
+      }, PHOTO_INDEXING_HEADLESS_INTERVAL_MS);
+    }
+  }, PHOTO_INDEXING_HEADLESS_INITIAL_MS);
+}
+
+function stopPhotoIndexingHeadlessScheduler() {
+  if (photoIndexingHeadlessInitialTimer) {
+    clearTimeout(photoIndexingHeadlessInitialTimer);
+    photoIndexingHeadlessInitialTimer = null;
+  }
+  if (photoIndexingHeadlessTimer) {
+    clearInterval(photoIndexingHeadlessTimer);
+    photoIndexingHeadlessTimer = null;
+  }
+  photoIndexingHeadlessRunning = false;
+}
+
 async function createWindow() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     showMainWindow();
@@ -3321,6 +3838,17 @@ ipcMain.handle("photos:get-sources", async (event) => {
   return systemPhotoSources();
 });
 
+ipcMain.handle("photos:sensitive-auth-status", async (event) => {
+  assertTrustedSender(event);
+  return photosSensitiveAuthStatus();
+});
+
+ipcMain.handle("photos:authenticate-sensitive", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "Photos sensitive auth payload");
+  return authenticatePhotosSensitiveCollection(payload.reason);
+});
+
 ipcMain.handle("workspace-lock:get-status", async (event) => {
   assertTrustedSender(event);
   initializeWorkspaceLockForActiveWorkspace();
@@ -3405,12 +3933,255 @@ ipcMain.handle("shell:open-path", async (event, payload = {}) => {
   return { ok: !error, error };
 });
 
+ipcMain.handle("shell:open-path-with", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "Open with payload");
+  const target = path.resolve(String(payload.path || ""));
+  if (!isTrustedShellPath(target) || !fs.existsSync(target) || isWorkspaceLocked()) {
+    return { ok: false, supported: true, opened: false, path: target, error: "Path does not exist." };
+  }
+  try {
+    if (!fs.statSync(target).isFile()) {
+      return { ok: false, supported: true, opened: false, path: target, error: "Only files can be opened with an external editor." };
+    }
+  } catch {
+    return { ok: false, supported: true, opened: false, path: target, error: "Path does not exist." };
+  }
+  let editorPath = normalizeExternalEditorPath(payload.editorPath);
+  if (editorPath && (!isTrustedExternalEditorPath(editorPath) || (!isGrantedExternalEditorPath(editorPath) && !isSavedExternalEditorPath(editorPath)))) {
+    return { ok: false, supported: true, opened: false, path: target, editorPath, error: "Choose an external editor from the system picker first." };
+  }
+  if (!editorPath) {
+    const parent = BrowserWindow.fromWebContents(event.sender) || mainWindow || BrowserWindow.getFocusedWindow();
+    const properties = process.platform === "darwin" ? ["openFile", "openDirectory"] : ["openFile"];
+    const dialogOptions = {
+      title: "Choose external editor",
+      buttonLabel: "Open with",
+      properties,
+      filters: process.platform === "win32"
+        ? [
+            { name: "Applications", extensions: ["exe", "cmd", "bat", "com"] },
+            { name: "All files", extensions: ["*"] }
+          ]
+        : [
+            { name: "Applications", extensions: ["app"] },
+            { name: "All files", extensions: ["*"] }
+          ]
+    };
+    if (process.platform === "darwin") {
+      dialogOptions.defaultPath = "/Applications";
+    }
+    const result = parent ? await dialog.showOpenDialog(parent, dialogOptions) : await dialog.showOpenDialog(dialogOptions);
+    if (result.canceled || !result.filePaths.length) {
+      return { ok: false, supported: true, opened: false, path: target, canceled: true, error: "No external editor selected." };
+    }
+    editorPath = normalizeExternalEditorPath(result.filePaths[0]);
+    if (!isTrustedExternalEditorPath(editorPath)) {
+      return { ok: false, supported: true, opened: false, path: target, editorPath, error: "Choose a macOS .app bundle or executable file." };
+    }
+    grantExternalEditorPath(editorPath);
+  }
+  grantExternalEditorPath(editorPath);
+  try {
+    const child = launchExternalEditor(target, editorPath);
+    child.once("error", (error) => {
+      appendDiagnosticEvent({
+        type: "external_editor_open_failed",
+        level: "warn",
+        path: target,
+        editorPath,
+        message: error instanceof Error ? error.message : String(error || "External editor failed.")
+      });
+    });
+    child.unref();
+    const editors = persistExternalEditorFavorite(editorPath);
+    auditDesktopAction({ action: "shell_open_with", path: target, editorPath });
+    return { ok: true, supported: true, opened: true, path: target, editorPath, editors };
+  } catch (error) {
+    return { ok: false, supported: true, opened: false, path: target, editorPath, error: error instanceof Error ? error.message : String(error || "External editor could not be opened.") };
+  }
+});
+
+ipcMain.handle("shell:list-external-editors", async (event) => {
+  assertTrustedSender(event);
+  return { ok: true, editors: listExternalEditorFavorites() };
+});
+
+ipcMain.handle("shell:forget-external-editor", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "External editor payload");
+  return { ok: true, editors: forgetExternalEditorFavorite(payload.editorPath) };
+});
+
+ipcMain.handle("shell:share-paths", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "Share payload");
+  const rawPaths = Array.isArray(payload.paths) ? payload.paths : [payload.path];
+  const targets = [];
+  const seen = new Set();
+  for (const rawPath of rawPaths.slice(0, 50)) {
+    const target = path.resolve(String(rawPath || ""));
+    if (!target || seen.has(target)) {
+      continue;
+    }
+    seen.add(target);
+    if (!isTrustedShellPath(target) || !fs.existsSync(target) || isWorkspaceLocked()) {
+      continue;
+    }
+    try {
+      if (!fs.statSync(target).isFile()) {
+        continue;
+      }
+    } catch {
+      continue;
+    }
+    targets.push(target);
+  }
+  if (!targets.length) {
+    return { ok: false, supported: process.platform === "darwin", shared: false, count: 0, filePaths: [], error: "No shareable files are available." };
+  }
+  if (process.platform !== "darwin" || typeof ShareMenu !== "function") {
+    const fallbackPath = targets[0];
+    try {
+      shell.showItemInFolder(fallbackPath);
+      auditDesktopAction({ action: "shell_share_fallback_reveal", path: fallbackPath, count: targets.length, platform: process.platform });
+      return {
+        ok: true,
+        supported: false,
+        shared: false,
+        fallback: "reveal",
+        fallbackPath,
+        fallbackDirectory: path.dirname(fallbackPath),
+        count: targets.length,
+        filePaths: targets,
+        error: "Native share is not available on this platform, so the containing folder was opened instead."
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        supported: false,
+        shared: false,
+        fallback: "reveal",
+        fallbackPath,
+        fallbackDirectory: path.dirname(fallbackPath),
+        count: targets.length,
+        filePaths: targets,
+        error: error instanceof Error ? error.message : "Native share is not available on this platform and the fallback folder could not be opened."
+      };
+    }
+  }
+  const window = BrowserWindow.fromWebContents(event.sender) || mainWindow || BrowserWindow.getFocusedWindow();
+  const menu = new ShareMenu({ filePaths: targets });
+  menu.popup({ window: window || undefined });
+  auditDesktopAction({ action: "shell_share", path: targets[0], count: targets.length });
+  return { ok: true, supported: true, shared: true, count: targets.length, filePaths: targets };
+});
+
+ipcMain.handle("shell:print-path", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "Print payload");
+  const target = path.resolve(String(payload.path || ""));
+  if (!isTrustedShellPath(target) || !fs.existsSync(target) || isWorkspaceLocked()) {
+    return { ok: false, supported: true, printed: false, path: target, error: "Path does not exist." };
+  }
+  try {
+    if (!fs.statSync(target).isFile()) {
+      return { ok: false, supported: true, printed: false, path: target, error: "Only files can be printed." };
+    }
+  } catch {
+    return { ok: false, supported: true, printed: false, path: target, error: "Path does not exist." };
+  }
+  const parent = BrowserWindow.fromWebContents(event.sender) || mainWindow || BrowserWindow.getFocusedWindow();
+  const printWindow = new BrowserWindow({
+    width: 900,
+    height: 700,
+    show: false,
+    parent: parent || undefined,
+    webPreferences: {
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  try {
+    await printWindow.loadURL(pathToFileURL(target).toString());
+    const printed = await new Promise((resolve) => {
+      printWindow.webContents.print({ silent: false, printBackground: true }, (success, failureReason) => {
+        resolve({ success, failureReason });
+      });
+    });
+    if (printed.success) {
+      auditDesktopAction({ action: "shell_print", path: target });
+      return { ok: true, supported: true, printed: true, path: target };
+    }
+    return {
+      ok: false,
+      supported: true,
+      printed: false,
+      path: target,
+      error: printed.failureReason || "Print was cancelled or could not start."
+    };
+  } catch (error) {
+    return { ok: false, supported: true, printed: false, path: target, error: error instanceof Error ? error.message : String(error || "Print failed.") };
+  } finally {
+    if (!printWindow.isDestroyed()) {
+      printWindow.close();
+    }
+  }
+});
+
 ipcMain.handle("clipboard:write-text", async (event, payload = {}) => {
   assertTrustedSender(event);
   assertPlainObject(payload, "Clipboard payload");
   const text = String(payload.text || "");
   clipboard.writeText(text.slice(0, 200_000));
   return true;
+});
+
+ipcMain.handle("clipboard:write-image-path", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "Clipboard image payload");
+  const target = path.resolve(String(payload.path || ""));
+  if (!isTrustedShellPath(target) || !fs.existsSync(target) || isWorkspaceLocked()) {
+    return { ok: false, path: target, error: "Path does not exist." };
+  }
+  try {
+    if (!fs.statSync(target).isFile()) {
+      return { ok: false, path: target, error: "Only image files can be copied." };
+    }
+  } catch {
+    return { ok: false, path: target, error: "Path does not exist." };
+  }
+  const image = nativeImage.createFromPath(target);
+  if (!image || image.isEmpty()) {
+    return { ok: false, path: target, error: "Image could not be loaded." };
+  }
+  clipboard.writeImage(image);
+  auditDesktopAction({ action: "clipboard_image", path: target });
+  return { ok: true, path: target };
+});
+
+ipcMain.handle("shell:start-drag-file", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "Drag payload");
+  const target = path.resolve(String(payload.path || ""));
+  if (!isTrustedShellPath(target) || !fs.existsSync(target) || isWorkspaceLocked()) {
+    return { ok: false, path: target, error: "Path does not exist." };
+  }
+  try {
+    if (!fs.statSync(target).isFile()) {
+      return { ok: false, path: target, error: "Only files can be dragged." };
+    }
+  } catch {
+    return { ok: false, path: target, error: "Path does not exist." };
+  }
+  const image = nativeImage.createFromPath(target);
+  if (!image || image.isEmpty()) {
+    return { ok: false, path: target, error: "Drag icon could not be loaded." };
+  }
+  event.sender.startDrag({ file: target, icon: image });
+  auditDesktopAction({ action: "shell_start_drag", path: target });
+  return { ok: true, path: target };
 });
 
 ipcMain.handle("dialog:choose-folder", async (event) => {
@@ -3465,6 +4236,356 @@ ipcMain.handle("dialog:choose-images", async (event) => {
   return result.filePaths.map(toMedia);
 });
 
+ipcMain.handle("dialog:choose-audio", async (event) => {
+  assertTrustedSender(event);
+  const toMedia = (filePath) => {
+    grantUserPath(filePath);
+    return { path: filePath, url: mediaUrlFor(filePath), isDir: false };
+  };
+  if (process.env.CROSSAGE_TEST_DIALOG_PATHS) {
+    const paths = process.env.CROSSAGE_TEST_DIALOG_PATHS.split(path.delimiter).filter(Boolean);
+    const selected = paths.shift() || "";
+    process.env.CROSSAGE_TEST_DIALOG_PATHS = paths.join(path.delimiter);
+    return selected ? toMedia(selected) : null;
+  }
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openFile"],
+    filters: [
+      { name: "Audio", extensions: ["aac", "aif", "aiff", "caf", "flac", "m4a", "mp3", "ogg", "opus", "wav"] },
+      { name: "All files", extensions: ["*"] }
+    ]
+  });
+  if (result.canceled || !result.filePaths.length) {
+    return null;
+  }
+  return toMedia(result.filePaths[0]);
+});
+
+ipcMain.handle("dialog:choose-json", async (event) => {
+  assertTrustedSender(event);
+  const toFile = (filePath) => {
+    grantUserPath(filePath);
+    return { path: filePath, isDir: false };
+  };
+  if (process.env.CROSSAGE_TEST_DIALOG_PATHS) {
+    const paths = process.env.CROSSAGE_TEST_DIALOG_PATHS.split(path.delimiter).filter(Boolean);
+    const selected = paths.shift() || "";
+    process.env.CROSSAGE_TEST_DIALOG_PATHS = paths.join(path.delimiter);
+    return selected ? toFile(selected) : null;
+  }
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openFile"],
+    filters: [
+      { name: "JSON", extensions: ["json"] },
+      { name: "All files", extensions: ["*"] }
+    ]
+  });
+  if (result.canceled || !result.filePaths.length) {
+    return null;
+  }
+  return toFile(result.filePaths[0]);
+});
+
+ipcMain.handle("dialog:choose-color-profile", async (event) => {
+  assertTrustedSender(event);
+  const toFile = (filePath) => {
+    grantUserPath(filePath);
+    return { path: filePath, isDir: false };
+  };
+  if (process.env.CROSSAGE_TEST_DIALOG_PATHS) {
+    const paths = process.env.CROSSAGE_TEST_DIALOG_PATHS.split(path.delimiter).filter(Boolean);
+    const selected = paths.shift() || "";
+    process.env.CROSSAGE_TEST_DIALOG_PATHS = paths.join(path.delimiter);
+    return selected ? toFile(selected) : null;
+  }
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openFile"],
+    filters: [
+      { name: "ICC profiles", extensions: ["icc", "icm"] },
+      { name: "All files", extensions: ["*"] }
+    ]
+  });
+  if (result.canceled || !result.filePaths.length) {
+    return null;
+  }
+  return toFile(result.filePaths[0]);
+});
+
+const PHOTO_MEDIA_SOURCE_LABELS = Object.freeze({
+  folder: "Imported files",
+  camera: "Camera/device import",
+  library: "Photo library",
+  mail: "Mail",
+  safari: "Safari",
+  messages: "Messages",
+  airdrop: "AirDrop",
+  downloads: "Downloads",
+  app: "Other app"
+});
+
+function mediaSourcePathParts(filePath) {
+  return String(filePath || "")
+    .replace(/\\/g, "/")
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function titleCaseMediaSourcePart(value) {
+  const clean = String(value || "").replace(/[-_]+/g, " ").trim();
+  if (!clean) return "";
+  if (/^[A-Z0-9\s.]+$/.test(clean)) return clean;
+  return clean.replace(/\b[a-z]/g, (match) => match.toUpperCase());
+}
+
+function mediaSourceTailFromMarker(parts, marker, label, afterCount = 1) {
+  const lowerParts = parts.map((part) => part.toLowerCase());
+  const index = lowerParts.findIndex(marker);
+  if (index < 0) return label;
+  const tail = parts.slice(index, index + afterCount + 1).map(titleCaseMediaSourcePart).filter(Boolean);
+  return tail.length ? tail.join(" / ") : label;
+}
+
+function cleanMediaSourceDetail(value, maxLength = 240) {
+  const cleaned = String(value || "").replace(/\s+/g, " ").trim();
+  if (!cleaned) return "";
+  return cleaned.length > maxLength ? `${cleaned.slice(0, Math.max(0, maxLength - 3)).trim()}...` : cleaned;
+}
+
+function decodeXmlEntities(value) {
+  return String(value || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function sidecarCandidatePaths(filePath, isDir = false) {
+  const target = String(filePath || "");
+  if (!target) return [];
+  const dir = isDir ? target : path.dirname(target);
+  const parsed = path.parse(target);
+  const candidates = [
+    `${target}.context.json`,
+    `${target}.json`,
+    `${target}.eml`,
+    `${target}.webloc`,
+    `${target}.url`,
+    `${target}.txt`,
+  ];
+  if (!isDir) {
+    candidates.push(
+      path.join(dir, `${parsed.name}.context.json`),
+      path.join(dir, `${parsed.name}.json`),
+      path.join(dir, `${parsed.name}.eml`),
+      path.join(dir, `${parsed.name}.webloc`),
+      path.join(dir, `${parsed.name}.url`),
+      path.join(dir, `${parsed.name}.txt`),
+      path.join(dir, "message.eml"),
+      path.join(dir, "message.txt"),
+      path.join(dir, "source.webloc"),
+      path.join(dir, "source.url"),
+      path.join(dir, "source.json"),
+    );
+  } else {
+    candidates.push(
+      path.join(dir, "source.context.json"),
+      path.join(dir, "source.json"),
+      path.join(dir, "message.eml"),
+      path.join(dir, "message.txt"),
+      path.join(dir, "source.webloc"),
+      path.join(dir, "source.url"),
+    );
+  }
+  return [...new Set(candidates)];
+}
+
+function readSmallTextFile(filePath, maxBytes = 64 * 1024) {
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile() || stat.size > maxBytes) return "";
+    return fs.readFileSync(filePath, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function firstHeaderValue(text, names) {
+  const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+  for (const name of names) {
+    const pattern = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*:\\s*(.+)$`, "i");
+    for (let index = 0; index < lines.length; index += 1) {
+      const match = lines[index].match(pattern);
+      if (!match) continue;
+      const pieces = [match[1]];
+      let cursor = index + 1;
+      while (cursor < lines.length && /^[ \t]+/.test(lines[cursor])) {
+        pieces.push(lines[cursor].trim());
+        cursor += 1;
+      }
+      return cleanMediaSourceDetail(pieces.join(" "), 120);
+    }
+  }
+  return "";
+}
+
+function detailFromParts(parts) {
+  return cleanMediaSourceDetail(parts.filter(Boolean).join(" · "));
+}
+
+function attributionFromMailText(text) {
+  const sender = firstHeaderValue(text, ["From", "Sender"]);
+  const subject = firstHeaderValue(text, ["Subject"]);
+  const messageId = firstHeaderValue(text, ["Message-ID", "Message-Id"]);
+  const detail = detailFromParts([
+    sender ? `Sender: ${sender}` : "",
+    subject ? `Subject: ${subject}` : "",
+    messageId ? `Message: ${messageId}` : "",
+  ]);
+  return detail ? { sourceKind: "mail", sourceLabel: PHOTO_MEDIA_SOURCE_LABELS.mail, sourceDetail: detail } : {};
+}
+
+function attributionFromWebText(text) {
+  const urlMatch = String(text || "").match(/(?:^|\n)\s*(?:URL|Source URL)\s*=\s*(.+)\s*$/im)
+    || String(text || "").match(/<key>\s*URL\s*<\/key>\s*<string>([^<]+)<\/string>/i)
+    || String(text || "").match(/\bhttps?:\/\/[^\s<>"']+/i);
+  const titleMatch = String(text || "").match(/<key>\s*(?:Name|Title)\s*<\/key>\s*<string>([^<]+)<\/string>/i)
+    || String(text || "").match(/(?:^|\n)\s*(?:Title|Page Title)\s*[:=]\s*(.+)\s*$/im);
+  const url = cleanMediaSourceDetail(decodeXmlEntities(urlMatch?.[1] || urlMatch?.[0] || ""), 160);
+  const title = cleanMediaSourceDetail(decodeXmlEntities(titleMatch?.[1] || ""), 120);
+  const detail = detailFromParts([
+    title ? `Page: ${title}` : "",
+    url ? `Source URL: ${url}` : "",
+  ]);
+  return detail ? { sourceKind: "safari", sourceLabel: PHOTO_MEDIA_SOURCE_LABELS.safari, sourceDetail: detail } : {};
+}
+
+function attributionFromContextJson(text) {
+  let data = null;
+  try {
+    data = JSON.parse(String(text || ""));
+  } catch {
+    return {};
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) return {};
+  const pick = (...keys) => {
+    for (const key of keys) {
+      const value = data[key];
+      if (typeof value === "string" && value.trim()) return cleanMediaSourceDetail(value, 160);
+    }
+    return "";
+  };
+  const appText = `${pick("app", "application", "sourceApp", "source")} ${pick("kind", "sourceKind")}`.toLowerCase();
+  const sourceKind = appText.includes("mail")
+    ? "mail"
+    : appText.includes("safari") || appText.includes("browser") || pick("url", "sourceUrl", "pageUrl")
+      ? "safari"
+      : appText.includes("message") || appText.includes("imessage") || pick("conversation", "chat", "thread")
+        ? "messages"
+        : "";
+  if (!sourceKind) return {};
+  const detail = detailFromParts([
+    pick("sender", "from", "author") ? `Sender: ${pick("sender", "from", "author")}` : "",
+    pick("subject") ? `Subject: ${pick("subject")}` : "",
+    pick("title", "pageTitle") ? `Page: ${pick("title", "pageTitle")}` : "",
+    pick("conversation", "chat", "thread") ? `Conversation: ${pick("conversation", "chat", "thread")}` : "",
+    pick("url", "sourceUrl", "pageUrl", "messageUrl") ? `Source URL: ${pick("url", "sourceUrl", "pageUrl", "messageUrl")}` : "",
+  ]);
+  return detail ? { sourceKind, sourceLabel: PHOTO_MEDIA_SOURCE_LABELS[sourceKind] || PHOTO_MEDIA_SOURCE_LABELS.app, sourceDetail: detail } : {};
+}
+
+function attributionFromMessageText(text) {
+  const sender = firstHeaderValue(text, ["Sender", "From"]);
+  const conversation = firstHeaderValue(text, ["Conversation", "Chat", "Thread"]);
+  const url = firstHeaderValue(text, ["URL", "Source URL"]);
+  const detail = detailFromParts([
+    sender ? `Sender: ${sender}` : "",
+    conversation ? `Conversation: ${conversation}` : "",
+    url ? `Source URL: ${url}` : "",
+  ]);
+  return detail ? { sourceKind: "messages", sourceLabel: PHOTO_MEDIA_SOURCE_LABELS.messages, sourceDetail: detail } : {};
+}
+
+function inferLocalMediaSourceSidecarAttribution(filePath, isDir = false) {
+  for (const candidate of sidecarCandidatePaths(filePath, isDir)) {
+    const lower = candidate.toLowerCase();
+    const text = readSmallTextFile(candidate);
+    if (!text) continue;
+    if (lower.endsWith(".eml")) {
+      const attribution = attributionFromMailText(text);
+      if (attribution.sourceDetail) return attribution;
+    }
+    if (lower.endsWith(".webloc") || lower.endsWith(".url")) {
+      const attribution = attributionFromWebText(text);
+      if (attribution.sourceDetail) return attribution;
+    }
+    if (lower.endsWith(".json")) {
+      const attribution = attributionFromContextJson(text);
+      if (attribution.sourceDetail) return attribution;
+    }
+    if (lower.endsWith(".txt")) {
+      const messageAttribution = attributionFromMessageText(text);
+      if (messageAttribution.sourceDetail) return messageAttribution;
+      const webAttribution = attributionFromWebText(text);
+      if (webAttribution.sourceDetail) return webAttribution;
+    }
+  }
+  return {};
+}
+
+function inferLocalMediaSourceAttribution(filePath, isDir = false) {
+  const parts = mediaSourcePathParts(filePath);
+  const containerParts = isDir ? parts : parts.slice(0, -1);
+  const lowerParts = parts.map((part) => part.toLowerCase());
+  const lowerPath = String(filePath || "").replace(/\\/g, "/").toLowerCase();
+  const sidecarAttribution = inferLocalMediaSourceSidecarAttribution(filePath, isDir);
+  let sourceKind = "";
+  let sourceDetail = "";
+
+  if (lowerParts.some((part) => part.endsWith(".photoslibrary")) || lowerPath.includes("photos library")) {
+    const libraryPart = parts.find((part) => part.toLowerCase().endsWith(".photoslibrary"));
+    sourceKind = "library";
+    sourceDetail = libraryPart ? `${titleCaseMediaSourcePart(libraryPart)} package` : "Photo library";
+  } else if (lowerPath.includes("com.apple.mail") || lowerPath.includes("mail downloads") || lowerParts.includes("mail")) {
+    sourceKind = "mail";
+    sourceDetail = mediaSourceTailFromMarker(containerParts, (part) => part === "mail downloads", "Mail Downloads", 1);
+  } else if (lowerPath.includes("com.apple.safari") || lowerParts.includes("safari") || lowerParts.includes("browser")) {
+    sourceKind = "safari";
+    sourceDetail = lowerParts.includes("downloads") ? "Safari Downloads" : "Safari";
+  } else if (lowerPath.includes("com.apple.messages") || lowerPath.includes("library/messages") || lowerParts.includes("messages") || lowerParts.includes("imessage")) {
+    sourceKind = "messages";
+    sourceDetail = mediaSourceTailFromMarker(containerParts, (part) => part === "messages" || part === "attachments", "Messages attachments", 2);
+  } else if (lowerPath.includes("airdrop") || lowerPath.includes("air drop")) {
+    sourceKind = "airdrop";
+    sourceDetail = "AirDrop";
+  } else if (lowerParts.includes("dcim") || lowerParts.some((part) => /^10\dapple$/.test(part)) || lowerParts.some((part) => ["camera", "canon", "eos_digital", "fujifilm", "gopro", "lumix", "nikon", "olympus", "panasonic", "private", "sony"].includes(part))) {
+    sourceKind = "camera";
+    sourceDetail = lowerParts.includes("dcim")
+      ? mediaSourceTailFromMarker(containerParts, (part) => part === "dcim", "DCIM", 1)
+      : "Camera/device path";
+  } else if (lowerParts.includes("downloads")) {
+    sourceKind = "downloads";
+    sourceDetail = "Downloads";
+  } else if (lowerPath.includes("icloud") || lowerPath.includes("mobile documents") || lowerPath.includes("onedrive") || lowerPath.includes("dropbox")) {
+    sourceKind = "app";
+    sourceDetail = lowerPath.includes("mobile documents") ? "iCloud Drive" : "Other app";
+  }
+
+  if (!sourceKind && sidecarAttribution.sourceKind) {
+    sourceKind = sidecarAttribution.sourceKind;
+  }
+  if (sidecarAttribution.sourceDetail) {
+    sourceDetail = sidecarAttribution.sourceDetail;
+  }
+  if (!sourceKind) return {};
+  return {
+    sourceKind,
+    sourceLabel: sidecarAttribution.sourceLabel || PHOTO_MEDIA_SOURCE_LABELS[sourceKind] || PHOTO_MEDIA_SOURCE_LABELS.folder,
+    sourceDetail
+  };
+}
+
 // Grant a batch of file/folder paths (dropped files, or folder sample images) and
 // return their thumbnail URLs, so they can be previewed before enrolling.
 ipcMain.handle("media:prepare-paths", async (event, payload) => {
@@ -3482,7 +4603,7 @@ ipcMain.handle("media:prepare-paths", async (event, payload) => {
     } catch (_error) {
       isDir = false;
     }
-    out.push({ path: candidate, url: mediaUrlFor(candidate), isDir });
+    out.push({ path: candidate, url: mediaUrlFor(candidate), isDir, ...inferLocalMediaSourceAttribution(candidate, isDir) });
   }
   return out;
 });
@@ -3628,6 +4749,7 @@ if (!singleInstanceLock) {
     buildApplicationMenu();
     createTray();
     await createWindow();
+    startPhotoIndexingHeadlessScheduler();
     await resumePersistedFolderWatch();
     handleExternalInputs(process.argv.slice(1));
   });
@@ -3649,6 +4771,7 @@ app.on("activate", () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  stopPhotoIndexingHeadlessScheduler();
   stopFolderWatch("App quitting.", { persist: false });
   if (backend) {
     backend.stop();

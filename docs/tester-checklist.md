@@ -65,4 +65,7 @@ npm run update:dry-run
 npm run release:check
 ```
 
+Confirm the `selfLearningRd` row is present in the JSON output and remains
+non-authorizing for true retraining unless Phase 5/6 evidence has been approved.
+
 For Windows installers, use the GitHub Actions `Windows Release` workflow and download the `Vintrace-Windows-Installer` artifact.

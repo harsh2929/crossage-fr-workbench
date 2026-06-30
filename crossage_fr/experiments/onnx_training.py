@@ -79,6 +79,32 @@ PHASE5_ROW_SPLIT_MANIFEST_FILENAME = "phase5_onnx_training_row_split_manifest.js
 TRAINING_ROWS_FILENAME = "training-rows.json"
 VALIDATION_ROWS_FILENAME = "validation-rows.json"
 VALIDATION_REPORT_SCOPE = "phase5-onnx-training-validation"
+CONTEXT_SPLIT_FIELDS = [
+    "datasetId",
+    "validationBucket",
+    "difficulty",
+    "scenario",
+    "poseBucket",
+    "mediaKind",
+]
+ONNX_TINY_HEAD_FEATURE_VERSION = "onnx-tiny-head-app-context-features-v4"
+ONNX_CONTEXT_FEATURE_NAMES = [
+    "context_cross_age",
+    "context_cross_pose",
+    "context_pose_unknown",
+    "context_media_video",
+    "context_close_runner_up",
+    "context_single_reference",
+    "context_hard_pose",
+    "context_low_quality",
+]
+ROW_TRAINING_DEFAULT_EPOCHS = 64
+ROW_TRAINING_DEFAULT_LEARNING_RATE = 0.05
+ROW_TRAINING_DEFAULT_ARCHITECTURE = "linear"
+ROW_TRAINING_DEFAULT_HIDDEN_UNITS = 0
+ROW_TRAINING_DEFAULT_FEATURE_PREPROCESSING = "none"
+ROW_TRAINING_ARCHITECTURES = {"linear", "mlp"}
+ROW_TRAINING_FEATURE_PREPROCESSING = {"none", "standardize"}
 
 BASELINE_RUNTIME_FAILURE_MODES = [
     "cancelled",
@@ -199,6 +225,7 @@ def _training_job_report(training: dict[str, Any]) -> dict[str, Any]:
         "status": str(training.get("status", "") or "unknown"),
         "durationMs": float(training.get("durationMs", 0.0) or 0.0),
         "epochs": int(training.get("epochs", 0) or 0),
+        "learningRate": float(training.get("learningRate", 0.0) or 0.0),
         "rows": int(training.get("rows", 0) or 0),
         "featureCount": int(training.get("featureCount", 0) or 0),
         "losses": [round(float(loss), 6) for loss in training.get("losses", []) if isinstance(loss, (int, float))],
@@ -390,6 +417,11 @@ def write_phase5_measurement_bundle(
     *,
     training_rows_source: str | Path | None = None,
     validation_rows_source: str | Path | None = None,
+    row_training_epochs: int = ROW_TRAINING_DEFAULT_EPOCHS,
+    row_training_learning_rate: float = ROW_TRAINING_DEFAULT_LEARNING_RATE,
+    row_training_architecture: str = ROW_TRAINING_DEFAULT_ARCHITECTURE,
+    row_training_hidden_units: int = ROW_TRAINING_DEFAULT_HIDDEN_UNITS,
+    row_training_feature_preprocessing: str = ROW_TRAINING_DEFAULT_FEATURE_PREPROCESSING,
 ) -> dict[str, Any]:
     """Write local Phase 5 measurement evidence and a runtime-study fragment."""
 
@@ -412,6 +444,11 @@ def write_phase5_measurement_bundle(
         "status": "not-requested",
         "trainingRowsSource": str(Path(training_rows_source).expanduser()) if training_rows_source else "",
         "validationRowsSource": str(Path(validation_rows_source).expanduser()) if validation_rows_source else "",
+        "rowTrainingEpochs": int(row_training_epochs),
+        "rowTrainingLearningRate": float(row_training_learning_rate),
+        "architecture": str(row_training_architecture),
+        "hiddenUnits": int(row_training_hidden_units),
+        "featurePreprocessing": str(row_training_feature_preprocessing),
         "validationReportPath": "",
         "trainingJob": {},
         "validation": {},
@@ -434,6 +471,11 @@ def write_phase5_measurement_bundle(
                     output / "row-training-validation",
                     training_rows,
                     validation_rows,
+                    epochs=int(row_training_epochs),
+                    learning_rate=float(row_training_learning_rate),
+                    architecture=row_training_architecture,
+                    hidden_units=int(row_training_hidden_units),
+                    feature_preprocessing=row_training_feature_preprocessing,
                 ),
             }
             if row_validation.get("status") == "complete":
@@ -818,6 +860,17 @@ def _phase5_validation_semantic_errors(payload: dict[str, Any]) -> list[str]:
         if isinstance(payload.get("onnxHead"), dict) and isinstance(payload.get("onnxHead", {}).get("metrics"), dict)
         else {}
     )
+    onnx_head = payload.get("onnxHead") if isinstance(payload.get("onnxHead"), dict) else {}
+    if str(onnx_head.get("featureVersion", "") or "") != ONNX_TINY_HEAD_FEATURE_VERSION:
+        errors.append("validation-report-feature-version-unsupported")
+    if _as_positive_int(onnx_head.get("featureCount")) != len(tiny_head_feature_names()):
+        errors.append("validation-report-feature-count-invalid")
+    training_config = payload.get("trainingConfig") if isinstance(payload.get("trainingConfig"), dict) else {}
+    if training_config:
+        if str(training_config.get("featureVersion", "") or "") != ONNX_TINY_HEAD_FEATURE_VERSION:
+            errors.append("validation-report-training-config-feature-version-unsupported")
+        if _as_positive_int(training_config.get("featureCount")) != len(tiny_head_feature_names()):
+            errors.append("validation-report-training-config-feature-count-invalid")
     delta = payload.get("delta") if isinstance(payload.get("delta"), dict) else {}
     for metric in ("accuracy", "precision", "recall"):
         if metric not in json_metrics or metric not in onnx_metrics or metric not in delta:
@@ -865,14 +918,21 @@ def phase5_validation_report(
     rows: Sequence[dict[str, Any]],
     onnx_scores: Sequence[float],
     *,
+    baseline_rows: Sequence[dict[str, Any]] | None = None,
     threshold: float = 0.5,
+    onnx_threshold: float | None = None,
+    threshold_calibration: dict[str, Any] | None = None,
+    training_config: dict[str, Any] | None = None,
     min_count: int = 20,
     min_per_class: int = 5,
 ) -> dict[str, Any]:
     validation = validate_against_json_adapter_baseline(
         rows,
         onnx_scores,
+        baseline_rows=baseline_rows,
         threshold=threshold,
+        onnx_threshold=onnx_threshold,
+        threshold_calibration=threshold_calibration,
         min_count=min_count,
         min_per_class=min_per_class,
     )
@@ -881,6 +941,7 @@ def phase5_validation_report(
         "generatedAtUnix": round(time.time(), 3),
         "scope": VALIDATION_REPORT_SCOPE,
         "notProductionAuthorization": True,
+        "trainingConfig": dict(training_config or {}),
         **validation,
     }
     return _attach_report_hash(report)
@@ -891,14 +952,22 @@ def write_phase5_validation_report(
     rows: Sequence[dict[str, Any]],
     onnx_scores: Sequence[float],
     *,
+    baseline_rows: Sequence[dict[str, Any]] | None = None,
     threshold: float = 0.5,
+    onnx_threshold: float | None = None,
+    threshold_calibration: dict[str, Any] | None = None,
+    training_config: dict[str, Any] | None = None,
     min_count: int = 20,
     min_per_class: int = 5,
 ) -> dict[str, Any]:
     report = phase5_validation_report(
         rows,
         onnx_scores,
+        baseline_rows=baseline_rows,
         threshold=threshold,
+        onnx_threshold=onnx_threshold,
+        threshold_calibration=threshold_calibration,
+        training_config=training_config,
         min_count=min_count,
         min_per_class=min_per_class,
     )
@@ -1828,25 +1897,152 @@ def rollback_training_artifact_bundle(registry_dir: str | Path) -> dict[str, Any
     return {"rolledBack": True, "pointerPath": str(pointer_path), "active": next_pointer["active"], "previous": current}
 
 
-def build_tiny_scoring_head_model(feature_count: int = 19, class_count: int = 2) -> Any:
-    """Build a forward-only linear ONNX model for Phase 5 experiments."""
+def _tiny_head_architecture(architecture: str = ROW_TRAINING_DEFAULT_ARCHITECTURE, hidden_units: int = ROW_TRAINING_DEFAULT_HIDDEN_UNITS) -> tuple[str, int]:
+    name = str(architecture or ROW_TRAINING_DEFAULT_ARCHITECTURE).strip().casefold()
+    if name not in ROW_TRAINING_ARCHITECTURES:
+        raise ValueError(f"Unsupported tiny-head architecture: {architecture}")
+    hidden = max(0, int(hidden_units))
+    if name == "linear":
+        return name, 0
+    if hidden < 1:
+        raise ValueError("MLP tiny-head architecture requires hidden_units >= 1.")
+    return name, hidden
+
+
+def _tiny_head_trainable_params(architecture: str, hidden_units: int) -> list[str]:
+    if architecture == "mlp":
+        return ["hidden_weight", "hidden_bias", "output_weight", "output_bias"]
+    return ["weight", "bias"]
+
+
+def _tiny_head_feature_preprocessing_mode(mode: str = ROW_TRAINING_DEFAULT_FEATURE_PREPROCESSING) -> str:
+    normalized = str(mode or ROW_TRAINING_DEFAULT_FEATURE_PREPROCESSING).strip().casefold()
+    if normalized not in ROW_TRAINING_FEATURE_PREPROCESSING:
+        raise ValueError(f"Unsupported tiny-head feature preprocessing: {mode}")
+    return normalized
+
+
+def _feature_standardization_metadata(features: Sequence[Sequence[float]], mode: str = ROW_TRAINING_DEFAULT_FEATURE_PREPROCESSING) -> dict[str, Any]:
+    """Return deterministic preprocessing metadata derived only from training rows."""
+
+    mode = _tiny_head_feature_preprocessing_mode(mode)
+    rows = [[float(value) for value in row] for row in features]
+    if not rows:
+        raise ValueError("features must not be empty.")
+    feature_count = len(rows[0])
+    if any(len(row) != feature_count for row in rows):
+        raise ValueError("feature dimensions differ.")
+    if mode == "none":
+        return {
+            "mode": "none",
+            "featureCount": feature_count,
+            "means": [0.0 for _ in range(feature_count)],
+            "scales": [1.0 for _ in range(feature_count)],
+        }
+    import numpy as np
+
+    x = np.asarray(rows, dtype=np.float64)
+    means = x.mean(axis=0)
+    scales = x.std(axis=0)
+    scales[scales < 1e-9] = 1.0
+    return {
+        "mode": "standardize",
+        "featureCount": feature_count,
+        "means": [round(float(value), 12) for value in means.tolist()],
+        "scales": [round(float(value), 12) for value in scales.tolist()],
+    }
+
+
+def _feature_preprocessing_arrays(
+    *,
+    feature_count: int,
+    feature_preprocessing: dict[str, Any] | None = None,
+) -> tuple[str, list[float], list[float]]:
+    metadata = feature_preprocessing if isinstance(feature_preprocessing, dict) else {}
+    mode = _tiny_head_feature_preprocessing_mode(str(metadata.get("mode", "none") or "none"))
+    if mode == "none":
+        return mode, [], []
+    means = [float(value) for value in metadata.get("means", [])] if isinstance(metadata.get("means"), list) else []
+    scales = [float(value) for value in metadata.get("scales", [])] if isinstance(metadata.get("scales"), list) else []
+    if len(means) != feature_count or len(scales) != feature_count:
+        raise ValueError("feature preprocessing dimensions do not match feature_count.")
+    scales = [value if abs(value) >= 1e-9 else 1.0 for value in scales]
+    return mode, means, scales
+
+
+def build_tiny_scoring_head_model(
+    feature_count: int = 19,
+    class_count: int = 2,
+    *,
+    architecture: str = ROW_TRAINING_DEFAULT_ARCHITECTURE,
+    hidden_units: int = ROW_TRAINING_DEFAULT_HIDDEN_UNITS,
+    feature_preprocessing: dict[str, Any] | None = None,
+) -> Any:
+    """Build a forward-only ONNX scoring head for Phase 5 experiments."""
 
     if feature_count < 1:
         raise ValueError("feature_count must be positive.")
     if class_count < 2:
         raise ValueError("class_count must be at least 2.")
+    architecture, hidden_units = _tiny_head_architecture(architecture, hidden_units)
     import numpy as np
     import onnx
     from onnx import TensorProto, helper, numpy_helper
 
-    weight = np.zeros((feature_count, class_count), dtype=np.float32)
-    bias = np.zeros((class_count,), dtype=np.float32)
+    preprocessing_mode, feature_means, feature_scales = _feature_preprocessing_arrays(
+        feature_count=feature_count,
+        feature_preprocessing=feature_preprocessing,
+    )
+    input_name = "features"
+    preprocessing_nodes = []
+    preprocessing_initializers = []
+    if preprocessing_mode == "standardize":
+        input_name = "standardized_features"
+        preprocessing_nodes = [
+            helper.make_node("Sub", ["features", "feature_mean"], ["centered_features"], name="feature_center"),
+            helper.make_node("Div", ["centered_features", "feature_scale"], [input_name], name="feature_standardize"),
+        ]
+        preprocessing_initializers = [
+            numpy_helper.from_array(np.asarray(feature_means, dtype=np.float32), name="feature_mean"),
+            numpy_helper.from_array(np.asarray(feature_scales, dtype=np.float32), name="feature_scale"),
+        ]
+    if architecture == "mlp":
+        rng = np.random.default_rng(20260619)
+        hidden_weight = rng.normal(0.0, 0.05, size=(feature_count, hidden_units)).astype(np.float32)
+        hidden_bias = np.zeros((hidden_units,), dtype=np.float32)
+        output_weight = rng.normal(0.0, 0.05, size=(hidden_units, class_count)).astype(np.float32)
+        output_bias = np.zeros((class_count,), dtype=np.float32)
+        nodes = [
+            *preprocessing_nodes,
+            helper.make_node("MatMul", [input_name, "hidden_weight"], ["hidden_matmul_out"], name="hidden_matmul"),
+            helper.make_node("Add", ["hidden_matmul_out", "hidden_bias"], ["hidden_linear_out"], name="hidden_bias"),
+            helper.make_node("Relu", ["hidden_linear_out"], ["hidden_relu_out"], name="hidden_relu"),
+            helper.make_node("MatMul", ["hidden_relu_out", "output_weight"], ["output_matmul_out"], name="output_matmul"),
+            helper.make_node("Add", ["output_matmul_out", "output_bias"], ["logits"], name="output_bias"),
+        ]
+        initializers = [
+            *preprocessing_initializers,
+            numpy_helper.from_array(hidden_weight, name="hidden_weight"),
+            numpy_helper.from_array(hidden_bias, name="hidden_bias"),
+            numpy_helper.from_array(output_weight, name="output_weight"),
+            numpy_helper.from_array(output_bias, name="output_bias"),
+        ]
+    else:
+        weight = np.zeros((feature_count, class_count), dtype=np.float32)
+        bias = np.zeros((class_count,), dtype=np.float32)
+        nodes = [
+            *preprocessing_nodes,
+            helper.make_node("MatMul", [input_name, "weight"], ["matmul_out"], name="linear_matmul"),
+            helper.make_node("Add", ["matmul_out", "bias"], ["logits"], name="linear_bias"),
+        ]
+        initializers = [
+            *preprocessing_initializers,
+            numpy_helper.from_array(weight, name="weight"),
+            numpy_helper.from_array(bias, name="bias"),
+        ]
     model = helper.make_model(
         helper.make_graph(
-            [
-                helper.make_node("MatMul", ["features", "weight"], ["matmul_out"], name="linear_matmul"),
-                helper.make_node("Add", ["matmul_out", "bias"], ["logits"], name="linear_bias"),
-            ],
+            nodes,
             "vintrace_tiny_scoring_head",
             [
                 helper.make_tensor_value_info("features", TensorProto.FLOAT, ["batch", feature_count]),
@@ -1854,10 +2050,7 @@ def build_tiny_scoring_head_model(feature_count: int = 19, class_count: int = 2)
             [
                 helper.make_tensor_value_info("logits", TensorProto.FLOAT, ["batch", class_count]),
             ],
-            [
-                numpy_helper.from_array(weight, name="weight"),
-                numpy_helper.from_array(bias, name="bias"),
-            ],
+            initializers,
         ),
         producer_name="vintrace-phase5-rd",
         opset_imports=[helper.make_operatorsetid("", 13)],
@@ -1867,12 +2060,26 @@ def build_tiny_scoring_head_model(feature_count: int = 19, class_count: int = 2)
     return model
 
 
-def save_tiny_scoring_head_model(path: str | Path, feature_count: int = 19, class_count: int = 2) -> dict[str, Any]:
+def save_tiny_scoring_head_model(
+    path: str | Path,
+    feature_count: int = 19,
+    class_count: int = 2,
+    *,
+    architecture: str = ROW_TRAINING_DEFAULT_ARCHITECTURE,
+    hidden_units: int = ROW_TRAINING_DEFAULT_HIDDEN_UNITS,
+    feature_preprocessing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     import onnx
 
     output = Path(path).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
-    model = build_tiny_scoring_head_model(feature_count=feature_count, class_count=class_count)
+    model = build_tiny_scoring_head_model(
+        feature_count=feature_count,
+        class_count=class_count,
+        architecture=architecture,
+        hidden_units=hidden_units,
+        feature_preprocessing=feature_preprocessing,
+    )
     onnx.save(model, output)
     return _artifact_record(output, "forwardModel")
 
@@ -1882,16 +2089,24 @@ def generate_tiny_scoring_head_artifacts(
     *,
     feature_count: int = 19,
     class_count: int = 2,
+    architecture: str = ROW_TRAINING_DEFAULT_ARCHITECTURE,
+    hidden_units: int = ROW_TRAINING_DEFAULT_HIDDEN_UNITS,
+    feature_preprocessing: dict[str, Any] | None = None,
     prefix: str = "tiny_head_",
     artifact_module: Any | None = None,
 ) -> dict[str, Any]:
-    """Generate ORT training artifacts for a tiny linear scoring head.
+    """Generate ORT training artifacts for a tiny scoring head.
 
     `artifact_module` is injectable so tests can validate the integration when
     `onnxruntime.training` is not installed locally. Production callers should
     leave it unset.
     """
 
+    architecture, hidden_units = _tiny_head_architecture(architecture, hidden_units)
+    preprocessing_mode, _feature_means, _feature_scales = _feature_preprocessing_arrays(
+        feature_count=feature_count,
+        feature_preprocessing=feature_preprocessing,
+    )
     output = Path(output_dir).expanduser()
     output.mkdir(parents=True, exist_ok=True)
     matrix = dependency_feasibility_matrix()
@@ -1901,6 +2116,9 @@ def generate_tiny_scoring_head_artifacts(
             "enabled": False,
             "featureFlag": CANONICAL_FEATURE_FLAG,
             "outputDir": str(output),
+            "architecture": architecture,
+            "hiddenUnits": hidden_units,
+            "featurePreprocessing": {"mode": preprocessing_mode},
             "artifacts": [],
             "matrix": matrix,
             "reason": f"Set {CANONICAL_FEATURE_FLAG}=1 to generate experimental ONNX training artifacts.",
@@ -1913,6 +2131,9 @@ def generate_tiny_scoring_head_artifacts(
                 "enabled": True,
                 "featureFlag": CANONICAL_FEATURE_FLAG,
                 "outputDir": str(output),
+                "architecture": architecture,
+                "hiddenUnits": hidden_units,
+                "featurePreprocessing": {"mode": preprocessing_mode},
                 "artifacts": [],
                 "matrix": matrix,
                 "blockers": [f"{name} is not importable" for name in missing],
@@ -1923,11 +2144,18 @@ def generate_tiny_scoring_head_artifacts(
 
     started = time.perf_counter()
     forward_path = output / f"{prefix}forward.onnx"
-    forward = build_tiny_scoring_head_model(feature_count=feature_count, class_count=class_count)
+    forward = build_tiny_scoring_head_model(
+        feature_count=feature_count,
+        class_count=class_count,
+        architecture=architecture,
+        hidden_units=hidden_units,
+        feature_preprocessing=feature_preprocessing,
+    )
     onnx.save(forward, forward_path)
+    trainable_params = _tiny_head_trainable_params(architecture, hidden_units)
     artifact_module.generate_artifacts(
         forward,
-        requires_grad=["weight", "bias"],
+        requires_grad=trainable_params,
         frozen_params=[],
         loss=artifact_module.LossType.CrossEntropyLoss,
         optimizer=artifact_module.OptimType.AdamW,
@@ -1949,6 +2177,10 @@ def generate_tiny_scoring_head_artifacts(
         "prefix": prefix,
         "featureCount": feature_count,
         "classCount": class_count,
+        "architecture": architecture,
+        "hiddenUnits": hidden_units,
+        "featurePreprocessing": dict(feature_preprocessing or {"mode": preprocessing_mode}),
+        "trainableParams": trainable_params,
         "durationMs": round((time.perf_counter() - started) * 1000, 3),
         "artifacts": records,
         "normalizedIrKinds": normalized,
@@ -2043,6 +2275,7 @@ def run_tiny_head_training_job(
         "outputDir": str(output),
         "prefix": prefix,
         "epochs": max(1, int(epochs)),
+        "learningRate": float(learning_rate),
         "rows": int(x.shape[0]),
         "featureCount": int(x.shape[1]),
         "durationMs": round((time.perf_counter() - started) * 1000, 3),
@@ -2169,6 +2402,69 @@ def _desired_validation_count(total: int, *, fraction: float, min_per_class: int
     return min(desired, total - int(min_per_class))
 
 
+def _context_split_key(row: dict[str, Any]) -> str:
+    parts = []
+    for key in CONTEXT_SPLIT_FIELDS:
+        value = str(row.get(key, "") or "").strip()
+        if value:
+            parts.append(f"{key}={value}")
+    return "|".join(parts) or "__default__"
+
+
+def _rebalance_context_validation_groups(
+    indexed_rows: Sequence[tuple[int, dict[str, Any]]],
+    validation_ids: set[int],
+    *,
+    split_salt: str,
+) -> set[int]:
+    """Avoid putting an entire repeated context group only in validation.
+
+    Public benchmark rows may have rare context buckets. A pure row-hash split can
+    place every row from a small repeated bucket in validation, making the ONNX
+    head and JSON baseline extrapolate an unseen scenario. This swaps one row
+    from such a bucket back to training and moves a same-class training row from
+    a better-represented bucket into validation, preserving class counts.
+    """
+
+    next_validation_ids = set(validation_ids)
+    for label in (True, False):
+        class_items = [(index, row) for index, row in indexed_rows if bool(row.get("isMatch")) is label]
+        groups: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+        for index, row in class_items:
+            groups.setdefault(_context_split_key(row), []).append((index, row))
+        for group_key in sorted(groups):
+            group_items = groups[group_key]
+            if len(group_items) < 2:
+                continue
+            group_validation = [(index, row) for index, row in group_items if id(row) in next_validation_ids]
+            if len(group_validation) != len(group_items):
+                continue
+            replacement_candidates: list[tuple[int, dict[str, Any]]] = []
+            for candidate_group_key, candidate_group_items in groups.items():
+                if candidate_group_key == group_key:
+                    continue
+                candidate_training = [
+                    (index, row)
+                    for index, row in candidate_group_items
+                    if id(row) not in next_validation_ids
+                ]
+                if len(candidate_training) >= 2:
+                    replacement_candidates.extend(candidate_training)
+            if not replacement_candidates:
+                continue
+            move_to_training = sorted(
+                group_validation,
+                key=lambda item: _split_digest(item[1], item[0], f"{split_salt}|context-train|{label}|{group_key}"),
+            )[0]
+            move_to_validation = sorted(
+                replacement_candidates,
+                key=lambda item: _split_digest(item[1], item[0], f"{split_salt}|context-validation|{label}|{group_key}"),
+            )[0]
+            next_validation_ids.discard(id(move_to_training[1]))
+            next_validation_ids.add(id(move_to_validation[1]))
+    return next_validation_ids
+
+
 def _stable_class_split(
     rows: Sequence[dict[str, Any]],
     *,
@@ -2194,6 +2490,11 @@ def _stable_class_split(
             negatives,
             key=lambda item: _split_digest(item[1], item[0], f"{split_salt}|negative"),
         )[:neg_validation]
+    )
+    validation_ids = _rebalance_context_validation_groups(
+        indexed,
+        validation_ids,
+        split_salt=split_salt,
     )
     training = [row for row in rows if id(row) not in validation_ids]
     validation = [row for row in rows if id(row) in validation_ids]
@@ -2309,6 +2610,7 @@ def split_reviewed_training_examples(
         "minTrainingCount": int(min_training_count),
         "minValidationCount": int(min_validation_count),
         "minPerClass": int(min_per_class),
+        "contextSplitFields": list(CONTEXT_SPLIT_FIELDS),
         "splitSaltHash": hashlib.sha256(split_salt.encode("utf-8")).hexdigest(),
         "input": {
             "rawRows": len(raw_rows),
@@ -2344,6 +2646,42 @@ def split_reviewed_training_examples(
     }
 
 
+def _onnx_context_feature_values(row: dict[str, Any]) -> list[float]:
+    from crossage_fr.match import adapters as match_adapters
+
+    context = match_adapters.pair_context(row)
+    cross_age = 1.0 if context.get("crossAge") is True else 0.0
+    cross_pose = 1.0 if context.get("crossPose") is True else 0.0
+    pose_unknown = 1.0 if context.get("poseUnknown") is True else 0.0
+    media_video = 1.0 if context.get("mediaVideo") is True else 0.0
+    close_runner_up = 1.0 if context.get("closeRunnerUp") is True else 0.0
+    single_reference = 1.0 if context.get("singleReference") is True else 0.0
+    hard_pose = 1.0 if context.get("hardPose") is True else 0.0
+    low_quality = 1.0 if context.get("lowQuality") is True else 0.0
+    return [
+        cross_age,
+        cross_pose,
+        pose_unknown,
+        media_video,
+        close_runner_up,
+        single_reference,
+        hard_pose,
+        low_quality,
+    ]
+
+
+def tiny_head_feature_names() -> list[str]:
+    from crossage_fr.match import adapters as match_adapters
+
+    return list(match_adapters.FEATURE_NAMES) + list(ONNX_CONTEXT_FEATURE_NAMES)
+
+
+def tiny_head_feature_vector(row: dict[str, Any]) -> list[float]:
+    from crossage_fr.match import adapters as match_adapters
+
+    return match_adapters.feature_vector(row, match_adapters.FEATURE_NAMES) + _onnx_context_feature_values(row)
+
+
 def rows_to_tiny_head_features(rows: Sequence[dict[str, Any]], *, require_labels: bool = False) -> tuple[list[list[float]], list[int]]:
     from crossage_fr.match import adapters as match_adapters
 
@@ -2356,7 +2694,7 @@ def rows_to_tiny_head_features(rows: Sequence[dict[str, Any]], *, require_labels
         label = canonical.get("isMatch")
         if require_labels and label is None:
             raise ValueError(f"Row {index} is missing an isMatch label.")
-        features.append(match_adapters.feature_vector(canonical, match_adapters.FEATURE_NAMES))
+        features.append(tiny_head_feature_vector(canonical))
         labels.append(1 if bool(label) else 0)
     return features, labels
 
@@ -2386,8 +2724,11 @@ def run_row_training_validation(
     validation_rows: Sequence[dict[str, Any]],
     *,
     prefix: str = "row_",
-    epochs: int = 8,
-    learning_rate: float = 0.05,
+    epochs: int = ROW_TRAINING_DEFAULT_EPOCHS,
+    learning_rate: float = ROW_TRAINING_DEFAULT_LEARNING_RATE,
+    architecture: str = ROW_TRAINING_DEFAULT_ARCHITECTURE,
+    hidden_units: int = ROW_TRAINING_DEFAULT_HIDDEN_UNITS,
+    feature_preprocessing: str = ROW_TRAINING_DEFAULT_FEATURE_PREPROCESSING,
     min_count: int = 20,
     min_per_class: int = 5,
     threshold: float = 0.5,
@@ -2399,10 +2740,18 @@ def run_row_training_validation(
     feature_count = len(train_features[0])
     if any(len(row) != feature_count for row in validation_features):
         raise ValueError("training and validation feature dimensions differ.")
+    architecture, hidden_units = _tiny_head_architecture(architecture, hidden_units)
+    feature_preprocessing_metadata = _feature_standardization_metadata(
+        train_features,
+        mode=feature_preprocessing,
+    )
     artifact_dir = output / "row_training_artifacts"
     generation = generate_tiny_scoring_head_artifacts(
         artifact_dir,
         feature_count=feature_count,
+        architecture=architecture,
+        hidden_units=hidden_units,
+        feature_preprocessing=feature_preprocessing_metadata,
         prefix=prefix,
     )
     if generation.get("status") != "complete":
@@ -2413,6 +2762,7 @@ def run_row_training_validation(
             "trainingJob": {},
             "validationReportPath": "",
             "validation": {},
+            "featurePreprocessing": feature_preprocessing_metadata,
             "reason": "Row training validation could not run because artifact generation did not complete.",
         }
     training = run_tiny_head_training_job(
@@ -2432,17 +2782,72 @@ def run_row_training_validation(
             "trainingJob": training_report,
             "validationReportPath": "",
             "validation": {},
+            "featurePreprocessing": feature_preprocessing_metadata,
             "reason": "Row training validation could not run because training did not complete.",
         }
     scores = score_tiny_head_inference_model(
         training_report["inferenceModelPath"],
         validation_features,
     )
+    training_scores = score_tiny_head_inference_model(
+        training_report["inferenceModelPath"],
+        train_features,
+    )
+    train_label_bools = [bool(label) for label in train_labels]
+    threshold_calibration = calibrate_onnx_threshold(
+        training_scores,
+        train_label_bools,
+        requested_threshold=threshold,
+    )
+    try:
+        from crossage_fr.match import adapters as match_adapters
+
+        baseline_adapter = match_adapters.fit(training_rows, min_count=min_count, min_per_class=min_per_class)
+        if baseline_adapter is not None:
+            json_training_scores = [match_adapters.score(row, baseline_adapter) for row in training_rows]
+            threshold_calibration = calibrate_onnx_threshold_against_baseline(
+                training_scores,
+                train_label_bools,
+                json_training_scores,
+                requested_threshold=threshold,
+                baseline_threshold=threshold,
+            )
+    except Exception as exc:
+        threshold_calibration = {
+            **threshold_calibration,
+            "selectionPolicy": "best-accuracy-fallback",
+            "policyStatus": "baseline-aware-calibration-failed",
+            "baselineCalibrationError": exc.__class__.__name__,
+        }
+    selected_threshold, selected_threshold_valid = _finite_float(
+        threshold_calibration.get("selected", {}).get("threshold")
+        if isinstance(threshold_calibration.get("selected"), dict)
+        else threshold
+    )
+    if not selected_threshold_valid:
+        selected_threshold = float(threshold)
     validation = write_phase5_validation_report(
         output / PHASE5_VALIDATION_FILENAME,
         validation_rows,
         scores,
+        baseline_rows=training_rows,
         threshold=threshold,
+        onnx_threshold=selected_threshold,
+        threshold_calibration=threshold_calibration,
+        training_config={
+            "epochs": int(epochs),
+            "learningRate": float(learning_rate),
+            "featureVersion": ONNX_TINY_HEAD_FEATURE_VERSION,
+            "featureCount": feature_count,
+            "architecture": architecture,
+            "hiddenUnits": hidden_units,
+            "featurePreprocessing": {
+                "mode": feature_preprocessing_metadata["mode"],
+                "featureCount": feature_preprocessing_metadata["featureCount"],
+                "meansHash": _sha256_json({"means": feature_preprocessing_metadata["means"]}),
+                "scalesHash": _sha256_json({"scales": feature_preprocessing_metadata["scales"]}),
+            },
+        },
         min_count=min_count,
         min_per_class=min_per_class,
     )
@@ -2459,13 +2864,26 @@ def run_row_training_validation(
         "validationReportPath": validation["reportPath"],
         "validation": {
             "status": validation.get("status"),
+            "rowTrainingEpochs": int(epochs),
+            "rowTrainingLearningRate": float(learning_rate),
+            "architecture": architecture,
+            "hiddenUnits": hidden_units,
+            "featurePreprocessing": feature_preprocessing_metadata,
             "bestMetricGain": max((_as_float(validation.get("delta", {}).get(metric)) for metric in ("accuracy", "precision", "recall")), default=0.0),
             "delta": validation.get("delta", {}),
             "input": validation.get("input", {}),
+            "baselineTraining": validation.get("baselineTraining", {}),
+            "thresholds": validation.get("thresholds", {}),
+            "onnxFeatureVersion": validation.get("onnxHead", {}).get("featureVersion") if isinstance(validation.get("onnxHead"), dict) else "",
+            "onnxFeatureCount": validation.get("onnxHead", {}).get("featureCount") if isinstance(validation.get("onnxHead"), dict) else 0,
             "reportHash": validation.get("reportHash", ""),
         },
         "reason": "Row-trained ONNX head was scored against validation rows.",
     }
+
+
+def _rounded_score(value: Any) -> float:
+    return round(_as_float(value), 6)
 
 
 def _binary_metrics(scores: Sequence[float], labels: Sequence[bool], threshold: float) -> dict[str, Any]:
@@ -2504,11 +2922,374 @@ def _binary_metrics(scores: Sequence[float], labels: Sequence[bool], threshold: 
     }
 
 
+def _threshold_candidates(scores: Sequence[float], requested_threshold: float = 0.5) -> list[float]:
+    values = sorted({_rounded_score(score) for score in scores if math.isfinite(_as_float(score))})
+    candidates = {0.0, _rounded_score(requested_threshold), 0.5, 1.0}
+    if values:
+        candidates.add(_rounded_score(values[0] - 0.000001))
+        candidates.add(_rounded_score(values[-1] + 0.000001))
+    for value in values:
+        candidates.add(_rounded_score(value))
+    for left, right in zip(values, values[1:]):
+        candidates.add(_rounded_score((left + right) / 2.0))
+    return sorted(candidates)
+
+
+def _metrics_sort_key(metrics: dict[str, Any]) -> tuple[float, float, float, float, float]:
+    return (
+        _as_float(metrics.get("accuracy")),
+        _as_float(metrics.get("precision")),
+        _as_float(metrics.get("recall")),
+        _as_float(metrics.get("specificity")),
+        -abs(_as_float(metrics.get("threshold")) - 0.5),
+    )
+
+
+def _precision_sort_key(metrics: dict[str, Any]) -> tuple[float, float, float, float]:
+    return (
+        _as_float(metrics.get("precision")),
+        _as_float(metrics.get("recall")),
+        _as_float(metrics.get("accuracy")),
+        -abs(_as_float(metrics.get("threshold")) - 0.5),
+    )
+
+
+def _threshold_sweep(scores: Sequence[float], labels: Sequence[bool], requested_threshold: float = 0.5) -> list[dict[str, Any]]:
+    return [_binary_metrics(scores, labels, threshold) for threshold in _threshold_candidates(scores, requested_threshold)]
+
+
+def _metric_deltas(candidate: dict[str, Any], baseline: dict[str, Any]) -> dict[str, float]:
+    return {
+        metric: round(_as_float(candidate.get(metric)) - _as_float(baseline.get(metric)), 6)
+        for metric in ("accuracy", "precision", "recall", "specificity")
+    }
+
+
+def _no_core_metric_regression(deltas: dict[str, float]) -> bool:
+    return all(_as_float(deltas.get(metric)) >= -0.000001 for metric in ("accuracy", "precision", "recall"))
+
+
+def _sweep_candidate_against_baseline(candidate: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
+    deltas = _metric_deltas(candidate, baseline)
+    return {
+        **candidate,
+        "deltaVsJsonAdapter": deltas,
+        "bestMetricGain": round(max(deltas.get(metric, 0.0) for metric in ("accuracy", "precision", "recall")), 6),
+        "noCoreMetricRegression": _no_core_metric_regression(deltas),
+    }
+
+
+def _gain_sort_key(candidate: dict[str, Any]) -> tuple[float, float, float, float, float]:
+    deltas = candidate.get("deltaVsJsonAdapter") if isinstance(candidate.get("deltaVsJsonAdapter"), dict) else {}
+    return (
+        _as_float(candidate.get("bestMetricGain")),
+        _as_float(deltas.get("accuracy")),
+        _as_float(deltas.get("precision")),
+        _as_float(deltas.get("recall")),
+        -abs(_as_float(candidate.get("threshold")) - 0.5),
+    )
+
+
+def _threshold_sweep_baseline_diagnostics(
+    sweep: Sequence[dict[str, Any]],
+    baseline_metrics: dict[str, Any],
+    *,
+    min_metric_gain: float = 0.01,
+) -> dict[str, Any]:
+    compared = [_sweep_candidate_against_baseline(row, baseline_metrics) for row in sweep]
+    no_regression = [row for row in compared if row.get("noCoreMetricRegression") is True]
+    measurable = [row for row in no_regression if _as_float(row.get("bestMetricGain")) >= float(min_metric_gain)]
+    return {
+        "baselineJsonAdapter": baseline_metrics,
+        "minMetricGain": float(min_metric_gain),
+        "candidateCount": len(compared),
+        "noRegressionCandidateCount": len(no_regression),
+        "measurableGainNoRegressionCandidateCount": len(measurable),
+        "bestNoRegression": max(no_regression, key=_gain_sort_key) if no_regression else None,
+        "bestMeasurableGainNoRegression": max(measurable, key=_gain_sort_key) if measurable else None,
+    }
+
+
+def calibrate_onnx_threshold(
+    scores: Sequence[float],
+    labels: Sequence[bool],
+    *,
+    requested_threshold: float = 0.5,
+) -> dict[str, Any]:
+    labels_list = [bool(label) for label in labels]
+    scores_list = [float(score) for score in scores]
+    if len(labels_list) != len(scores_list):
+        raise ValueError("scores and labels must have the same length for threshold calibration.")
+    if not scores_list:
+        raise ValueError("threshold calibration requires at least one score.")
+    sweep = _threshold_sweep(scores_list, labels_list, requested_threshold)
+    fixed = _binary_metrics(scores_list, labels_list, requested_threshold)
+    selected = max(sweep, key=_metrics_sort_key)
+    precision_first = max(sweep, key=_precision_sort_key)
+    return {
+        "scope": "phase5-onnx-training-threshold-calibration",
+        "source": "training-rows",
+        "requestedThreshold": float(requested_threshold),
+        "selected": selected,
+        "fixedThreshold": fixed,
+        "bestPrecision": precision_first,
+        "candidateCount": len(sweep),
+        "scoreSummary": _score_summary(scores_list, labels_list),
+    }
+
+
+def calibrate_onnx_threshold_against_baseline(
+    onnx_scores: Sequence[float],
+    labels: Sequence[bool],
+    baseline_scores: Sequence[float],
+    *,
+    requested_threshold: float = 0.5,
+    baseline_threshold: float = 0.5,
+    min_metric_gain: float = 0.01,
+) -> dict[str, Any]:
+    """Choose an ONNX threshold on training rows without regressing the JSON baseline."""
+
+    labels_list = [bool(label) for label in labels]
+    onnx_scores_list = [float(score) for score in onnx_scores]
+    baseline_scores_list = [float(score) for score in baseline_scores]
+    if len(labels_list) != len(onnx_scores_list) or len(labels_list) != len(baseline_scores_list):
+        raise ValueError("scores and labels must have the same length for baseline-aware threshold calibration.")
+    base = calibrate_onnx_threshold(
+        onnx_scores_list,
+        labels_list,
+        requested_threshold=requested_threshold,
+    )
+    baseline_metrics = _binary_metrics(baseline_scores_list, labels_list, baseline_threshold)
+    sweep = _threshold_sweep(onnx_scores_list, labels_list, requested_threshold)
+    comparison = _threshold_sweep_baseline_diagnostics(
+        sweep,
+        baseline_metrics,
+        min_metric_gain=min_metric_gain,
+    )
+    selected = base["selected"]
+    selected_by_policy = "bestAccuracy"
+    policy_status = "fallback-best-accuracy"
+    if comparison.get("bestMeasurableGainNoRegression"):
+        selected = comparison["bestMeasurableGainNoRegression"]
+        selected_by_policy = "bestMeasurableGainNoRegression"
+        policy_status = "baseline-aware-measurable-gain"
+    elif comparison.get("bestNoRegression"):
+        selected = comparison["bestNoRegression"]
+        selected_by_policy = "bestNoRegression"
+        policy_status = "baseline-aware-no-regression"
+    return {
+        **base,
+        "selectionPolicy": "json-baseline-no-regression-first",
+        "policyStatus": policy_status,
+        "selectedByPolicy": selected_by_policy,
+        "unconstrainedSelected": base["selected"],
+        "selected": selected,
+        "baselineThreshold": float(baseline_threshold),
+        "baselineComparison": comparison,
+    }
+
+
+def _score_distribution(values: Sequence[float]) -> dict[str, Any]:
+    finite = sorted(float(value) for value in values if math.isfinite(float(value)))
+    if not finite:
+        return {"count": 0, "min": None, "max": None, "mean": None}
+    return {
+        "count": len(finite),
+        "min": _rounded_score(finite[0]),
+        "max": _rounded_score(finite[-1]),
+        "mean": _rounded_score(sum(finite) / len(finite)),
+    }
+
+
+def _score_summary(scores: Sequence[float], labels: Sequence[bool]) -> dict[str, Any]:
+    pairs = [(float(score), bool(label)) for score, label in zip(scores, labels)]
+    positives = [score for score, label in pairs if label]
+    negatives = [score for score, label in pairs if not label]
+    return {
+        "overall": _score_distribution([score for score, _label in pairs]),
+        "positive": _score_distribution(positives),
+        "negative": _score_distribution(negatives),
+        "separation": {
+            "minPositiveMinusMaxNegative": (
+                _rounded_score(min(positives) - max(negatives))
+                if positives and negatives
+                else None
+            ),
+            "meanPositiveMinusMeanNegative": (
+                _rounded_score((sum(positives) / len(positives)) - (sum(negatives) / len(negatives)))
+                if positives and negatives
+                else None
+            ),
+        },
+    }
+
+
+def _validation_row_identity(row: dict[str, Any], index: int) -> dict[str, Any]:
+    source_hash = str(row.get("sourceHash", "") or "")
+    return {
+        "index": index,
+        "rowHash": _sha256_json({key: value for key, value in row.items() if "path" not in key.casefold()}),
+        "candidateId": str(row.get("candidateId", "") or ""),
+        "sourceHashPrefix": source_hash[:12],
+        "datasetId": str(row.get("datasetId", "") or ""),
+        "expectedPerson": str(row.get("expectedPerson", "") or ""),
+        "actualPerson": str(row.get("actualPerson", "") or ""),
+        "scenario": str(row.get("scenario", "") or ""),
+        "validationBucket": str(row.get("validationBucket", "") or ""),
+        "difficulty": str(row.get("difficulty", "") or ""),
+        "matchScore": _rounded_score(row.get("matchScore")),
+    }
+
+
+def _prediction_errors(
+    rows: Sequence[dict[str, Any]],
+    scores: Sequence[float],
+    labels: Sequence[bool],
+    threshold: float,
+    *,
+    limit: int = 12,
+) -> dict[str, list[dict[str, Any]]]:
+    false_positives: list[dict[str, Any]] = []
+    false_negatives: list[dict[str, Any]] = []
+    for index, (row, score, label) in enumerate(zip(rows, scores, labels)):
+        predicted = float(score) >= float(threshold)
+        if predicted == bool(label):
+            continue
+        entry = {
+            **_validation_row_identity(dict(row), index),
+            "score": _rounded_score(score),
+            "threshold": _rounded_score(threshold),
+        }
+        if predicted:
+            false_positives.append(entry)
+        else:
+            false_negatives.append(entry)
+    false_positives.sort(key=lambda item: (-_as_float(item.get("score")), str(item.get("rowHash"))))
+    false_negatives.sort(key=lambda item: (_as_float(item.get("score")), str(item.get("rowHash"))))
+    return {
+        "falsePositives": false_positives[:limit],
+        "falseNegatives": false_negatives[:limit],
+    }
+
+
+def _learning_context_key(row: dict[str, Any]) -> str:
+    from crossage_fr.match import adapters as match_adapters
+
+    return match_adapters.pair_context_key(row)
+
+
+def _context_counts(rows: Sequence[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    from crossage_fr.match import adapters as match_adapters
+
+    counts: dict[str, dict[str, int]] = {}
+    for row in rows:
+        canonical = match_adapters.canonical_row(dict(row)) or dict(row)
+        key = _learning_context_key(canonical)
+        bucket = counts.setdefault(key, {"positive": 0, "negative": 0, "total": 0})
+        label_key = "positive" if bool(canonical.get("isMatch")) else "negative"
+        bucket[label_key] += 1
+        bucket["total"] += 1
+    return counts
+
+
+def _training_coverage_diagnostics(
+    baseline_rows: Sequence[dict[str, Any]],
+    validation_rows: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    from crossage_fr.match import adapters as match_adapters
+
+    training_counts = _context_counts(baseline_rows)
+    validation_counts = _context_counts(validation_rows)
+    missing: dict[tuple[str, str], dict[str, Any]] = {}
+    covered_rows = 0
+    for index, row in enumerate(validation_rows):
+        canonical = match_adapters.canonical_row(dict(row)) or dict(row)
+        key = _learning_context_key(canonical)
+        label_key = "positive" if bool(canonical.get("isMatch")) else "negative"
+        training_count = int(training_counts.get(key, {}).get(label_key, 0))
+        if training_count > 0:
+            covered_rows += 1
+            continue
+        missing_key = (key, label_key)
+        entry = missing.setdefault(
+            missing_key,
+            {
+                "contextKey": key,
+                "label": label_key,
+                "validationCount": 0,
+                "trainingCount": training_count,
+                "examples": [],
+            },
+        )
+        entry["validationCount"] += 1
+        if len(entry["examples"]) < 3:
+            entry["examples"].append(_validation_row_identity(canonical, index))
+    missing_contexts = sorted(
+        missing.values(),
+        key=lambda item: (-int(item.get("validationCount", 0)), str(item.get("label", "")), str(item.get("contextKey", ""))),
+    )
+    return {
+        "trainingContextCount": len(training_counts),
+        "validationContextCount": len(validation_counts),
+        "validationRows": len(validation_rows),
+        "coveredValidationRows": covered_rows,
+        "missingValidationRows": len(validation_rows) - covered_rows,
+        "missingValidationContexts": missing_contexts,
+    }
+
+
+def _validation_diagnostics(
+    rows: Sequence[dict[str, Any]],
+    labels: Sequence[bool],
+    *,
+    baseline_rows: Sequence[dict[str, Any]],
+    json_scores: Sequence[float],
+    onnx_scores: Sequence[float],
+    json_threshold: float,
+    onnx_threshold: float,
+) -> dict[str, Any]:
+    onnx_sweep = _threshold_sweep(onnx_scores, labels, onnx_threshold)
+    json_metrics = _binary_metrics(json_scores, labels, json_threshold)
+    onnx_fixed_metrics = _binary_metrics(onnx_scores, labels, json_threshold)
+    onnx_selected_metrics = _binary_metrics(onnx_scores, labels, onnx_threshold)
+    return {
+        "scoreSummary": {
+            "jsonAdapter": _score_summary(json_scores, labels),
+            "onnxHead": _score_summary(onnx_scores, labels),
+        },
+        "fixedThreshold": {
+            "threshold": float(json_threshold),
+            "jsonAdapter": json_metrics,
+            "onnxHead": onnx_fixed_metrics,
+            "deltaVsJsonAdapter": _metric_deltas(onnx_fixed_metrics, json_metrics),
+        },
+        "selectedThreshold": {
+            "threshold": float(onnx_threshold),
+            "onnxHead": onnx_selected_metrics,
+            "deltaVsJsonAdapter": _metric_deltas(onnx_selected_metrics, json_metrics),
+        },
+        "onnxThresholdSweep": {
+            "candidateCount": len(onnx_sweep),
+            "bestAccuracy": max(onnx_sweep, key=_metrics_sort_key),
+            "bestPrecision": max(onnx_sweep, key=_precision_sort_key),
+            "baselineComparison": _threshold_sweep_baseline_diagnostics(onnx_sweep, json_metrics),
+        },
+        "trainingCoverage": _training_coverage_diagnostics(baseline_rows, rows),
+        "predictionErrors": {
+            "jsonAdapter": _prediction_errors(rows, json_scores, labels, json_threshold),
+            "onnxHead": _prediction_errors(rows, onnx_scores, labels, onnx_threshold),
+        },
+    }
+
+
 def validate_against_json_adapter_baseline(
     rows: Sequence[dict[str, Any]],
     onnx_scores: Sequence[float],
     *,
+    baseline_rows: Sequence[dict[str, Any]] | None = None,
     threshold: float = 0.5,
+    onnx_threshold: float | None = None,
+    threshold_calibration: dict[str, Any] | None = None,
     min_count: int = 20,
     min_per_class: int = 5,
 ) -> dict[str, Any]:
@@ -2517,24 +3298,34 @@ def validate_against_json_adapter_baseline(
     from crossage_fr.match import adapters as match_adapters
 
     rows_list = [dict(row) for row in rows]
+    baseline_rows_list = [dict(row) for row in (baseline_rows if baseline_rows is not None else rows)]
     scores = [float(score) for score in onnx_scores]
     if len(rows_list) != len(scores):
         raise ValueError("rows and onnx_scores must have the same length.")
     if not rows_list:
         raise ValueError("rows must not be empty.")
-    adapter = match_adapters.fit(rows_list, min_count=min_count, min_per_class=min_per_class)
+    if not baseline_rows_list:
+        raise ValueError("baseline rows must not be empty.")
+    adapter = match_adapters.fit(baseline_rows_list, min_count=min_count, min_per_class=min_per_class)
     if adapter is None:
         raise ValueError("Not enough labeled rows to train the JSON adapter baseline.")
     labels = [bool((match_adapters.canonical_row(row) or row).get("isMatch")) for row in rows_list]
     json_scores = [match_adapters.score(row, adapter) for row in rows_list]
+    effective_onnx_threshold = float(threshold if onnx_threshold is None else onnx_threshold)
     json_metrics = _binary_metrics(json_scores, labels, threshold)
-    onnx_metrics = _binary_metrics(scores, labels, threshold)
+    onnx_metrics = _binary_metrics(scores, labels, effective_onnx_threshold)
     accuracy_delta = float(onnx_metrics["accuracy"]) - float(json_metrics["accuracy"])
     precision_delta = float(onnx_metrics["precision"]) - float(json_metrics["precision"])
     recall_delta = float(onnx_metrics["recall"]) - float(json_metrics["recall"])
+    status = "pass" if accuracy_delta >= -0.02 and precision_delta >= -0.02 else "regression"
     return {
-        "status": "pass" if accuracy_delta >= -0.02 and precision_delta >= -0.02 else "regression",
+        "status": status,
         "threshold": float(threshold),
+        "thresholds": {
+            "jsonAdapter": float(threshold),
+            "onnxHead": effective_onnx_threshold,
+            "requested": float(threshold),
+        },
         "count": len(rows_list),
         "input": {
             "count": len(rows_list),
@@ -2544,6 +3335,15 @@ def validate_against_json_adapter_baseline(
             "minPerClass": int(min_per_class),
             "rowsHash": _sha256_json({"rows": rows_list}),
             "scoresHash": _sha256_json({"onnxScores": scores}),
+        },
+        "baselineTraining": {
+            "source": "training-rows" if baseline_rows is not None else "validation-rows",
+            "count": len(baseline_rows_list),
+            "rowsHash": _sha256_json({"rows": baseline_rows_list}),
+            "inputCount": adapter.get("inputCount"),
+            "positiveCount": adapter.get("positiveCount"),
+            "negativeCount": adapter.get("negativeCount"),
+            "labelsDroppedOtherModel": adapter.get("labelsDroppedOtherModel"),
         },
         "jsonAdapter": {
             "artifact": {
@@ -2555,8 +3355,20 @@ def validate_against_json_adapter_baseline(
             "metrics": json_metrics,
         },
         "onnxHead": {
+            "featureVersion": ONNX_TINY_HEAD_FEATURE_VERSION,
+            "featureCount": len(tiny_head_feature_names()),
             "metrics": onnx_metrics,
         },
+        "thresholdCalibration": threshold_calibration or {},
+        "diagnostics": _validation_diagnostics(
+            rows_list,
+            labels,
+            baseline_rows=baseline_rows_list,
+            json_scores=json_scores,
+            onnx_scores=scores,
+            json_threshold=threshold,
+            onnx_threshold=effective_onnx_threshold,
+        ),
         "delta": {
             "accuracy": round(accuracy_delta, 6),
             "precision": round(precision_delta, 6),
@@ -2564,7 +3376,7 @@ def validate_against_json_adapter_baseline(
         },
         "reason": (
             "ONNX scoring head matches or beats the JSON adapter baseline within tolerance."
-            if accuracy_delta >= -0.02 and precision_delta >= -0.02
+            if status == "pass"
             else "ONNX scoring head regressed against the JSON adapter baseline."
         ),
     }
@@ -2711,6 +3523,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         output = Path(args.pop(0)).expanduser()
     training_rows_source: str | None = None
     validation_rows_source: str | None = None
+    row_training_epochs = ROW_TRAINING_DEFAULT_EPOCHS
+    row_training_learning_rate = ROW_TRAINING_DEFAULT_LEARNING_RATE
+    row_training_architecture = ROW_TRAINING_DEFAULT_ARCHITECTURE
+    row_training_hidden_units = ROW_TRAINING_DEFAULT_HIDDEN_UNITS
+    row_training_feature_preprocessing = ROW_TRAINING_DEFAULT_FEATURE_PREPROCESSING
     try:
         while args:
             option = args.pop(0)
@@ -2718,8 +3535,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 training_rows_source = _pop_option_value(args, option)
             elif option == "--validation-rows":
                 validation_rows_source = _pop_option_value(args, option)
+            elif option == "--row-training-epochs":
+                row_training_epochs = _pop_int_option(args, option)
+                if row_training_epochs < 1:
+                    raise ValueError("--row-training-epochs must be at least 1")
+            elif option == "--row-training-learning-rate":
+                row_training_learning_rate = _pop_float_option(args, option)
+                if not math.isfinite(row_training_learning_rate) or row_training_learning_rate <= 0:
+                    raise ValueError("--row-training-learning-rate must be a positive finite value")
+            elif option == "--row-training-architecture":
+                row_training_architecture = str(_pop_option_value(args, option)).strip().casefold()
+                if row_training_architecture not in ROW_TRAINING_ARCHITECTURES:
+                    raise ValueError(f"Unsupported --row-training-architecture: {row_training_architecture}")
+            elif option == "--row-training-hidden-units":
+                row_training_hidden_units = _pop_int_option(args, option)
+            elif option == "--row-training-feature-preprocessing":
+                row_training_feature_preprocessing = str(_pop_option_value(args, option)).strip().casefold()
+                if row_training_feature_preprocessing not in ROW_TRAINING_FEATURE_PREPROCESSING:
+                    raise ValueError(f"Unsupported --row-training-feature-preprocessing: {row_training_feature_preprocessing}")
+            elif option == "--row-training-no-standardize":
+                row_training_feature_preprocessing = "none"
             else:
                 raise ValueError(f"Unknown option: {option}")
+        row_training_architecture, row_training_hidden_units = _tiny_head_architecture(
+            row_training_architecture,
+            row_training_hidden_units,
+        )
     except ValueError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, indent=2, sort_keys=True))
         return 2
@@ -2727,6 +3568,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         output,
         training_rows_source=training_rows_source,
         validation_rows_source=validation_rows_source,
+        row_training_epochs=row_training_epochs,
+        row_training_learning_rate=row_training_learning_rate,
+        row_training_architecture=row_training_architecture,
+        row_training_hidden_units=row_training_hidden_units,
+        row_training_feature_preprocessing=row_training_feature_preprocessing,
     )
     row_validation = bundle.get("rowValidation") if isinstance(bundle.get("rowValidation"), dict) else {}
     summary = {
@@ -2741,6 +3587,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "blockers": bundle["targetRuntimeStudy"]["targets"][0]["blockers"],
         "rowValidationStatus": row_validation.get("status", "not-requested"),
         "validationReportPath": row_validation.get("validationReportPath", ""),
+        "rowTrainingEpochs": row_validation.get("rowTrainingEpochs", row_training_epochs),
+        "rowTrainingLearningRate": row_validation.get("rowTrainingLearningRate", row_training_learning_rate),
+        "rowTrainingArchitecture": row_validation.get("architecture", row_training_architecture),
+        "rowTrainingHiddenUnits": row_validation.get("hiddenUnits", row_training_hidden_units),
+        "rowTrainingFeaturePreprocessing": (
+            row_validation.get("featurePreprocessing", {}).get("mode")
+            if isinstance(row_validation.get("featurePreprocessing"), dict)
+            else row_training_feature_preprocessing
+        ),
     }
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0

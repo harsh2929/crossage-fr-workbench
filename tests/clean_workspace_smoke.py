@@ -13,7 +13,9 @@ def run_smoke() -> dict:
     root = Path(tempfile.mkdtemp(prefix="vintrace-clean-workspace-"))
     workspace = root / "workspace"
     os.environ["CROSSAGE_FORCE_FALLBACK"] = "1"
-    os.environ["CROSSAGE_REGISTRY_HOME"] = str(root / "registry")
+    registry = str(root / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
     api = DesktopApi(workspace)
 
     state = api.state(preview_create_budget=0, candidate_limit=25)

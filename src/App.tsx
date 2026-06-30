@@ -70,15 +70,26 @@ import type {
   CandidateStatus,
   CommandResult,
   AccuracyEvaluation,
+  CalibrationLearningArtifact,
+  CalibrationLearningResult,
+  CalibrationLearningStatus,
+  EmbeddingAdapterStatus,
+  SelfLearningRdStatus,
+  LearningMode,
+  LearningJobsResult,
   AccuracyLabelsExportValue,
   AccuracyLabelsImportValue,
   AccuracyValidationPackValue,
+  TrainingExamplesExportValue,
+  TrainingExamplesImportValue,
   AuditLogExportValue,
   ConsentReceiptExportValue,
   DatabaseRepairResult,
   DeleteFaceDataResult,
   ExportReportValue,
   AppCommand,
+  ExternalEditorFavorite,
+  PhotoExternalImportRequest,
   ExternalOpenPayload,
   FolderAnalysis,
   FolderTree,
@@ -138,13 +149,82 @@ import type {
   WorkspaceRelinkResult,
   CandidateQueryResult,
   DiagnosticsReport,
+  PhotoAlbumPreviewValue,
+  PhotoSmartAlbumMigrationValue,
+  PhotoAlbumSuggestionResult,
+  PhotoAssetEventValue,
+  PhotoAssetVersionDuplicateValue,
+  PhotoDateBucketList,
+  PhotoDuplicateGroupDismissValue,
+  PhotoEditStackValue,
+  PhotoEditStackVersionValue,
   PhotoFolderList,
+  PhotoImportFailureDismissValue,
+  PhotoImportFailureListValue,
+  PhotoImportFailureRecoverValue,
+  PhotoImportFailureRetryValue,
+  PhotoImportResult,
+  PhotoImportSessionArchiveUpdateValue,
+  PhotoImportSessionProvenanceUpdateValue,
+  PhotoItem,
   PhotoItemsPage,
+  PhotoKeyword,
+  PhotoLiveKeyPhotoValue,
+  PhotoLiveMotionExportValue,
+  PhotoSubjectCutoutExportValue,
+  PhotoPortraitBlurExportValue,
+  SemanticSearchPhotosValue,
+  PhotoMemory,
+  PhotoBackupRestoreRehearsalValue,
+  PhotoLibraryBackupCheckValue,
+  PhotoLibraryCatalogCleanupValue,
+  PhotoLibraryConsolidateValue,
+  PhotoCurationPreferencesValue,
+  PhotoLibraryPreviewSweepValue,
+  PhotoLibraryRelinkValue,
+  PhotoLibrarySettingsValue,
+  PhotoLibrarySearchResult,
+  PhotoMediaPairCreateValue,
+  PhotoMediaPairDeleteValue,
+  PhotoMediaPairRelinkValue,
+  PhotoOperation,
+  PhotoOperationListValue,
+  PhotoOperationUndoValue,
+  PhotoReviewMoreSuggestionValue,
+  PhotoRepairHistoryValue,
+  OpenPathWithResult,
+  PhotoRestoreRehearsalValue,
+  PhotoPreviewRebuildValue,
+  PhotoRecoveredCleanupValue,
+  PhotoRecoveredOrphanScanValue,
+  PhotoReverseGeocodeResult,
+  PhotoContactSheetExportValue,
+  PhotoColorProfileStatusValue,
+  PhotoColorProfileValidationValue,
+  PhotoSelectionExportValue,
+  PhotoSensitiveAuthResult,
+  PhotoSensitiveAuthStatus,
+  PhotoSlideshowExportValue,
+  PhotoVideoFrameExportValue,
+  PhotoVideoTrimExportValue,
+  PhotoVideoPosterValue,
+  PhotoVisibilityOperationValue,
+  PrintPathResult,
+  SharePathsResult,
   UpdateStatus
 } from "./types";
 import { computeScannedCounts, countExcludedBranches, excludeNode, includeNode } from "./lib/folderTreeSelection";
 import { filterPeople, groupReferencesByPerson, type Person } from "./lib/peopleGrouping";
 import { PhotosView } from "./views/PhotosView";
+import { photoReviewMoreCandidateReasons } from "./views/photoGroupReview";
+import {
+  normalizeReviewFocusHistory,
+  removeReviewFocusHistoryItem,
+  reviewFocusHistoryStorageKey,
+  upsertReviewFocusHistory,
+  type ReviewFocusHistoryRecord
+} from "./views/reviewFocusHistory";
+import type { PhotoSlideshowProject, PhotoSlideshowThemeTemplate } from "./views/photoSlideshowProjects";
 import { initBootBackground } from "./lib/bootBackground";
 import { formatErrorMessage, formatUiMessage, languageOptions, localizeDom, normalizeLanguage, translate, translateUiText } from "./i18n";
 import type { LanguageCode, TranslationKey, UiMessageKey } from "./i18n";
@@ -368,6 +448,11 @@ function normalizePerformanceChoice(value: unknown): PerformanceChoice {
   return mode === "auto" ? "auto" : normalizePerformanceMode(mode);
 }
 
+function normalizeLearningMode(value: unknown): LearningMode {
+  const mode = String(value || "").toLowerCase().replace(/-/g, "_");
+  return mode === "off" || mode === "auto_stage" ? mode : "manual";
+}
+
 function resolvePerformanceMode(choice: PerformanceChoice, platform?: PlatformReport | null): PerformanceMode {
   if (choice !== "auto") return choice;
   return normalizePerformanceMode(platform?.recommended_performance_mode);
@@ -386,6 +471,7 @@ type SettingsDraft = {
   faceDetectorSize: number;
   twoPassScan: boolean;
   verificationDetectorSize: number;
+  learningMode: LearningMode;
   safeMode: boolean;
   safeModeZeroAdmittance?: boolean;
   safeModeThreshold: number;
@@ -442,6 +528,7 @@ const settingsPresets: SettingsPreset[] = [
       faceDetectorSize: 512,
       twoPassScan: true,
       verificationDetectorSize: 640,
+      learningMode: "manual",
       safeMode: true,
       safeModeThreshold: 0.58,
       storageBudgetBytes: 0,
@@ -462,6 +549,7 @@ const settingsPresets: SettingsPreset[] = [
       faceDetectorSize: 512,
       twoPassScan: true,
       verificationDetectorSize: 640,
+      learningMode: "manual",
       safeMode: true,
       safeModeThreshold: 0.45,
       storageBudgetBytes: 0,
@@ -482,6 +570,7 @@ const settingsPresets: SettingsPreset[] = [
       faceDetectorSize: 640,
       twoPassScan: false,
       verificationDetectorSize: 640,
+      learningMode: "manual",
       safeMode: true,
       safeModeThreshold: 0.58,
       storageBudgetBytes: 0,
@@ -502,6 +591,7 @@ const settingsPresets: SettingsPreset[] = [
       faceDetectorSize: 384,
       twoPassScan: true,
       verificationDetectorSize: 640,
+      learningMode: "manual",
       safeMode: true,
       safeModeThreshold: 0.62,
       storageBudgetBytes: 0,
@@ -663,6 +753,11 @@ type ReviewUndo = {
   candidateId: string;
   previousStatus: CandidateStatus;
   nextStatus: CandidateStatus;
+  label: string;
+};
+
+type ReviewFocus = {
+  candidateIds: string[];
   label: string;
 };
 
@@ -1007,6 +1102,7 @@ function coerceSettingsProfile(incoming: unknown, current: SettingsDraft): Setti
     faceDetectorSize: finiteInteger(profile.faceDetectorSize, current.faceDetectorSize, 128, 2048),
     twoPassScan: booleanSetting(profile.twoPassScan, current.twoPassScan),
     verificationDetectorSize: finiteInteger(profile.verificationDetectorSize, current.verificationDetectorSize, 128, 2048),
+    learningMode: normalizeLearningMode(profile.learningMode ?? current.learningMode),
     safeMode: booleanSetting(profile.safeMode, current.safeMode),
     safeModeThreshold: finiteNumber(profile.safeModeThreshold, current.safeModeThreshold, 0, 1),
     storageBudgetBytes: finiteInteger(profile.storageBudgetBytes, current.storageBudgetBytes, 0, 10 * 1024 * 1024 * 1024 * 1024),
@@ -1147,6 +1243,22 @@ function writeSavedReviewViews(workspace: string | null | undefined, views: Save
   }
 }
 
+function readReviewFocusHistory(workspace: string | null | undefined): ReviewFocusHistoryRecord[] {
+  try {
+    return normalizeReviewFocusHistory(JSON.parse(window.localStorage.getItem(reviewFocusHistoryStorageKey(workspace)) || "[]"));
+  } catch {
+    return [];
+  }
+}
+
+function writeReviewFocusHistory(workspace: string | null | undefined, history: ReviewFocusHistoryRecord[]) {
+  try {
+    window.localStorage.setItem(reviewFocusHistoryStorageKey(workspace), JSON.stringify(normalizeReviewFocusHistory(history)));
+  } catch {
+    // Recent focused queues are optional UI state.
+  }
+}
+
 function settingsValuesEqual(left: SettingsValues, right: SettingsValues) {
   return (
     sameSettingValue(left.thresholds.confident, right.thresholds.confident) &&
@@ -1157,6 +1269,7 @@ function settingsValuesEqual(left: SettingsValues, right: SettingsValues) {
     left.faceDetectorSize === right.faceDetectorSize &&
     left.twoPassScan === right.twoPassScan &&
     left.verificationDetectorSize === right.verificationDetectorSize &&
+    left.learningMode === right.learningMode &&
     left.safeMode === right.safeMode &&
     (left.safeModeZeroAdmittance ?? false) === (right.safeModeZeroAdmittance ?? false) &&
     sameSettingValue(left.safeModeThreshold, right.safeModeThreshold) &&
@@ -1257,6 +1370,27 @@ function toneFor(value: number) {
 function basename(value: string | null | undefined) {
   if (!value) return "";
   return value.split(/[\\/]/).filter(Boolean).at(-1) ?? value;
+}
+
+function calibrationArtifactId(artifact: CalibrationLearningArtifact | null | undefined) {
+  return String(artifact?.artifact_id || artifact?.artifactId || "");
+}
+
+function calibrationArtifactHash(artifact: CalibrationLearningArtifact | null | undefined) {
+  return String(artifact?.artifact_hash || artifact?.artifactHash || "");
+}
+
+function calibrationArtifactCreatedAt(artifact: CalibrationLearningArtifact | null | undefined) {
+  return String(artifact?.created_at || artifact?.createdAt || "");
+}
+
+function calibrationArtifactModel(artifact: CalibrationLearningArtifact | null | undefined) {
+  return String(artifact?.model_name || artifact?.modelName || "");
+}
+
+function calibrationArtifactCount(artifact: CalibrationLearningArtifact | null | undefined, snakeKey: keyof CalibrationLearningArtifact, camelKey: keyof CalibrationLearningArtifact) {
+  const fallback = finiteInteger(artifact?.[camelKey], 0, 0, Number.MAX_SAFE_INTEGER);
+  return finiteInteger(artifact?.[snakeKey], fallback, 0, Number.MAX_SAFE_INTEGER);
 }
 
 function formatMediaTimestamp(value: number | null | undefined) {
@@ -1502,6 +1636,7 @@ function normalizeAppState(incoming: AppState, previous: AppState | null): AppSt
     twoPassScan: booleanSetting(rawConfig.twoPassScan, previousConfig?.twoPassScan ?? preset.twoPassScan),
     verificationDetectorSize: finiteInteger(rawConfig.verificationDetectorSize, previousConfig?.verificationDetectorSize ?? preset.verificationDetectorSize, 320, 1024),
     performanceMode: safeText(rawConfig.performanceMode, previousConfig?.performanceMode ?? "auto"),
+    learningMode: normalizeLearningMode(rawConfig.learningMode ?? previousConfig?.learningMode ?? "manual"),
     effectivePerformanceMode: safeText(rawConfig.effectivePerformanceMode, previousConfig?.effectivePerformanceMode ?? "balanced"),
     effectiveFaceDetectorSize: finiteInteger(rawConfig.effectiveFaceDetectorSize, previousConfig?.effectiveFaceDetectorSize ?? preset.faceDetectorSize, 320, 1024),
     effectiveTwoPassScan: booleanSetting(rawConfig.effectiveTwoPassScan, previousConfig?.effectiveTwoPassScan ?? preset.twoPassScan),
@@ -1618,6 +1753,7 @@ function normalizeAppState(incoming: AppState, previous: AppState | null): AppSt
     videoMoments: Array.isArray(raw.videoMoments) ? raw.videoMoments as AppState["videoMoments"] : previous?.videoMoments ?? [],
     references: Array.isArray(raw.references) ? raw.references as AppState["references"] : previous?.references ?? [],
     candidates: Array.isArray(raw.candidates) ? raw.candidates as AppState["candidates"] : previous?.candidates ?? [],
+    referenceSuggestions: Array.isArray(raw.referenceSuggestions) ? raw.referenceSuggestions as AppState["referenceSuggestions"] : previous?.referenceSuggestions ?? [],
     config
   };
 }
@@ -1632,7 +1768,11 @@ export default function App() {
   const [bootClock, setBootClock] = useState(() => Date.now());
   const bootCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [notice, setNotice] = useState<NoticeState | null>(null);
+  const [lastPhotoExternalEditorPath, setLastPhotoExternalEditorPath] = useState("");
+  const [photoExternalEditors, setPhotoExternalEditors] = useState<ExternalEditorFavorite[]>([]);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
+  const [reviewFocus, setReviewFocus] = useState<ReviewFocus | null>(null);
+  const [reviewFocusHistory, setReviewFocusHistory] = useState<ReviewFocusHistoryRecord[]>([]);
   const [selectedRefId, setSelectedRefId] = useState<string | null>(null);
   const [personName, setPersonName] = useState("");
   const [ageBucket, setAgeBucket] = useState<AgeBucket>("unknown");
@@ -1650,6 +1790,8 @@ export default function App() {
   const [diagnosticsReport, setDiagnosticsReport] = useState<DiagnosticsReport | null>(null);
   const [installerDiagnostics, setInstallerDiagnostics] = useState<InstallerDiagnosticsResult | null>(null);
   const [photoSources, setPhotoSources] = useState<SystemPhotoSource[]>([]);
+  const [photoAppShortcutCommand, setPhotoAppShortcutCommand] = useState<{ id: number; shortcut: "selectPage" | "delete" } | null>(null);
+  const [photoExternalImportRequest, setPhotoExternalImportRequest] = useState<PhotoExternalImportRequest | null>(null);
   const [workspaceLock, setWorkspaceLock] = useState<WorkspaceLockStatus | null>(null);
   const [duplicatePeople, setDuplicatePeople] = useState<DuplicatePeopleResult | null>(null);
   const [reviewRuleResult, setReviewRuleResult] = useState<ReviewRulesApplyResult | null>(null);
@@ -1691,6 +1833,9 @@ export default function App() {
   const [savedScanSources, setSavedScanSources] = useState<SavedScanSource[]>([]);
   const [scanQueue, setScanQueue] = useState<ScanQueueItem[]>([]);
   const [scanQueueRunning, setScanQueueRunning] = useState(false);
+  useEffect(() => {
+    setReviewFocusHistory(readReviewFocusHistory(state?.workspace));
+  }, [state?.workspace]);
   const [backupVerification, setBackupVerification] = useState<WorkspaceBackupVerification | null>(null);
   const [backupPruneResult, setBackupPruneResult] = useState<WorkspaceBackupPruneValue | null>(null);
   const [backupRestoreResult, setBackupRestoreResult] = useState<WorkspaceBackupRestoreValue | null>(null);
@@ -1706,6 +1851,9 @@ export default function App() {
   const [runtimeBenchmark, setRuntimeBenchmark] = useState<RuntimeBenchmarkResult | null>(null);
   const [releaseReadiness, setReleaseReadiness] = useState<ReleaseReadinessResult | null>(null);
   const [accuracyEvaluation, setAccuracyEvaluation] = useState<AccuracyEvaluation | null>(null);
+  const [calibrationLearning, setCalibrationLearning] = useState<CalibrationLearningStatus | null>(null);
+  const [embeddingAdapterLearning, setEmbeddingAdapterLearning] = useState<EmbeddingAdapterStatus | null>(null);
+  const [selfLearningRdStatus, setSelfLearningRdStatus] = useState<SelfLearningRdStatus | null>(null);
   const [accuracyValidationPack, setAccuracyValidationPack] = useState<AccuracyValidationPackValue | null>(null);
   const [publicDatasetCatalog, setPublicDatasetCatalog] = useState<PublicDatasetCatalog | null>(null);
   const [publicDatasetInspection, setPublicDatasetInspection] = useState<PublicDatasetInspection | null>(null);
@@ -1915,6 +2063,18 @@ export default function App() {
         });
       });
   }, [state?.workspace, publicDatasetCatalog]);
+
+  useEffect(() => {
+    let cancelled = false;
+    window.crossAge.listExternalEditors()
+      .then((result) => {
+        if (!cancelled) setPhotoExternalEditors(Array.isArray(result.editors) ? result.editors : []);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const unsubscribeBackend = window.crossAge.onBackendError((message) => {
@@ -2210,6 +2370,9 @@ export default function App() {
 
   function applyState(rawNext: AppState) {
     const next = normalizeAppState(rawNext, state);
+    if (state?.workspace && next.workspace && next.workspace !== state.workspace) {
+      setCalibrationLearning(null);
+    }
     stateReadyRef.current = true;
     setState(next);
     setPerformanceChoiceState(normalizePerformanceChoice(next.config.performanceMode));
@@ -2219,6 +2382,7 @@ export default function App() {
       faceDetectorSize: next.config.faceDetectorSize,
       twoPassScan: next.config.twoPassScan,
       verificationDetectorSize: next.config.verificationDetectorSize,
+      learningMode: normalizeLearningMode(next.config.learningMode),
       safeMode: next.config.safeMode,
       safeModeZeroAdmittance: next.config.safeModeZeroAdmittance ?? false,
       safeModeThreshold: next.config.safeModeThreshold,
@@ -2293,7 +2457,7 @@ export default function App() {
   // Stable identities so PhotosView's data effects don't refire on every App
   // re-render (the shell re-renders ~1/s via a clock).
   const listPhotoFolders = useCallback(
-    () => window.crossAge.invoke<PhotoFolderList>("list_photo_folders", {}),
+    (params: Record<string, unknown> = {}) => window.crossAge.invoke<PhotoFolderList>("list_photo_folders", params),
     []
   );
 
@@ -2302,6 +2466,1161 @@ export default function App() {
       window.crossAge.invoke<PhotoItemsPage>("list_photo_folder_items", params),
     []
   );
+
+  const listPhotoDateBuckets = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<PhotoDateBucketList>("list_photo_date_buckets", params),
+    []
+  );
+
+  const searchPhotoLibrary = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<PhotoLibrarySearchResult>("search_photo_library", params),
+    []
+  );
+
+  const listPhotoBurstStacks = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: unknown }>("list_photo_burst_stacks", params),
+    []
+  );
+
+  const setPhotoBurstSelection = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("set_photo_burst_selection", params),
+    []
+  );
+
+  const validatePhotoColorProfile = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoColorProfileValidationValue }>("validate_photo_color_profile", params),
+    []
+  );
+
+  const getPhotoColorProfileStatus = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoColorProfileStatusValue }>("photo_color_profile_status", params),
+    []
+  );
+
+  const listPhotoKeywords = useCallback(
+    () => window.crossAge.invoke<{ value: { keywords: PhotoKeyword[] } }>("list_photo_keywords", {}),
+    []
+  );
+
+  const listPhotoSavedFilters = useCallback(
+    () => window.crossAge.invoke<{ value: { filters?: unknown[] } }>("list_photo_saved_filters", {}),
+    []
+  );
+
+  const savePhotoSavedFilter = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("save_photo_saved_filter", params),
+    []
+  );
+
+  const deletePhotoSavedFilter = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("delete_photo_saved_filter", params),
+    []
+  );
+
+  const savePhotoKeyword = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoKeyword }>("save_photo_keyword", params),
+    []
+  );
+
+  const deletePhotoKeyword = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { keywordId: string; name: string; removedAssignments: number; deleted: boolean } }>("delete_photo_keyword", params),
+    []
+  );
+
+  const exportPhotoKeywords = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: { path: string; exported: number; format: string; generatedAt: string; keywords: PhotoKeyword[] } }>("export_photo_keywords", params),
+    []
+  );
+
+  const importPhotoKeywords = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { imported: number; created: number; updated: number; skipped: number; keywords: PhotoKeyword[] } }>("import_photo_keywords", params),
+    []
+  );
+
+  const mergePhotoDuplicates = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { groupId: string; keptAssetId: string; deletedAssetIds: string[]; merged: number; deletedAt: string } }>("merge_photo_duplicates", params),
+    []
+  );
+
+  const dismissPhotoDuplicateGroup = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoDuplicateGroupDismissValue }>("dismiss_photo_duplicate_group", params),
+    []
+  );
+
+  const savePhotoPersonProfile = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("save_photo_person_profile", params),
+    []
+  );
+
+  const savePhotoPetProfile = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("save_photo_pet_profile", params),
+    []
+  );
+
+  const savePhotoPlaceProfile = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("save_photo_place_profile", params),
+    []
+  );
+
+  const savePhotoUtilityProfile = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("save_photo_utility_profile", params),
+    []
+  );
+
+  const renamePhotoPet = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("rename_photo_pet", params),
+    []
+  );
+
+  const assignPhotoPet = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("assign_photo_pet", params),
+    []
+  );
+
+  const dismissPhotoPetReview = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("dismiss_photo_pet_review", params),
+    []
+  );
+
+  const savePhotoPeopleGroup = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("save_photo_people_group", params),
+    []
+  );
+
+  const deletePhotoPeopleGroup = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("delete_photo_people_group", params),
+    []
+  );
+
+  const savePhotoAlbum = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("save_photo_album", params),
+    []
+  );
+
+  const previewPhotoAlbumRules = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoAlbumPreviewValue }>("preview_photo_album_rules", params),
+    []
+  );
+
+  const deletePhotoAlbum = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("delete_photo_album", params),
+    []
+  );
+
+  const mergePhotoAlbums = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("merge_photo_albums", params),
+    []
+  );
+
+  const migratePhotoSmartAlbums = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoSmartAlbumMigrationValue }>("migrate_photo_smart_albums", params),
+    []
+  );
+
+  const savePhotoAlbumFolder = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("save_photo_album_folder", params),
+    []
+  );
+
+  const deletePhotoAlbumFolder = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("delete_photo_album_folder", params),
+    []
+  );
+
+  const movePhotoAlbumToFolder = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("move_photo_album_to_folder", params),
+    []
+  );
+
+  const reorderPhotoAlbumFolderChildren = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("reorder_photo_album_folder_children", params),
+    []
+  );
+
+  const addPhotoAlbumItems = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("add_photo_album_items", params),
+    []
+  );
+
+  const removePhotoAlbumItems = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("remove_photo_album_items", params),
+    []
+  );
+
+  const reorderPhotoAlbumItems = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("reorder_photo_album_items", params),
+    []
+  );
+
+  const updatePhotoAssetMetadata = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: Partial<PhotoItem> & Record<string, unknown> }>("update_photo_asset_metadata", params),
+    []
+  );
+
+  const updatePhotoAssetsMetadata = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { items: Array<Partial<PhotoItem> & Record<string, unknown>>; updated: number; changed: number; operation?: PhotoOperation } }>("update_photo_assets_metadata", params),
+    []
+  );
+
+  const reverseGeocodePhotoLocation = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoReverseGeocodeResult }>("reverse_geocode_photo_location", params),
+    []
+  );
+
+  const getPhotoEditStack = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoEditStackValue }>("get_photo_edit_stack", params),
+    []
+  );
+
+  const savePhotoEditStack = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoEditStackValue }>("save_photo_edit_stack", params),
+    []
+  );
+
+  const revertPhotoEditStack = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoEditStackValue }>("revert_photo_edit_stack", params),
+    []
+  );
+
+  const listPhotoEditStackVersions = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { assetId: string; sourcePath: string; versions: PhotoEditStackVersionValue[] } }>("list_photo_edit_stack_versions", params),
+    []
+  );
+
+  const createPhotoEditStackVersion = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoEditStackVersionValue }>("create_photo_edit_stack_version", params),
+    []
+  );
+
+  const restorePhotoEditStackVersion = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { version: PhotoEditStackVersionValue; stack: PhotoEditStackValue; hasStack: boolean } }>("restore_photo_edit_stack_version", params),
+    []
+  );
+
+  const deletePhotoEditStackVersion = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { versionId: string; assetId: string; sourcePath: string; deleted: number; previous?: PhotoEditStackVersionValue } }>("delete_photo_edit_stack_version", params),
+    []
+  );
+
+  const duplicatePhotoAssetVersion = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoAssetVersionDuplicateValue }>("duplicate_photo_asset_version", params),
+    []
+  );
+
+  const duplicatePhotoAssetRenderedVersion = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoAssetVersionDuplicateValue }>("duplicate_photo_asset_rendered_version", params),
+    []
+  );
+
+  const recordPhotoAssetEvent = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoAssetEventValue }>("record_photo_asset_event", params),
+    []
+  );
+
+  const applyPhotoVisibilityOperation = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoVisibilityOperationValue }>("apply_photo_visibility_operation", params),
+    []
+  );
+
+  const listPhotoOperations = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoOperationListValue }>("list_photo_operations", params),
+    []
+  );
+
+  const photoRestoreRehearsal = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoRestoreRehearsalValue }>("photo_restore_rehearsal", params),
+    []
+  );
+
+  const photoBackupRestoreRehearsal = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoBackupRestoreRehearsalValue }>("photo_backup_restore_rehearsal", params),
+    []
+  );
+
+  const undoPhotoOperation = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoOperationUndoValue }>("undo_photo_operation", params),
+    []
+  );
+
+  const permanentlyDeletePhotos = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { selected: number; deletedAssets: number; deletedScanFiles: number; deletedCandidates: number; deletedFiles: number; managedOriginalsTrashed?: number; managedOriginalTrashFailures?: Array<{ assetId?: string; sourcePath: string; reason: string }>; managedOriginalTrashPaths?: string[]; sourcePaths: string[]; assetIds: string[]; candidateIds: string[]; originalMediaDeleted: boolean; operation?: PhotoOperation } }>("permanently_delete_photos", params),
+    []
+  );
+
+  const suggestPhotoAlbums = useCallback(
+    () => window.crossAge.invoke<{ value: PhotoAlbumSuggestionResult }>("suggest_photo_albums", { limit: 12 }),
+    []
+  );
+
+  const listPhotoImportFailures = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoImportFailureListValue }>("list_photo_import_failures", params),
+    []
+  );
+
+  const updatePhotoImportSessionProvenance = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoImportSessionProvenanceUpdateValue }>("update_photo_import_session_provenance", params),
+    []
+  );
+
+  const archivePhotoImportSessions = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoImportSessionArchiveUpdateValue }>("archive_photo_import_sessions", params),
+    []
+  );
+
+  const dismissPhotoImportFailure = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoImportFailureDismissValue }>("dismiss_photo_import_failure", params),
+    []
+  );
+
+  const retryPhotoImportFailure = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoImportFailureRetryValue }>("retry_photo_import_failure", params),
+    []
+  );
+
+  const saveRecoveredPhotoImportFailure = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoImportFailureRecoverValue }>("save_recovered_photo_import_failure", params),
+    []
+  );
+
+  const deleteRecoveredPhotoImportFailure = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoImportFailureRecoverValue }>("delete_recovered_photo_import_failure", params),
+    []
+  );
+
+  const scanPhotoRecoveredOrphans = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoRecoveredOrphanScanValue }>("scan_photo_recovered_orphans", params),
+    []
+  );
+
+  const photoRecoveredCleanup = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: PhotoRecoveredCleanupValue }>("photo_recovered_cleanup", params),
+    []
+  );
+
+  const rebuildPhotoPreviews = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoPreviewRebuildValue }>("rebuild_photo_previews", params),
+    []
+  );
+
+  const photoLibraryPreviewSweep = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: PhotoLibraryPreviewSweepValue }>("photo_library_preview_sweep", params),
+    []
+  );
+
+  const relinkPhotoLibraryPaths = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoLibraryRelinkValue }>("relink_photo_library_paths", params),
+    []
+  );
+
+  const createPhotoMediaPair = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoMediaPairCreateValue }>("create_photo_media_pair", params),
+    []
+  );
+
+  const relinkPhotoMediaPair = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoMediaPairRelinkValue }>("relink_photo_media_pair", params),
+    []
+  );
+
+  const deletePhotoMediaPair = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoMediaPairDeleteValue }>("delete_photo_media_pair", params),
+    []
+  );
+
+  const consolidatePhotoLibraryAssets = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoLibraryConsolidateValue }>("consolidate_photo_library_assets", params),
+    []
+  );
+
+  const photoLibraryBackupCheck = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: PhotoLibraryBackupCheckValue }>("photo_library_backup_check", params),
+    []
+  );
+
+  const photoLibraryCatalogCleanup = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: PhotoLibraryCatalogCleanupValue }>("photo_library_catalog_cleanup", params),
+    []
+  );
+
+  const photoRepairHistory = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: PhotoRepairHistoryValue }>("photo_repair_history", params),
+    []
+  );
+
+  const photoLibrarySettings = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: PhotoLibrarySettingsValue }>("photo_library_settings", params),
+    []
+  );
+
+  const savePhotoLibrarySettings = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoLibrarySettingsValue }>("save_photo_library_settings", params),
+    []
+  );
+
+  const indexPhotoOcr = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: Record<string, unknown> }>("index_photo_ocr", params),
+    []
+  );
+
+  const photoOcrIndexStatus = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: Record<string, unknown> }>("photo_ocr_index_status", params),
+    []
+  );
+
+  const indexPhotoBarcodes = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: Record<string, unknown> }>("index_photo_barcodes", params),
+    []
+  );
+
+  const photoBarcodeIndexStatus = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: Record<string, unknown> }>("photo_barcode_index_status", params),
+    []
+  );
+
+  const indexPhotoObjects = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: Record<string, unknown> }>("index_photo_objects", params),
+    []
+  );
+
+  const photoObjectIndexStatus = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: Record<string, unknown> }>("photo_object_index_status", params),
+    []
+  );
+
+  const enqueuePhotoIndexingJob = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: Record<string, unknown> }>("enqueue_photo_indexing_job", params),
+    []
+  );
+
+  const photoIndexingJobs = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: Record<string, unknown> }>("photo_indexing_jobs", params),
+    []
+  );
+
+  const runPhotoIndexingJob = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: Record<string, unknown> }>("run_photo_indexing_job", params),
+    []
+  );
+
+  const runPhotoIndexingQueue = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: Record<string, unknown> }>("run_photo_indexing_queue", params),
+    []
+  );
+
+  const cancelPhotoIndexingJob = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: Record<string, unknown> }>("cancel_photo_indexing_job", params),
+    []
+  );
+
+  const dismissPhotoIndexingJob = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: Record<string, unknown> }>("dismiss_photo_indexing_job", params),
+    []
+  );
+
+  const photoCurationPreferences = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: PhotoCurationPreferencesValue }>("photo_curation_preferences", params),
+    []
+  );
+
+  const savePhotoCurationPreferences = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoCurationPreferencesValue }>("save_photo_curation_preferences", params),
+    []
+  );
+
+  const photoUserMemories = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: { memories?: PhotoMemory[] } }>("photo_user_memories", params),
+    []
+  );
+
+  const savePhotoUserMemory = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoMemory }>("save_photo_user_memory", params),
+    []
+  );
+
+  const deletePhotoUserMemory = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { memoryId: string; deleted: number } }>("delete_photo_user_memory", params),
+    []
+  );
+
+  const photoSlideshowProjects = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: { projects?: PhotoSlideshowProject[] } }>("photo_slideshow_projects", params),
+    []
+  );
+
+  const photoSlideshowThemeTemplates = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: { templates?: PhotoSlideshowThemeTemplate[] } }>("photo_slideshow_theme_templates", params),
+    []
+  );
+
+  const savePhotoSlideshowThemeTemplate = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoSlideshowThemeTemplate }>("save_photo_slideshow_theme_template", params),
+    []
+  );
+
+  const deletePhotoSlideshowThemeTemplate = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { id: string; deleted: number } }>("delete_photo_slideshow_theme_template", params),
+    []
+  );
+
+  const exportPhotoSlideshowThemeTemplates = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: { path: string; targetPath?: string; exported: number; templateCount: number; format: string; generatedAt: string; templates: PhotoSlideshowThemeTemplate[] } }>("export_photo_slideshow_theme_templates", params),
+    []
+  );
+
+  const importPhotoSlideshowThemeTemplates = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { imported: number; created: number; updated: number; skipped: number; sourcePath?: string; format: string; templates: PhotoSlideshowThemeTemplate[] } }>("import_photo_slideshow_theme_templates", params),
+    []
+  );
+
+  const savePhotoSlideshowProject = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoSlideshowProject }>("save_photo_slideshow_project", params),
+    []
+  );
+
+  const deletePhotoSlideshowProject = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { id: string; deleted: number } }>("delete_photo_slideshow_project", params),
+    []
+  );
+
+  async function exportPhotoSlideshow(params: Record<string, unknown>) {
+    const result = await invoke<CommandResult<PhotoSlideshowExportValue>>(
+      "Exporting slideshow",
+      "export_photo_slideshow",
+      params
+    );
+    const value = result.value;
+    if (!value) return null;
+    const included = value.counts.included || value.items.filter((item) => item.result === "included").length;
+    const skipped = (value.counts.missing || 0) + (value.counts.unsupported || 0);
+    const renderedMovie = Boolean(value.targetPath);
+    setNotice({
+      tone: skipped ? "warn" : "ok",
+      text: renderedMovie
+        ? `Exported slideshow movie with ${included} slide${included === 1 ? "" : "s"} as ${String(value.videoRenderFormat || "video").toUpperCase()}${skipped ? `; skipped ${skipped}` : ""}.`
+        : `Exported slideshow with ${included} slide${included === 1 ? "" : "s"}${skipped ? `; skipped ${skipped}` : ""}.`
+    });
+    await window.crossAge.revealPath(value.bundlePath || value.htmlPath);
+    return value;
+  }
+
+  async function exportPhotoMemoryMovie(params: Record<string, unknown>) {
+    const result = await invoke<CommandResult<PhotoSlideshowExportValue>>(
+      "Exporting Memory movie",
+      "export_photo_memory_movie",
+      params
+    );
+    const value = result.value;
+    if (!value) return null;
+    const included = value.counts.included || value.items.filter((item) => item.result === "included").length;
+    const skipped = (value.counts.missing || 0) + (value.counts.unsupported || 0);
+    setNotice({
+      tone: skipped ? "warn" : "ok",
+      text: `Exported Memory movie with ${included} slide${included === 1 ? "" : "s"} as ${String(value.videoRenderFormat || "video").toUpperCase()}${skipped ? `; skipped ${skipped}` : ""}.`
+    });
+    await window.crossAge.revealPath(value.bundlePath || value.targetPath || value.htmlPath);
+    return value;
+  }
+
+  async function importPhotos(params: Record<string, unknown>) {
+    const sourcePaths = Array.isArray(params.sourcePaths) ? params.sourcePaths.filter(Boolean).map(String) : [];
+    if (!sourcePaths.length) {
+      setNotice({ tone: "warn", text: "Choose photos or a folder to import." });
+      return null;
+    }
+    const result = await invoke<CommandResult<PhotoImportResult>>("Importing photos", "import_photos", {
+      ...params,
+      sourcePaths
+    });
+    const value = result.value;
+    if (!value) return null;
+    const warningCount = value.failedCount || 0;
+    setNotice({
+      tone: warningCount ? "warn" : "ok",
+      text: `Imported ${value.importedCount} photo${value.importedCount === 1 ? "" : "s"}${warningCount ? `; ${warningCount} failed` : ""}.`
+    });
+    return value;
+  }
+
+  async function choosePhotoImportFiles() {
+    const picked = await window.crossAge.chooseImages();
+    return (picked || []).map((item) => item.path).filter(Boolean);
+  }
+
+  async function choosePhotoImportFolder() {
+    return window.crossAge.chooseFolder();
+  }
+
+  async function choosePhotoSlideshowAudioFile() {
+    return window.crossAge.chooseAudioFile();
+  }
+
+  async function choosePhotoSlideshowTemplateLibraryFile() {
+    return window.crossAge.chooseJsonFile();
+  }
+
+  async function choosePhotoColorProfileFile() {
+    return window.crossAge.chooseColorProfileFile();
+  }
+
+  function getPathForFile(file: File) {
+    const electronPath = window.crossAge.getPathForFile(file);
+    if (electronPath || !window.crossAge.testFileDropPathFallback) return electronPath;
+    const fallbackPath = (file as File & { path?: unknown }).path;
+    return typeof fallbackPath === "string" ? fallbackPath : "";
+  }
+
+  async function preparePhotoImportPaths(paths: string[]) {
+    return window.crossAge.prepareMedia(paths);
+  }
+
+  async function revealPhotoPath(photoPath?: string | null) {
+    if (!photoPath) {
+      setNotice({ tone: "warn", text: "This photo original path is not available." });
+      return;
+    }
+    const revealed = await window.crossAge.revealPath(photoPath);
+    setNotice(revealed ? { tone: "ok", text: "Photo original shown." } : { tone: "warn", text: "Photo original is not available." });
+  }
+
+  async function openPhotoPath(photoPath?: string | null) {
+    if (!photoPath) {
+      setNotice({ tone: "warn", text: "This photo original path is not available." });
+      return;
+    }
+    const result = await window.crossAge.openPath(photoPath);
+    setNotice(result.ok ? { tone: "ok", text: "Photo original opened." } : { tone: "error", text: result.error || "Photo original could not be opened." });
+  }
+
+  async function openPhotoPathWith(photoPath?: string | null, editorPath?: string | null): Promise<OpenPathWithResult | null> {
+    if (!photoPath) {
+      setNotice({ tone: "warn", text: "This photo original path is not available." });
+      return null;
+    }
+    const result = await window.crossAge.openPathWith(photoPath, editorPath || undefined);
+    if (result.opened) {
+      if (result.editorPath) setLastPhotoExternalEditorPath(result.editorPath);
+      if (Array.isArray(result.editors)) setPhotoExternalEditors(result.editors);
+      setNotice({ tone: "ok", text: "Photo original sent to external editor." });
+      return result;
+    }
+    if (editorPath && result.error?.toLowerCase().includes("system picker")) {
+      setLastPhotoExternalEditorPath("");
+    }
+    setNotice({ tone: result.canceled ? "warn" : "error", text: result.error || "Photo original could not be opened with an external editor." });
+    return result;
+  }
+
+  async function forgetPhotoExternalEditor(editorPath?: string | null) {
+    if (!editorPath) return;
+    const result = await window.crossAge.forgetExternalEditor(editorPath);
+    setPhotoExternalEditors(Array.isArray(result.editors) ? result.editors : []);
+    if (lastPhotoExternalEditorPath === editorPath) {
+      setLastPhotoExternalEditorPath("");
+    }
+    setNotice(result.ok ? { tone: "ok", text: "External editor forgotten." } : { tone: "error", text: result.error || "External editor could not be forgotten." });
+  }
+
+  async function sharePhotoPaths(photoPaths: string[]): Promise<SharePathsResult | null> {
+    const paths = [...new Set(photoPaths.filter(Boolean))];
+    if (!paths.length) {
+      setNotice({ tone: "warn", text: "Select photos before sharing." });
+      return null;
+    }
+    try {
+      const result = await window.crossAge.sharePaths(paths);
+      if (result.shared) {
+        setNotice({ tone: "ok", text: `Opened system share menu for ${result.count} photo${result.count === 1 ? "" : "s"}.` });
+      } else if (result.ok && result.fallback === "reveal") {
+        setNotice({ tone: "ok", text: `Native share is not available here, so I opened the folder containing ${result.count} selected photo${result.count === 1 ? "" : "s"}.` });
+      } else {
+        setNotice({ tone: "warn", text: result.error || "Use Export to create a shareable folder on this platform." });
+      }
+      return result;
+    } catch (error) {
+      const details = errorDetails(error, "Could not open the system share menu.");
+      setNotice({ tone: "error", text: details.text });
+      return { ok: false, supported: false, shared: false, count: 0, error: details.text };
+    }
+  }
+
+  async function printPhotoPath(photoPath?: string | null): Promise<PrintPathResult | null> {
+    if (!photoPath) {
+      setNotice({ tone: "warn", text: "No printable photo output is available yet." });
+      return null;
+    }
+    try {
+      const result = await window.crossAge.printPath(photoPath);
+      if (result.printed) {
+        setNotice({ tone: "ok", text: "Opened the system print dialog." });
+      } else {
+        setNotice({ tone: "warn", text: result.error || "Print was cancelled or could not start." });
+      }
+      return result;
+    } catch (error) {
+      const details = errorDetails(error, "Could not open the system print dialog.");
+      setNotice({ tone: "error", text: details.text });
+      return { ok: false, supported: true, printed: false, error: details.text };
+    }
+  }
+
+  async function startPhotoFileDrag(photoPath?: string | null) {
+    if (!photoPath) {
+      return { ok: false, path: "", error: "No draggable file is available yet." };
+    }
+    try {
+      const result = await window.crossAge.startFileDrag(photoPath);
+      if (!result.ok) {
+        setNotice({ tone: "warn", text: result.error || "Could not start dragging this file." });
+      }
+      return result;
+    } catch (error) {
+      const details = errorDetails(error, "Could not start dragging this file.");
+      setNotice({ tone: "error", text: details.text });
+      return { ok: false, path: photoPath, error: details.text };
+    }
+  }
+
+  const getPhotosSensitiveAuthStatus = useCallback(async (): Promise<PhotoSensitiveAuthStatus | null> => {
+    try {
+      return await window.crossAge.getPhotosSensitiveAuthStatus();
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const authenticatePhotosSensitiveAccess = useCallback(async (reason: string): Promise<PhotoSensitiveAuthResult | null> => {
+    try {
+      return await window.crossAge.authenticatePhotosSensitiveAccess(reason);
+    } catch (error) {
+      const details = errorDetails(error, "Device authentication could not start.");
+      return {
+        ok: false,
+        supported: false,
+        available: false,
+        platform: "unknown",
+        method: "none",
+        error: details.text
+      };
+    }
+  }, []);
+
+  async function exportPhotoSelection(
+    sourcePaths: string[],
+    action: "export" | "copy" | "move" = "export",
+    folder?: string,
+    options: {
+      includeMetadata?: boolean;
+      includeXmp?: boolean;
+      includeExistingSidecars?: boolean;
+      stripLocation?: boolean;
+      preserveColorProfile?: boolean;
+      targetColorProfile?: "source" | "srgb" | "display-p3" | "adobe-rgb" | "custom-icc" | "none";
+      targetColorProfilePath?: string;
+      layout?: "bundle" | "flat";
+      filenameMode?: "numbered" | "original" | "template";
+      filenameTemplate?: string;
+      subfolderTemplate?: string;
+      exportVariant?: "original" | "rendered";
+      renderFormat?: "jpeg" | "png" | "tiff" | "heic";
+      renderQuality?: number;
+      renderMaxDimension?: number;
+      allowRenderFallback?: boolean;
+      revealAfterExport?: boolean;
+      videoRenderFormat?: "mp4" | "mov" | "m4v" | "webm" | "hevc" | "prores";
+      videoRenderQuality?: "small" | "medium" | "high";
+    } = {}
+  ) {
+    const paths = [...new Set(sourcePaths.filter(Boolean))];
+    if (!paths.length) {
+      setNotice({ tone: "warn", text: "Select photos before exporting." });
+      return null;
+    }
+    const { revealAfterExport = true, ...exportOptions } = options;
+    const result = await invoke<CommandResult<PhotoSelectionExportValue>>(
+      action === "move" ? "Moving selected photos" : action === "copy" ? "Copying selected photos" : "Exporting selected photos",
+      "export_photo_selection",
+      { sourcePaths: paths, action, folder: folder || "", ...exportOptions }
+    );
+    const value = result.value;
+    if (!value) return null;
+    const copied = value.counts.copied;
+    const moved = value.counts.moved ?? 0;
+    const missing = value.counts.missing;
+    const changed = action === "move" ? moved : copied;
+    const rendered = value.counts.rendered || 0;
+    const videoRendered = value.counts.videoRendered || 0;
+    const renderFallback = value.counts.renderFallback || 0;
+    const skipped = value.counts.skipped || 0;
+    const sidecars = (value.counts.metadata || 0) + (value.counts.xmp || 0);
+    setNotice({
+      tone: missing || skipped ? "warn" : "ok",
+      text: `${action === "move" ? "Moved" : action === "copy" ? "Copied" : "Exported"} ${changed} photo${changed === 1 ? "" : "s"}${rendered ? `; rendered ${rendered}` : ""}${videoRendered ? ` (${videoRendered} video${videoRendered === 1 ? "" : "s"})` : ""}${renderFallback ? `; original fallback ${renderFallback}` : ""}${sidecars ? ` with ${sidecars} sidecar${sidecars === 1 ? "" : "s"}` : ""}${skipped ? `; skipped ${skipped}` : ""}${missing ? `; missing ${missing}` : ""}.`
+    });
+    if (revealAfterExport && value.bundlePath) {
+      await window.crossAge.revealPath(value.bundlePath);
+    }
+    return value;
+  }
+
+  async function exportPhotoContactSheet(
+    sourcePaths: string[],
+    options: {
+      format?: "pdf" | "png" | "jpeg";
+      layoutPreset?: "custom" | "full_page" | "two_up" | "four_up" | "wallet";
+      columns?: number;
+      thumbnailSize?: number;
+      includeCaptions?: boolean;
+      captionMode?: "title_date_people" | "metadata" | "filename";
+      title?: string;
+      pageSize?: "letter" | "a4";
+      quality?: number;
+    } = {}
+  ) {
+    const paths = [...new Set(sourcePaths.filter(Boolean))];
+    if (!paths.length) {
+      setNotice({ tone: "warn", text: "Select photos before exporting a contact sheet." });
+      return null;
+    }
+    const result = await invoke<CommandResult<PhotoContactSheetExportValue>>(
+      "Exporting contact sheet",
+      "export_photo_contact_sheet",
+      { sourcePaths: paths, ...options }
+    );
+    const value = result.value;
+    if (!value) return null;
+    const pages = value.counts.pages || value.targetPaths.length || 1;
+    const skipped = (value.counts.missing || 0) + (value.counts.unsupported || 0);
+    setNotice({
+      tone: skipped ? "warn" : "ok",
+      text: `Exported contact sheet with ${pages} page${pages === 1 ? "" : "s"}${skipped ? `; skipped ${skipped}` : ""}.`
+    });
+    await window.crossAge.revealPath(value.bundlePath || value.targetPath);
+    return value;
+  }
+
+  async function exportPhotoVideoFrame(params: Record<string, unknown>) {
+    const result = await invoke<CommandResult<PhotoVideoFrameExportValue>>(
+      "Exporting video frame",
+      "export_photo_video_frame",
+      params
+    );
+    const value = result.value;
+    if (!value) return null;
+    const seconds = Math.round((Number(value.timestampMs) || 0) / 1000);
+    setNotice({
+      tone: "ok",
+      text: `Exported ${value.posterFrameReused ? "saved poster frame" : "video frame"} at ${seconds}s as ${String(value.renderFormat || "image").toUpperCase()}.`
+    });
+    await window.crossAge.revealPath(value.bundlePath || value.targetPath);
+    return value;
+  }
+
+  async function exportPhotoVideoTrim(params: Record<string, unknown>) {
+    const result = await invoke<CommandResult<PhotoVideoTrimExportValue>>(
+      "Exporting video trim",
+      "export_photo_video_trim",
+      params
+    );
+    const value = result.value;
+    if (!value) return null;
+    const start = Math.round((Number(value.startMs) || 0) / 1000);
+    const end = Math.round((Number(value.endMs) || 0) / 1000);
+    const rotate = Number(value.videoRotateDegrees) || 0;
+    const crop = String(value.videoCropAspect || "none");
+    const transform = rotate || crop !== "none"
+      ? ` with ${[rotate ? `${rotate} deg rotation` : "", crop !== "none" ? `${crop} crop` : ""].filter(Boolean).join(" and ")}`
+      : "";
+    setNotice({ tone: "ok", text: `Exported video trim from ${start}s to ${end}s${transform}.` });
+    await window.crossAge.revealPath(value.bundlePath || value.targetPath);
+    return value;
+  }
+
+  async function exportPhotoLiveMotion(params: Record<string, unknown>) {
+    const result = await invoke<CommandResult<PhotoLiveMotionExportValue>>(
+      "Exporting Live Photo motion",
+      "export_photo_live_motion",
+      params
+    );
+    const value = result.value;
+    if (!value) return null;
+    const variant = String(value.exportVariant || "").toLowerCase();
+    const label = variant.includes("bounce") ? "Bounce GIF" : variant.includes("gif") ? "animated GIF" : "motion clip";
+    setNotice({ tone: "ok", text: `Exported Live Photo ${label}.` });
+    await window.crossAge.revealPath(value.bundlePath || value.targetPath);
+    return value;
+  }
+
+  async function exportPhotoSubjectCutout(params: Record<string, unknown>) {
+    const result = await invoke<CommandResult<PhotoSubjectCutoutExportValue>>(
+      "Exporting subject cutout",
+      "export_photo_subject_cutout",
+      params
+    );
+    const value = result.value;
+    if (!value) return null;
+    const variant = String(value.exportVariant || "cutout").toLowerCase();
+    if (params.copyToClipboard && value.targetPath) {
+      const copied = await window.crossAge.writeClipboardImagePath(value.targetPath);
+      if (!copied.ok) {
+        setNotice({ tone: "warn", text: copied.error || "Could not copy subject PNG to clipboard." });
+        await window.crossAge.revealPath(value.bundlePath || value.targetPath);
+        return value;
+      }
+      setNotice({ tone: "ok", text: `Copied subject ${variant === "sticker" ? "sticker" : "cutout"} PNG.` });
+      return value;
+    }
+    setNotice({ tone: "ok", text: `Exported subject ${variant === "sticker" ? "sticker" : "cutout"} PNG.` });
+    await window.crossAge.revealPath(value.bundlePath || value.targetPath);
+    return value;
+  }
+
+  async function exportPhotoPortraitBlur(params: Record<string, unknown>) {
+    const result = await invoke<CommandResult<PhotoPortraitBlurExportValue>>(
+      "Exporting portrait blur",
+      "export_photo_portrait_blur",
+      params
+    );
+    const value = result.value;
+    if (!value) return null;
+    const heuristic = value.blur?.algorithm !== "depth-anything-v2";
+    setNotice({
+      tone: "ok",
+      text: heuristic ? "Exported portrait blur PNG (heuristic depth)." : "Exported portrait blur PNG.",
+    });
+    await window.crossAge.revealPath(value.bundlePath || value.targetPath);
+    return value;
+  }
+
+  async function semanticSearchPhotos(params: Record<string, unknown>) {
+    const result = await invoke<CommandResult<SemanticSearchPhotosValue>>(
+      "Searching by meaning",
+      "semantic_search_photos",
+      params,
+      { quiet: true }
+    );
+    return result.value ?? null;
+  }
+
+  async function setPhotoLiveKeyPhoto(params: Record<string, unknown>) {
+    const result = await invoke<CommandResult<PhotoLiveKeyPhotoValue>>(
+      "Setting Live Photo key photo",
+      "set_photo_live_key_photo",
+      params
+    );
+    const value = result.value;
+    if (!value) return null;
+    const seconds = Math.round((Number(value.timestampMs) || 0) / 1000);
+    setNotice({ tone: "ok", text: `Set Live Photo key photo at ${seconds}s.` });
+    return value;
+  }
+
+  async function resetPhotoLiveKeyPhoto(params: Record<string, unknown>) {
+    const result = await invoke<CommandResult<PhotoLiveKeyPhotoValue>>(
+      "Resetting Live Photo key photo",
+      "reset_photo_live_key_photo",
+      params
+    );
+    const value = result.value;
+    if (!value) return null;
+    setNotice({ tone: "ok", text: "Reset Live Photo key photo." });
+    return value;
+  }
+
+  async function setPhotoVideoPoster(params: Record<string, unknown>) {
+    const result = await invoke<CommandResult<PhotoVideoPosterValue>>(
+      "Setting video poster",
+      "set_photo_video_poster",
+      params
+    );
+    const value = result.value;
+    if (!value) return null;
+    const seconds = Math.round((Number(value.timestampMs) || 0) / 1000);
+    setNotice({ tone: "ok", text: `Set video poster at ${seconds}s.` });
+    return value;
+  }
+
+  async function resetPhotoVideoPoster(params: Record<string, unknown>) {
+    const result = await invoke<CommandResult<PhotoVideoPosterValue>>(
+      "Resetting video poster",
+      "reset_photo_video_poster",
+      params
+    );
+    const value = result.value;
+    if (!value) return null;
+    setNotice({ tone: "ok", text: "Reset video poster." });
+    return value;
+  }
+
+  async function exportPhotoMediaBundle(candidateIds: string[]) {
+    const ids = [...new Set(candidateIds.filter(Boolean))];
+    if (!ids.length) {
+      setNotice({ tone: "warn", text: "Select photos with review matches before creating a bundle." });
+      return null;
+    }
+    const result = await invoke<CommandResult<MediaBundleExportValue>>("Exporting selected media bundle", "export_media_bundle", {
+      candidateIds: ids,
+      statuses: ["pending", "accepted", "rejected", "uncertain"],
+      includeOriginalMedia: true
+    });
+    const value = result.value;
+    if (!value) return null;
+    setNotice({ tone: "ok", text: `Created media bundle with ${value.counts.copied} source file${value.counts.copied === 1 ? "" : "s"}.` });
+    if (value.bundlePath) {
+      await window.crossAge.revealPath(value.bundlePath);
+    }
+    return value;
+  }
+
+  function openReviewForCandidates(candidateIds: string[], options: { label?: string; refreshState?: boolean } = {}) {
+    const ids = [...new Set(candidateIds.filter(Boolean))];
+    if (!ids.length) {
+      setNotice({ tone: "warn", text: "No review rows are attached to the selected photos." });
+      return;
+    }
+    const label = options.label || `${ids.length} selected match${ids.length === 1 ? "" : "es"}`;
+    const openFocus = () => {
+      setReviewFocus({
+        candidateIds: ids,
+        label
+      });
+      setReviewFocusHistory((current) => {
+        const next = upsertReviewFocusHistory(current, { label, candidateIds: ids });
+        writeReviewFocusHistory(state?.workspace, next);
+        return next;
+      });
+      setSelectedCandidateId(ids[0]);
+      setActiveTab("review");
+      setNotice({ tone: "ok", text: `Opened Review for ${ids.length} selected match${ids.length === 1 ? "" : "es"}.` });
+    };
+    const loaded = new Set(state?.candidates.map((candidate) => candidate.candidateId) || []);
+    const missingRows = ids.some((candidateId) => !loaded.has(candidateId));
+    if (options.refreshState || missingRows) {
+      void (async () => {
+        try {
+          await invoke<AppState>("Refreshing Review", "get_state", {}, { quiet: true });
+        } catch {
+          // Keep the user in flow; Review will show whatever rows are already loaded.
+        }
+        openFocus();
+      })();
+      return;
+    }
+    openFocus();
+  }
+
+  const suggestPhotoReviewMoreCandidates = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<CommandResult<PhotoReviewMoreSuggestionValue>>("suggest_photo_review_more_candidates", params),
+    []
+  );
+
+  function removeReviewFocusHistory(recordId: string) {
+    setReviewFocusHistory((current) => {
+      const next = removeReviewFocusHistoryItem(current, recordId);
+      writeReviewFocusHistory(state?.workspace, next);
+      return next;
+    });
+  }
 
   async function queryCandidates(params: Record<string, unknown>) {
     const startedAt = performance.now();
@@ -3074,6 +4393,14 @@ export default function App() {
       setActiveTab(command.tab);
       return;
     }
+    if (command.type === "photos-shortcut") {
+      if (workspaceLocked || activeTab !== "photos") return;
+      setPhotoAppShortcutCommand((current) => ({
+        id: (current?.id || 0) + 1,
+        shortcut: command.shortcut,
+      }));
+      return;
+    }
     if (command.type === "open-workspace") {
       await chooseWorkspace();
       return;
@@ -3134,6 +4461,31 @@ export default function App() {
       await startWatchForFolder(payload.path);
       return;
     }
+    if (payload.type === "photos-import") {
+      const rawPaths = Array.isArray(payload.paths) ? payload.paths : [];
+      const paths = [...new Set(rawPaths.map((entry) => String(entry || "").trim()).filter(Boolean))];
+      if (!paths.length) {
+        setActiveTab("photos");
+        return;
+      }
+      if (payload.source === "protocol") {
+        const preview = paths.slice(0, 6).join("\n");
+        const extra = paths.length > 6 ? `\n...and ${paths.length - 6} more` : "";
+        if (!await confirmDialog(`Review these photos for import from an external link?\n\n${preview}${extra}`)) {
+          return;
+        }
+      }
+      setActiveTab("photos");
+      setPhotoExternalImportRequest((current) => ({
+        id: (current?.id || 0) + 1,
+        paths,
+        sourceKind: payload.sourceKind,
+        sourceLabel: payload.sourceLabel,
+        sourceDetail: payload.sourceDetail || (payload.source === "protocol" ? "Opened from external Photos import link." : ""),
+      }));
+      setNotice({ tone: "ok", text: "Photos import received for review." });
+      return;
+    }
     if (payload.type === "scan-files") {
       setActiveTab("scan");
       if (!state?.consentOnFile || !state.references.length) {
@@ -3173,6 +4525,11 @@ export default function App() {
     const found = result.added ?? 0;
     setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped: " from received files.", protected: protectedText }, `Found ${found} possible match${found === 1 ? "" : "es"} from received files.${protectedText}`);
   }
+
+  // External IPC can arrive between a render commit and React effects. Keep the
+  // event bridge pointed at the latest handlers synchronously during render.
+  appCommandHandlerRef.current = handleAppCommand;
+  externalOpenHandlerRef.current = handleExternalOpen;
 
   function startReferenceFix(targetPersonName: string) {
     const target = safeText(targetPersonName).trim();
@@ -3348,9 +4705,10 @@ export default function App() {
     setNotice({ tone: "ok", text: "Review note saved." });
   }
 
-  async function blockFalseMatch(candidateId: string) {
-    if (!await confirmDialog("Stop suggesting this image for this person again, even if another saved photo triggers it? The current row will be rejected.")) return;
+  async function blockFalseMatch(candidateId: string, options: { confirm?: boolean } = {}) {
+    if (options.confirm !== false && !await confirmDialog("Stop suggesting this image for this person again, even if another saved photo triggers it? The current row will be rejected.")) return;
     const result = await invoke<CommandResult>("Saving feedback", "block_false_match", { candidateId });
+    if (result.state) applyState(result.state);
     const value = result.value as { blocked?: number } | undefined;
     setNotice({ tone: "ok", text: value?.blocked ? "This image/person false match will be suppressed in future scans." : "Feedback saved." });
   }
@@ -3400,6 +4758,38 @@ export default function App() {
     const result = await invoke<CommandResult>("Deleting person", "delete_person", { personName });
     const deleted = result.deleted ?? { references: 0, candidates: 0 };
     setNoticeMessage("ok", "notice.deletedPersonData", { references: deleted.references, candidates: deleted.candidates }, `Deleted ${deleted.references} saved photo${deleted.references === 1 ? "" : "s"} and ${deleted.candidates} possible match${deleted.candidates === 1 ? "" : "es"}.`);
+  }
+
+  async function stageReferenceSuggestions() {
+    if (!await confirmDialog("Find accepted matches that are safe to suggest as saved person photos? Suggestions still require approval.")) return;
+    const result = await invoke<CommandResult<{ staged?: number; rejected?: unknown[]; skipped?: unknown[] }>>("Finding reference suggestions", "stage_reference_suggestions", { limit: 20 });
+    if (result.state) applyState(result.state);
+    const staged = finiteInteger(result.value?.staged, 0, 0, Number.MAX_SAFE_INTEGER);
+    const rejected = Array.isArray(result.value?.rejected) ? result.value.rejected.length : 0;
+    setNotice({
+      tone: staged ? "ok" : "warn",
+      text: staged
+        ? `Staged ${formatNumber(staged)} suggested reference${staged === 1 ? "" : "s"}.`
+        : `No reference suggestions staged${rejected ? `; ${formatNumber(rejected)} accepted match${rejected === 1 ? "" : "es"} did not pass suitability checks` : ""}.`
+    });
+  }
+
+  async function approveReferenceSuggestion(artifactId: string) {
+    if (!artifactId) return;
+    if (!await confirmDialog("Add this accepted match as a saved person photo? The app will recheck quality and duplicates first.")) return;
+    const result = await invoke<CommandResult<{ refId?: string }>>("Approving suggested reference", "approve_reference_suggestion", { artifactId });
+    if (result.state) applyState(result.state);
+    setNotice({ tone: "ok", text: "Suggested reference added to saved person photos." });
+  }
+
+  async function rejectReferenceSuggestion(artifactId: string) {
+    if (!artifactId) return;
+    const result = await invoke<CommandResult>("Rejecting suggested reference", "reject_reference_suggestion", {
+      artifactId,
+      reason: "Rejected from People view."
+    });
+    if (result.state) applyState(result.state);
+    setNotice({ tone: "ok", text: "Suggested reference rejected." });
   }
 
   async function purgeReviewedCandidates() {
@@ -4325,7 +5715,136 @@ export default function App() {
     if (result.state) {
       applyState(result.state);
     }
+    void refreshCalibrationLearningStatus().catch(() => undefined);
     setNotice({ tone: "ok", text: "Matching levels updated from review feedback." });
+  }
+
+  async function refreshCalibrationLearningStatus() {
+    const result = await invoke<CalibrationLearningStatus>(
+      "Checking learned calibration",
+      "calibration_learning_status",
+      {},
+      { quiet: true }
+    );
+    setCalibrationLearning(result);
+  }
+
+  async function refreshEmbeddingAdapterStatus() {
+    const result = await invoke<EmbeddingAdapterStatus>(
+      "Checking embedding adapter",
+      "embedding_adapter_status",
+      {},
+      { quiet: true }
+    );
+    setEmbeddingAdapterLearning(result);
+  }
+
+  async function refreshSelfLearningRdStatus() {
+    const result = await invoke<SelfLearningRdStatus>(
+      "Checking self-learning R&D status",
+      "self_learning_rd_status",
+      {},
+      { quiet: true }
+    );
+    setSelfLearningRdStatus(result);
+  }
+
+  async function stageCalibration() {
+    const result = await invoke<CommandResult<CalibrationLearningResult>>("Staging calibration", "stage_calibration");
+    await refreshCalibrationLearningStatus();
+    const labels = finiteInteger(
+      result.value?.payload?.labels,
+      calibrationArtifactCount(result.value?.artifact, "input_count", "inputCount"),
+      0,
+      Number.MAX_SAFE_INTEGER
+    );
+    setNotice({
+      tone: result.value?.promotable === false || result.value?.status === "rejected" ? "warn" : "ok",
+      text: result.value?.status === "rejected"
+        ? "Calibration feedback was evaluated and kept advisory because validation did not pass."
+        : `Learned calibration staged${labels ? ` from ${formatNumber(Number(labels))} label${Number(labels) === 1 ? "" : "s"}` : ""}.`
+    });
+  }
+
+  async function runLearningJobs() {
+    if (!await confirmDialog("Run the local learning check now? It can stage a learned calibration artifact, but it will not apply it.")) return;
+    const result = await invoke<CommandResult<LearningJobsResult>>("Running learning check", "run_learning_jobs");
+    if (result.state) {
+      applyState(result.state);
+    }
+    if (result.value?.status) {
+      setCalibrationLearning(result.value.status);
+    } else {
+      await refreshCalibrationLearningStatus();
+    }
+    setNotice({
+      tone: result.value?.artifactCreated && result.value?.staged === false ? "warn" : "ok",
+      text: result.value?.reason || "Learning check complete."
+    });
+  }
+
+  async function promoteCalibration(artifactId = "") {
+    if (!await confirmDialog("Apply the staged learned calibration to matching levels now? Rollback metadata will remain in the local artifact history.")) return;
+    const params = artifactId ? { artifactId } : {};
+    const result = await invoke<CommandResult<CalibrationLearningResult>>("Applying learned calibration", "promote_calibration", params);
+    if (result.state) {
+      applyState(result.state);
+    }
+    await refreshCalibrationLearningStatus();
+    setNotice({ tone: "ok", text: "Learned calibration applied to matching levels." });
+  }
+
+  async function rollbackCalibration(artifactId = "") {
+    if (!await confirmDialog("Rollback the promoted learned calibration and restore the previous matching levels saved in the artifact?")) return;
+    const params = artifactId ? { artifactId } : {};
+    const result = await invoke<CommandResult<CalibrationLearningResult>>("Rolling back calibration", "rollback_calibration", params);
+    if (result.state) {
+      applyState(result.state);
+    }
+    await refreshCalibrationLearningStatus();
+    setNotice({ tone: "ok", text: "Learned calibration rolled back." });
+  }
+
+  async function stageEmbeddingAdapter() {
+    const result = await invoke<CommandResult<CalibrationLearningResult>>("Staging embedding adapter", "stage_embedding_adapter");
+    if (result.state) {
+      applyState(result.state);
+    }
+    await refreshEmbeddingAdapterStatus();
+    const labels = finiteInteger(
+      result.value?.payload?.inputCount,
+      calibrationArtifactCount(result.value?.artifact, "input_count", "inputCount"),
+      0,
+      Number.MAX_SAFE_INTEGER
+    );
+    setNotice({
+      tone: result.value?.promotable === false || result.value?.status === "rejected" ? "warn" : "ok",
+      text: result.value?.status === "rejected"
+        ? "Adapter feedback was evaluated and kept advisory because validation did not pass."
+        : `Embedding adapter staged${labels ? ` from ${formatNumber(Number(labels))} example${Number(labels) === 1 ? "" : "s"}` : ""}.`
+    });
+  }
+
+  async function promoteEmbeddingAdapter(artifactId = "") {
+    if (!await confirmDialog("Apply the staged embedding adapter to future matching? Rollback keeps the previous scoring path available.")) return;
+    const params = artifactId ? { artifactId } : {};
+    const result = await invoke<CommandResult<CalibrationLearningResult>>("Applying embedding adapter", "promote_embedding_adapter", params);
+    if (result.state) {
+      applyState(result.state);
+    }
+    await refreshEmbeddingAdapterStatus();
+    setNotice({ tone: "ok", text: "Embedding adapter applied to future matching." });
+  }
+
+  async function rollbackEmbeddingAdapter(artifactId = "") {
+    if (!await confirmDialog("Rollback the promoted embedding adapter and return to the current scoring path?")) return;
+    const params = artifactId ? { artifactId } : {};
+    const result = await invoke<CommandResult<CalibrationLearningResult>>("Rolling back embedding adapter", "rollback_embedding_adapter", params);
+    if (result.state) {
+      applyState(result.state);
+    }
+    await refreshEmbeddingAdapterStatus();
+    setNotice({ tone: "ok", text: "Embedding adapter rolled back." });
   }
 
   async function exportAccuracyLabels() {
@@ -4339,6 +5858,22 @@ export default function App() {
     await window.crossAge.revealPath(value.jsonPath);
   }
 
+  async function exportTrainingExamples() {
+    const result = await invoke<CommandResult<TrainingExamplesExportValue>>("Exporting training examples", "export_training_examples", {
+      includePaths: false
+    });
+    const value = result.value;
+    if (!value) {
+      setNotice({ tone: "error", text: "Training-example export did not return a path." });
+      return;
+    }
+    setNotice({
+      tone: value.counts.examples ? "ok" : "warn",
+      text: `Exported ${formatNumber(value.counts.examples)} training example${value.counts.examples === 1 ? "" : "s"} without media files.`
+    });
+    await window.crossAge.revealPath(value.jsonPath);
+  }
+
   function parseAccuracyLabelRows(text: string) {
     const parsed = JSON.parse(text);
     const record = asRecord(parsed);
@@ -4348,6 +5883,17 @@ export default function App() {
     const value = record ? asRecord(record.value) : null;
     if (value && Array.isArray(value.labels)) return value.labels.filter((row) => row && typeof row === "object") as Record<string, unknown>[];
     throw new Error("Paste a Vintrace accuracy-label JSON export with a labels array.");
+  }
+
+  function parseTrainingExampleRows(text: string) {
+    const parsed = JSON.parse(text);
+    const record = asRecord(parsed);
+    if (Array.isArray(parsed)) return parsed.filter((row) => row && typeof row === "object") as Record<string, unknown>[];
+    if (record && Array.isArray(record.examples)) return record.examples.filter((row) => row && typeof row === "object") as Record<string, unknown>[];
+    if (record && Array.isArray(record.rows)) return record.rows.filter((row) => row && typeof row === "object") as Record<string, unknown>[];
+    const value = record ? asRecord(record.value) : null;
+    if (value && Array.isArray(value.examples)) return value.examples.filter((row) => row && typeof row === "object") as Record<string, unknown>[];
+    throw new Error("Paste a Vintrace training-example JSON export with an examples array.");
   }
 
   async function importAccuracyLabels(text: string) {
@@ -4367,6 +5913,25 @@ export default function App() {
       text: `Imported ${imported} accuracy label${imported === 1 ? "" : "s"}${skipped ? ` and skipped ${skipped}` : ""}.`
     });
     void runAccuracyEvaluation();
+  }
+
+  async function importTrainingExamples(text: string) {
+    const rows = parseTrainingExampleRows(text);
+    if (!rows.length) {
+      setNotice({ tone: "warn", text: "No training examples were found in the pasted JSON." });
+      return;
+    }
+    const result = await invoke<CommandResult<TrainingExamplesImportValue>>("Importing training examples", "import_training_examples", { rows });
+    if (result.state) {
+      applyState(result.state);
+    }
+    const imported = result.value?.imported ?? 0;
+    const skipped = result.value?.skipped ?? 0;
+    setNotice({
+      tone: imported ? "ok" : "warn",
+      text: `Imported ${formatNumber(imported)} training example${imported === 1 ? "" : "s"}${skipped ? ` and skipped ${formatNumber(skipped)}` : ""}.`
+    });
+    void refreshCalibrationLearningStatus().catch(() => undefined);
   }
 
   async function addCandidateCalibrationLabel(candidate: ReviewCandidate, isMatch: boolean) {
@@ -4426,7 +5991,7 @@ export default function App() {
     setNotice({ tone: "ok", text: "Face data deleted from this app folder." });
   }
 
-  async function renamePerson(oldName: string, newName: string) {
+  async function renamePerson(oldName: string, newName: string, options: { confirm?: boolean } = {}) {
     const target = newName.trim();
     if (!oldName || !target) {
       setNotice({ tone: "warn", text: "Choose a person and enter the new name." });
@@ -4435,7 +6000,7 @@ export default function App() {
     const mergeText = settingsPeople.some((person) => person.toLowerCase() === target.toLowerCase() && person !== oldName)
       ? " This will merge into an existing person label."
       : "";
-    if (!await confirmDialogMessage("dialog.renamePerson", { oldName, newName: target, mergeText }, `Rename ${oldName} to ${target}?${mergeText}`)) return;
+    if (options.confirm !== false && !await confirmDialogMessage("dialog.renamePerson", { oldName, newName: target, mergeText }, `Rename ${oldName} to ${target}?${mergeText}`)) return;
     const result = await invoke<CommandResult>("Renaming person", "rename_person", { oldName, newName: target });
     const renamed = result.renamed ?? { references: 0, candidates: 0 };
     setNoticeMessage(
@@ -4459,6 +6024,7 @@ export default function App() {
       faceDetectorSize: draft.faceDetectorSize,
       twoPassScan: draft.twoPassScan,
       verificationDetectorSize: draft.verificationDetectorSize,
+      learningMode: draft.learningMode,
       performanceMode: performanceChoice,
       safeMode: draft.safeMode,
       safeModeZeroAdmittance: draft.safeModeZeroAdmittance ?? false,
@@ -4602,11 +6168,6 @@ export default function App() {
   }, [scanFolder]);
 
   useEffect(() => {
-    appCommandHandlerRef.current = handleAppCommand;
-    externalOpenHandlerRef.current = handleExternalOpen;
-  });
-
-  useEffect(() => {
     if (!state || rendererReadySentRef.current) {
       return;
     }
@@ -4733,7 +6294,7 @@ export default function App() {
             <span>{t("app.subtitle")}</span>
           </div>
         </div>
-        <nav className="nav-list">
+        <nav className="nav-list" aria-label="Primary navigation">
           {tabs.map((tab) => {
             const Icon = tab.icon;
             return (
@@ -4773,7 +6334,7 @@ export default function App() {
               </div>
             </div>
           </div>
-          <div className="topbar-actions">
+          <div className={`topbar-actions${busy ? " disabled" : ""}`}>
             <button className="ghost" onClick={openOnboarding} title="Open first-use guide">
               <BookOpen size={17} />
               <span>{t("topbar.guide")}</span>
@@ -4791,7 +6352,7 @@ export default function App() {
               <span>{t("topbar.refresh")}</span>
             </button>
             {workspaceLock?.enabled && (
-              <button className={workspaceLock.locked ? "ghost danger-text" : "ghost"} onClick={workspaceLock.locked ? unlockWorkspace : lockWorkspace} title={localizeImperativeText(workspaceLock.message)}>
+              <button className="ghost workspace-lock-toggle" aria-pressed={workspaceLock.locked} onClick={workspaceLock.locked ? unlockWorkspace : lockWorkspace} title={localizeImperativeText(workspaceLock.message)}>
                 {workspaceLock.locked ? <Lock size={17} /> : <Unlock size={17} />}
                 <span>{workspaceLock.locked ? t("topbar.unlock") : t("topbar.lock")}</span>
               </button>
@@ -4903,7 +6464,13 @@ export default function App() {
             deletePerson={deletePerson}
             deletePhoto={removeReference}
             addMoreForPerson={addMoreForPerson}
+            stageReferenceSuggestions={stageReferenceSuggestions}
+            approveReferenceSuggestion={approveReferenceSuggestion}
+            rejectReferenceSuggestion={rejectReferenceSuggestion}
             busy={Boolean(busy)}
+            language={language}
+            t={t}
+            uiText={uiText}
           />
         )}
         {!workspaceLocked && activeTab === "scan" && (
@@ -4975,6 +6542,11 @@ export default function App() {
             selectedCandidate={selectedCandidate}
             selectedCandidateId={selectedCandidateId}
             setSelectedCandidateId={setSelectedCandidateId}
+            reviewFocus={reviewFocus}
+            clearReviewFocus={() => setReviewFocus(null)}
+            reviewFocusHistory={reviewFocusHistory}
+            openReviewFocusHistoryItem={(record) => openReviewForCandidates(record.candidateIds, { label: record.label })}
+            removeReviewFocusHistory={removeReviewFocusHistory}
             queryCandidates={queryCandidates}
             review={review}
             bulkReview={bulkReview}
@@ -5006,7 +6578,165 @@ export default function App() {
           <PhotosView
             listPhotoFolders={listPhotoFolders}
             listPhotoFolderItems={listPhotoFolderItems}
+            listPhotoDateBuckets={listPhotoDateBuckets}
+            searchPhotoLibrary={searchPhotoLibrary}
+            getPhotoColorProfileStatus={getPhotoColorProfileStatus}
+            validatePhotoColorProfile={validatePhotoColorProfile}
+            listPhotoBurstStacks={listPhotoBurstStacks}
+            setPhotoBurstSelection={setPhotoBurstSelection}
+            listPhotoKeywords={listPhotoKeywords}
+            listPhotoSavedFilters={listPhotoSavedFilters}
+            savePhotoSavedFilter={savePhotoSavedFilter}
+            deletePhotoSavedFilter={deletePhotoSavedFilter}
+            savePhotoKeyword={savePhotoKeyword}
+            deletePhotoKeyword={deletePhotoKeyword}
+            exportPhotoKeywords={exportPhotoKeywords}
+            importPhotoKeywords={importPhotoKeywords}
+            mergePhotoDuplicates={mergePhotoDuplicates}
+            dismissPhotoDuplicateGroup={dismissPhotoDuplicateGroup}
+            savePhotoPersonProfile={savePhotoPersonProfile}
+            savePhotoPetProfile={savePhotoPetProfile}
+            savePhotoPlaceProfile={savePhotoPlaceProfile}
+            savePhotoUtilityProfile={savePhotoUtilityProfile}
+            renamePhotoPet={renamePhotoPet}
+            assignPhotoPet={assignPhotoPet}
+            dismissPhotoPetReview={dismissPhotoPetReview}
+            savePhotoPeopleGroup={savePhotoPeopleGroup}
+            deletePhotoPeopleGroup={deletePhotoPeopleGroup}
+            savePhotoAlbum={savePhotoAlbum}
+            previewPhotoAlbumRules={previewPhotoAlbumRules}
+            deletePhotoAlbum={deletePhotoAlbum}
+            mergePhotoAlbums={mergePhotoAlbums}
+            migratePhotoSmartAlbums={migratePhotoSmartAlbums}
+            savePhotoAlbumFolder={savePhotoAlbumFolder}
+            deletePhotoAlbumFolder={deletePhotoAlbumFolder}
+            movePhotoAlbumToFolder={movePhotoAlbumToFolder}
+            reorderPhotoAlbumFolderChildren={reorderPhotoAlbumFolderChildren}
+            addPhotoAlbumItems={addPhotoAlbumItems}
+            removePhotoAlbumItems={removePhotoAlbumItems}
+            reorderPhotoAlbumItems={reorderPhotoAlbumItems}
+            updatePhotoAssetMetadata={updatePhotoAssetMetadata}
+            updatePhotoAssetsMetadata={updatePhotoAssetsMetadata}
+            reverseGeocodePhotoLocation={reverseGeocodePhotoLocation}
+            recordPhotoAssetEvent={recordPhotoAssetEvent}
+            applyPhotoVisibilityOperation={applyPhotoVisibilityOperation}
+            listPhotoOperations={listPhotoOperations}
+            photoRestoreRehearsal={photoRestoreRehearsal}
+            photoBackupRestoreRehearsal={photoBackupRestoreRehearsal}
+            undoPhotoOperation={undoPhotoOperation}
+            permanentlyDeletePhotos={permanentlyDeletePhotos}
+            suggestPhotoAlbums={suggestPhotoAlbums}
+            listPhotoImportFailures={listPhotoImportFailures}
+            updatePhotoImportSessionProvenance={updatePhotoImportSessionProvenance}
+            archivePhotoImportSessions={archivePhotoImportSessions}
+            dismissPhotoImportFailure={dismissPhotoImportFailure}
+            retryPhotoImportFailure={retryPhotoImportFailure}
+            saveRecoveredPhotoImportFailure={saveRecoveredPhotoImportFailure}
+            deleteRecoveredPhotoImportFailure={deleteRecoveredPhotoImportFailure}
+            scanPhotoRecoveredOrphans={scanPhotoRecoveredOrphans}
+            photoRecoveredCleanup={photoRecoveredCleanup}
+            rebuildPhotoPreviews={rebuildPhotoPreviews}
+            photoLibraryPreviewSweep={photoLibraryPreviewSweep}
+            relinkPhotoLibraryPaths={relinkPhotoLibraryPaths}
+            createPhotoMediaPair={createPhotoMediaPair}
+            relinkPhotoMediaPair={relinkPhotoMediaPair}
+            deletePhotoMediaPair={deletePhotoMediaPair}
+            consolidatePhotoLibraryAssets={consolidatePhotoLibraryAssets}
+            photoLibraryBackupCheck={photoLibraryBackupCheck}
+            photoLibraryCatalogCleanup={photoLibraryCatalogCleanup}
+            photoRepairHistory={photoRepairHistory}
+            photoLibrarySettings={photoLibrarySettings}
+            savePhotoLibrarySettings={savePhotoLibrarySettings}
+            indexPhotoOcr={indexPhotoOcr}
+            photoOcrIndexStatus={photoOcrIndexStatus}
+            indexPhotoBarcodes={indexPhotoBarcodes}
+            photoBarcodeIndexStatus={photoBarcodeIndexStatus}
+            indexPhotoObjects={indexPhotoObjects}
+            photoObjectIndexStatus={photoObjectIndexStatus}
+            enqueuePhotoIndexingJob={enqueuePhotoIndexingJob}
+            photoIndexingJobs={photoIndexingJobs}
+            runPhotoIndexingJob={runPhotoIndexingJob}
+            runPhotoIndexingQueue={runPhotoIndexingQueue}
+            cancelPhotoIndexingJob={cancelPhotoIndexingJob}
+            dismissPhotoIndexingJob={dismissPhotoIndexingJob}
+            photoCurationPreferences={photoCurationPreferences}
+            savePhotoCurationPreferences={savePhotoCurationPreferences}
+            photoUserMemories={photoUserMemories}
+            savePhotoUserMemory={savePhotoUserMemory}
+            deletePhotoUserMemory={deletePhotoUserMemory}
+            listPhotoSlideshowProjects={photoSlideshowProjects}
+            listPhotoSlideshowThemeTemplates={photoSlideshowThemeTemplates}
+            savePhotoSlideshowThemeTemplate={savePhotoSlideshowThemeTemplate}
+            deletePhotoSlideshowThemeTemplate={deletePhotoSlideshowThemeTemplate}
+            exportPhotoSlideshowThemeTemplates={exportPhotoSlideshowThemeTemplates}
+            importPhotoSlideshowThemeTemplates={importPhotoSlideshowThemeTemplates}
+            savePhotoSlideshowProject={savePhotoSlideshowProject}
+            deletePhotoSlideshowProject={deletePhotoSlideshowProject}
+            exportPhotoSlideshow={exportPhotoSlideshow}
+            exportPhotoMemoryMovie={exportPhotoMemoryMovie}
+            importPhotos={importPhotos}
+            photoSources={photoSources}
+            refreshPhotoSources={refreshPhotoSources}
+            chooseImportFiles={choosePhotoImportFiles}
+            chooseImportFolder={choosePhotoImportFolder}
+            chooseSlideshowAudioFile={choosePhotoSlideshowAudioFile}
+            chooseSlideshowTemplateLibraryFile={choosePhotoSlideshowTemplateLibraryFile}
+            chooseColorProfileFile={choosePhotoColorProfileFile}
+            getPathForFile={getPathForFile}
+            prepareImportPaths={preparePhotoImportPaths}
+            externalImportRequest={photoExternalImportRequest}
+            onExternalImportConsumed={(requestId) => setPhotoExternalImportRequest((current) => current?.id === requestId ? null : current)}
+            revealPath={revealPhotoPath}
+            openPath={openPhotoPath}
+            openPathWith={openPhotoPathWith}
+            lastExternalEditorPath={lastPhotoExternalEditorPath || photoExternalEditors[0]?.editorPath || ""}
+            externalEditors={photoExternalEditors}
+            forgetExternalEditor={forgetPhotoExternalEditor}
+            sharePaths={sharePhotoPaths}
+            printPath={printPhotoPath}
+            startFileDrag={startPhotoFileDrag}
+            getSensitiveAuthStatus={getPhotosSensitiveAuthStatus}
+            authenticateSensitiveAccess={authenticatePhotosSensitiveAccess}
+            exportPhotoSelection={exportPhotoSelection}
+            exportPhotoContactSheet={exportPhotoContactSheet}
+            exportPhotoVideoFrame={exportPhotoVideoFrame}
+            exportPhotoVideoTrim={exportPhotoVideoTrim}
+            getPhotoEditStack={getPhotoEditStack}
+            savePhotoEditStack={savePhotoEditStack}
+            revertPhotoEditStack={revertPhotoEditStack}
+            listPhotoEditStackVersions={listPhotoEditStackVersions}
+            createPhotoEditStackVersion={createPhotoEditStackVersion}
+            restorePhotoEditStackVersion={restorePhotoEditStackVersion}
+            deletePhotoEditStackVersion={deletePhotoEditStackVersion}
+            duplicatePhotoAssetVersion={duplicatePhotoAssetVersion}
+            duplicatePhotoAssetRenderedVersion={duplicatePhotoAssetRenderedVersion}
+            exportPhotoLiveMotion={exportPhotoLiveMotion}
+            exportPhotoSubjectCutout={exportPhotoSubjectCutout}
+            exportPhotoPortraitBlur={exportPhotoPortraitBlur}
+            semanticSearchPhotos={semanticSearchPhotos}
+            setPhotoLiveKeyPhoto={setPhotoLiveKeyPhoto}
+            resetPhotoLiveKeyPhoto={resetPhotoLiveKeyPhoto}
+            setPhotoVideoPoster={setPhotoVideoPoster}
+            resetPhotoVideoPoster={resetPhotoVideoPoster}
+            exportPhotoMediaBundle={exportPhotoMediaBundle}
+            manageCandidateMedia={manageCandidateMedia}
+            chooseDestinationFolder={chooseDestinationFolder}
+            openReviewForCandidates={openReviewForCandidates}
+            suggestPhotoReviewMoreCandidates={suggestPhotoReviewMoreCandidates}
+            reviewCandidate={(status, candidate) => review(status, candidate, true)}
+            blockFalseMatch={blockFalseMatch}
+            reassignCandidatePerson={reassignCandidatePerson}
+            renamePerson={renamePerson}
+            reviewCandidates={state.candidates}
+            duplicatePeople={duplicatePeople}
+            loadDuplicatePeople={loadDuplicatePeople}
+            mergeDuplicatePeople={mergeDuplicatePeople}
+            people={settingsPeople}
+            uiText={uiText}
+            formatNumber={formatNumber}
+            copyText={copyText}
             busy={Boolean(busy)}
+            appShortcutCommand={photoAppShortcutCommand}
           />
         )}
         {!workspaceLocked && activeTab === "settings" && settings && (
@@ -5081,12 +6811,25 @@ export default function App() {
             releaseReadiness={releaseReadiness}
             runReleaseReadiness={runReleaseReadiness}
             accuracyEvaluation={accuracyEvaluation}
+            calibrationLearning={calibrationLearning}
+            embeddingAdapterLearning={embeddingAdapterLearning}
+            selfLearningRdStatus={selfLearningRdStatus}
             accuracyValidationPack={accuracyValidationPack}
             publicDatasetCatalog={publicDatasetCatalog}
             publicDatasetInspection={publicDatasetInspection}
             publicDatasetBenchmark={publicDatasetBenchmark}
             publicDatasetModelComparison={publicDatasetModelComparison}
             runAccuracyEvaluation={runAccuracyEvaluation}
+            refreshCalibrationLearningStatus={refreshCalibrationLearningStatus}
+            refreshEmbeddingAdapterStatus={refreshEmbeddingAdapterStatus}
+            refreshSelfLearningRdStatus={refreshSelfLearningRdStatus}
+            runLearningJobs={runLearningJobs}
+            stageCalibration={stageCalibration}
+            promoteCalibration={promoteCalibration}
+            rollbackCalibration={rollbackCalibration}
+            stageEmbeddingAdapter={stageEmbeddingAdapter}
+            promoteEmbeddingAdapter={promoteEmbeddingAdapter}
+            rollbackEmbeddingAdapter={rollbackEmbeddingAdapter}
             generateAccuracyValidationPack={generateAccuracyValidationPack}
             choosePublicDatasetFolder={choosePublicDatasetFolder}
             inspectPublicDataset={inspectPublicDataset}
@@ -5096,6 +6839,8 @@ export default function App() {
             applyCalibration={applyCalibration}
             exportAccuracyLabels={exportAccuracyLabels}
             importAccuracyLabels={importAccuracyLabels}
+            exportTrainingExamples={exportTrainingExamples}
+            importTrainingExamples={importTrainingExamples}
             privacyReport={privacyReport}
             mediaTrashReport={mediaTrashReport}
             mediaTrashCleanup={mediaTrashCleanup}
@@ -6707,18 +8452,30 @@ function FaceThumb(props: { url?: string | null; alt: string; onRemove?: () => v
   );
 }
 
-function StagingTray(props: { items: StagedItem[]; onRemove(id: string): void; onClear(): void; busy: boolean }) {
+function StagingTray(props: {
+  items: StagedItem[];
+  onRemove(id: string): void;
+  onClear(): void;
+  busy: boolean;
+  language: LanguageCode;
+  t(key: TranslationKey, values?: Record<string, string | number>): string;
+}) {
   if (!props.items.length) return null;
   const total = stagedPhotoCount(props.items);
+  const stagedLabel = formatUiMessage(
+    props.language,
+    total === 1 ? "addPerson.stagedReadyOne" : "addPerson.stagedReadyMany",
+    { count: formatNumber(total) }
+  );
   return (
     <div className="staging-tray">
       <div className="staging-head">
-        <span className="staging-count">{total} photo{total === 1 ? "" : "s"} ready</span>
-        <button type="button" className="ghost compact-action" onClick={props.onClear} disabled={props.busy} aria-label="Clear staged photos"><X size={14} /><span>Clear</span></button>
+        <span className="staging-count">{stagedLabel}</span>
+        <button type="button" className="ghost compact-action" onClick={props.onClear} disabled={props.busy} aria-label={props.t("addPerson.clearStaged")}><X size={14} /><span>{props.t("addPerson.clear")}</span></button>
       </div>
       <div className="staging-grid">
         {props.items.map((item) => item.kind === "file"
-          ? <FaceThumb key={item.id} url={item.url} alt={basename(item.path)} onRemove={() => props.onRemove(item.id)} removeLabel="Remove photo" />
+          ? <FaceThumb key={item.id} url={item.url} alt={basename(item.path)} onRemove={() => props.onRemove(item.id)} removeLabel={props.t("addPerson.removePhoto")} />
           : (
             <div key={item.id} className="staging-folder" title={item.path}>
               <div className="staging-folder-stack">
@@ -6726,8 +8483,8 @@ function StagingTray(props: { items: StagedItem[]; onRemove(id: string): void; o
                   ? item.sampleUrls.slice(0, 3).map((url, index) => <img key={index} src={url} alt="" loading="lazy" decoding="async" />)
                   : <FolderOpen size={18} />}
               </div>
-              <span className="staging-folder-label"><FolderOpen size={12} /> {basename(item.path) || item.path} · {item.count}</span>
-              <button type="button" className="face-thumb-remove" onClick={() => props.onRemove(item.id)} aria-label="Remove folder"><X size={12} /></button>
+              <span className="staging-folder-label"><FolderOpen size={12} /> {basename(item.path) || item.path} · {formatNumber(item.count)}</span>
+              <button type="button" className="face-thumb-remove" onClick={() => props.onRemove(item.id)} aria-label={props.t("addPerson.removeFolder")}><X size={12} /></button>
             </div>
           ))}
       </div>
@@ -6749,33 +8506,47 @@ function AddPersonPanel(props: {
   clearStaging(): void;
   addStaged(): void;
   busy: boolean;
+  language: LanguageCode;
+  t(key: TranslationKey, values?: Record<string, string | number>): string;
+  uiText(source: string): string;
 }) {
   const [dragOver, setDragOver] = useState(false);
   const trimmedName = props.personName.trim();
   const total = stagedPhotoCount(props.staging);
   const canAdd = trimmedName.length > 0 && props.staging.length > 0 && !props.busy;
+  const totalLabel = formatNumber(total);
+  const addMessageKey: UiMessageKey = trimmedName
+    ? total === 1 ? "addPerson.addCountNamedOne" : "addPerson.addCountNamedMany"
+    : total === 1 ? "addPerson.addCountOne" : "addPerson.addCountMany";
+  const addLabel = props.staging.length
+    ? formatUiMessage(props.language, addMessageKey, { count: totalLabel, name: trimmedName })
+    : props.t("addPerson.addPhotos");
   return (
     <div className="panel form-panel add-person-panel">
-      <div className="panel-title"><UserPlus size={18} /> Add a person</div>
-      <p className="compact">Name them, add a few clear photos, and they&rsquo;ll appear in your people list.</p>
+      <div className="panel-title"><UserPlus size={18} /> {props.t("addPerson.title")}</div>
+      <p className="compact">{props.t("addPerson.body")}</p>
       <ol className="add-steps">
         <li className="add-step">
           <span className="add-step-num">1</span>
           <div className="add-step-body">
-            <span className="add-step-label">Who is this?</span>
+            <span className="add-step-label">{props.t("addPerson.who")}</span>
             <div className="add-identity">
               <input
                 ref={props.nameInputRef}
                 className="add-name"
-                aria-label="Person name"
-                placeholder="Name shown in results"
+                aria-label={props.t("addPerson.personName")}
+                placeholder={props.t("addPerson.namePlaceholder")}
                 value={props.personName}
                 onChange={(event) => props.setPersonName(event.currentTarget.value)}
               />
               <label className="add-age">
-                <span>Age</span>
-                <select value={props.ageBucket} onChange={(event) => props.setAgeBucket(event.currentTarget.value as AgeBucket)}>
-                  {ageBuckets.map((bucket) => <option key={bucket} value={bucket}>{ageBucketLabel(bucket)}</option>)}
+                <span>{props.t("addPerson.age")}</span>
+                <select
+                  value={props.ageBucket}
+                  onChange={(event) => props.setAgeBucket(event.currentTarget.value as AgeBucket)}
+                  aria-label={props.t("addPerson.ageRange")}
+                >
+                  {ageBuckets.map((bucket) => <option key={bucket} value={bucket}>{props.uiText(ageBucketLabel(bucket))}</option>)}
                 </select>
               </label>
             </div>
@@ -6784,7 +8555,7 @@ function AddPersonPanel(props: {
         <li className="add-step">
           <span className="add-step-num">2</span>
           <div className="add-step-body">
-            <span className="add-step-label">Add their photos</span>
+            <span className="add-step-label">{props.t("addPerson.photosStep")}</span>
             <div
               className={dragOver ? "dropzone dragging" : "dropzone"}
               onDragOver={(event) => { event.preventDefault(); setDragOver(true); }}
@@ -6792,11 +8563,11 @@ function AddPersonPanel(props: {
               onDrop={(event) => { event.preventDefault(); setDragOver(false); props.onDropFiles(Array.from(event.dataTransfer.files)); }}
             >
               <Upload size={24} className="dropzone-icon" />
-              <span className="dropzone-text">Drag photos or a folder here</span>
-              <span className="dropzone-or">or</span>
+              <span className="dropzone-text">{props.t("addPerson.dropzone")}</span>
+              <span className="dropzone-or">{props.t("addPerson.or")}</span>
               <div className="dropzone-actions">
-                <button type="button" className="secondary" onClick={props.chooseImages} disabled={props.busy}><ImageIcon size={16} /><span>Choose photos</span></button>
-                <button type="button" className="secondary" onClick={props.chooseFolder} disabled={props.busy}><FolderOpen size={16} /><span>Choose folder</span></button>
+                <button type="button" className="secondary" onClick={props.chooseImages} disabled={props.busy} aria-label={props.t("addPerson.choosePersonPhotos")}><ImageIcon size={16} /><span>{props.t("addPerson.choosePhotos")}</span></button>
+                <button type="button" className="secondary" onClick={props.chooseFolder} disabled={props.busy} aria-label={props.t("addPerson.choosePersonPhotoFolder")}><FolderOpen size={16} /><span>{props.t("addPerson.chooseFolder")}</span></button>
               </div>
             </div>
           </div>
@@ -6804,17 +8575,13 @@ function AddPersonPanel(props: {
         <li className="add-step">
           <span className="add-step-num">3</span>
           <div className="add-step-body">
-            <span className="add-step-label">Review &amp; add</span>
+            <span className="add-step-label">{props.t("addPerson.review")}</span>
             {props.staging.length === 0
-              ? <p className="compact add-step-hint">Photos you add will preview here before they&rsquo;re saved.</p>
-              : <StagingTray items={props.staging} onRemove={props.removeStaged} onClear={props.clearStaging} busy={props.busy} />}
+              ? <p className="compact add-step-hint">{props.t("addPerson.emptyPreview")}</p>
+              : <StagingTray items={props.staging} onRemove={props.removeStaged} onClear={props.clearStaging} busy={props.busy} language={props.language} t={props.t} />}
             <button className="primary add-commit" onClick={props.addStaged} disabled={!canAdd}>
               {props.busy ? <Loader2 className="spin" size={17} /> : <Check size={17} />}
-              <span>
-                {props.staging.length
-                  ? `Add ${total} photo${total === 1 ? "" : "s"}${trimmedName ? ` to “${trimmedName}”` : ""}`
-                  : "Add photos"}
-              </span>
+              <span>{addLabel}</span>
             </button>
           </div>
         </li>
@@ -6888,14 +8655,67 @@ function PersonCard(props: {
   );
 }
 
+function ReferenceSuggestionsPanel(props: {
+  suggestions: NonNullable<AppState["referenceSuggestions"]>;
+  onFind(): void;
+  onApprove(artifactId: string): void;
+  onReject(artifactId: string): void;
+  busy: boolean;
+}) {
+  const staged = props.suggestions.filter((item) => item.status === "staged");
+  return (
+    <div className="reference-suggestions">
+      <div className="reference-suggestions-head">
+        <div>
+          <strong>Reference suggestions</strong>
+          <small>{staged.length ? `${formatNumber(staged.length)} staged` : "None staged"}</small>
+        </div>
+        <button className="secondary" onClick={props.onFind} disabled={props.busy} type="button">
+          <RefreshCcw size={16} />
+          <span>Find suggestions</span>
+        </button>
+      </div>
+      {staged.length ? (
+        <div className="reference-suggestion-list">
+          {staged.slice(0, 6).map((item) => (
+            <div className="reference-suggestion-row" key={item.artifactId}>
+              <div className="suggestion-thumb">
+                {item.previewUrl ? <img src={item.previewUrl} alt="" loading="lazy" decoding="async" /> : <ImageIcon size={18} />}
+              </div>
+              <div>
+                <strong>{item.personName || "Unknown person"}</strong>
+                <small>{scoreLabel(item.score)} match &middot; {percent(item.quality)} quality{item.createdAt ? ` &middot; ${formatDateTime(item.createdAt)}` : ""}</small>
+              </div>
+              <div className="suggestion-actions">
+                <button className="secondary compact-action" onClick={() => props.onApprove(item.artifactId)} disabled={props.busy || !item.candidateAvailable} type="button">
+                  <Check size={15} />
+                  <span>Approve</span>
+                </button>
+                <button className="ghost compact-action" onClick={() => props.onReject(item.artifactId)} disabled={props.busy} type="button">
+                  <X size={15} />
+                  <span>Reject</span>
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function PeopleGallery(props: {
   references: AppState["references"];
+  referenceSuggestions: NonNullable<AppState["referenceSuggestions"]>;
   search: string;
   setSearch(value: string): void;
   onRename(oldName: string, newName: string): void;
   onDeletePerson(name: string): void;
   onDeletePhoto(refId: string): void;
   onAddMore(name: string): void;
+  stageReferenceSuggestions(): void;
+  approveReferenceSuggestion(artifactId: string): void;
+  rejectReferenceSuggestion(artifactId: string): void;
   busy: boolean;
 }) {
   const people = useMemo(() => groupReferencesByPerson(props.references), [props.references]);
@@ -6920,6 +8740,13 @@ function PeopleGallery(props: {
         <EmptyState icon={Search} label="No matches" detail={`No people match “${props.search.trim()}”.`} />
       ) : (
         <>
+          <ReferenceSuggestionsPanel
+            suggestions={props.referenceSuggestions}
+            onFind={props.stageReferenceSuggestions}
+            onApprove={props.approveReferenceSuggestion}
+            onReject={props.rejectReferenceSuggestion}
+            busy={props.busy}
+          />
           <p className="people-summary compact">{people.length} {people.length === 1 ? "person" : "people"} &middot; {totalPhotos} photo{totalPhotos === 1 ? "" : "s"}</p>
           <div className="people-list">
             {filtered.map((person) => (
@@ -6960,7 +8787,13 @@ function EnrollView(props: {
   deletePerson(name: string): void;
   deletePhoto(refId: string): void;
   addMoreForPerson(name: string): void;
+  stageReferenceSuggestions(): void;
+  approveReferenceSuggestion(artifactId: string): void;
+  rejectReferenceSuggestion(artifactId: string): void;
   busy: boolean;
+  language: LanguageCode;
+  t(key: TranslationKey, values?: Record<string, string | number>): string;
+  uiText(source: string): string;
 }) {
   return (
     <section className="split-page enroll-page">
@@ -6978,6 +8811,9 @@ function EnrollView(props: {
         clearStaging={props.clearStaging}
         addStaged={props.addStaged}
         busy={props.busy}
+        language={props.language}
+        t={props.t}
+        uiText={props.uiText}
       />
       <PeopleGallery
         references={props.state.references}
@@ -6987,6 +8823,10 @@ function EnrollView(props: {
         onDeletePerson={props.deletePerson}
         onDeletePhoto={props.deletePhoto}
         onAddMore={props.addMoreForPerson}
+        referenceSuggestions={props.state.referenceSuggestions ?? []}
+        stageReferenceSuggestions={props.stageReferenceSuggestions}
+        approveReferenceSuggestion={props.approveReferenceSuggestion}
+        rejectReferenceSuggestion={props.rejectReferenceSuggestion}
         busy={props.busy}
       />
     </section>
@@ -8364,6 +10204,11 @@ function ReviewView(props: {
   selectedCandidate: ReviewCandidate | null;
   selectedCandidateId: string | null;
   setSelectedCandidateId(value: string | null): void;
+  reviewFocus: ReviewFocus | null;
+  clearReviewFocus(): void;
+  reviewFocusHistory: ReviewFocusHistoryRecord[];
+  openReviewFocusHistoryItem(record: ReviewFocusHistoryRecord): void;
+  removeReviewFocusHistory(recordId: string): void;
   queryCandidates(params: Record<string, unknown>): Promise<CandidateQueryResult>;
   review(status: CandidateStatus, current?: ReviewCandidate | null, quiet?: boolean): void | Promise<void>;
   bulkReview(candidateIds: string[], status: CandidateStatus): void | Promise<void>;
@@ -8440,11 +10285,21 @@ function ReviewView(props: {
       : null,
     [props.reviewUndo, props.state.candidates]
   );
+  const reviewFocusIds = props.reviewFocus?.candidateIds ?? [];
+  const reviewFocusKey = reviewFocusIds.join("\n");
+  const focusedCandidates = useMemo(() => {
+    if (!props.reviewFocus) return [];
+    const order = new Map(reviewFocusIds.map((candidateId, index) => [candidateId, index]));
+    return props.state.candidates
+      .filter((candidate) => order.has(candidate.candidateId))
+      .sort((a, b) => (order.get(a.candidateId) ?? 0) - (order.get(b.candidateId) ?? 0));
+  }, [props.reviewFocus, props.state.candidates, reviewFocusKey]);
   const activeCandidate = useMemo(
-    () => pagedCandidates.find((candidate) => candidate.candidateId === props.selectedCandidateId)
+    () => focusedCandidates.find((candidate) => candidate.candidateId === props.selectedCandidateId)
+      ?? pagedCandidates.find((candidate) => candidate.candidateId === props.selectedCandidateId)
       ?? (props.selectedCandidate?.candidateId === props.selectedCandidateId ? props.selectedCandidate : null)
       ?? (recentDecisionCandidate?.candidateId === props.selectedCandidateId ? recentDecisionCandidate : null),
-    [pagedCandidates, props.selectedCandidate, recentDecisionCandidate, props.selectedCandidateId]
+    [focusedCandidates, pagedCandidates, props.selectedCandidate, recentDecisionCandidate, props.selectedCandidateId]
   );
 
   useEffect(() => {
@@ -8671,10 +10526,17 @@ function ReviewView(props: {
     setJumpRow("");
     setPagedError(null);
     setSelectedIds(new Set());
+    if (props.reviewFocus) {
+      setPagedLoading(false);
+      return;
+    }
     void loadCandidatePage(false, 0);
-  }, [querySignature]);
+  }, [querySignature, reviewFocusKey]);
 
   const filteredCandidates = useMemo(() => {
+    if (props.reviewFocus) {
+      return focusedCandidates;
+    }
     if (pagedCandidates.length) {
       return pagedCandidates;
     }
@@ -8682,8 +10544,8 @@ function ReviewView(props: {
       return [recentDecisionCandidate];
     }
     return pagedCandidates;
-  }, [pagedCandidates, recentDecisionCandidate, statusFilter]);
-  const filteredTotal = Math.max(pagedTotal, filteredCandidates.length);
+  }, [focusedCandidates, pagedCandidates, props.reviewFocus, recentDecisionCandidate, statusFilter]);
+  const filteredTotal = props.reviewFocus ? focusedCandidates.length : Math.max(pagedTotal, filteredCandidates.length);
   const selectedIndex = filteredCandidates.findIndex((candidate) => candidate.candidateId === props.selectedCandidateId);
   const queuePosition = selectedIndex >= 0 ? selectedIndex + 1 : 0;
   const filteredStats = useMemo(() => {
@@ -8700,12 +10562,13 @@ function ReviewView(props: {
     };
   }, [filteredCandidates, props.state.config.thresholds.confident]);
   const visibleCandidates = filteredCandidates;
-  const visibleStart = filteredTotal && visibleCandidates.length ? pageOffset + 1 : 0;
-  const visibleEnd = visibleCandidates.length ? Math.min(filteredTotal, pageOffset + visibleCandidates.length) : 0;
-  const canPageBack = pageOffset > 0 && !pagedLoading;
-  const canPageForward = pageOffset + pageSize < filteredTotal && !pagedLoading;
+  const visibleStart = filteredTotal && visibleCandidates.length ? (props.reviewFocus ? 1 : pageOffset + 1) : 0;
+  const visibleEnd = visibleCandidates.length ? (props.reviewFocus ? visibleCandidates.length : Math.min(filteredTotal, pageOffset + visibleCandidates.length)) : 0;
+  const canPageBack = !props.reviewFocus && pageOffset > 0 && !pagedLoading;
+  const canPageForward = !props.reviewFocus && pageOffset + pageSize < filteredTotal && !pagedLoading;
 
   function goToReviewOffset(offset: number) {
+    if (props.reviewFocus) return;
     const bounded = Math.max(0, Math.min(Math.max(0, filteredTotal - 1), offset));
     setSelectedIds(new Set());
     props.setSelectedCandidateId(null);
@@ -9238,6 +11101,38 @@ function ReviewView(props: {
             </button>
           </div>
         )}
+        {props.reviewFocus && (
+          <div className="review-focus-strip">
+            <span>
+              <Users size={15} />
+              <strong>{props.reviewFocus.label}</strong>
+              <small>{formatNumber(focusedCandidates.length)} match{focusedCandidates.length === 1 ? "" : "es"}</small>
+            </span>
+            <button className="ghost compact-action" onClick={props.clearReviewFocus} type="button">
+              <X size={14} />
+              <span>Show all Review</span>
+            </button>
+          </div>
+        )}
+        {props.reviewFocusHistory.length > 0 && (
+          <div className="saved-view-strip review-focus-history-strip" role="group" aria-label="Recent Review More">
+            {props.reviewFocusHistory.slice(0, 6).map((record) => (
+              <span className="saved-view-chip review-focus-history-chip" key={record.id}>
+                <button
+                  onClick={() => props.openReviewFocusHistoryItem(record)}
+                  type="button"
+                  title={`${formatNumber(record.candidateIds.length)} match${record.candidateIds.length === 1 ? "" : "es"}`}
+                >
+                  <span>{record.label}</span>
+                  <strong>{formatNumber(record.candidateIds.length)}</strong>
+                </button>
+                <button onClick={() => props.removeReviewFocusHistory(record.id)} type="button" aria-label={`Remove ${record.label} from recent Review More`}>
+                  <X size={12} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         <div className="saved-view-strip" role="group" aria-label="Saved review views">
           <button className="smart-batch save-view" onClick={saveCurrentReviewView} type="button">
             <span>Save current view</span>
@@ -9331,7 +11226,7 @@ function ReviewView(props: {
             <span>Next</span>
             <ChevronRight size={16} />
           </button>
-          <button className="ghost compact-action" onClick={() => void loadCandidatePage(false)} disabled={pagedLoading} type="button">
+          <button className="ghost compact-action" onClick={() => void loadCandidatePage(false)} disabled={pagedLoading || Boolean(props.reviewFocus)} type="button">
             <RefreshCcw size={16} />
             <span>Refresh</span>
           </button>
@@ -9344,6 +11239,7 @@ function ReviewView(props: {
               max={Math.max(1, filteredTotal)}
               type="number"
               value={jumpRow}
+              disabled={Boolean(props.reviewFocus)}
               onChange={(event) => setJumpRow(event.currentTarget.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
@@ -9353,7 +11249,7 @@ function ReviewView(props: {
               }}
             />
           </label>
-          <button className="secondary compact-action" onClick={jumpToReviewRow} disabled={pagedLoading || !filteredTotal} type="button">Go</button>
+          <button className="secondary compact-action" onClick={jumpToReviewRow} disabled={pagedLoading || Boolean(props.reviewFocus) || !filteredTotal} type="button">Go</button>
         </div>
         {mediaActionPreview && (
           <div className="media-action-preview" role="region" aria-label="File action preview">
@@ -9511,7 +11407,7 @@ function ReviewView(props: {
                     onClick={(event) => event.stopPropagation()}
                     onChange={() => toggleCandidate(candidate.candidateId)}
                   />
-                  <CandidateIdentity candidate={candidate} showThumbnail={props.showListThumbnails} />
+                  <CandidateIdentity candidate={candidate} showThumbnail={props.showListThumbnails} showReviewProvenance={Boolean(props.reviewFocus)} />
                   <span className={`status ${candidate.status}`}>{reviewStatusLabel(candidate.status)}</span>
                   <span
                     className="score-cell"
@@ -9985,12 +11881,25 @@ function SettingsView(props: {
   releaseReadiness: ReleaseReadinessResult | null;
   runReleaseReadiness(): void;
   accuracyEvaluation: AccuracyEvaluation | null;
+  calibrationLearning: CalibrationLearningStatus | null;
+  embeddingAdapterLearning: EmbeddingAdapterStatus | null;
+  selfLearningRdStatus: SelfLearningRdStatus | null;
   accuracyValidationPack: AccuracyValidationPackValue | null;
   publicDatasetCatalog: PublicDatasetCatalog | null;
   publicDatasetInspection: PublicDatasetInspection | null;
   publicDatasetBenchmark: PublicDatasetBenchmarkResult | null;
   publicDatasetModelComparison: PublicDatasetModelComparisonResult | null;
   runAccuracyEvaluation(): void;
+  refreshCalibrationLearningStatus(): void;
+  refreshEmbeddingAdapterStatus(): void;
+  refreshSelfLearningRdStatus(): void;
+  runLearningJobs(): void;
+  stageCalibration(): void;
+  promoteCalibration(artifactId?: string): void;
+  rollbackCalibration(artifactId?: string): void;
+  stageEmbeddingAdapter(): void;
+  promoteEmbeddingAdapter(artifactId?: string): void;
+  rollbackEmbeddingAdapter(artifactId?: string): void;
   generateAccuracyValidationPack(): void;
   choosePublicDatasetFolder(): Promise<string | null>;
   inspectPublicDataset(options: { datasetId: string; folder: string; includeVideos?: boolean }): void | Promise<void>;
@@ -10000,6 +11909,8 @@ function SettingsView(props: {
   applyCalibration(): void;
   exportAccuracyLabels(): void;
   importAccuracyLabels(text: string): void | Promise<void>;
+  exportTrainingExamples(): void;
+  importTrainingExamples(text: string): void | Promise<void>;
   privacyReport: PrivacyReport | null;
   mediaTrashReport: MediaTrashReportValue | null;
   mediaTrashCleanup: MediaTrashCleanupValue | null;
@@ -10179,6 +12090,23 @@ function SettingsView(props: {
             <span>Safe Mode</span>
             <strong>{guardrail}</strong>
           </div>
+          <div>
+            <span>Learning</span>
+            <strong>{props.settings.learningMode === "off" ? "Off" : props.settings.learningMode === "auto_stage" ? "Auto-stage" : "Manual"}</strong>
+          </div>
+        </div>
+        <div className="settings-form-grid compact-grid">
+          <label>
+            <span>Learning mode</span>
+            <select
+              value={props.settings.learningMode}
+              onChange={(event) => setCustomSettings({ learningMode: normalizeLearningMode(event.currentTarget.value) })}
+            >
+              <option value="off">Off</option>
+              <option value="manual">Manual suggestions</option>
+              <option value="auto_stage">Auto-stage after validation</option>
+            </select>
+          </label>
         </div>
         <div className="settings-presets" role="group" aria-label="Configuration presets">
           {settingsPresets.map((preset) => (
@@ -10428,6 +12356,9 @@ function SettingsView(props: {
       <BenchmarkPanel result={props.runtimeBenchmark} history={props.state.benchmarkHistory ?? []} busy={props.busy} runBenchmark={props.runRuntimeBenchmark} />
       <AccuracyLabPanel
         result={props.accuracyEvaluation}
+        learning={props.calibrationLearning}
+        adapterLearning={props.embeddingAdapterLearning}
+        selfLearningRdStatus={props.selfLearningRdStatus}
         validationPack={props.accuracyValidationPack}
         datasetCatalog={props.publicDatasetCatalog}
         datasetInspection={props.publicDatasetInspection}
@@ -10436,6 +12367,16 @@ function SettingsView(props: {
         calibration={props.state.calibration}
         busy={props.busy}
         runAccuracyEvaluation={props.runAccuracyEvaluation}
+        refreshLearning={props.refreshCalibrationLearningStatus}
+        refreshAdapterLearning={props.refreshEmbeddingAdapterStatus}
+        refreshSelfLearningRdStatus={props.refreshSelfLearningRdStatus}
+        runLearningJobs={props.runLearningJobs}
+        stageCalibration={props.stageCalibration}
+        promoteCalibration={props.promoteCalibration}
+        rollbackCalibration={props.rollbackCalibration}
+        stageEmbeddingAdapter={props.stageEmbeddingAdapter}
+        promoteEmbeddingAdapter={props.promoteEmbeddingAdapter}
+        rollbackEmbeddingAdapter={props.rollbackEmbeddingAdapter}
         generateAccuracyValidationPack={props.generateAccuracyValidationPack}
         chooseDatasetFolder={props.choosePublicDatasetFolder}
         inspectDataset={props.inspectPublicDataset}
@@ -10445,6 +12386,8 @@ function SettingsView(props: {
         applyCalibration={props.applyCalibration}
         exportAccuracyLabels={props.exportAccuracyLabels}
         importAccuracyLabels={props.importAccuracyLabels}
+        exportTrainingExamples={props.exportTrainingExamples}
+        importTrainingExamples={props.importTrainingExamples}
         copyText={props.copyText}
       />
       <ReviewRulesPanel
@@ -11756,6 +13699,9 @@ function VideoDecoderPanel({
 
 function AccuracyLabPanel({
   result,
+  learning,
+  adapterLearning,
+  selfLearningRdStatus,
   validationPack,
   datasetCatalog,
   datasetInspection,
@@ -11764,6 +13710,16 @@ function AccuracyLabPanel({
   calibration,
   busy,
   runAccuracyEvaluation,
+  refreshLearning,
+  refreshAdapterLearning,
+  refreshSelfLearningRdStatus,
+  runLearningJobs,
+  stageCalibration,
+  promoteCalibration,
+  rollbackCalibration,
+  stageEmbeddingAdapter,
+  promoteEmbeddingAdapter,
+  rollbackEmbeddingAdapter,
   generateAccuracyValidationPack,
   chooseDatasetFolder,
   inspectDataset,
@@ -11773,9 +13729,14 @@ function AccuracyLabPanel({
   applyCalibration,
   exportAccuracyLabels,
   importAccuracyLabels,
+  exportTrainingExamples,
+  importTrainingExamples,
   copyText
 }: {
   result: AccuracyEvaluation | null;
+  learning: CalibrationLearningStatus | null;
+  adapterLearning: EmbeddingAdapterStatus | null;
+  selfLearningRdStatus: SelfLearningRdStatus | null;
   validationPack: AccuracyValidationPackValue | null;
   datasetCatalog: PublicDatasetCatalog | null;
   datasetInspection: PublicDatasetInspection | null;
@@ -11784,6 +13745,16 @@ function AccuracyLabPanel({
   calibration: AppState["calibration"];
   busy: boolean;
   runAccuracyEvaluation(): void;
+  refreshLearning(): void;
+  refreshAdapterLearning(): void;
+  refreshSelfLearningRdStatus(): void;
+  runLearningJobs(): void;
+  stageCalibration(): void;
+  promoteCalibration(artifactId?: string): void;
+  rollbackCalibration(artifactId?: string): void;
+  stageEmbeddingAdapter(): void;
+  promoteEmbeddingAdapter(artifactId?: string): void;
+  rollbackEmbeddingAdapter(artifactId?: string): void;
   generateAccuracyValidationPack(): void;
   chooseDatasetFolder(): Promise<string | null>;
   inspectDataset(options: { datasetId: string; folder: string; includeVideos?: boolean }): void | Promise<void>;
@@ -11793,21 +13764,119 @@ function AccuracyLabPanel({
   applyCalibration(): void;
   exportAccuracyLabels(): void;
   importAccuracyLabels(text: string): void | Promise<void>;
+  exportTrainingExamples(): void;
+  importTrainingExamples(text: string): void | Promise<void>;
   copyText(text: string, label?: string): void;
 }) {
   const [importText, setImportText] = useState("");
+  const [trainingImportText, setTrainingImportText] = useState("");
   const [datasetId, setDatasetId] = useState("lfw");
   const [datasetFolder, setDatasetFolder] = useState("");
   const [datasetMaxIdentities, setDatasetMaxIdentities] = useState(12);
   const [datasetCandidateImages, setDatasetCandidateImages] = useState(3);
   const [datasetDownloadPublic, setDatasetDownloadPublic] = useState(true);
   const [datasetIncludeVideos, setDatasetIncludeVideos] = useState(false);
+  const learningLoadedRef = useRef(false);
   const datasets = datasetCatalog?.datasets ?? [];
   const selectedDataset = datasets.find((item) => item.datasetId === datasetId) ?? datasets[0] ?? null;
   const canAutoPrepareDataset = Boolean(selectedDataset?.download?.available);
   const likely = result?.metrics.likely;
   const labelCount = likely?.labeled ?? calibration?.matchLabels ?? 0;
+  const positiveLabels = calibration?.positivePairs ?? 0;
+  const negativeLabels = calibration?.negativePairs ?? 0;
+  const stageReady = labelCount >= 20 && positiveLabels >= 5 && negativeLabels >= 5;
+  const artifacts = learning?.artifacts ?? [];
+  const readiness = learning?.readiness ?? null;
+  const autoStageReady = Boolean(readiness?.ready);
+  const learningConsentBlocked = Boolean(readiness?.consentRequired && !readiness?.consentActive);
+  const newLabelsSinceArtifact = finiteInteger(readiness?.newLabelsSinceLastArtifact, 0, 0, Number.MAX_SAFE_INTEGER);
+  const autoStageMinNewLabels = finiteInteger(readiness?.autoStageMinNewLabels, 10, 1, Number.MAX_SAFE_INTEGER);
+  const latestArtifact = artifacts[0] ?? null;
+  const stagedArtifact = artifacts.find((artifact) => artifact.status === "staged") ?? null;
+  const promotedArtifact = artifacts.find((artifact) => artifact.status === "promoted") ?? null;
+  const latestArtifactId = calibrationArtifactId(latestArtifact);
+  const stagedArtifactId = calibrationArtifactId(stagedArtifact);
+  const promotedArtifactId = calibrationArtifactId(promotedArtifact);
+  const latestArtifactHash = calibrationArtifactHash(latestArtifact);
+  const latestMetrics = asRecord(latestArtifact?.metrics) ?? {};
+  const latestThresholds = asRecord(latestMetrics.thresholds) ?? asRecord(latestArtifact?.payload?.thresholds) ?? {};
+  const latestLikelyThreshold = Number.isFinite(Number(latestThresholds.likely)) ? Number(latestThresholds.likely) : null;
+  const latestValidation = asRecord(latestMetrics.validation) ?? {};
+  const validationDelta = Number.isFinite(Number(latestValidation.delta)) ? Number(latestValidation.delta) : null;
+  const currentLikelyThreshold = Number.isFinite(Number(learning?.current?.thresholds?.likely)) ? Number(learning?.current?.thresholds?.likely) : null;
+  const adapterReadiness = adapterLearning?.readiness ?? null;
+  const adapterArtifacts = adapterLearning?.artifacts ?? [];
+  const adapterLatestArtifact = adapterArtifacts[0] ?? null;
+  const adapterStagedArtifact = adapterArtifacts.find((artifact) => artifact.status === "staged") ?? null;
+  const adapterPromotedArtifact = adapterLearning?.activeArtifact ?? adapterArtifacts.find((artifact) => artifact.status === "promoted") ?? null;
+  const adapterLatestArtifactId = calibrationArtifactId(adapterLatestArtifact);
+  const adapterStagedArtifactId = calibrationArtifactId(adapterStagedArtifact);
+  const adapterPromotedArtifactId = calibrationArtifactId(adapterPromotedArtifact);
+  const adapterLatestArtifactHash = calibrationArtifactHash(adapterLatestArtifact);
+  const adapterMetrics = asRecord(adapterLatestArtifact?.metrics) ?? {};
+  const adapterValidation = asRecord(adapterMetrics.validation) ?? {};
+  const adapterDelta = Number.isFinite(Number(adapterValidation.delta)) ? Number(adapterValidation.delta) : null;
+  const adapterReady = Boolean(adapterReadiness?.ready);
+  const adapterLabels = finiteInteger(adapterReadiness?.labels, adapterLearning?.summary?.totalExamples ?? 0, 0, Number.MAX_SAFE_INTEGER);
+  const adapterPositive = finiteInteger(adapterReadiness?.positiveLabels, adapterLearning?.summary?.positiveExamples ?? 0, 0, Number.MAX_SAFE_INTEGER);
+  const adapterNegative = finiteInteger(adapterReadiness?.negativeLabels, adapterLearning?.summary?.negativeExamples ?? 0, 0, Number.MAX_SAFE_INTEGER);
+  const adapterMinimumLabels = finiteInteger(adapterReadiness?.minimumLabels, 100, 1, Number.MAX_SAFE_INTEGER);
+  const adapterMinimumPerClass = finiteInteger(adapterReadiness?.minimumPerClass, 25, 1, Number.MAX_SAFE_INTEGER);
+  const adapterCoverage = adapterLearning?.coverage ?? null;
+  const adapterCoveredTargets = finiteInteger(adapterCoverage?.coveredTargets, 0, 0, Number.MAX_SAFE_INTEGER);
+  const adapterTargetCount = finiteInteger(adapterCoverage?.targetCount, 0, 0, Number.MAX_SAFE_INTEGER);
+  const adapterMissingTargets = adapterCoverage?.targets?.filter((target) => !target.ready) ?? [];
+  const adapterStatusText = adapterStagedArtifact
+    ? "Staged"
+    : adapterPromotedArtifact
+      ? "Promoted"
+      : adapterLatestArtifact?.status === "candidate"
+        ? "Advisory"
+      : adapterReadiness?.consentRequired && !adapterReadiness?.consentActive
+        ? "Consent needed"
+        : adapterReady
+          ? "Ready to stage"
+          : "Collect more examples";
+  const adapterStatusClass = adapterStagedArtifact || adapterReady || adapterLatestArtifact?.status === "candidate"
+    ? "status uncertain"
+    : adapterPromotedArtifact
+      ? "status accepted"
+      : "status pending";
+  const rdSatisfiedCount = finiteInteger(selfLearningRdStatus?.satisfied?.length, 0, 0, Number.MAX_SAFE_INTEGER);
+  const rdBlockedCount = finiteInteger(selfLearningRdStatus?.blocked?.length, 0, 0, Number.MAX_SAFE_INTEGER);
+  const rdBlocker = selfLearningRdStatus?.blockers?.[0] ?? "";
+  const rdStatusText = !selfLearningRdStatus
+    ? "Not loaded"
+    : selfLearningRdStatus.ok
+      ? "Satisfied"
+      : selfLearningRdStatus.status === "blocked"
+        ? "R&D blocked"
+        : selfLearningRdStatus.status === "missing"
+          ? "Evidence missing"
+          : "Needs attention";
+  const rdStatusClass = selfLearningRdStatus?.ok
+    ? "status accepted"
+    : selfLearningRdStatus?.status === "blocked"
+      ? "status uncertain"
+      : "status pending";
+  const artifactStatusText = stagedArtifact
+    ? "Staged"
+    : promotedArtifact
+      ? "Promoted"
+      : learningConsentBlocked
+        ? "Consent needed"
+      : autoStageReady
+        ? "Ready to stage"
+        : stageReady
+          ? "New feedback available"
+        : "Collect more labels";
+  const artifactStatusClass = stagedArtifact || autoStageReady || (stageReady && !learningConsentBlocked)
+    ? "status uncertain"
+    : promotedArtifact
+      ? "status accepted"
+      : "status pending";
   const importDisabled = busy || !importText.trim();
+  const trainingImportDisabled = busy || !trainingImportText.trim();
   const canRunDataset = !busy && Boolean(datasetFolder.trim() || canAutoPrepareDataset);
   const preferredMatrixKeys = [
     "all",
@@ -11828,10 +13897,22 @@ function AccuracyLabPanel({
       .filter((item): item is NonNullable<PublicDatasetBenchmarkResult["validationMatrix"]>[string] => Boolean(item)),
     ...Object.values(validationMatrix).filter((item) => !preferredMatrixKeys.includes(item.key))
   ];
+  useEffect(() => {
+    if (learningLoadedRef.current) return;
+    learningLoadedRef.current = true;
+    void Promise.resolve(refreshLearning()).catch(() => undefined);
+    void Promise.resolve(refreshAdapterLearning()).catch(() => undefined);
+    void Promise.resolve(refreshSelfLearningRdStatus()).catch(() => undefined);
+  }, [refreshLearning, refreshAdapterLearning, refreshSelfLearningRdStatus]);
   async function submitImport() {
     if (!importText.trim()) return;
     await importAccuracyLabels(importText);
     setImportText("");
+  }
+  async function submitTrainingImport() {
+    if (!trainingImportText.trim()) return;
+    await importTrainingExamples(trainingImportText);
+    setTrainingImportText("");
   }
   async function chooseFolderForDataset() {
     const folder = await chooseDatasetFolder();
@@ -11897,6 +13978,156 @@ function AccuracyLabPanel({
           <Crosshair size={17} />
           <span>Create validation pack</span>
         </button>
+      </div>
+      <div className="validation-pack-card">
+        <div className="panel-title compact-title">
+          <Activity size={16} />
+          <span>Self-learning R&D</span>
+          <div className="spacer" />
+          <span className={rdStatusClass}>{rdStatusText}</span>
+        </div>
+        <div className="workspace-health-grid compact-grid">
+          <span><small>Satisfied</small><strong>{formatNumber(rdSatisfiedCount)}</strong></span>
+          <span><small>Blocked</small><strong>{formatNumber(rdBlockedCount)}</strong></span>
+          <span><small>Production auth</small><strong>{selfLearningRdStatus?.notProductionAuthorization ? "No" : selfLearningRdStatus ? "Check" : "n/a"}</strong></span>
+          <span><small>Audit</small><strong>{selfLearningRdStatus?.reportHash ? selfLearningRdStatus.reportHash.slice(0, 8) : "n/a"}</strong></span>
+        </div>
+        <div className="health-list">
+          <span>{selfLearningRdStatus?.message || "R&D evidence status has not been loaded."}</span>
+          {rdBlocker ? <span>{rdBlocker}</span> : null}
+        </div>
+        <div className="button-row">
+          <button className="secondary" onClick={refreshSelfLearningRdStatus} disabled={busy} type="button">
+            <RefreshCcw size={17} />
+            <span>Update R&D status</span>
+          </button>
+          {selfLearningRdStatus?.auditPath ? (
+            <button className="ghost compact-action" onClick={() => copyText(selfLearningRdStatus.auditPath, "Self-learning audit path")} type="button">
+              <Archive size={16} />
+              <span>Copy audit path</span>
+            </button>
+          ) : null}
+        </div>
+      </div>
+      <div className="validation-pack-card">
+        <div className="panel-title compact-title">
+          <SlidersHorizontal size={16} />
+          <span>Learned calibration</span>
+          <div className="spacer" />
+          <span className={artifactStatusClass}>{artifactStatusText}</span>
+        </div>
+        <div className="workspace-health-grid compact-grid">
+          <span><small>Labels</small><strong>{formatNumber(labelCount)}</strong></span>
+          <span><small>Matches</small><strong>{formatNumber(positiveLabels)}</strong></span>
+          <span><small>Non-matches</small><strong>{formatNumber(negativeLabels)}</strong></span>
+          <span><small>New labels</small><strong>{readiness ? `${formatNumber(newLabelsSinceArtifact)}/${formatNumber(autoStageMinNewLabels)}` : "n/a"}</strong></span>
+          <span><small>Artifacts</small><strong>{formatNumber(artifacts.length || calibration?.learnedArtifacts || 0)}</strong></span>
+          <span><small>Current likely</small><strong>{currentLikelyThreshold === null ? "n/a" : percent(currentLikelyThreshold)}</strong></span>
+          <span><small>Learned likely</small><strong>{latestLikelyThreshold === null ? "n/a" : percent(latestLikelyThreshold)}</strong></span>
+          <span><small>Validation delta</small><strong>{validationDelta === null ? "n/a" : `${validationDelta >= 0 ? "+" : ""}${(validationDelta * 100).toFixed(1)}%`}</strong></span>
+          <span><small>Latest status</small><strong>{latestArtifact?.status ? latestArtifact.status.replace(/_/g, " ") : "None"}</strong></span>
+        </div>
+        {readiness ? (
+          <div className="health-list">
+            <span>{readiness.reason}</span>
+          </div>
+        ) : null}
+        {latestArtifact ? (
+          <div className="health-list">
+            <span>Latest artifact {latestArtifactId || "unknown"}{calibrationArtifactModel(latestArtifact) ? ` for ${calibrationArtifactModel(latestArtifact)}` : ""}.</span>
+            <span>{formatNumber(calibrationArtifactCount(latestArtifact, "input_count", "inputCount"))} labels, {formatNumber(calibrationArtifactCount(latestArtifact, "positive_count", "positiveCount"))} matches, {formatNumber(calibrationArtifactCount(latestArtifact, "negative_count", "negativeCount"))} non-matches.</span>
+            {latestArtifactHash ? <span>Hash {latestArtifactHash.slice(0, 16)}... created {formatDateTime(calibrationArtifactCreatedAt(latestArtifact))}.</span> : null}
+          </div>
+        ) : (
+          <p className="compact">Stage reviewed feedback once there are at least 20 accepted/rejected labels with 5 or more in each class.</p>
+        )}
+        <div className="button-row">
+          <button className="secondary" onClick={refreshLearning} disabled={busy} type="button">
+            <RefreshCcw size={17} />
+            <span>Update learning status</span>
+          </button>
+          <button className="secondary" onClick={runLearningJobs} disabled={busy} type="button">
+            <Play size={17} />
+            <span>Run learning check</span>
+          </button>
+          <button className="secondary" onClick={stageCalibration} disabled={busy || !stageReady} type="button">
+            <SlidersHorizontal size={17} />
+            <span>Stage calibration</span>
+          </button>
+          <button className="secondary" onClick={exportTrainingExamples} disabled={busy} type="button">
+            <Archive size={17} />
+            <span>Export training examples</span>
+          </button>
+          <button className="secondary" onClick={() => promoteCalibration(stagedArtifactId)} disabled={busy || !stagedArtifact} type="button">
+            <Check size={17} />
+            <span>Apply learned calibration</span>
+          </button>
+          <button className="secondary" onClick={() => rollbackCalibration(promotedArtifactId)} disabled={busy || !promotedArtifact} type="button">
+            <Undo2 size={17} />
+            <span>Rollback</span>
+          </button>
+        </div>
+      </div>
+      <div className="validation-pack-card">
+        <div className="panel-title compact-title">
+          <Gauge size={16} />
+          <span>Embedding adapter</span>
+          <div className="spacer" />
+          <span className={adapterStatusClass}>{adapterStatusText}</span>
+        </div>
+        <div className="workspace-health-grid compact-grid">
+          <span><small>Examples</small><strong>{formatNumber(adapterLabels)}</strong></span>
+          <span><small>Matches</small><strong>{formatNumber(adapterPositive)}</strong></span>
+          <span><small>Non-matches</small><strong>{formatNumber(adapterNegative)}</strong></span>
+          <span><small>Minimum</small><strong>{formatNumber(adapterMinimumLabels)}</strong></span>
+          <span><small>Per class</small><strong>{formatNumber(adapterMinimumPerClass)}</strong></span>
+          <span><small>Artifacts</small><strong>{formatNumber(adapterArtifacts.length)}</strong></span>
+          <span><small>Coverage</small><strong>{adapterTargetCount ? `${formatNumber(adapterCoveredTargets)}/${formatNumber(adapterTargetCount)}` : "n/a"}</strong></span>
+          <span><small>Validation delta</small><strong>{adapterDelta === null ? "n/a" : `${adapterDelta >= 0 ? "+" : ""}${(adapterDelta * 100).toFixed(1)}%`}</strong></span>
+          <span><small>Latest status</small><strong>{adapterLatestArtifact?.status ? adapterLatestArtifact.status.replace(/_/g, " ") : "None"}</strong></span>
+        </div>
+        {adapterReadiness ? (
+          <div className="health-list">
+            <span>{adapterReadiness.reason}</span>
+            {adapterReadiness.dominantModel ? <span>Model {adapterReadiness.dominantModel}{adapterReadiness.labelsDroppedOtherModel ? `, ${formatNumber(adapterReadiness.labelsDroppedOtherModel)} examples skipped from other models` : ""}.</span> : null}
+          </div>
+        ) : null}
+        {adapterCoverage ? (
+          <div className="health-list">
+            {(adapterMissingTargets.length ? adapterMissingTargets : adapterCoverage.targets).slice(0, 3).map((target) => (
+              <span key={target.id}>
+                {target.ready ? target.label : target.action} ({formatNumber(target.count)}/{formatNumber(target.minCount)})
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {adapterLatestArtifact ? (
+          <div className="health-list">
+            <span>Latest adapter {adapterLatestArtifactId || "unknown"}{calibrationArtifactModel(adapterLatestArtifact) ? ` for ${calibrationArtifactModel(adapterLatestArtifact)}` : ""}.</span>
+            <span>{formatNumber(calibrationArtifactCount(adapterLatestArtifact, "input_count", "inputCount"))} examples, {formatNumber(calibrationArtifactCount(adapterLatestArtifact, "positive_count", "positiveCount"))} matches, {formatNumber(calibrationArtifactCount(adapterLatestArtifact, "negative_count", "negativeCount"))} non-matches.</span>
+            {adapterLatestArtifactHash ? <span>Hash {adapterLatestArtifactHash.slice(0, 16)}... created {formatDateTime(calibrationArtifactCreatedAt(adapterLatestArtifact))}.</span> : null}
+          </div>
+        ) : (
+          <p className="compact">Stage an adapter once reviewed examples meet the local validation minimum.</p>
+        )}
+        <div className="button-row">
+          <button className="secondary" onClick={refreshAdapterLearning} disabled={busy} type="button">
+            <RefreshCcw size={17} />
+            <span>Update adapter status</span>
+          </button>
+          <button className="secondary" onClick={stageEmbeddingAdapter} disabled={busy || !adapterReady} type="button">
+            <Gauge size={17} />
+            <span>Stage adapter</span>
+          </button>
+          <button className="secondary" onClick={() => promoteEmbeddingAdapter(adapterStagedArtifactId)} disabled={busy || !adapterStagedArtifact} type="button">
+            <Check size={17} />
+            <span>Apply adapter</span>
+          </button>
+          <button className="secondary" onClick={() => rollbackEmbeddingAdapter(adapterPromotedArtifactId)} disabled={busy || !adapterPromotedArtifact} type="button">
+            <Undo2 size={17} />
+            <span>Rollback adapter</span>
+          </button>
+        </div>
       </div>
       {validationPack && (
         <div className="validation-pack-card">
@@ -12170,6 +14401,28 @@ function AccuracyLabPanel({
             <span>Import labels</span>
           </button>
           <button className="ghost compact-action" onClick={() => setImportText("")} disabled={!importText.trim()} type="button">
+            <X size={16} />
+            <span>Clear</span>
+          </button>
+        </div>
+      </details>
+      <details className="accuracy-import">
+        <summary>Import training-example JSON</summary>
+        <label className="diagnostics-json-label">
+          <span>Paste a Vintrace training-example export or a raw examples array.</span>
+          <textarea
+            value={trainingImportText}
+            onChange={(event) => setTrainingImportText(event.currentTarget.value)}
+            spellCheck={false}
+            placeholder='{"examples":[{"sourceHash":"...","expectedPerson":"...","isMatch":true}]}'
+          />
+        </label>
+        <div className="button-row">
+          <button className="secondary" onClick={() => void submitTrainingImport()} disabled={trainingImportDisabled} type="button">
+            <Archive size={17} />
+            <span>Import examples</span>
+          </button>
+          <button className="ghost compact-action" onClick={() => setTrainingImportText("")} disabled={!trainingImportText.trim()} type="button">
             <X size={16} />
             <span>Clear</span>
           </button>
@@ -12880,11 +15133,12 @@ function CandidateTable(props: {
   );
 }
 
-function CandidateIdentity({ candidate, showThumbnail = true }: { candidate: ReviewCandidate; showThumbnail?: boolean }) {
+function CandidateIdentity({ candidate, showThumbnail = true, showReviewProvenance = false }: { candidate: ReviewCandidate; showThumbnail?: boolean; showReviewProvenance?: boolean }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [candidate.sourceUrl]);
   const video = isVideoCandidate(candidate);
   const riskLabels = candidateRiskLabels(candidate);
+  const reviewProvenanceChips = showReviewProvenance ? photoReviewMoreCandidateReasons(candidate) : [];
   const detail = [
     video ? `video ${formatMediaTimestamp(candidate.videoTimestampMs)}` : "",
     ...riskLabels
@@ -12897,6 +15151,11 @@ function CandidateIdentity({ candidate, showThumbnail = true }: { candidate: Rev
       <span>
         <strong>{candidate.personName}</strong>
         <small>{detail ? `${matchBandLabel(candidate.band)} • ${detail}` : matchBandLabel(candidate.band)}</small>
+        {reviewProvenanceChips.length > 0 && (
+          <span className="review-provenance-chips" aria-label="Review More provenance">
+            {reviewProvenanceChips.map((reason) => <small key={`${candidate.candidateId}:${reason}`}>{reason}</small>)}
+          </span>
+        )}
       </span>
     </span>
   );

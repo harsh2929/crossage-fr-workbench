@@ -1295,11 +1295,124 @@ def import_accuracy_labels(labels: list[dict[str, Any]], confirm: bool = False) 
 
 
 @safe_tool()
+def export_training_examples(include_paths: bool = False) -> dict[str, Any]:
+    """Export reviewed training-example metadata without media files or vectors."""
+    result = _call("export_training_examples", {"includePaths": include_paths})
+    return {"export": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def import_training_examples(examples: list[dict[str, Any]], confirm: bool = False) -> dict[str, Any]:
+    """Import reviewed training-example metadata into the local learning set."""
+    _confirmed(confirm, "import training examples")
+    result = _call("import_training_examples", {"rows": examples})
+    return {"imported": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
 def apply_calibration(confirm: bool = False) -> dict[str, Any]:
     """Apply local review feedback to matching thresholds."""
     _confirmed(confirm, "apply review feedback to matching thresholds")
     result = _call("apply_calibration")
     return {"calibration": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def calibration_learning_status() -> dict[str, Any]:
+    """Read staged/promoted calibration-learning artifacts and current calibration state."""
+    return _call("calibration_learning_status")
+
+
+@safe_tool()
+def run_learning_jobs(confirm: bool = False) -> dict[str, Any]:
+    """Run guarded local learning jobs; currently auto-stages calibration when ready."""
+    _confirmed(confirm, "run local learning jobs")
+    result = _call("run_learning_jobs")
+    return {"learning": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def reference_suggestion_status() -> dict[str, Any]:
+    """Read staged/promoted suggested-reference artifacts."""
+    return _call("reference_suggestion_status")
+
+
+@safe_tool()
+def stage_reference_suggestions(limit: int = 20, confirm: bool = False) -> dict[str, Any]:
+    """Stage suggested references from high-quality accepted matches."""
+    _confirmed(confirm, "stage suggested references")
+    result = _call("stage_reference_suggestions", {"limit": limit})
+    return {"suggestions": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def approve_reference_suggestion(artifact_id: str, confirm: bool = False) -> dict[str, Any]:
+    """Approve a staged suggested reference and add it to saved person photos."""
+    _confirmed(confirm, "approve a suggested reference")
+    result = _call("approve_reference_suggestion", {"artifactId": artifact_id})
+    return {"approval": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def reject_reference_suggestion(artifact_id: str, reason: str = "", confirm: bool = False) -> dict[str, Any]:
+    """Reject a staged suggested reference artifact."""
+    _confirmed(confirm, "reject a suggested reference")
+    result = _call("reject_reference_suggestion", {"artifactId": artifact_id, "reason": reason})
+    return {"rejection": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def stage_calibration(confirm: bool = False) -> dict[str, Any]:
+    """Stage a learned calibration artifact from local review feedback without applying it."""
+    _confirmed(confirm, "stage a learned calibration artifact")
+    result = _call("stage_calibration")
+    return {"calibration": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def promote_calibration(artifact_id: str = "", confirm: bool = False) -> dict[str, Any]:
+    """Promote a staged learned calibration artifact after validation."""
+    _confirmed(confirm, "promote a staged calibration artifact")
+    result = _call("promote_calibration", {"artifactId": artifact_id})
+    return {"calibration": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def rollback_calibration(artifact_id: str = "", confirm: bool = False) -> dict[str, Any]:
+    """Rollback a promoted learned calibration artifact to its previous thresholds."""
+    _confirmed(confirm, "rollback a promoted calibration artifact")
+    result = _call("rollback_calibration", {"artifactId": artifact_id})
+    return {"calibration": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def embedding_adapter_status() -> dict[str, Any]:
+    """Read staged/promoted embedding-adapter artifacts and adapter readiness."""
+    return _call("embedding_adapter_status")
+
+
+@safe_tool()
+def stage_embedding_adapter(confirm: bool = False) -> dict[str, Any]:
+    """Stage a JSON logistic adapter over frozen embeddings after held-out validation."""
+    _confirmed(confirm, "stage an embedding adapter artifact")
+    result = _call("stage_embedding_adapter")
+    return {"adapter": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def promote_embedding_adapter(artifact_id: str = "", confirm: bool = False) -> dict[str, Any]:
+    """Promote a staged embedding adapter after validation."""
+    _confirmed(confirm, "promote an embedding adapter artifact")
+    result = _call("promote_embedding_adapter", {"artifactId": artifact_id})
+    return {"adapter": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def rollback_embedding_adapter(artifact_id: str = "", confirm: bool = False) -> dict[str, Any]:
+    """Rollback a promoted embedding adapter artifact."""
+    _confirmed(confirm, "rollback an embedding adapter artifact")
+    result = _call("rollback_embedding_adapter", {"artifactId": artifact_id})
+    return {"adapter": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
 @safe_tool()

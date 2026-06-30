@@ -13,6 +13,7 @@ Run: PYTHONPATH=. .venv/bin/python tests/folder_tree_units.py
 from __future__ import annotations
 
 import tempfile
+import os
 from pathlib import Path
 
 from crossage_fr.api_server import DesktopApi
@@ -50,11 +51,18 @@ def _names(paths) -> set[str]:
     return {Path(p).name for p in paths}
 
 
+def _use_temp_registry(base: Path) -> None:
+    registry = str(base / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
+
+
 # --- folder_tree command -----------------------------------------------------
 
 def test_folder_tree_counts_and_nesting() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         root = build_media_tree(base)
         api = DesktopApi(base / "workspace")
         tree = api.folder_tree(root)
@@ -81,6 +89,7 @@ def test_folder_tree_counts_and_nesting() -> None:
 def test_cmd_folder_tree_dispatch() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         root = build_media_tree(base)
         api = DesktopApi(base / "workspace")
         out = api.handle("folder_tree", {"folder": str(root)})
@@ -93,6 +102,7 @@ def test_cmd_folder_tree_dispatch() -> None:
 def test_iter_media_recursive_false_top_level_only() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         root = build_media_tree(base)
         project = ProjectState(base / "workspace")
         names = _names(_media_paths(project, root, recursive=False))
@@ -103,6 +113,7 @@ def test_iter_media_recursive_false_top_level_only() -> None:
 def test_iter_media_excluded_dirs_prunes_subtree() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         root = build_media_tree(base)
         project = ProjectState(base / "workspace")
         excluded = {safe_resolve(root / "sub2")}
@@ -117,6 +128,7 @@ def test_iter_media_excluded_dirs_prunes_subtree() -> None:
 def test_analyze_recursive_false() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         root = build_media_tree(base)
         api = DesktopApi(base / "workspace")
         result = api.analyze_folder(root, recursive=False)
@@ -128,6 +140,7 @@ def test_analyze_recursive_false() -> None:
 def test_analyze_excluded_dirs() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         root = build_media_tree(base)
         api = DesktopApi(base / "workspace")
         excluded = {safe_resolve(root / "sub1")}
@@ -139,6 +152,7 @@ def test_analyze_excluded_dirs() -> None:
 def test_analyze_rejects_excluded_dir_outside_folder() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         root = build_media_tree(base)
         outside = base / "elsewhere"
         outside.mkdir(parents=True, exist_ok=True)
@@ -159,6 +173,7 @@ def test_iter_image_paths_default_unchanged() -> None:
     # images only, recursive, config-excluded dirs still descended into.
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         root = build_media_tree(base)
         names = _names(iter_image_paths(root))
         assert "vid.mp4" not in names, "iter_image_paths is images-only"
@@ -170,6 +185,7 @@ def test_iter_image_paths_default_unchanged() -> None:
 def test_iter_image_paths_honors_exclusion_hook() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         root = build_media_tree(base)
         project = ProjectState(base / "workspace")
         names = _names(iter_image_paths(root, exclusion_reason=project.scan_exclusion_reason))
@@ -181,6 +197,7 @@ def test_iter_image_paths_honors_exclusion_hook() -> None:
 def test_iter_image_paths_recursive_false() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         root = build_media_tree(base)
         names = _names(iter_image_paths(root, recursive=False))
         assert names == {"a.jpg", "b.png"}, names
@@ -190,6 +207,7 @@ def test_iter_image_paths_recursive_false() -> None:
 def test_iter_image_paths_excluded_dirs() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         root = build_media_tree(base)
         excluded = {safe_resolve(root / "sub1")}
         names = _names(iter_image_paths(root, excluded_dirs=excluded))

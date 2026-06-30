@@ -70,6 +70,68 @@ def reviewed_rows(model_name: str = "modelA") -> list[dict]:
     return rows
 
 
+def context_rows(model_name: str = "modelA") -> list[dict]:
+    rows: list[dict] = []
+    for index in range(16):
+        rows.append(
+            {
+                "candidateId": f"context_pos_{index}",
+                "sourceHash": f"context_pos_hash_{index}",
+                "expectedPerson": "Context Positive",
+                "actualPerson": "Context Positive",
+                "isMatch": True,
+                "matchScore": 0.55 + index * 0.01,
+                "rawCosine": 0.53 + index * 0.01,
+                "modelName": model_name,
+                "datasetId": "calfw",
+                "validationBucket": "age:cross-age",
+                "difficulty": "cross-age",
+                "scenario": "calfw-age-cross-age",
+                "poseBucket": "frontal",
+                "mediaKind": "image",
+            }
+        )
+    for index in range(2):
+        rows.append(
+            {
+                "candidateId": f"rare_pose_unknown_{index}",
+                "sourceHash": f"rare_pose_unknown_hash_{index}",
+                "expectedPerson": "Rare Pose Unknown",
+                "actualPerson": "",
+                "isMatch": True,
+                "matchScore": 0.0,
+                "rawCosine": 0.0,
+                "modelName": model_name,
+                "datasetId": "cplfw",
+                "validationBucket": "pose:unknown",
+                "difficulty": "identity-match",
+                "scenario": "cplfw-pose-unknown",
+                "poseBucket": "unknown",
+                "mediaKind": "image",
+            }
+        )
+    for index in range(18):
+        rows.append(
+            {
+                "candidateId": f"context_neg_{index}",
+                "sourceHash": f"context_neg_hash_{index}",
+                "expectedPerson": "Context Negative",
+                "actualPerson": "",
+                "isMatch": False,
+                "matchScore": 0.0,
+                "rawCosine": 0.0,
+                "modelName": model_name,
+                "datasetId": "cplfw",
+                "validationBucket": "expected:non-match",
+                "difficulty": "non-match",
+                "scenario": "cplfw-expected-non-match",
+                "poseBucket": "unknown",
+                "mediaKind": "image",
+            }
+        )
+    return rows
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="vintrace-onnx-row-split-") as raw:
         temp = Path(raw)
@@ -124,6 +186,28 @@ def main() -> None:
         repeat_validation = json.loads(Path(repeat["validationRowsPath"]).read_text(encoding="utf-8"))
         assert [row["splitKey"] for row in training["rows"]] == [row["splitKey"] for row in repeat_training["rows"]]
         assert [row["splitKey"] for row in validation["rows"]] == [row["splitKey"] for row in repeat_validation["rows"]]
+
+        context_source = temp / "context-examples.json"
+        context_source.write_text(json.dumps({"examples": context_rows()}, indent=2), encoding="utf-8")
+        context_split = onnx_training.split_reviewed_training_examples(
+            context_source,
+            temp / "context-split",
+            validation_fraction=0.5,
+            model_name="modelA",
+            min_training_count=8,
+            min_validation_count=18,
+            min_per_class=4,
+            split_salt="salt-2",
+        )
+        context_training = json.loads(Path(context_split["trainingRowsPath"]).read_text(encoding="utf-8"))
+        context_validation = json.loads(Path(context_split["validationRowsPath"]).read_text(encoding="utf-8"))
+        context_manifest = json.loads(Path(context_split["manifestPath"]).read_text(encoding="utf-8"))
+        rare_training = [row for row in context_training["rows"] if str(row.get("candidateId", "")).startswith("rare_pose_unknown")]
+        rare_validation = [row for row in context_validation["rows"] if str(row.get("candidateId", "")).startswith("rare_pose_unknown")]
+        assert len(rare_training) == 1, context_manifest
+        assert len(rare_validation) == 1, context_manifest
+        assert context_manifest["validation"]["classCounts"] == {"negative": 9, "positive": 9, "total": 18}, context_manifest
+        assert "validationBucket" in context_manifest["contextSplitFields"], context_manifest
 
         with redirect_stdout(StringIO()):
             cli_result = onnx_training.main(

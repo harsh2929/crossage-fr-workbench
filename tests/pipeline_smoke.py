@@ -186,7 +186,9 @@ def assert_safe_mode_model_bundle() -> None:
 def assert_face_model_setup_status() -> None:
     os.environ["CROSSAGE_FORCE_FALLBACK"] = "1"
     root = Path(tempfile.mkdtemp(prefix="crossage-model-setup-"))
-    os.environ["CROSSAGE_REGISTRY_HOME"] = str(root / "registry")
+    registry = str(root / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
     api = DesktopApi(root / "workspace")
     model_root = root / "downloaded-models"
     state = api.handle("set_model_root", {"root": str(model_root)})
@@ -207,7 +209,9 @@ def assert_face_model_setup_status() -> None:
 def assert_pipeline_state() -> None:
     os.environ["CROSSAGE_FORCE_FALLBACK"] = "1"
     root = Path(tempfile.mkdtemp(prefix="crossage-pipeline-"))
-    os.environ["CROSSAGE_REGISTRY_HOME"] = str(root / "registry")
+    registry = str(root / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
     refs = root / "refs"
     scan = root / "scan"
     make_face(refs / "person_a.jpg")
@@ -244,7 +248,9 @@ def assert_pipeline_state() -> None:
 def assert_memory_pressure_progress() -> None:
     os.environ["CROSSAGE_FORCE_FALLBACK"] = "1"
     root = Path(tempfile.mkdtemp(prefix="crossage-memory-pressure-"))
-    os.environ["CROSSAGE_REGISTRY_HOME"] = str(root / "registry")
+    registry = str(root / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
     api = DesktopApi(root / "workspace")
     events: list[dict] = []
     with patch("crossage_fr.api_server.memory_available_bytes", return_value=320 * 1024 * 1024):
@@ -259,7 +265,9 @@ def assert_memory_pressure_progress() -> None:
 def assert_video_pipeline_state() -> None:
     os.environ["CROSSAGE_FORCE_FALLBACK"] = "1"
     root = Path(tempfile.mkdtemp(prefix="crossage-video-pipeline-"))
-    os.environ["CROSSAGE_REGISTRY_HOME"] = str(root / "registry")
+    registry = str(root / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
     refs = root / "refs"
     scan = root / "scan"
     video_path = scan / "candidate_clip.avi"

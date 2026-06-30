@@ -9,10 +9,13 @@ test("renderer IPC boundary rejects malformed and untrusted requests", async () 
   const projectRoot = process.cwd();
   const temp = mkdtempSync(path.join(os.tmpdir(), "vintrace-ipc-fuzz-"));
   const workspace = path.join(temp, "workspace");
+  const registry = path.join(temp, "registry");
   const env: Record<string, string> = {
     ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
     CROSSAGE_FORCE_FALLBACK: "1",
-    CROSSAGE_REGISTRY_HOME: path.join(temp, "registry"),
+    VINTRACE_REGISTRY_HOME: registry,
+    CROSSAGE_REGISTRY_HOME: registry,
+    VINTRACE_WORKSPACE: workspace,
     CROSSAGE_WORKSPACE: workspace,
     CROSSAGE_ALLOW_MULTI_INSTANCE: "1",
     PYTHONPATH: projectRoot
@@ -35,6 +38,9 @@ test("renderer IPC boundary rejects malformed and untrusted requests", async () 
       invoke(command: string, params?: Record<string, unknown>): Promise<unknown>;
       revealPath(targetPath: string): Promise<boolean>;
       openPath(targetPath: string): Promise<{ ok: boolean; error: string }>;
+      openPathWith(targetPath: string, editorPath?: string): Promise<{ ok: boolean; error: string }>;
+      writeClipboardImagePath(targetPath: string): Promise<{ ok: boolean; error: string }>;
+      startFileDrag(targetPath: string): Promise<{ ok: boolean; error: string }>;
       startFolderWatch(folder: string): Promise<unknown>;
     };
     async function capture(label: string, fn: () => Promise<unknown> | unknown) {
@@ -53,7 +59,10 @@ test("renderer IPC boundary rejects malformed and untrusted requests", async () 
       await capture("oversized params", () => crossAge.invoke("get_state", { padding: "x".repeat(1_000_010) })),
       await capture("empty folder watch", () => crossAge.startFolderWatch("")),
       await capture("untrusted reveal", () => crossAge.revealPath("/etc/passwd")),
-      await capture("untrusted open", () => crossAge.openPath("/etc/passwd"))
+      await capture("untrusted open", () => crossAge.openPath("/etc/passwd")),
+      await capture("untrusted open with", () => crossAge.openPathWith("/etc/passwd", "/Applications/Preview.app")),
+      await capture("untrusted image clipboard", () => crossAge.writeClipboardImagePath("/etc/passwd")),
+      await capture("untrusted file drag", () => crossAge.startFileDrag("/etc/passwd"))
     ];
   });
 
@@ -63,6 +72,9 @@ test("renderer IPC boundary rejects malformed and untrusted requests", async () 
   expect(results.find((item) => item.label === "empty folder watch")).toMatchObject({ ok: false, code: "E-FOLDER-WATCH-PATH" });
   expect(results.find((item) => item.label === "untrusted reveal")).toMatchObject({ ok: true, value: false });
   expect(results.find((item) => item.label === "untrusted open")).toMatchObject({ ok: true, value: { ok: false } });
+  expect(results.find((item) => item.label === "untrusted open with")).toMatchObject({ ok: true, value: { ok: false } });
+  expect(results.find((item) => item.label === "untrusted image clipboard")).toMatchObject({ ok: true, value: { ok: false } });
+  expect(results.find((item) => item.label === "untrusted file drag")).toMatchObject({ ok: true, value: { ok: false } });
   expect(pageErrors).toEqual([]);
   await app.close();
 });

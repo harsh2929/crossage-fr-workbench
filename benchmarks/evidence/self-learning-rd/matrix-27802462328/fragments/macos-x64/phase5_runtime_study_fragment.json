@@ -1,0 +1,40 @@
+{
+  "generatedAtUnix": 1781837718.197,
+  "schemaVersion": 1,
+  "scope": "phase5-onnx-training-runtime-study-fragment",
+  "sourceMeasurementPath": "/Users/runner/work/crossage-fr-workbench/crossage-fr-workbench/onnx-training-evidence/macos-x64/phase5_onnx_training_measurement.json",
+  "targets": [
+    {
+      "artifactCount": 5,
+      "artifactGenerationStatus": "complete",
+      "blockers": [],
+      "currentHost": true,
+      "failureModes": [
+        "artifact-tamper",
+        "cancelled",
+        "disk-full",
+        "missing-training-runtime",
+        "out-of-memory",
+        "thermal-throttle"
+      ],
+      "featureFlag": "VINTRACE_EXPERIMENTAL_ONNX_TRAINING",
+      "gpuAvailable": false,
+      "measuredAtUnix": 1781837717.088,
+      "missingArtifacts": [],
+      "packageSizeBytes": 739657692,
+      "performanceTier": "low",
+      "primaryProvider": "CPUExecutionProvider",
+      "providers": [
+        "CoreMLExecutionProvider",
+        "CPUExecutionProvider"
+      ],
+      "status": "pass",
+      "target": "macos-x64",
+      "trainingDurationMs": 26,
+      "trainingJobDurationMs": 12.354,
+      "trainingJobStatus": "complete",
+      "trainingPackageAvailable": true,
+      "trainingRuntimeAvailable": true
+    }
+  ]
+}

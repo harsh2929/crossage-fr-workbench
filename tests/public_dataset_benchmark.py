@@ -8,6 +8,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from crossage_fr.api_server import DesktopApi
+from crossage_fr.benchmark_quality import calibrate_public_labels
 from crossage_fr.ingest.video_io import sample_video_frames
 from crossage_fr.workspace_registry import read_active_workspace
 
@@ -56,7 +57,9 @@ def make_identity_video(path: Path, seed: int) -> bool:
 def main() -> None:
     os.environ["CROSSAGE_FORCE_FALLBACK"] = "1"
     root = Path(tempfile.mkdtemp(prefix="vintrace-public-dataset-"))
-    os.environ["CROSSAGE_REGISTRY_HOME"] = str(root / "registry")
+    registry = str(root / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
     workspace = root / "workspace"
     dataset = root / "dataset"
     for identity_index, identity in enumerate(["Ada", "Grace", "Katherine", "Distractor"], start=1):
@@ -310,8 +313,29 @@ def main() -> None:
     assert Path(value["labelsCsvPath"]).exists()
     labels = json.loads(Path(value["labelsJsonPath"]).read_text(encoding="utf-8"))["labels"]
     assert len(labels) == 8
+    public_calibration = calibrate_public_labels(labels, api.project.config.thresholds, target_precision=0.95)
+    assert public_calibration["labelCount"] == len(labels)
+    current_likely = public_calibration["overall"]["currentLikely"]
+    recommended_likely = public_calibration["overall"]["recommendedLikely"]
+    assert recommended_likely["precision"] >= current_likely["precision"], public_calibration
+    assert recommended_likely["falsePositives"] <= current_likely["falsePositives"], public_calibration
+    assert public_calibration["recommendedThresholds"]["likely"] >= 0.0
     assert read_active_workspace() == workspace.resolve()
-    print(json.dumps({"ok": True, "metrics": value["metrics"], "reportPath": value["reportPath"]}, indent=2))
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "metrics": value["metrics"],
+                "publicCalibration": {
+                    "currentLikely": current_likely,
+                    "recommendedLikely": recommended_likely,
+                    "recommendedThresholds": public_calibration["recommendedThresholds"],
+                },
+                "reportPath": value["reportPath"],
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

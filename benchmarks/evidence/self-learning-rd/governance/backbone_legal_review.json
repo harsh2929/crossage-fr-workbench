@@ -1,0 +1,31 @@
+{
+  "decision": "pending",
+  "reviewedAt": "",
+  "reviewer": "",
+  "schemaVersion": 1,
+  "scope": {
+    "baseModelLicenses": [
+      {
+        "licenseStatus": "pending",
+        "modelFamily": "",
+        "notes": "",
+        "source": ""
+      }
+    ],
+    "biometricDataCategories": [],
+    "consentPolicyVersion": "",
+    "exportBackupPolicy": "",
+    "jurisdiction": "",
+    "modelFamilies": [],
+    "retentionDays": 0,
+    "withdrawalProcedure": ""
+  },
+  "topics": {
+    "biometricTrainingConsent": false,
+    "derivativeWeightLicense": false,
+    "exportAndBackupScope": false,
+    "jurisdictionalBasis": false,
+    "retentionScope": false,
+    "withdrawalAndDeletion": false
+  }
+}

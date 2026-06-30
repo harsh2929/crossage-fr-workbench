@@ -12,6 +12,7 @@ Run: PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/enroll_paths_
 from __future__ import annotations
 
 import tempfile
+import os
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -43,11 +44,18 @@ def _names(paths) -> list[str]:
     return [Path(p).name for p in paths]
 
 
+def _use_temp_registry(base: Path) -> None:
+    registry = str(base / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
+
+
 # --- pure expansion helper (engine-free) ------------------------------------
 
 def test_expand_files_and_dir() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         _img(base / "a.jpg")
         _img(base / "folder" / "b.jpg")
         _img(base / "folder" / "deep" / "c.jpg")
@@ -60,6 +68,7 @@ def test_expand_files_and_dir() -> None:
 def test_expand_drops_non_image_files() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         _img(base / "a.jpg")
         (base / "notes.txt").write_text("x")
         project = ProjectState(base / "workspace")
@@ -71,6 +80,7 @@ def test_expand_drops_non_image_files() -> None:
 def test_expand_dedupes() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         _img(base / "a.jpg")
         project = ProjectState(base / "workspace")
         # same file listed directly AND via its folder -> appears once
@@ -82,6 +92,7 @@ def test_expand_dedupes() -> None:
 def test_expand_recursive_false_dir_top_level_only() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         _img(base / "top.jpg")
         _img(base / "nested" / "deep.jpg")
         project = ProjectState(base / "workspace")
@@ -93,6 +104,7 @@ def test_expand_recursive_false_dir_top_level_only() -> None:
 def test_expand_dir_skips_config_excluded() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         _img(base / "keep.jpg")
         _img(base / ".git" / "junk.jpg")
         _img(base / "node_modules" / "pkg.jpg")
@@ -105,6 +117,7 @@ def test_expand_dir_skips_config_excluded() -> None:
 def test_expand_picked_file_resolves_paths() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         _img(base / "a.jpg")
         project = ProjectState(base / "workspace")
         out = project._expand_enroll_paths([str(base / "a.jpg")])
@@ -117,6 +130,7 @@ def test_expand_picked_file_resolves_paths() -> None:
 def test_enroll_paths_command_files_and_folder() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         make_face(base / "a.jpg", shirt=(74, 88, 138))
         make_face(base / "people" / "b.jpg", shirt=(150, 70, 90))  # distinct bytes → distinct hash
         (base / "people" / "notes.txt").write_text("x")
@@ -137,6 +151,7 @@ def test_enroll_paths_command_files_and_folder() -> None:
 def test_enroll_paths_requires_person_name() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         make_face(base / "a.jpg")
         api = DesktopApi(base / "workspace")
         api.handle("set_consent", {"value": True})
@@ -152,6 +167,7 @@ def test_enroll_paths_requires_person_name() -> None:
 def test_enroll_paths_dedup_across_calls() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
+        _use_temp_registry(base)
         make_face(base / "a.jpg")
         api = DesktopApi(base / "workspace")
         api.handle("set_consent", {"value": True})

@@ -1,0 +1,968 @@
+{
+  "baselineTraining": {
+    "count": 960,
+    "inputCount": 960,
+    "labelsDroppedOtherModel": 0,
+    "negativeCount": 192,
+    "positiveCount": 768,
+    "rowsHash": "69f0538cc0b7ccbfa5eedd8929f8295763abe36a2cbd5ec9f1860acfb9c970e1",
+    "source": "training-rows"
+  },
+  "count": 320,
+  "delta": {
+    "accuracy": 0.009375,
+    "precision": 0.000107,
+    "recall": 0.011719
+  },
+  "diagnostics": {
+    "fixedThreshold": {
+      "deltaVsJsonAdapter": {
+        "accuracy": 0.00625,
+        "precision": -0.004025,
+        "recall": 0.011719,
+        "specificity": -0.015625
+      },
+      "jsonAdapter": {
+        "accuracy": 0.925,
+        "count": 320,
+        "falseNegatives": 22,
+        "falsePositives": 2,
+        "precision": 0.991525,
+        "recall": 0.914062,
+        "specificity": 0.96875,
+        "threshold": 0.5,
+        "trueNegatives": 62,
+        "truePositives": 234
+      },
+      "onnxHead": {
+        "accuracy": 0.93125,
+        "count": 320,
+        "falseNegatives": 19,
+        "falsePositives": 3,
+        "precision": 0.9875,
+        "recall": 0.925781,
+        "specificity": 0.953125,
+        "threshold": 0.5,
+        "trueNegatives": 61,
+        "truePositives": 237
+      },
+      "threshold": 0.5
+    },
+    "onnxThresholdSweep": {
+      "baselineComparison": {
+        "baselineJsonAdapter": {
+          "accuracy": 0.925,
+          "count": 320,
+          "falseNegatives": 22,
+          "falsePositives": 2,
+          "precision": 0.991525,
+          "recall": 0.914062,
+          "specificity": 0.96875,
+          "threshold": 0.5,
+          "trueNegatives": 62,
+          "truePositives": 234
+        },
+        "bestMeasurableGainNoRegression": {
+          "accuracy": 0.934375,
+          "bestMetricGain": 0.011719,
+          "count": 320,
+          "deltaVsJsonAdapter": {
+            "accuracy": 0.009375,
+            "precision": 0.000107,
+            "recall": 0.011719,
+            "specificity": 0.0
+          },
+          "falseNegatives": 19,
+          "falsePositives": 2,
+          "noCoreMetricRegression": true,
+          "precision": 0.991632,
+          "recall": 0.925781,
+          "specificity": 0.96875,
+          "threshold": 0.525418,
+          "trueNegatives": 62,
+          "truePositives": 237
+        },
+        "bestNoRegression": {
+          "accuracy": 0.934375,
+          "bestMetricGain": 0.011719,
+          "count": 320,
+          "deltaVsJsonAdapter": {
+            "accuracy": 0.009375,
+            "precision": 0.000107,
+            "recall": 0.011719,
+            "specificity": 0.0
+          },
+          "falseNegatives": 19,
+          "falsePositives": 2,
+          "noCoreMetricRegression": true,
+          "precision": 0.991632,
+          "recall": 0.925781,
+          "specificity": 0.96875,
+          "threshold": 0.525418,
+          "trueNegatives": 62,
+          "truePositives": 237
+        },
+        "candidateCount": 173,
+        "measurableGainNoRegressionCandidateCount": 2,
+        "minMetricGain": 0.01,
+        "noRegressionCandidateCount": 13
+      },
+      "bestAccuracy": {
+        "accuracy": 0.9375,
+        "count": 320,
+        "falseNegatives": 16,
+        "falsePositives": 4,
+        "precision": 0.983607,
+        "recall": 0.9375,
+        "specificity": 0.9375,
+        "threshold": 0.244495,
+        "trueNegatives": 60,
+        "truePositives": 240
+      },
+      "bestPrecision": {
+        "accuracy": 0.93125,
+        "count": 320,
+        "falseNegatives": 22,
+        "falsePositives": 0,
+        "precision": 1.0,
+        "recall": 0.914062,
+        "specificity": 1.0,
+        "threshold": 0.854742,
+        "trueNegatives": 64,
+        "truePositives": 234
+      },
+      "candidateCount": 173
+    },
+    "predictionErrors": {
+      "jsonAdapter": {
+        "falseNegatives": [
+          {
+            "actualPerson": "0026 F0183__MID1",
+            "candidateId": "public:fiw:antelopev2:a3498f62c617e2a471fb436d:84",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0043 F0299__MID1",
+            "index": 293,
+            "matchScore": 0.216709,
+            "rowHash": "117d026f75d47399cf611b2433cefd81e9ea69a2375f1d0a8f746a942598ef60",
+            "scenario": "fiw-pose-frontal",
+            "score": 0.03902,
+            "sourceHashPrefix": "a3498f62c617",
+            "threshold": 0.5,
+            "validationBucket": "pose:frontal"
+          },
+          {
+            "actualPerson": "0067 F0422__MID5",
+            "candidateId": "public:fiw:antelopev2:1867157d7a1f9eeae73135b7:126",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0064 F0422__MID1",
+            "index": 251,
+            "matchScore": 0.217899,
+            "rowHash": "b341f6a97534f4bc4cb9c53902c1de1ed3f81181e44309f6ead48665bf6e0ab6",
+            "scenario": "fiw-pose-frontal",
+            "score": 0.039463,
+            "sourceHashPrefix": "1867157d7a1f",
+            "threshold": 0.5,
+            "validationBucket": "pose:frontal"
+          },
+          {
+            "actualPerson": "",
+            "candidateId": "public:fiw:antelopev2:646f731fe729c45541855363:78",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0040 F0259__MID1",
+            "index": 276,
+            "matchScore": 0.0,
+            "rowHash": "008818bfd56f5484229f4a9e5a76579fccb4095c56febb8137ebab726198e065",
+            "scenario": "fiw-expected-match",
+            "score": 0.041587,
+            "sourceHashPrefix": "646f731fe729",
+            "threshold": 0.5,
+            "validationBucket": "expected:match"
+          },
+          {
+            "actualPerson": "",
+            "candidateId": "public:fiw:antelopev2:8a8f005f5c6c5519b30ec9c8:237",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0119 F0673__MID5",
+            "index": 286,
+            "matchScore": 0.0,
+            "rowHash": "05316b84147f5f7edfb2fd25547f7c20dbe748ba58b346800142b7eff7bab2ab",
+            "scenario": "fiw-expected-match",
+            "score": 0.041587,
+            "sourceHashPrefix": "8a8f005f5c6c",
+            "threshold": 0.5,
+            "validationBucket": "expected:match"
+          },
+          {
+            "actualPerson": "",
+            "candidateId": "public:fiw:antelopev2:ca799107e4a191c4565c6ea2:142",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0072 F0426__MID1",
+            "index": 304,
+            "matchScore": 0.0,
+            "rowHash": "3bb748672e2e6ccf4ea311ad1b1ef8e1e505f3d75f12f5a32e09908204cea36b",
+            "scenario": "fiw-expected-match",
+            "score": 0.041587,
+            "sourceHashPrefix": "ca799107e4a1",
+            "threshold": 0.5,
+            "validationBucket": "expected:match"
+          },
+          {
+            "actualPerson": "",
+            "candidateId": "public:fiw:antelopev2:cff098c1410590dd61ba4ce0:166",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0084 F0545__MID1",
+            "index": 307,
+            "matchScore": 0.0,
+            "rowHash": "6bca79c89e50f6e367c72bfaf0865841f74ab8b6e161179d182fd6c0b99b630f",
+            "scenario": "fiw-expected-match",
+            "score": 0.041587,
+            "sourceHashPrefix": "cff098c14105",
+            "threshold": 0.5,
+            "validationBucket": "expected:match"
+          },
+          {
+            "actualPerson": "",
+            "candidateId": "public:fiw:antelopev2:fd9e1baae8537a7368bebf72:2",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0002 F0007__MID1",
+            "index": 317,
+            "matchScore": 0.0,
+            "rowHash": "94c913f0f980258a33587e758757b4fa599be900e60fedfe0060cb0b3329e8d4",
+            "scenario": "fiw-expected-match",
+            "score": 0.041587,
+            "sourceHashPrefix": "fd9e1baae853",
+            "threshold": 0.5,
+            "validationBucket": "expected:match"
+          },
+          {
+            "actualPerson": "",
+            "candidateId": "public:fiw:antelopev2:f6ced855636ccc5ec843728a:175",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0088 F0564__MID2",
+            "index": 315,
+            "matchScore": 0.0,
+            "rowHash": "986629901fa270ce4ec6fc3ab416241949a0455d0177ed0d70fe2b35c07c0d34",
+            "scenario": "fiw-expected-match",
+            "score": 0.041587,
+            "sourceHashPrefix": "f6ced855636c",
+            "threshold": 0.5,
+            "validationBucket": "expected:match"
+          },
+          {
+            "actualPerson": "0026 F0183__MID1",
+            "candidateId": "public:fiw:antelopev2:06919cbf5a4c7c37b905e28f:85",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0043 F0299__MID1",
+            "index": 248,
+            "matchScore": 0.23301,
+            "rowHash": "4f7451fa6b37e5cfeed0fd27da84ae0b07b088531c0ee74c9d75452f1ec74e8d",
+            "scenario": "fiw-pose-frontal",
+            "score": 0.050122,
+            "sourceHashPrefix": "06919cbf5a4c",
+            "threshold": 0.5,
+            "validationBucket": "pose:frontal"
+          },
+          {
+            "actualPerson": "0124 0124-Ali_Abdullah_Saleh",
+            "candidateId": "public:cplfw:antelopev2:5205cb214604bd3a9986cf2e:72",
+            "datasetId": "cplfw",
+            "difficulty": "cross-pose",
+            "expectedPerson": "0037 0037-Adrian_Murrell",
+            "index": 198,
+            "matchScore": 0.162519,
+            "rowHash": "20f0b19152f01ad0e53f4844fcec7f0fa62bb46bf2634c6019475ff67b7e6612",
+            "scenario": "cplfw-pose-profile",
+            "score": 0.069083,
+            "sourceHashPrefix": "5205cb214604",
+            "threshold": 0.5,
+            "validationBucket": "pose:profile"
+          },
+          {
+            "actualPerson": "0107 F0601__MID5",
+            "candidateId": "public:fiw:antelopev2:5be584dbd629fd0f744991e3:189",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0095 F0601__MID1",
+            "index": 274,
+            "matchScore": 0.271655,
+            "rowHash": "a4c8ed63c823a7f3d0cb19aedec747d8c1a02777c408d66f2a2cd015f7586f91",
+            "scenario": "fiw-pose-three-quarter",
+            "score": 0.080192,
+            "sourceHashPrefix": "5be584dbd629",
+            "threshold": 0.5,
+            "validationBucket": "pose:three-quarter"
+          },
+          {
+            "actualPerson": "0068 F0422__MID6",
+            "candidateId": "public:fiw:antelopev2:b485c2344d5cba7085528c8d:52",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0027 F0187__MID1",
+            "index": 295,
+            "matchScore": 0.288113,
+            "rowHash": "3fc5980dc512af2ce8cb64e122d36d7c63dfb69c645ca5f0c18416c833f77a0e",
+            "scenario": "fiw-pose-three-quarter",
+            "score": 0.084421,
+            "sourceHashPrefix": "b485c2344d5c",
+            "threshold": 0.5,
+            "validationBucket": "pose:three-quarter"
+          }
+        ],
+        "falsePositives": [
+          {
+            "actualPerson": "0042 0042-Agnelo_Queiroz",
+            "candidateId": "public:cplfw:antelopev2:fa1ee07277daed0005005369:271",
+            "datasetId": "cplfw",
+            "difficulty": "cross-pose",
+            "expectedPerson": "0136-Aline_Chretien",
+            "index": 244,
+            "matchScore": 0.258357,
+            "rowHash": "b0078c2db48756a260bf7e7f0aac70eb2cb0f6300fccfd65dfad6ce07e70725d",
+            "scenario": "cplfw-pose-profile",
+            "score": 0.574928,
+            "sourceHashPrefix": "fa1ee07277da",
+            "threshold": 0.5,
+            "validationBucket": "pose:profile"
+          },
+          {
+            "actualPerson": "0011 0011-MaryPickford",
+            "candidateId": "public:agedb:antelopev2:88aab7391e35f281fda90347:269",
+            "datasetId": "agedb",
+            "difficulty": "cross-pose",
+            "expectedPerson": "0135-ClaudetteColbert",
+            "index": 42,
+            "matchScore": 0.255823,
+            "rowHash": "216a447e6737d219b34879c4adc42361b1e15bd2136ffecf8ae8d147f73e7875",
+            "scenario": "agedb-pose-profile",
+            "score": 0.566014,
+            "sourceHashPrefix": "88aab7391e35",
+            "threshold": 0.5,
+            "validationBucket": "pose:profile"
+          }
+        ]
+      },
+      "onnxHead": {
+        "falseNegatives": [
+          {
+            "actualPerson": "0068 F0422__MID6",
+            "candidateId": "public:fiw:antelopev2:b485c2344d5cba7085528c8d:52",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0027 F0187__MID1",
+            "index": 295,
+            "matchScore": 0.288113,
+            "rowHash": "3fc5980dc512af2ce8cb64e122d36d7c63dfb69c645ca5f0c18416c833f77a0e",
+            "scenario": "fiw-pose-three-quarter",
+            "score": 0.0,
+            "sourceHashPrefix": "b485c2344d5c",
+            "threshold": 0.531261,
+            "validationBucket": "pose:three-quarter"
+          },
+          {
+            "actualPerson": "0064 F0422__MID1",
+            "candidateId": "public:fiw:antelopev2:96390d38af19f38706ab44a2:39",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0020 F0128__MID2",
+            "index": 292,
+            "matchScore": 0.34719,
+            "rowHash": "9e3d2fe585fd2f8300783ac40aacb12890225bf5f46b3bdd07a4c45367430aa6",
+            "scenario": "fiw-pose-three-quarter",
+            "score": 0.0,
+            "sourceHashPrefix": "96390d38af19",
+            "threshold": 0.531261,
+            "validationBucket": "pose:three-quarter"
+          },
+          {
+            "actualPerson": "0124 0124-Ali_Abdullah_Saleh",
+            "candidateId": "public:cplfw:antelopev2:5205cb214604bd3a9986cf2e:72",
+            "datasetId": "cplfw",
+            "difficulty": "cross-pose",
+            "expectedPerson": "0037 0037-Adrian_Murrell",
+            "index": 198,
+            "matchScore": 0.162519,
+            "rowHash": "20f0b19152f01ad0e53f4844fcec7f0fa62bb46bf2634c6019475ff67b7e6612",
+            "scenario": "cplfw-pose-profile",
+            "score": 1e-05,
+            "sourceHashPrefix": "5205cb214604",
+            "threshold": 0.531261,
+            "validationBucket": "pose:profile"
+          },
+          {
+            "actualPerson": "0018 0018-Abel_Pacheco",
+            "candidateId": "public:cplfw:antelopev2:be29660f51d0d8014aa9a6b5:35",
+            "datasetId": "cplfw",
+            "difficulty": "cross-pose",
+            "expectedPerson": "0018 0018-Abel_Pacheco",
+            "index": 225,
+            "matchScore": 0.296512,
+            "rowHash": "6fa6abd795563a562bd00a8cc8f8016fb7495d2c0198f2b2b1f26cfd50424db6",
+            "scenario": "cplfw-pose-profile",
+            "score": 0.011432,
+            "sourceHashPrefix": "be29660f51d0",
+            "threshold": 0.531261,
+            "validationBucket": "pose:profile"
+          },
+          {
+            "actualPerson": "0107 F0601__MID5",
+            "candidateId": "public:fiw:antelopev2:5be584dbd629fd0f744991e3:189",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0095 F0601__MID1",
+            "index": 274,
+            "matchScore": 0.271655,
+            "rowHash": "a4c8ed63c823a7f3d0cb19aedec747d8c1a02777c408d66f2a2cd015f7586f91",
+            "scenario": "fiw-pose-three-quarter",
+            "score": 0.039283,
+            "sourceHashPrefix": "5be584dbd629",
+            "threshold": 0.531261,
+            "validationBucket": "pose:three-quarter"
+          },
+          {
+            "actualPerson": "0052 F0353__MID4",
+            "candidateId": "public:fiw:antelopev2:c674f8435e8f65ff9593c0c7:106",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0054 F0358__MID4",
+            "index": 300,
+            "matchScore": 0.267313,
+            "rowHash": "20b3696f6e40e5802b77b25ec86e541b73ae7fbac5ae63e1b329cb0a90af0097",
+            "scenario": "fiw-pose-frontal",
+            "score": 0.100147,
+            "sourceHashPrefix": "c674f8435e8f",
+            "threshold": 0.531261,
+            "validationBucket": "pose:frontal"
+          },
+          {
+            "actualPerson": "",
+            "candidateId": "public:fiw:antelopev2:646f731fe729c45541855363:78",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0040 F0259__MID1",
+            "index": 276,
+            "matchScore": 0.0,
+            "rowHash": "008818bfd56f5484229f4a9e5a76579fccb4095c56febb8137ebab726198e065",
+            "scenario": "fiw-expected-match",
+            "score": 0.135573,
+            "sourceHashPrefix": "646f731fe729",
+            "threshold": 0.531261,
+            "validationBucket": "expected:match"
+          },
+          {
+            "actualPerson": "",
+            "candidateId": "public:fiw:antelopev2:8a8f005f5c6c5519b30ec9c8:237",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0119 F0673__MID5",
+            "index": 286,
+            "matchScore": 0.0,
+            "rowHash": "05316b84147f5f7edfb2fd25547f7c20dbe748ba58b346800142b7eff7bab2ab",
+            "scenario": "fiw-expected-match",
+            "score": 0.135573,
+            "sourceHashPrefix": "8a8f005f5c6c",
+            "threshold": 0.531261,
+            "validationBucket": "expected:match"
+          },
+          {
+            "actualPerson": "",
+            "candidateId": "public:fiw:antelopev2:ca799107e4a191c4565c6ea2:142",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0072 F0426__MID1",
+            "index": 304,
+            "matchScore": 0.0,
+            "rowHash": "3bb748672e2e6ccf4ea311ad1b1ef8e1e505f3d75f12f5a32e09908204cea36b",
+            "scenario": "fiw-expected-match",
+            "score": 0.135573,
+            "sourceHashPrefix": "ca799107e4a1",
+            "threshold": 0.531261,
+            "validationBucket": "expected:match"
+          },
+          {
+            "actualPerson": "",
+            "candidateId": "public:fiw:antelopev2:cff098c1410590dd61ba4ce0:166",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0084 F0545__MID1",
+            "index": 307,
+            "matchScore": 0.0,
+            "rowHash": "6bca79c89e50f6e367c72bfaf0865841f74ab8b6e161179d182fd6c0b99b630f",
+            "scenario": "fiw-expected-match",
+            "score": 0.135573,
+            "sourceHashPrefix": "cff098c14105",
+            "threshold": 0.531261,
+            "validationBucket": "expected:match"
+          },
+          {
+            "actualPerson": "",
+            "candidateId": "public:fiw:antelopev2:fd9e1baae8537a7368bebf72:2",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0002 F0007__MID1",
+            "index": 317,
+            "matchScore": 0.0,
+            "rowHash": "94c913f0f980258a33587e758757b4fa599be900e60fedfe0060cb0b3329e8d4",
+            "scenario": "fiw-expected-match",
+            "score": 0.135573,
+            "sourceHashPrefix": "fd9e1baae853",
+            "threshold": 0.531261,
+            "validationBucket": "expected:match"
+          },
+          {
+            "actualPerson": "",
+            "candidateId": "public:fiw:antelopev2:f6ced855636ccc5ec843728a:175",
+            "datasetId": "fiw",
+            "difficulty": "identity-match",
+            "expectedPerson": "0088 F0564__MID2",
+            "index": 315,
+            "matchScore": 0.0,
+            "rowHash": "986629901fa270ce4ec6fc3ab416241949a0455d0177ed0d70fe2b35c07c0d34",
+            "scenario": "fiw-expected-match",
+            "score": 0.135573,
+            "sourceHashPrefix": "f6ced855636c",
+            "threshold": 0.531261,
+            "validationBucket": "expected:match"
+          }
+        ],
+        "falsePositives": [
+          {
+            "actualPerson": "0073 0073-PatriciaNeal",
+            "candidateId": "public:agedb:antelopev2:fdbfaad45f8d9b0a75decfd4:319",
+            "datasetId": "agedb",
+            "difficulty": "non-match",
+            "expectedPerson": "0160-CydCharisse",
+            "index": 87,
+            "matchScore": 0.366524,
+            "rowHash": "2f6a5be0f214409523d95f49ddc10b78b0c58818a31059cc460fde99ae263fe6",
+            "scenario": "agedb-pose-frontal",
+            "score": 0.821247,
+            "sourceHashPrefix": "fdbfaad45f8d",
+            "threshold": 0.531261,
+            "validationBucket": "pose:frontal"
+          },
+          {
+            "actualPerson": "0120 F0685__MID1",
+            "candidateId": "public:fiw:antelopev2:72c1a5ddb96a444d90bce25c:264",
+            "datasetId": "fiw",
+            "difficulty": "non-match",
+            "expectedPerson": "F0752__MID3",
+            "index": 281,
+            "matchScore": 0.343692,
+            "rowHash": "9a7de0ccd7b2afa91ef876588be53a8bae287651d7f5c06089f3ece16f4ac3f6",
+            "scenario": "fiw-expected-non-match",
+            "score": 0.605313,
+            "sourceHashPrefix": "72c1a5ddb96a",
+            "threshold": 0.531261,
+            "validationBucket": "expected:non-match"
+          }
+        ]
+      }
+    },
+    "scoreSummary": {
+      "jsonAdapter": {
+        "negative": {
+          "count": 64,
+          "max": 0.574928,
+          "mean": 0.090296,
+          "min": 0.000218
+        },
+        "overall": {
+          "count": 320,
+          "max": 1.0,
+          "mean": 0.737412,
+          "min": 0.000218
+        },
+        "positive": {
+          "count": 256,
+          "max": 1.0,
+          "mean": 0.899192,
+          "min": 0.03902
+        },
+        "separation": {
+          "meanPositiveMinusMeanNegative": 0.808896,
+          "minPositiveMinusMaxNegative": -0.535908
+        }
+      },
+      "onnxHead": {
+        "negative": {
+          "count": 64,
+          "max": 0.821247,
+          "mean": 0.161507,
+          "min": 0.000211
+        },
+        "overall": {
+          "count": 320,
+          "max": 1.0,
+          "mean": 0.774616,
+          "min": 0.0
+        },
+        "positive": {
+          "count": 256,
+          "max": 1.0,
+          "mean": 0.927893,
+          "min": 0.0
+        },
+        "separation": {
+          "meanPositiveMinusMeanNegative": 0.766386,
+          "minPositiveMinusMaxNegative": -0.821247
+        }
+      }
+    },
+    "selectedThreshold": {
+      "deltaVsJsonAdapter": {
+        "accuracy": 0.009375,
+        "precision": 0.000107,
+        "recall": 0.011719,
+        "specificity": 0.0
+      },
+      "onnxHead": {
+        "accuracy": 0.934375,
+        "count": 320,
+        "falseNegatives": 19,
+        "falsePositives": 2,
+        "precision": 0.991632,
+        "recall": 0.925781,
+        "specificity": 0.96875,
+        "threshold": 0.531261,
+        "trueNegatives": 62,
+        "truePositives": 237
+      },
+      "threshold": 0.531261
+    },
+    "trainingCoverage": {
+      "coveredValidationRows": 315,
+      "missingValidationContexts": [
+        {
+          "contextKey": "pose=three-quarter|media=image|scoreZero=False|scoreLow=False|crossAge=False|crossPose=True|poseUnknown=False|hardPose=True|closeRunnerUp=False|singleReference=False|lowQuality=True",
+          "examples": [
+            {
+              "actualPerson": "0064 F0422__MID1",
+              "candidateId": "public:fiw:antelopev2:96390d38af19f38706ab44a2:39",
+              "datasetId": "fiw",
+              "difficulty": "identity-match",
+              "expectedPerson": "0020 F0128__MID2",
+              "index": 292,
+              "matchScore": 0.34719,
+              "rowHash": "9e3d2fe585fd2f8300783ac40aacb12890225bf5f46b3bdd07a4c45367430aa6",
+              "scenario": "fiw-pose-three-quarter",
+              "sourceHashPrefix": "96390d38af19",
+              "validationBucket": "pose:three-quarter"
+            },
+            {
+              "actualPerson": "0068 F0422__MID6",
+              "candidateId": "public:fiw:antelopev2:b485c2344d5cba7085528c8d:52",
+              "datasetId": "fiw",
+              "difficulty": "identity-match",
+              "expectedPerson": "0027 F0187__MID1",
+              "index": 295,
+              "matchScore": 0.288113,
+              "rowHash": "3fc5980dc512af2ce8cb64e122d36d7c63dfb69c645ca5f0c18416c833f77a0e",
+              "scenario": "fiw-pose-three-quarter",
+              "sourceHashPrefix": "b485c2344d5c",
+              "validationBucket": "pose:three-quarter"
+            }
+          ],
+          "label": "positive",
+          "trainingCount": 0,
+          "validationCount": 2
+        },
+        {
+          "contextKey": "pose=three-quarter|media=image|scoreZero=False|scoreLow=False|crossAge=False|crossPose=True|poseUnknown=False|hardPose=False|closeRunnerUp=False|singleReference=False|lowQuality=False",
+          "examples": [
+            {
+              "actualPerson": "0120 F0685__MID1",
+              "candidateId": "public:fiw:antelopev2:9121e3772b69e9ea918578d8:265",
+              "datasetId": "fiw",
+              "difficulty": "non-match",
+              "expectedPerson": "F0752__MID3",
+              "index": 289,
+              "matchScore": 0.351346,
+              "rowHash": "cdb6be05cf8070e6b3a552f29155d9d9fce884b290795e48bef96ab5e6e3b8d7",
+              "scenario": "fiw-expected-non-match",
+              "sourceHashPrefix": "9121e3772b69",
+              "validationBucket": "expected:non-match"
+            }
+          ],
+          "label": "negative",
+          "trainingCount": 0,
+          "validationCount": 1
+        },
+        {
+          "contextKey": "pose=profile|media=image|scoreZero=False|scoreLow=False|crossAge=False|crossPose=True|poseUnknown=False|hardPose=True|closeRunnerUp=False|singleReference=True|lowQuality=True",
+          "examples": [
+            {
+              "actualPerson": "0018 0018-Abel_Pacheco",
+              "candidateId": "public:cplfw:antelopev2:be29660f51d0d8014aa9a6b5:35",
+              "datasetId": "cplfw",
+              "difficulty": "cross-pose",
+              "expectedPerson": "0018 0018-Abel_Pacheco",
+              "index": 225,
+              "matchScore": 0.296512,
+              "rowHash": "6fa6abd795563a562bd00a8cc8f8016fb7495d2c0198f2b2b1f26cfd50424db6",
+              "scenario": "cplfw-pose-profile",
+              "sourceHashPrefix": "be29660f51d0",
+              "validationBucket": "pose:profile"
+            }
+          ],
+          "label": "positive",
+          "trainingCount": 0,
+          "validationCount": 1
+        },
+        {
+          "contextKey": "pose=profile|media=image|scoreZero=False|scoreLow=True|crossAge=False|crossPose=True|poseUnknown=False|hardPose=True|closeRunnerUp=False|singleReference=True|lowQuality=True",
+          "examples": [
+            {
+              "actualPerson": "0124 0124-Ali_Abdullah_Saleh",
+              "candidateId": "public:cplfw:antelopev2:5205cb214604bd3a9986cf2e:72",
+              "datasetId": "cplfw",
+              "difficulty": "cross-pose",
+              "expectedPerson": "0037 0037-Adrian_Murrell",
+              "index": 198,
+              "matchScore": 0.162519,
+              "rowHash": "20f0b19152f01ad0e53f4844fcec7f0fa62bb46bf2634c6019475ff67b7e6612",
+              "scenario": "cplfw-pose-profile",
+              "sourceHashPrefix": "5205cb214604",
+              "validationBucket": "pose:profile"
+            }
+          ],
+          "label": "positive",
+          "trainingCount": 0,
+          "validationCount": 1
+        }
+      ],
+      "missingValidationRows": 5,
+      "trainingContextCount": 24,
+      "validationContextCount": 21,
+      "validationRows": 320
+    }
+  },
+  "generatedAtUnix": 1781853768.556,
+  "input": {
+    "count": 320,
+    "minCount": 20,
+    "minPerClass": 5,
+    "negativeCount": 64,
+    "positiveCount": 256,
+    "rowsHash": "8af848e406dc8b441ef177e05e3e52ae54f942efe790d55a6763e51b57a5fdd3",
+    "scoresHash": "102bd24c7b5171f73e4458faa55f3488a17bde08a10a4ba9859b2ba50a61e79e"
+  },
+  "jsonAdapter": {
+    "artifact": {
+      "featureVersion": "pair-adapter-features-v2",
+      "inputCount": 960,
+      "trainer": "sklearn-logistic-regression",
+      "versionKey": "logistic-pair-adapter-v1"
+    },
+    "metrics": {
+      "accuracy": 0.925,
+      "count": 320,
+      "falseNegatives": 22,
+      "falsePositives": 2,
+      "precision": 0.991525,
+      "recall": 0.914062,
+      "specificity": 0.96875,
+      "threshold": 0.5,
+      "trueNegatives": 62,
+      "truePositives": 234
+    }
+  },
+  "notProductionAuthorization": true,
+  "onnxHead": {
+    "featureCount": 36,
+    "featureVersion": "onnx-tiny-head-app-context-features-v4",
+    "metrics": {
+      "accuracy": 0.934375,
+      "count": 320,
+      "falseNegatives": 19,
+      "falsePositives": 2,
+      "precision": 0.991632,
+      "recall": 0.925781,
+      "specificity": 0.96875,
+      "threshold": 0.531261,
+      "trueNegatives": 62,
+      "truePositives": 237
+    }
+  },
+  "reason": "ONNX scoring head matches or beats the JSON adapter baseline within tolerance.",
+  "reportHash": "6d130ca4cf518009b3e20210acd56339669cec5481ff4a8c45de6fe232a8a78c",
+  "schemaVersion": 1,
+  "scope": "phase5-onnx-training-validation",
+  "status": "pass",
+  "threshold": 0.5,
+  "thresholdCalibration": {
+    "baselineComparison": {
+      "baselineJsonAdapter": {
+        "accuracy": 0.951042,
+        "count": 960,
+        "falseNegatives": 44,
+        "falsePositives": 3,
+        "precision": 0.995873,
+        "recall": 0.942708,
+        "specificity": 0.984375,
+        "threshold": 0.5,
+        "trueNegatives": 189,
+        "truePositives": 724
+      },
+      "bestMeasurableGainNoRegression": {
+        "accuracy": 0.9625,
+        "bestMetricGain": 0.014323,
+        "count": 960,
+        "deltaVsJsonAdapter": {
+          "accuracy": 0.011458,
+          "precision": 6.2e-05,
+          "recall": 0.014323,
+          "specificity": 0.0
+        },
+        "falseNegatives": 33,
+        "falsePositives": 3,
+        "noCoreMetricRegression": true,
+        "precision": 0.995935,
+        "recall": 0.957031,
+        "specificity": 0.984375,
+        "threshold": 0.531261,
+        "trueNegatives": 189,
+        "truePositives": 735
+      },
+      "bestNoRegression": {
+        "accuracy": 0.9625,
+        "bestMetricGain": 0.014323,
+        "count": 960,
+        "deltaVsJsonAdapter": {
+          "accuracy": 0.011458,
+          "precision": 6.2e-05,
+          "recall": 0.014323,
+          "specificity": 0.0
+        },
+        "falseNegatives": 33,
+        "falsePositives": 3,
+        "noCoreMetricRegression": true,
+        "precision": 0.995935,
+        "recall": 0.957031,
+        "specificity": 0.984375,
+        "threshold": 0.531261,
+        "trueNegatives": 189,
+        "truePositives": 735
+      },
+      "candidateCount": 491,
+      "measurableGainNoRegressionCandidateCount": 17,
+      "minMetricGain": 0.01,
+      "noRegressionCandidateCount": 31
+    },
+    "baselineThreshold": 0.5,
+    "bestPrecision": {
+      "accuracy": 0.963542,
+      "count": 960,
+      "falseNegatives": 35,
+      "falsePositives": 0,
+      "precision": 1.0,
+      "recall": 0.954427,
+      "specificity": 1.0,
+      "threshold": 0.802455,
+      "trueNegatives": 192,
+      "truePositives": 733
+    },
+    "candidateCount": 491,
+    "fixedThreshold": {
+      "accuracy": 0.961458,
+      "count": 960,
+      "falseNegatives": 33,
+      "falsePositives": 4,
+      "precision": 0.994587,
+      "recall": 0.957031,
+      "specificity": 0.979167,
+      "threshold": 0.5,
+      "trueNegatives": 188,
+      "truePositives": 735
+    },
+    "policyStatus": "baseline-aware-measurable-gain",
+    "requestedThreshold": 0.5,
+    "scope": "phase5-onnx-training-threshold-calibration",
+    "scoreSummary": {
+      "negative": {
+        "count": 192,
+        "max": 0.697746,
+        "mean": 0.143867,
+        "min": 1.1e-05
+      },
+      "overall": {
+        "count": 960,
+        "max": 1.0,
+        "mean": 0.79728,
+        "min": 1.1e-05
+      },
+      "positive": {
+        "count": 768,
+        "max": 1.0,
+        "mean": 0.960634,
+        "min": 0.111453
+      },
+      "separation": {
+        "meanPositiveMinusMeanNegative": 0.816767,
+        "minPositiveMinusMaxNegative": -0.586293
+      }
+    },
+    "selected": {
+      "accuracy": 0.9625,
+      "bestMetricGain": 0.014323,
+      "count": 960,
+      "deltaVsJsonAdapter": {
+        "accuracy": 0.011458,
+        "precision": 6.2e-05,
+        "recall": 0.014323,
+        "specificity": 0.0
+      },
+      "falseNegatives": 33,
+      "falsePositives": 3,
+      "noCoreMetricRegression": true,
+      "precision": 0.995935,
+      "recall": 0.957031,
+      "specificity": 0.984375,
+      "threshold": 0.531261,
+      "trueNegatives": 189,
+      "truePositives": 735
+    },
+    "selectedByPolicy": "bestMeasurableGainNoRegression",
+    "selectionPolicy": "json-baseline-no-regression-first",
+    "source": "training-rows",
+    "unconstrainedSelected": {
+      "accuracy": 0.964583,
+      "count": 960,
+      "falseNegatives": 29,
+      "falsePositives": 5,
+      "precision": 0.99328,
+      "recall": 0.96224,
+      "specificity": 0.973958,
+      "threshold": 0.361976,
+      "trueNegatives": 187,
+      "truePositives": 739
+    }
+  },
+  "thresholds": {
+    "jsonAdapter": 0.5,
+    "onnxHead": 0.531261,
+    "requested": 0.5
+  },
+  "trainingConfig": {
+    "architecture": "mlp",
+    "epochs": 128,
+    "featureCount": 36,
+    "featurePreprocessing": {
+      "featureCount": 36,
+      "meansHash": "175588fb9993860d93ee8042432a162a510838925000483b6364b43a74493ef2",
+      "mode": "none",
+      "scalesHash": "6cfaf86c3c4787afecf4419ac9d85332a9bfb02299a91169d835b21a8467e357"
+    },
+    "featureVersion": "onnx-tiny-head-app-context-features-v4",
+    "hiddenUnits": 64,
+    "learningRate": 0.08
+  }
+}

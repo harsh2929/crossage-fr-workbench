@@ -5,3 +5,10 @@ faiss-cpu>=1.8
 hdbscan>=0.8
 ExifRead>=3.0
 pyinstaller>=6.0
+
+# Offline reverse geocoding (APL-PLACE-01): bundled GeoNames gazetteer, no runtime network.
+reverse_geocode>=1.6
+# On-device OCR (APL-INTEL-01/META-07): RapidOCR PP-OCRv5 ONNX over onnxruntime, offline.
+rapidocr-onnxruntime>=1.4
+# On-device tokenizer for SigLIP2 semantic search (APL-SEARCH-SEMANTIC): loads tokenizer.json from disk, offline at inference.
+tokenizers>=0.20

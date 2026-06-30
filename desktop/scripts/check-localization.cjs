@@ -8,8 +8,14 @@ const vm = require("vm");
 const repoRoot = path.resolve(__dirname, "..", "..");
 const i18nPath = path.join(repoRoot, "src", "i18n.ts");
 const appPath = path.join(repoRoot, "src", "App.tsx");
+const extraUiPaths = [
+  path.join(repoRoot, "src", "views", "PhotosView.tsx")
+];
 const source = fs.readFileSync(i18nPath, "utf8");
-const appSource = fs.readFileSync(appPath, "utf8");
+const appSource = [appPath, ...extraUiPaths]
+  .filter((filePath) => fs.existsSync(filePath))
+  .map((filePath) => fs.readFileSync(filePath, "utf8"))
+  .join("\n");
 const checks = [];
 
 function add(name, ok, detail, data = {}) {
@@ -95,12 +101,35 @@ const criticalLiterals = [
   "Move files",
   "Trash files",
   "Start camera",
-  "Capture best frame"
+  "Capture best frame",
+  "All Photos",
+  "No photos here yet",
+  "Photo preview",
+  "Add a person",
+  "Name them, add a few clear photos, and they'll appear in your people list.",
+  "Who is this?",
+  "Add their photos",
+  "Drag photos or a folder here",
+  "Review & add",
+  "Photos you add will preview here before they're saved.",
+  "Choose person photo folder"
 ];
 
 for (const language of nonEnglish) {
   const untranslated = criticalLiterals.filter((text) => i18n.translateUiText(language, text) === text);
   add(`critical literals ${language}`, untranslated.length === 0, untranslated.join(", ") || "covered", { untranslated });
+}
+
+const criticalUiMessages = [
+  ["addPerson.stagedReadyMany", { count: 3 }],
+  ["addPerson.addCountNamedMany", { count: 3, name: "Ada" }]
+];
+
+for (const language of nonEnglish) {
+  const untranslated = criticalUiMessages
+    .filter(([key, values]) => i18n.formatUiMessage(language, key, values) === i18n.formatUiMessage("en", key, values))
+    .map(([key]) => key);
+  add(`critical ui messages ${language}`, untranslated.length === 0, untranslated.join(", ") || "covered", { untranslated });
 }
 
 const visibleLiterals = visibleLiteralCandidates();

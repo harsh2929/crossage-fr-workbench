@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import deque
@@ -23,18 +23,20 @@ from crossage_fr.cluster import cluster_vectors
 from crossage_fr.crypto import DecryptionError, backup_passphrase, decrypt_bytes, encrypt_bytes, is_encrypted
 from crossage_fr.embed import EmbeddingEngine
 from crossage_fr.ingest import ImageLoadError, VideoLoadError, image_record_for_path, iter_image_paths, load_image, sample_video_frames
-from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, sha256_file, write_preview_image
+from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, RAW_IMAGE_EXTENSIONS, sha256_file, write_preview_image
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, configure_video_decoder_paths
 from crossage_fr.ingest.safety import SafetyAssessment, assess_image_safety, safety_model_report
 from crossage_fr.match import (
     accuracy_at_threshold,
     accuracy_from_label_rows,
+    band_for_score,
     group_hits,
     pose_review_supported,
     thresholds_for_pose,
     valid_candidate,
     valid_reference,
 )
+from crossage_fr.match import adapters as match_adapters
 from crossage_fr.match.age_gap import compute_age_gap, confidence_for_gap
 from crossage_fr.match.review_order import review_lane, review_priority
 from crossage_fr.match.calibration import (
@@ -135,6 +137,7 @@ def _video_note(metadata: dict[str, Any]) -> str:
 
 class ProjectState:
     def __init__(self, root: Path, actor: str = "backend"):
+        self.actor = actor
         self.root = root.expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock_path = self.root / ".state.lock"
@@ -1345,6 +1348,23 @@ class ProjectState:
                 _templates = self._person_templates(embedding.model_name)
                 _template_cosines = {p: template_cosine(embedding.vector, t) for p, t in _templates.items()} if _templates else None
                 decision = group_hits(hits, compatible_refs, pose_thresholds, pose_bucket=pose_bucket, candidate_quality=embedding.quality, candidate_capture_date=embedding_metadata.get("capture_date"), candidate_align_error=embedding.align_error, candidate_template_cosines=_template_cosines)
+                reference_capture_date = self._reference_capture_date(decision.best_ref_id) if decision is not None else None
+                reference_capture_date_provenance = self._reference_capture_date_provenance(decision.best_ref_id) if decision is not None else None
+                age_gap_years, age_gap_confidence, age_gap_flag = compute_age_gap(
+                    embedding_metadata.get("capture_date"),
+                    reference_capture_date,
+                    candidate_provenance=embedding_metadata.get("capture_date_provenance", "unknown"),
+                    reference_provenance=reference_capture_date_provenance,
+                ) if decision is not None else (None, None, "")
+                if decision is not None:
+                    decision = self._apply_embedding_adapter_to_decision(
+                        decision,
+                        embedding,
+                        pose_thresholds,
+                        pose_bucket,
+                        age_gap_years,
+                        embedding_metadata,
+                    )
                 decision_flags = set(decision.flags) if decision is not None else set()
                 if "pose-reranked" in decision_flags:
                     metrics["poseReranked"] += 1
@@ -1419,14 +1439,6 @@ class ProjectState:
                 if rescue_used:
                     candidate_note = self._append_candidate_note(candidate_note, "Recovered by the side-face detector; review before accepting.")
                 candidate_risk_flags = normalize_risk_flags(candidate_risk_flags, candidate_note)
-                reference_capture_date = self._reference_capture_date(decision.best_ref_id)
-                reference_capture_date_provenance = self._reference_capture_date_provenance(decision.best_ref_id)
-                age_gap_years, age_gap_confidence, age_gap_flag = compute_age_gap(
-                    embedding_metadata.get("capture_date"),
-                    reference_capture_date,
-                    candidate_provenance=embedding_metadata.get("capture_date_provenance", "unknown"),
-                    reference_provenance=reference_capture_date_provenance,
-                )
                 if age_gap_flag:
                     candidate_risk_flags = normalize_risk_flags(
                         [*candidate_risk_flags, age_gap_flag], candidate_note
@@ -1439,7 +1451,7 @@ class ProjectState:
                 )
                 candidate_review_priority = review_priority(
                     lane=candidate_review_lane,
-                    probability=self.match_probability(decision.score, embedding.model_name),
+                    probability=self.match_probability(decision.score, embedding.model_name, decision.person_name),
                     score=decision.score,
                 )
                 candidate = ReviewCandidate(
@@ -2465,12 +2477,110 @@ class ProjectState:
             self.db.safety_store(content_hash, model_version, self.config.safe_mode_threshold, assessment, conn)
         return assessment, content_hash
 
-    def set_candidate_status(self, candidate_id: str, status: str) -> None:
+    def _candidate_file_hash(self, candidate: ReviewCandidate) -> str:
+        file_hash = str(candidate.source_hash or "").strip()
+        if file_hash:
+            return file_hash
+        try:
+            return sha256_file(Path(candidate.source_path))
+        except Exception:
+            return ""
+
+    def _candidate_embedding_key(self, candidate: ReviewCandidate, file_hash: str) -> str:
+        model_name = str(candidate.model_name or "").strip()
+        if not file_hash or not model_name:
+            return ""
+        return f"sha256:{file_hash}|model:{model_name}|detector:{int(self.config.face_detector_size)}"
+
+    def _record_review_learning_example(self, candidate: ReviewCandidate, status: str) -> dict[str, str]:
+        """Persist the current accepted/rejected review as calibration + adapter input."""
+        if status not in {"accepted", "rejected"}:
+            try:
+                self.db.delete_training_examples_for_candidates([candidate.candidate_id])
+            except sqlite3.Error:
+                pass
+            return {"labelId": "", "exampleId": ""}
+        file_hash = self._candidate_file_hash(candidate)
+        is_match = status == "accepted"
+        label_id = new_id("label")
+        self.db.add_calibration_label(
+            label_id,
+            {
+                "sourcePath": candidate.source_path,
+                "fileHash": file_hash,
+                "expectedPerson": candidate.person_name,
+                "actualPerson": candidate.person_name if is_match else "",
+                "matchScore": candidate.score,
+                "isMatch": is_match,
+                "poseBucket": candidate.pose_bucket,
+                "ageGapYears": candidate.age_gap_years,
+                "rawCosine": candidate.raw_cosine,
+                "modelName": candidate.model_name,
+            },
+        )
+        reference = self.references.get(str(candidate.best_ref_id or ""))
+        features = {
+            "band": candidate.band,
+            "matchScore": candidate.score,
+            "rawCosine": candidate.raw_cosine,
+            "quality": candidate.quality,
+            "poseBucket": candidate.pose_bucket,
+            "ageGapYears": candidate.age_gap_years,
+            "alignError": candidate.align_error,
+            "iedPx": candidate.ied_px,
+            "reviewPriority": candidate.review_priority,
+            "reviewLane": candidate.review_lane,
+            "riskFlags": list(candidate.risk_flags),
+            "videoTimestampMs": candidate.video_timestamp_ms,
+        }
+        example_id = new_id("train")
+        self.db.add_training_example(
+            example_id,
+            {
+                "labelId": label_id,
+                "candidateId": candidate.candidate_id,
+                "sourcePath": candidate.source_path,
+                "sourceHash": file_hash,
+                "expectedPerson": candidate.person_name,
+                "actualPerson": candidate.person_name if is_match else "",
+                "isMatch": is_match,
+                "matchScore": candidate.score,
+                "rawCosine": candidate.raw_cosine,
+                "quality": candidate.quality,
+                "modelName": candidate.model_name,
+                "detectorSize": int(self.config.face_detector_size),
+                "candidateEmbeddingKey": self._candidate_embedding_key(candidate, file_hash),
+                "bestRefId": candidate.best_ref_id or "",
+                "bestRefPath": candidate.best_ref_path or "",
+                "referenceModelName": reference.model_name if reference else "",
+                "poseBucket": candidate.pose_bucket,
+                "ageGapYears": candidate.age_gap_years,
+                "alignError": candidate.align_error,
+                "iedPx": candidate.ied_px,
+                "mediaKind": candidate.media_kind,
+                "features": features,
+            },
+        )
+        return {"labelId": label_id, "exampleId": example_id}
+
+    def set_candidate_status(self, candidate_id: str, status: str) -> dict[str, Any] | None:
         if status not in {"pending", "accepted", "rejected", "uncertain"}:
             raise ValueError(f"Unsupported review status: {status}")
         candidate = self.candidates[candidate_id]
+        previous = {
+            "status": candidate.status,
+            "personName": candidate.person_name,
+            "score": candidate.score,
+            "quality": candidate.quality,
+            "band": candidate.band,
+            "bestRefId": candidate.best_ref_id or "",
+            "bestRefPath": candidate.best_ref_path or "",
+            "note": candidate.note,
+        }
+        operation_snapshot = self.db.review_candidate_correction_undo_snapshot(candidate=candidate)
         candidate.status = status
         self._mark_candidate_dirty(candidate_id)
+        learning = self._record_review_learning_example(candidate, status)
         self._append_audit(
             {
                 "action": "set_candidate_status",
@@ -2480,30 +2590,49 @@ class ProjectState:
                 "person_name": candidate.person_name,
                 "score": candidate.score,
                 "band": candidate.band,
+                "label_id": learning.get("labelId", ""),
+                "training_example_id": learning.get("exampleId", ""),
             }
         )
-        if status in {"accepted", "rejected"}:
-            file_hash = ""
-            try:
-                file_hash = sha256_file(Path(candidate.source_path))
-            except Exception:
-                file_hash = ""
-            self.db.add_calibration_label(
-                new_id("label"),
-                {
-                    "sourcePath": candidate.source_path,
-                    "fileHash": file_hash,
-                    "expectedPerson": candidate.person_name,
-                    "actualPerson": candidate.person_name if status == "accepted" else "",
-                    "matchScore": candidate.score,
-                    "isMatch": status == "accepted",
-                    "poseBucket": candidate.pose_bucket,
-                    "ageGapYears": candidate.age_gap_years,
-                    "rawCosine": candidate.raw_cosine,
-                    "modelName": candidate.model_name,
-                },
-            )
         self.save()
+        if previous["status"] == status:
+            return None
+        status_label = {
+            "pending": "Needs review",
+            "accepted": "Accepted",
+            "rejected": "Rejected",
+            "uncertain": "Not sure",
+        }.get(status, status)
+        operation = self.db.record_review_candidate_correction_operation(
+            operation_type="review_candidate_decision",
+            label=f"Marked {candidate.person_name} review as {status_label}",
+            candidate_id=candidate_id,
+            snapshot=operation_snapshot,
+            affected_count=1,
+            payload={
+                "action": "set_candidate_status",
+                "personName": previous["personName"],
+                "sourcePath": candidate.source_path,
+                "sourceFilename": Path(candidate.source_path).name,
+                "statusBefore": previous["status"],
+                "statusAfter": candidate.status,
+                "scoreBefore": previous["score"],
+                "scoreAfter": candidate.score,
+                "qualityBefore": previous["quality"],
+                "qualityAfter": candidate.quality,
+                "bandBefore": previous["band"],
+                "bandAfter": candidate.band,
+                "bestRefIdBefore": previous["bestRefId"],
+                "bestRefIdAfter": candidate.best_ref_id or "",
+                "bestRefPathBefore": previous["bestRefPath"],
+                "bestRefPathAfter": candidate.best_ref_path or "",
+                "noteBefore": previous["note"],
+                "noteAfter": candidate.note,
+                "labelId": learning.get("labelId", ""),
+                "trainingExampleId": learning.get("exampleId", ""),
+            },
+        )
+        return operation
 
     def set_candidate_note(self, candidate_id: str, note: str) -> None:
         candidate = self.candidates[candidate_id]
@@ -2531,6 +2660,25 @@ class ProjectState:
         if not file_hash:
             raise ValueError("This match cannot be blocked because its file hash is unavailable.")
         best_ref_id = candidate.best_ref_id or ""
+        blocked_pair_rows = [
+            {
+                "fileHash": file_hash,
+                "personName": candidate.person_name,
+                "bestRefId": best_ref_id,
+            }
+        ]
+        if best_ref_id:
+            blocked_pair_rows.append(
+                {
+                    "fileHash": file_hash,
+                    "personName": candidate.person_name,
+                    "bestRefId": "",
+                }
+            )
+        operation_snapshot = self.db.review_candidate_correction_undo_snapshot(
+            candidate=candidate,
+            blocked_pairs=blocked_pair_rows,
+        )
         self.db.add_blocked_pair(
             {
                 "fileHash": file_hash,
@@ -2555,21 +2703,7 @@ class ProjectState:
         candidate.status = "rejected"
         candidate.note = self._append_candidate_note(candidate.note, "Do not suggest this image/person pair again.")
         self._mark_candidate_dirty(candidate_id)
-        self.db.add_calibration_label(
-            new_id("label"),
-            {
-                "sourcePath": candidate.source_path,
-                "fileHash": file_hash,
-                "expectedPerson": candidate.person_name,
-                "actualPerson": "",
-                "matchScore": candidate.score,
-                "isMatch": False,
-                "poseBucket": candidate.pose_bucket,
-                "ageGapYears": candidate.age_gap_years,
-                "rawCosine": candidate.raw_cosine,
-                "modelName": candidate.model_name,
-            },
-        )
+        learning = self._record_review_learning_example(candidate, "rejected")
         self._append_audit(
             {
                 "action": "block_false_match",
@@ -2578,16 +2712,43 @@ class ProjectState:
                 "person_name": candidate.person_name,
                 "best_ref_id": best_ref_id,
                 "blocked_rows": blocked_count,
+                "label_id": learning.get("labelId", ""),
+                "training_example_id": learning.get("exampleId", ""),
             }
         )
         self.save()
-        return {"blocked": blocked_count, "summary": self.db.blocked_pairs_summary(limit=5)}
+        operation = self.db.record_review_candidate_correction_operation(
+            operation_type="person_match_remove",
+            label=f"Removed {operation_snapshot.get('candidate', {}).get('person_name', candidate.person_name)} from photo match",
+            candidate_id=candidate_id,
+            snapshot=operation_snapshot,
+            affected_count=1 + blocked_count,
+            payload={
+                "action": "block_false_match",
+                "personName": operation_snapshot.get("candidate", {}).get("person_name", candidate.person_name),
+                "sourcePath": candidate.source_path,
+                "sourceFilename": Path(candidate.source_path).name,
+                "statusBefore": operation_snapshot.get("candidate", {}).get("status", ""),
+                "statusAfter": candidate.status,
+                "scoreBefore": operation_snapshot.get("candidate", {}).get("score", 0.0),
+                "qualityBefore": operation_snapshot.get("candidate", {}).get("quality", 0.0),
+                "bandBefore": operation_snapshot.get("candidate", {}).get("band", ""),
+                "bandAfter": candidate.band,
+                "bestRefIdBefore": operation_snapshot.get("candidate", {}).get("best_ref_id", "") or "",
+                "bestRefPathBefore": operation_snapshot.get("candidate", {}).get("best_ref_path", "") or "",
+                "noteBefore": operation_snapshot.get("candidate", {}).get("note", ""),
+                "noteAfter": candidate.note,
+                "blockedRows": blocked_count,
+            },
+        )
+        return {"blocked": blocked_count, "summary": self.db.blocked_pairs_summary(limit=5), "operation": operation}
 
     def reassign_candidate_person(self, candidate_id: str, person_name: str, clear_reference: bool = True) -> dict[str, Any]:
         target = person_name.strip()
         if not target:
             raise ValueError("Choose the person this match belongs to.")
         candidate = self.candidates[candidate_id]
+        operation_snapshot = self.db.review_candidate_correction_undo_snapshot(candidate=candidate)
         previous = {
             "personName": candidate.person_name,
             "bestRefId": candidate.best_ref_id,
@@ -2615,7 +2776,32 @@ class ProjectState:
             }
         )
         self.save()
-        return {"candidateId": candidate_id, "previous": previous, "personName": target}
+        operation = self.db.record_review_candidate_correction_operation(
+            operation_type="person_match_reassign",
+            label=f"Moved match from {previous['personName']} to {target}",
+            candidate_id=candidate_id,
+            snapshot=operation_snapshot,
+            affected_count=1,
+            payload={
+                "action": "reassign_candidate_person",
+                "sourcePath": candidate.source_path,
+                "sourceFilename": Path(candidate.source_path).name,
+                "oldPersonName": previous["personName"],
+                "newPersonName": target,
+                "oldStatus": previous["status"],
+                "newStatus": candidate.status,
+                "oldScore": previous["score"],
+                "newScore": candidate.score,
+                "oldBand": previous["band"],
+                "newBand": candidate.band,
+                "oldBestRefId": previous["bestRefId"] or "",
+                "newBestRefId": candidate.best_ref_id or "",
+                "oldBestRefPath": previous["bestRefPath"] or "",
+                "newBestRefPath": candidate.best_ref_path or "",
+                "clearReference": bool(clear_reference),
+            },
+        )
+        return {"candidateId": candidate_id, "previous": previous, "personName": target, "operation": operation}
 
     def bulk_set_candidate_status(self, candidate_ids: list[str], status: str) -> int:
         if status not in {"pending", "accepted", "rejected", "uncertain"}:
@@ -2624,8 +2810,13 @@ class ProjectState:
         missing = [candidate_id for candidate_id in unique_ids if candidate_id not in self.candidates]
         if missing:
             raise KeyError(f"Candidate not found: {missing[0]}")
+        learning_examples = 0
         for candidate_id in unique_ids:
-            self.candidates[candidate_id].status = status
+            candidate = self.candidates[candidate_id]
+            candidate.status = status
+            learning = self._record_review_learning_example(candidate, status)
+            if learning.get("exampleId"):
+                learning_examples += 1
         self._mark_candidates_dirty(unique_ids)
         self._append_audit(
             {
@@ -2633,13 +2824,357 @@ class ProjectState:
                 "status": status,
                 "count": len(unique_ids),
                 "candidate_ids": unique_ids[:40],
+                "training_examples": learning_examples,
             }
         )
         self.save()
         return len(unique_ids)
 
+    def _vector_cosine(self, left: list[float], right: list[float]) -> float:
+        if not left or not right or len(left) != len(right):
+            return 0.0
+        dot = 0.0
+        left_norm = 0.0
+        right_norm = 0.0
+        for left_value, right_value in zip(left, right):
+            try:
+                a = float(left_value)
+                b = float(right_value)
+            except (TypeError, ValueError):
+                return 0.0
+            dot += a * b
+            left_norm += a * a
+            right_norm += b * b
+        if left_norm <= 0.0 or right_norm <= 0.0:
+            return 0.0
+        return dot / math.sqrt(left_norm * right_norm)
+
+    def _reference_suggestion_training_hash(self, payload: dict[str, Any]) -> str:
+        body = {
+            "candidateId": str(payload.get("candidateId", "") or ""),
+            "personName": str(payload.get("personName", "") or ""),
+            "sourceHash": str(payload.get("sourceHash", "") or ""),
+            "modelName": str(payload.get("modelName", "") or ""),
+            "versionKey": "suggested-reference-v1",
+        }
+        return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    def _suggested_reference_artifact_candidate_ids(self) -> set[str]:
+        result: set[str] = set()
+        for artifact in self.db.learned_artifact_rows("suggested_reference", limit=200):
+            if str(artifact.get("status", "")) not in {"staged", "promoted"}:
+                continue
+            payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+            candidate_id = str(payload.get("candidateId", payload.get("candidate_id", "")) or "")
+            if candidate_id:
+                result.add(candidate_id)
+        return result
+
+    def reference_suggestion_candidates(self, limit: int = 80) -> list[ReviewCandidate]:
+        existing = self._suggested_reference_artifact_candidate_ids()
+        candidates = [
+            candidate
+            for candidate in self.candidates.values()
+            if candidate.status == "accepted" and candidate.candidate_id not in existing
+        ]
+        candidates.sort(key=lambda item: (-float(item.score), -float(item.quality), str(item.created_at), item.candidate_id))
+        return candidates[: max(1, min(500, int(limit or 80)))]
+
+    def _evaluate_reference_suggestion(
+        self,
+        candidate: ReviewCandidate,
+        embedding: EmbeddingResult,
+        expected_source_hash: str = "",
+    ) -> dict[str, Any]:
+        reasons: list[str] = []
+        source = Path(candidate.source_path).expanduser()
+        file_hash = candidate.source_hash or ""
+        if source.exists() and not file_hash:
+            try:
+                file_hash = sha256_file(source)
+            except Exception:
+                file_hash = ""
+        if not source.exists():
+            reasons.append("missing-source")
+        if expected_source_hash and file_hash and file_hash != expected_source_hash:
+            reasons.append("source-changed")
+        if candidate.status != "accepted":
+            reasons.append("not-accepted")
+        if self.config.require_consent and not self.consent_for_person(candidate.person_name):
+            reasons.append("consent-required")
+        embedding_model = str(embedding.model_name or candidate.model_name or "").strip()
+        if candidate.model_name and embedding_model and not self._compatible_reference_model_name(candidate.model_name, embedding_model):
+            reasons.append("model-mismatch")
+        score_min = float(self.config.thresholds.likely)
+        if float(candidate.score) < score_min:
+            reasons.append("score-too-low")
+        quality = max(float(candidate.quality or 0.0), float(embedding.quality or 0.0))
+        if quality < self.REFERENCE_SUGGESTION_MIN_QUALITY:
+            reasons.append("quality-too-low")
+        align_error = float(embedding.align_error or candidate.align_error or 0.0)
+        if align_error and align_error > self.REFERENCE_SUGGESTION_MAX_ALIGN_ERROR:
+            reasons.append("alignment-too-high")
+        ied_px = float(embedding.ied_px or candidate.ied_px or 0.0)
+        if ied_px and ied_px < self.REFERENCE_SUGGESTION_MIN_IED_PX:
+            reasons.append("face-too-small")
+        same_person_refs = [
+            ref
+            for ref in self.references.values()
+            if ref.person_name.casefold() == candidate.person_name.casefold()
+            and self._compatible_reference_model_name(embedding_model, ref.model_name)
+        ]
+        if not same_person_refs:
+            reasons.append("no-compatible-reference")
+        duplicate_source = bool(file_hash and any(ref.source_hash == file_hash for ref in same_person_refs))
+        if duplicate_source:
+            reasons.append("duplicate-source")
+        best_ref_id = ""
+        best_ref_cosine = 0.0
+        for ref in same_person_refs:
+            cosine = self._vector_cosine(embedding.vector, ref.vector)
+            if cosine > best_ref_cosine:
+                best_ref_cosine = cosine
+                best_ref_id = ref.ref_id
+        if same_person_refs and best_ref_cosine >= self.REFERENCE_SUGGESTION_DUPLICATE_COSINE:
+            reasons.append("duplicate-reference")
+        if same_person_refs and best_ref_cosine < self.REFERENCE_SUGGESTION_OUTLIER_MIN_COSINE:
+            reasons.append("embedding-outlier")
+        pose_bucket = self._normalized_pose_bucket(embedding.pose_bucket or candidate.pose_bucket)
+        metrics = {
+            "score": float(candidate.score),
+            "scoreMinimum": score_min,
+            "candidateQuality": float(candidate.quality or 0.0),
+            "embeddingQuality": float(embedding.quality or 0.0),
+            "quality": quality,
+            "qualityMinimum": self.REFERENCE_SUGGESTION_MIN_QUALITY,
+            "alignError": align_error,
+            "alignErrorMaximum": self.REFERENCE_SUGGESTION_MAX_ALIGN_ERROR,
+            "iedPx": ied_px,
+            "iedPxMinimum": self.REFERENCE_SUGGESTION_MIN_IED_PX,
+            "bestReferenceCosine": best_ref_cosine,
+            "duplicateCosine": self.REFERENCE_SUGGESTION_DUPLICATE_COSINE,
+            "outlierMinimumCosine": self.REFERENCE_SUGGESTION_OUTLIER_MIN_COSINE,
+            "bestReferenceId": best_ref_id,
+            "reasons": sorted(set(reasons)),
+        }
+        payload = {
+            "candidateId": candidate.candidate_id,
+            "personName": candidate.person_name,
+            "ageBucket": "unknown",
+            "sourceHash": file_hash,
+            "modelName": embedding_model,
+            "candidateModelName": candidate.model_name,
+            "bestRefId": candidate.best_ref_id or best_ref_id,
+            "bestReferenceId": best_ref_id,
+            "score": float(candidate.score),
+            "quality": quality,
+            "poseBucket": pose_bucket,
+            "mediaKind": candidate.media_kind,
+            "captureDate": candidate.capture_date,
+            "captureDateProvenance": candidate.capture_date_provenance or "unknown",
+            "acceptedAt": candidate.created_at,
+            "versionKey": "suggested-reference-v1",
+        }
+        return {
+            "eligible": not reasons,
+            "reasons": sorted(set(reasons)),
+            "metrics": metrics,
+            "payload": payload,
+            "trainingDataHash": self._reference_suggestion_training_hash(payload),
+        }
+
+    def stage_reference_suggestions(
+        self,
+        embeddings_by_candidate_id: dict[str, EmbeddingResult],
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        limit = max(1, min(50, int(limit or 20)))
+        if str(getattr(self.config, "learning_mode", "manual") or "manual") == "off":
+            return {
+                "staged": 0,
+                "suggestions": [],
+                "rejected": [],
+                "skipped": [{"reason": "learning-off"}],
+                "summary": self.reference_suggestion_status(),
+            }
+        if self.config.require_consent and not self.consent_on_file():
+            return {
+                "staged": 0,
+                "suggestions": [],
+                "rejected": [],
+                "skipped": [{"reason": "consent-required"}],
+                "summary": self.reference_suggestion_status(),
+            }
+        existing = self._suggested_reference_artifact_candidate_ids()
+        suggestions: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for candidate in self.reference_suggestion_candidates(limit=limit * 4):
+            if len(suggestions) >= limit:
+                break
+            if candidate.candidate_id in existing:
+                skipped.append({"candidateId": candidate.candidate_id, "reason": "already-suggested"})
+                continue
+            embedding = embeddings_by_candidate_id.get(candidate.candidate_id)
+            if embedding is None:
+                skipped.append({"candidateId": candidate.candidate_id, "reason": "missing-embedding"})
+                continue
+            evaluation = self._evaluate_reference_suggestion(candidate, embedding)
+            if not evaluation["eligible"]:
+                rejected.append({"candidateId": candidate.candidate_id, "personName": candidate.person_name, "reasons": evaluation["reasons"], "metrics": evaluation["metrics"]})
+                continue
+            payload = evaluation["payload"]
+            metrics = evaluation["metrics"]
+            artifact_id = new_id("learn")
+            artifact = self.db.upsert_learned_artifact(
+                artifact_id,
+                {
+                    "artifactType": "suggested_reference",
+                    "status": "staged",
+                    "modelName": payload["modelName"],
+                    "versionKey": "suggested-reference-v1",
+                    "trainingDataHash": evaluation["trainingDataHash"],
+                    "inputCount": 1,
+                    "positiveCount": 1,
+                    "negativeCount": 0,
+                    "metrics": metrics,
+                    "payload": payload,
+                },
+            )
+            row = {**artifact, "artifactType": "suggested_reference", "metrics": metrics, "payload": payload}
+            suggestions.append(row)
+            existing.add(candidate.candidate_id)
+            self._append_audit(
+                {
+                    "action": "stage_reference_suggestion",
+                    "artifact_id": artifact_id,
+                    "artifact_hash": artifact.get("artifactHash", ""),
+                    "candidate_id": candidate.candidate_id,
+                    "person_name": candidate.person_name,
+                    "source_hash": payload["sourceHash"],
+                    "model_name": payload["modelName"],
+                    "score": payload["score"],
+                    "quality": payload["quality"],
+                    "best_reference_cosine": metrics["bestReferenceCosine"],
+                }
+            )
+        return {
+            "staged": len(suggestions),
+            "suggestions": suggestions,
+            "rejected": rejected,
+            "skipped": skipped,
+            "summary": self.reference_suggestion_status(),
+        }
+
+    def reference_suggestion_status(self, limit: int = 20) -> dict[str, Any]:
+        artifacts = self.db.learned_artifact_rows("suggested_reference", limit=max(1, min(100, int(limit or 20))))
+        counts: dict[str, int] = {}
+        for artifact in artifacts:
+            status = str(artifact.get("status", ""))
+            counts[status] = counts.get(status, 0) + 1
+        return {
+            "artifacts": artifacts,
+            "counts": counts,
+            "staged": counts.get("staged", 0),
+            "promoted": counts.get("promoted", 0),
+            "rejected": counts.get("rejected", 0),
+        }
+
+    def approve_reference_suggestion(
+        self,
+        artifact_id: str,
+        embedding: EmbeddingResult,
+        operator: str = "",
+    ) -> dict[str, Any]:
+        artifact = self.db.learned_artifact_by_id(artifact_id)
+        if not artifact or artifact.get("artifact_type") != "suggested_reference":
+            raise ValueError("No suggested reference artifact is available for approval.")
+        if artifact.get("status") != "staged":
+            raise ValueError("Only staged suggested references can be approved.")
+        self._require_learning_consent("approving a suggested reference")
+        payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+        candidate_id = str(payload.get("candidateId", payload.get("candidate_id", "")) or "")
+        candidate = self.candidates.get(candidate_id)
+        if candidate is None:
+            raise ValueError("The source candidate for this reference suggestion is no longer available.")
+        evaluation = self._evaluate_reference_suggestion(candidate, embedding, expected_source_hash=str(payload.get("sourceHash", "") or ""))
+        if not evaluation["eligible"]:
+            self.db.update_learned_artifact_status(str(artifact["artifact_id"]), "rejected")
+            self._append_audit(
+                {
+                    "action": "approve_reference_suggestion",
+                    "artifact_id": artifact["artifact_id"],
+                    "approved": False,
+                    "candidate_id": candidate_id,
+                    "reasons": evaluation["reasons"],
+                }
+            )
+            raise ValueError(f"Suggested reference failed final validation: {', '.join(evaluation['reasons'])}")
+        source_hash = str(evaluation["payload"].get("sourceHash", "") or "")
+        ref = ReferenceFace(
+            ref_id=new_id("ref"),
+            person_name=candidate.person_name,
+            age_bucket=str(payload.get("ageBucket", "unknown") or "unknown"),
+            source_path=candidate.source_path,
+            capture_date=candidate.capture_date,
+            quality=float(embedding.quality or candidate.quality or 0.0),
+            model_name=str(embedding.model_name or candidate.model_name or ""),
+            vector=list(embedding.vector),
+            source_hash=source_hash,
+            pose_bucket=self._normalized_pose_bucket(embedding.pose_bucket or candidate.pose_bucket),
+            capture_date_provenance=candidate.capture_date_provenance or "unknown",
+        )
+        self.references[ref.ref_id] = ref
+        self.vector_store.add(ref.ref_id, ref.vector)
+        self._invalidate_reference_indexes()
+        promoted_at = now_iso()
+        self.db.update_learned_artifact_status(str(artifact["artifact_id"]), "promoted", promoted_at=promoted_at)
+        self._append_audit(
+            {
+                "action": "approve_reference_suggestion",
+                "approved": True,
+                "artifact_id": artifact["artifact_id"],
+                "artifact_hash": artifact.get("artifact_hash", ""),
+                "ref_id": ref.ref_id,
+                "candidate_id": candidate_id,
+                "person_name": ref.person_name,
+                "source_hash": source_hash,
+                "model_name": ref.model_name,
+                "quality": ref.quality,
+                "operator": str(operator or self.actor)[:120],
+            }
+        )
+        self.save()
+        return {
+            "approved": True,
+            "artifactId": artifact["artifact_id"],
+            "artifactHash": artifact.get("artifact_hash", ""),
+            "refId": ref.ref_id,
+            "reference": asdict(ref),
+            "promotedAt": promoted_at,
+            "summary": self.reference_suggestion_status(),
+        }
+
+    def reject_reference_suggestion(self, artifact_id: str, reason: str = "") -> dict[str, Any]:
+        artifact = self.db.learned_artifact_by_id(artifact_id)
+        if not artifact or artifact.get("artifact_type") != "suggested_reference":
+            raise ValueError("No suggested reference artifact is available for rejection.")
+        if artifact.get("status") not in {"candidate", "staged"}:
+            raise ValueError("Only candidate or staged suggested references can be rejected.")
+        self.db.update_learned_artifact_status(str(artifact["artifact_id"]), "rejected")
+        self._append_audit(
+            {
+                "action": "reject_reference_suggestion",
+                "artifact_id": artifact["artifact_id"],
+                "artifact_hash": artifact.get("artifact_hash", ""),
+                "reason": str(reason or "")[:300],
+            }
+        )
+        return {"rejected": True, "artifactId": artifact["artifact_id"], "summary": self.reference_suggestion_status()}
+
     def clear_candidates(self) -> None:
         count = len(self.candidates)
+        candidate_ids = list(self.candidates.keys())
         self.candidates.clear()
         self._candidate_dirty_ids.clear()
         self._candidate_deleted_ids.clear()
@@ -2647,7 +3182,8 @@ class ProjectState:
             self.db.clear_candidates()
         except sqlite3.Error:
             pass
-        self._append_audit({"action": "clear_candidates", "count": count})
+        deleted_suggestions = self.db.delete_suggested_reference_artifacts(candidate_ids=candidate_ids, statuses={"staged", "candidate"})
+        self._append_audit({"action": "clear_candidates", "count": count, "suggested_reference_artifacts_deleted": deleted_suggestions})
         self.save()
 
     def purge_candidates(self, statuses: list[str]) -> int:
@@ -2656,6 +3192,7 @@ class ProjectState:
         if not status_set or not status_set <= allowed:
             raise ValueError("Purge statuses must be selected from pending, accepted, rejected, and uncertain.")
         to_delete = [candidate_id for candidate_id, candidate in self.candidates.items() if candidate.status in status_set]
+        deleted_suggestions = self.db.delete_suggested_reference_artifacts(candidate_ids=to_delete, statuses={"staged", "candidate"})
         self._mark_candidates_deleted(to_delete)
         for candidate_id in to_delete:
             self.candidates.pop(candidate_id, None)
@@ -2664,6 +3201,7 @@ class ProjectState:
                 "action": "purge_candidates",
                 "statuses": sorted(status_set),
                 "count": len(to_delete),
+                "suggested_reference_artifacts_deleted": deleted_suggestions,
             }
         )
         self.save()
@@ -2800,15 +3338,16 @@ class ProjectState:
         for candidate_id in candidate_ids:
             self.candidates.pop(candidate_id, None)
         self._mark_candidates_deleted(candidate_ids)
+        deleted_suggestions = self.db.delete_suggested_reference_artifacts(person_names=[person_name.strip()])
         self.vector_store.rebuild({item_id: item.vector for item_id, item in self.references.items()})
         if ref_ids:
             self._invalidate_reference_indexes()
-        result = {"references": len(ref_ids), "candidates": len(candidate_ids)}
+        result = {"references": len(ref_ids), "candidates": len(candidate_ids), "suggestedReferenceArtifacts": deleted_suggestions}
         self._append_audit({"action": "delete_person", "person_name": person_name.strip(), **result})
         self.save()
         return result
 
-    def rename_person(self, old_name: str, new_name: str) -> dict[str, int]:
+    def rename_person(self, old_name: str, new_name: str) -> dict[str, Any]:
         old_clean = old_name.strip()
         new_clean = new_name.strip()
         if not old_clean or not new_clean:
@@ -2816,6 +3355,20 @@ class ProjectState:
         old_key = old_clean.casefold()
         if old_key == new_clean.casefold():
             return {"references": 0, "candidates": 0}
+        reference_undo_rows: list[dict[str, str]] = []
+        candidate_ids: list[str] = []
+        for ref in self.references.values():
+            if ref.person_name.casefold() == old_key:
+                reference_undo_rows.append({"refId": ref.ref_id, "personName": ref.person_name, "sourcePath": ref.source_path})
+        for candidate in self.candidates.values():
+            if candidate.person_name.casefold() == old_key:
+                candidate_ids.append(candidate.candidate_id)
+        self._flush_candidate_index()
+        operation_snapshot = self.db.photo_person_label_undo_snapshot(
+            old_name=old_clean,
+            new_name=new_clean,
+            candidate_ids=candidate_ids,
+        )
         references = 0
         candidates = 0
         for ref in self.references.values():
@@ -2839,7 +3392,43 @@ class ProjectState:
             }
         )
         self.save()
-        return {"references": references, "candidates": candidates}
+        photo_profile = self.db.rename_photo_person_profile(old_clean, new_clean)
+        photo_people_rows = operation_snapshot.get("photoPeopleRows", []) if isinstance(operation_snapshot, dict) else []
+        operation = self.db.record_photo_person_label_operation(
+            operation_type="person_label_merge" if bool(photo_profile.get("profileMerged")) else "person_label_rename",
+            label=(
+                f"Merged person {old_clean} into {new_clean}"
+                if bool(photo_profile.get("profileMerged"))
+                else f"Renamed person {old_clean} to {new_clean}"
+            ),
+            old_name=old_clean,
+            new_name=new_clean,
+            references=reference_undo_rows,
+            snapshot=operation_snapshot if isinstance(operation_snapshot, dict) else {},
+            affected_count=references + candidates + len(photo_people_rows),
+        )
+        return {"references": references, "candidates": candidates, **photo_profile, "operation": operation}
+
+    def restore_person_label_references(self, undo_payload: dict[str, Any]) -> int:
+        if not isinstance(undo_payload, dict):
+            return 0
+        old_person = str(undo_payload.get("oldPersonName", "") or "").strip()
+        rows = undo_payload.get("references", [])
+        restored = 0
+        for row in (rows if isinstance(rows, list) else []):
+            if not isinstance(row, dict):
+                continue
+            ref_id = str(row.get("refId", "") or "").strip()
+            person_name = str(row.get("personName", "") or old_person).strip() or old_person
+            ref = self.references.get(ref_id)
+            if ref is None or not person_name:
+                continue
+            ref.person_name = person_name
+            restored += 1
+        if restored:
+            self._invalidate_reference_indexes()
+            self.save(snapshot_candidates=True, flush_candidate_index=False)
+        return restored
 
     def purge_old_candidates(self, days: int, statuses: list[str] | None = None) -> int:
         days = max(1, min(3650, int(days)))
@@ -2860,6 +3449,14 @@ class ProjectState:
                 continue
             if created < cutoff:
                 to_delete.append(candidate_id)
+        deleted_examples = 0
+        deleted_suggestions = 0
+        if to_delete:
+            try:
+                deleted_examples = self.db.delete_training_examples_for_candidates(to_delete)
+            except sqlite3.Error:
+                deleted_examples = 0
+            deleted_suggestions = self.db.delete_suggested_reference_artifacts(candidate_ids=to_delete, statuses={"staged", "candidate"})
         for candidate_id in to_delete:
             self.candidates.pop(candidate_id, None)
         self._mark_candidates_deleted(to_delete)
@@ -2870,6 +3467,8 @@ class ProjectState:
                 "statuses": sorted(status_set),
                 "count": len(to_delete),
                 "skipped_undated": skipped_undated,
+                "training_examples_deleted": deleted_examples,
+                "suggested_reference_artifacts_deleted": deleted_suggestions,
             }
         )
         self.save()
@@ -3118,9 +3717,303 @@ class ProjectState:
             self.save()
         return result
 
+    def _path_inside_workspace(self, value: str) -> bool:
+        try:
+            path = Path(str(value or "")).expanduser().resolve()
+            root = self.root.resolve()
+            return path == root or root in path.parents
+        except (OSError, RuntimeError):
+            return False
+
+    def _photos_manifest_root_profiles(self, settings: dict[str, Any], asset_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        workspace_default = str((self.root / "photo-library" / "managed").expanduser().resolve())
+        roots = [dict(root) for root in settings.get("managedRoots", []) if isinstance(root, dict)]
+        if not any(str(root.get("path", "") or "") == workspace_default for root in roots):
+            roots.append({
+                "profileId": "workspaceDefaultManagedRoot",
+                "name": "Workspace managed library",
+                "path": workspace_default,
+                "isDefault": not bool(str(settings.get("defaultManagedRoot", "") or "").strip()),
+                "builtIn": True,
+            })
+        profiles: list[dict[str, Any]] = []
+        for root in roots:
+            root_path_text = str(root.get("path", "") or "").strip()
+            if not root_path_text:
+                continue
+            try:
+                root_path = Path(root_path_text).expanduser().resolve()
+                inside_workspace = self._path_inside_workspace(str(root_path))
+            except (OSError, RuntimeError):
+                root_path = Path(root_path_text)
+                inside_workspace = False
+            asset_count = 0
+            for asset in asset_rows:
+                if str(asset.get("sourceKind", "") or "").lower() != "managed":
+                    continue
+                source = str(asset.get("sourcePath", "") or "")
+                try:
+                    source_path = Path(source).expanduser().resolve()
+                    if source_path == root_path or root_path in source_path.parents:
+                        asset_count += 1
+                except (OSError, RuntimeError):
+                    continue
+            profiles.append({
+                "profileId": str(root.get("profileId", "") or ""),
+                "name": str(root.get("name", "") or Path(root_path_text).name or "Managed library"),
+                "path": root_path_text,
+                "isDefault": bool(root.get("isDefault", False)),
+                "builtIn": bool(root.get("builtIn", False)),
+                "insideWorkspace": inside_workspace,
+                "assetCount": asset_count,
+                "includedInWorkspaceBackup": bool(inside_workspace),
+                "requiresExternalBackup": bool(asset_count and not inside_workspace),
+            })
+        return profiles
+
+    def _photos_backup_manifest(self, include_generated: bool) -> dict[str, Any]:
+        counts: dict[str, int] = {
+            "assets": 0,
+            "managedAssets": 0,
+            "referencedAssets": 0,
+            "missingOriginals": 0,
+            "missingManagedOriginals": 0,
+            "missingReferencedOriginals": 0,
+            "workspaceBackedOriginals": 0,
+            "externalOriginals": 0,
+            "referencedOriginalsOutsideWorkspace": 0,
+            "managedOriginalsOutsideWorkspace": 0,
+            "albums": 0,
+            "albumFolders": 0,
+            "albumItems": 0,
+            "metadataRows": 0,
+            "keywordAssignments": 0,
+            "peopleLinks": 0,
+            "savedFilters": 0,
+            "editStacks": 0,
+        }
+        media_pairs = {
+            "livePhotoAssets": 0,
+            "pairedMotionFiles": 0,
+            "pairedMotionMissing": 0,
+            "pairedMotionIncludedInWorkspaceBackup": 0,
+            "pairedMotionExternal": 0,
+            "catalogRows": 0,
+            "nonLivePairRows": 0,
+            "kinds": {},
+            "relatedFiles": 0,
+            "relatedFilesMissing": 0,
+            "relatedFilesIncludedInWorkspaceBackup": 0,
+            "relatedFilesExternal": 0,
+            "samples": [],
+            "nonLiveSamples": [],
+        }
+        asset_rows: list[dict[str, Any]] = []
+        media_pair_rows: list[dict[str, Any]] = []
+        settings: dict[str, Any] = {}
+        try:
+            settings = self.db.photo_library_settings()
+            with self.db.connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT asset_id, source_path, source_kind, media_kind, missing_at, metadata_json
+                    FROM photo_assets
+                    ORDER BY added_at ASC, asset_id ASC
+                    """
+                ).fetchall()
+                asset_rows = [
+                    {
+                        "assetId": str(row["asset_id"] or ""),
+                        "sourcePath": str(row["source_path"] or ""),
+                        "sourceKind": str(row["source_kind"] or "referenced"),
+                        "mediaKind": str(row["media_kind"] or "image"),
+                        "missingAt": str(row["missing_at"] or ""),
+                        "metadataJson": str(row["metadata_json"] or "{}"),
+                    }
+                    for row in rows
+                ]
+                for key, sql in {
+                    "metadataRows": "SELECT COUNT(*) AS n FROM photo_asset_metadata",
+                    "keywordAssignments": "SELECT COUNT(*) AS n FROM photo_asset_keywords",
+                    "peopleLinks": "SELECT COUNT(*) AS n FROM photo_asset_people",
+                    "albums": "SELECT COUNT(*) AS n FROM photo_albums",
+                    "albumFolders": "SELECT COUNT(*) AS n FROM photo_album_folders",
+                    "albumItems": "SELECT COUNT(*) AS n FROM photo_album_items",
+                    "savedFilters": "SELECT COUNT(*) AS n FROM photo_saved_filters",
+                    "editStacks": "SELECT COUNT(*) AS n FROM photo_edit_stacks",
+                }.items():
+                    row = conn.execute(sql).fetchone()
+                    counts[key] = int(row["n"] if row else 0)
+                try:
+                    pair_rows = conn.execute(
+                        """
+                        SELECT p.pair_id, p.asset_id, p.related_asset_id, p.pair_kind,
+                               p.source_path, p.related_source_path, p.metadata_json,
+                               related.source_path AS related_asset_source_path
+                        FROM photo_media_pairs AS p
+                        LEFT JOIN photo_assets AS related ON related.asset_id = p.related_asset_id
+                        ORDER BY p.updated_at ASC, p.pair_id ASC
+                        """
+                    ).fetchall()
+                    media_pair_rows = [
+                        {
+                            "pairId": str(row["pair_id"] or ""),
+                            "assetId": str(row["asset_id"] or ""),
+                            "relatedAssetId": str(row["related_asset_id"] or ""),
+                            "pairKind": str(row["pair_kind"] or ""),
+                            "sourcePath": str(row["source_path"] or ""),
+                            "relatedSourcePath": str(row["related_source_path"] or ""),
+                            "relatedAssetSourcePath": str(row["related_asset_source_path"] or ""),
+                            "metadataJson": str(row["metadata_json"] or "{}"),
+                        }
+                        for row in pair_rows
+                    ]
+                except sqlite3.DatabaseError:
+                    media_pair_rows = []
+        except sqlite3.DatabaseError as exc:
+            return {
+                "schemaVersion": 1,
+                "includeGenerated": bool(include_generated),
+                "error": str(exc),
+                "counts": counts,
+            }
+
+        for asset in asset_rows:
+            counts["assets"] += 1
+            source_path = str(asset.get("sourcePath", "") or "")
+            source_kind = str(asset.get("sourceKind", "") or "referenced").lower()
+            is_managed = source_kind == "managed"
+            counts["managedAssets" if is_managed else "referencedAssets"] += 1
+            inside_workspace = self._path_inside_workspace(source_path)
+            if inside_workspace:
+                counts["workspaceBackedOriginals"] += 1
+            else:
+                counts["externalOriginals"] += 1
+                counts["managedOriginalsOutsideWorkspace" if is_managed else "referencedOriginalsOutsideWorkspace"] += 1
+            source_exists = False
+            try:
+                source_exists = Path(source_path).expanduser().is_file()
+            except (OSError, RuntimeError):
+                source_exists = False
+            if not source_exists:
+                counts["missingOriginals"] += 1
+                counts["missingManagedOriginals" if is_managed else "missingReferencedOriginals"] += 1
+
+            metadata: dict[str, Any] = {}
+            try:
+                parsed = json.loads(str(asset.get("metadataJson", "{}") or "{}"))
+                metadata = parsed if isinstance(parsed, dict) else {}
+            except (TypeError, ValueError):
+                metadata = {}
+            live_photo = metadata.get("livePhoto") if isinstance(metadata.get("livePhoto"), dict) else {}
+            paired_path = str(live_photo.get("pairedVideoPath", "") or "").strip()
+            if str(asset.get("mediaKind", "") or "") == "live_photo" or paired_path:
+                media_pairs["livePhotoAssets"] += 1
+            if paired_path:
+                pair_exists = False
+                try:
+                    pair_exists = Path(paired_path).expanduser().is_file()
+                except (OSError, RuntimeError):
+                    pair_exists = False
+                if pair_exists:
+                    media_pairs["pairedMotionFiles"] += 1
+                else:
+                    media_pairs["pairedMotionMissing"] += 1
+                if self._path_inside_workspace(paired_path):
+                    media_pairs["pairedMotionIncludedInWorkspaceBackup"] += 1
+                else:
+                    media_pairs["pairedMotionExternal"] += 1
+                samples = media_pairs["samples"]
+                if isinstance(samples, list) and len(samples) < 12:
+                    samples.append({
+                        "assetId": str(asset.get("assetId", "") or ""),
+                        "sourcePath": source_path,
+                        "pairedVideoPath": paired_path,
+                        "exists": pair_exists,
+                        "includedInWorkspaceBackup": self._path_inside_workspace(paired_path),
+                    })
+
+        for pair in media_pair_rows:
+            kind = str(pair.get("pairKind", "") or "unknown").strip().lower() or "unknown"
+            media_pairs["catalogRows"] += 1
+            kinds = media_pairs["kinds"]
+            if isinstance(kinds, dict):
+                kinds[kind] = int(kinds.get(kind, 0)) + 1
+            if kind != "live_photo":
+                media_pairs["nonLivePairRows"] += 1
+
+            metadata: dict[str, Any] = {}
+            try:
+                parsed = json.loads(str(pair.get("metadataJson", "{}") or "{}"))
+                metadata = parsed if isinstance(parsed, dict) else {}
+            except (TypeError, ValueError):
+                metadata = {}
+            related_path = (
+                str(pair.get("relatedAssetSourcePath", "") or "").strip()
+                or str(pair.get("relatedSourcePath", "") or "").strip()
+                or str(metadata.get("relatedSourcePath", "") or "").strip()
+                or str(metadata.get("path", "") or "").strip()
+            )
+            if not related_path:
+                continue
+            related_exists = False
+            try:
+                related_exists = Path(related_path).expanduser().is_file()
+            except (OSError, RuntimeError):
+                related_exists = False
+            if related_exists:
+                media_pairs["relatedFiles"] += 1
+            else:
+                media_pairs["relatedFilesMissing"] += 1
+            included_in_workspace = self._path_inside_workspace(related_path)
+            if included_in_workspace:
+                media_pairs["relatedFilesIncludedInWorkspaceBackup"] += 1
+            else:
+                media_pairs["relatedFilesExternal"] += 1
+            if kind != "live_photo":
+                non_live_samples = media_pairs["nonLiveSamples"]
+                if isinstance(non_live_samples, list) and len(non_live_samples) < 12:
+                    non_live_samples.append({
+                        "pairId": str(pair.get("pairId", "") or ""),
+                        "assetId": str(pair.get("assetId", "") or ""),
+                        "relatedAssetId": str(pair.get("relatedAssetId", "") or ""),
+                        "pairKind": kind,
+                        "sourcePath": str(pair.get("sourcePath", "") or ""),
+                        "relatedSourcePath": related_path,
+                        "exists": related_exists,
+                        "includedInWorkspaceBackup": included_in_workspace,
+                    })
+
+        root_profiles = self._photos_manifest_root_profiles(settings, asset_rows)
+        backup_policy = settings.get("backupPolicy", {}) if isinstance(settings.get("backupPolicy"), dict) else {}
+        return {
+            "schemaVersion": 1,
+            "includeGenerated": bool(include_generated),
+            "settings": {
+                "defaultStorageMode": settings.get("defaultStorageMode", "referenced"),
+                "defaultManagedRoot": settings.get("defaultManagedRoot", ""),
+                "managedRoots": root_profiles,
+                "backupPolicy": backup_policy,
+            },
+            "counts": counts,
+            "coverage": {
+                "workspaceBackedOriginals": counts["workspaceBackedOriginals"],
+                "externalOriginals": counts["externalOriginals"],
+                "referencedOriginalsOutsideWorkspace": counts["referencedOriginalsOutsideWorkspace"],
+                "managedOriginalsOutsideWorkspace": counts["managedOriginalsOutsideWorkspace"],
+                "missingOriginals": counts["missingOriginals"],
+                "rootProfilesRequiringExternalBackup": sum(1 for root in root_profiles if root.get("requiresExternalBackup")),
+            },
+            "mediaPairs": media_pairs,
+            "note": "Photos originals and paired motion files outside the active workspace require external backup coverage.",
+        }
+
     def export_workspace_backup(self, folder: Path | None = None, include_generated: bool = True) -> dict[str, Any]:
         export_root = (folder or self.root / "exports").expanduser().resolve()
         export_root.mkdir(parents=True, exist_ok=True)
+        # Ensure DB-first / Photos-only workspaces still produce the legacy core
+        # JSON files that backup verification and restore summaries require.
+        self.save(snapshot_candidates=True)
         stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
         backup_path = export_root / f"vintrace-workspace-backup-{stamp}.zip"
         counter = 2
@@ -3137,6 +4030,7 @@ class ProjectState:
                 "candidates": len(self.candidates),
                 "scanRuns": len(self.scan_history),
             },
+            "photos": self._photos_backup_manifest(include_generated=bool(include_generated)),
             "note": "Backup contains Vintrace workspace metadata and generated workspace files, not original source media outside the workspace.",
         }
         include_dirs = {"exports"}
@@ -5548,22 +6442,183 @@ class ProjectState:
     # overlapping hard negative could push the wrong way; this is the documented fix.
     CALIBRATION_MIN_LABELS = 20
     CALIBRATION_MIN_PER_CLASS = 5
+    CALIBRATION_AUTO_STAGE_MIN_NEW_LABELS = 10
+    ADAPTER_MIN_LABELS = 100
+    ADAPTER_MIN_PER_CLASS = 25
+    ADAPTER_CONTEXT_TARGETS = (
+        {
+            "id": "negative-cross-pose-low-score",
+            "label": "Rejected low-score hard-pose matches",
+            "desiredLabel": "negative",
+            "minCount": 5,
+            "action": "Review and reject low-score profile or three-quarter possible matches.",
+        },
+        {
+            "id": "positive-cross-pose-hard",
+            "label": "Accepted hard-pose matches",
+            "desiredLabel": "positive",
+            "minCount": 5,
+            "action": "Review and accept real profile or three-quarter matches.",
+        },
+        {
+            "id": "negative-video-low-score",
+            "label": "Rejected low-score video-frame matches",
+            "desiredLabel": "negative",
+            "minCount": 3,
+            "action": "Review and reject low-score video-frame possible matches.",
+        },
+        {
+            "id": "positive-video",
+            "label": "Accepted video-frame matches",
+            "desiredLabel": "positive",
+            "minCount": 3,
+            "action": "Review and accept real video-frame matches.",
+        },
+        {
+            "id": "negative-cross-age-low-score",
+            "label": "Rejected low-score cross-age matches",
+            "desiredLabel": "negative",
+            "minCount": 3,
+            "action": "Review and reject low-score cross-age possible matches.",
+        },
+        {
+            "id": "positive-cross-age",
+            "label": "Accepted cross-age matches",
+            "desiredLabel": "positive",
+            "minCount": 3,
+            "action": "Review and accept real cross-age matches.",
+        },
+        {
+            "id": "negative-unknown-or-zero-score",
+            "label": "Rejected unknown-pose or zero-score matches",
+            "desiredLabel": "negative",
+            "minCount": 5,
+            "action": "Review and reject unknown-pose or zero-score possible matches.",
+        },
+    )
+    REFERENCE_SUGGESTION_MIN_QUALITY = 0.55
+    REFERENCE_SUGGESTION_MIN_IED_PX = 24.0
+    REFERENCE_SUGGESTION_MAX_ALIGN_ERROR = 0.18
+    REFERENCE_SUGGESTION_DUPLICATE_COSINE = 0.995
+    REFERENCE_SUGGESTION_OUTLIER_MIN_COSINE = 0.20
     # Target false-match rates that define each band's operating point on the user's
     # own labeled impostors (recall-first cross-age band tolerates more false matches).
     CALIBRATION_TARGET_FMR = {"confident": 0.01, "likely": 0.10, "relaxed_child": 0.30}
 
-    def apply_calibration_to_config(self) -> dict[str, Any]:
-        # Replaces the (min_positive + max_negative)/2 midpoint with a probabilistic
-        # fit + FMR-targeted thresholds on the user's accept/reject labels. Fits on the
-        # fused match score (what band_for_score actually bands), keeping the operating
-        # point self-consistent with the live decision path. NOTE: this is a regularized
-        # GLOBAL fit; a held-out split is preferable once enough labels accumulate.
+    def _workspace_state_lock_active(self) -> bool:
+        try:
+            if not self.lock_path.exists():
+                return False
+            return time.time() - self.lock_path.stat().st_mtime <= 45
+        except OSError:
+            return False
+
+    def _require_learning_consent(self, action: str = "running learning jobs") -> None:
+        if self._workspace_state_lock_active():
+            raise ValueError("Workspace state is locked; try again after the current operation finishes.")
+        if str(getattr(self.config, "learning_mode", "manual") or "manual") == "off":
+            raise ValueError("Learning mode is Off; choose Manual suggestions or Auto-stage before running learning.")
+        if self.config.require_consent and not self.consent_on_file():
+            raise ValueError(f"Consent must be active before {action}.")
+
+    def _calibration_scoped_rows(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str, int]:
         all_rows = self.db.calibration_label_rows()
         # Phase 3.4: cosines from different recognizers live in different embedding
-        # spaces, so only fit on the dominant model's labels and TAG the result with it.
+        # spaces, so fit on the dominant model's labels and TAG the result with it.
+        # Legacy/imported labels may be untagged; keep them with the dominant scope
+        # instead of discarding a useful local validation set after the first tagged
+        # review decision lands.
         models = [str(row.get("modelName") or "") for row in all_rows if row.get("modelName")]
         dominant_model = max(set(models), key=models.count) if models else ""
-        rows = [row for row in all_rows if str(row.get("modelName") or "") == dominant_model] if dominant_model else all_rows
+        rows = [
+            row for row in all_rows
+            if str(row.get("modelName") or "") in {"", dominant_model}
+        ] if dominant_model else all_rows
+        dropped = sum(
+            1 for row in all_rows
+            if str(row.get("modelName") or "") not in {"", dominant_model}
+        ) if dominant_model else 0
+        return all_rows, rows, dominant_model, dropped
+
+    def _calibration_training_hash(self, rows: list[dict[str, Any]]) -> str:
+        payload = json.dumps(rows, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _calibration_validation_regressed(self, validation: dict[str, Any]) -> bool:
+        return "baselineAccuracy" in validation and float(validation.get("delta", 0.0)) < -0.02
+
+    def _calibration_learning_readiness(
+        self,
+        rows: list[dict[str, Any]] | None = None,
+        dominant_model: str = "",
+        dropped: int = 0,
+    ) -> dict[str, Any]:
+        if rows is None:
+            _, rows, dominant_model, dropped = self._calibration_scoped_rows()
+        current_hash = self._calibration_training_hash(rows)
+        latest = self.db.latest_learned_artifact("calibration")
+        latest_hash = str(latest.get("training_data_hash", "") or "") if latest else ""
+        latest_count = int(latest.get("input_count", 0) or 0) if latest else 0
+        if latest_hash and latest_hash == current_hash:
+            new_labels = 0
+        elif latest:
+            new_labels = max(0, len(rows) - latest_count)
+        else:
+            new_labels = len(rows)
+        positives = sum(1 for row in rows if row.get("isMatch"))
+        negatives = len(rows) - positives
+        consent_required = bool(getattr(self.config, "require_consent", True))
+        consent_active = bool(self.consent_on_file())
+        learning_mode = str(getattr(self.config, "learning_mode", "manual") or "manual")
+        ready = True
+        reason = "Ready to stage a learned calibration artifact."
+        if self._workspace_state_lock_active():
+            ready = False
+            reason = "Workspace state is locked; wait for the current operation to finish before running learning jobs."
+        elif learning_mode == "off":
+            ready = False
+            reason = "Learning mode is Off."
+        elif consent_required and not consent_active:
+            ready = False
+            reason = "Consent must be active before running learning jobs."
+        elif len(rows) < self.CALIBRATION_MIN_LABELS or positives < self.CALIBRATION_MIN_PER_CLASS or negatives < self.CALIBRATION_MIN_PER_CLASS:
+            ready = False
+            reason = (
+                "Review more accepted and rejected matches before staging calibration "
+                f"(need {self.CALIBRATION_MIN_LABELS} labels with {self.CALIBRATION_MIN_PER_CLASS}+ of each)."
+            )
+        elif latest_hash and latest_hash == current_hash:
+            ready = False
+            reason = "Current reviewed feedback already has a calibration artifact."
+        elif latest and new_labels < self.CALIBRATION_AUTO_STAGE_MIN_NEW_LABELS:
+            ready = False
+            remaining = self.CALIBRATION_AUTO_STAGE_MIN_NEW_LABELS - new_labels
+            reason = f"Review at least {remaining} more accepted/rejected match{'' if remaining == 1 else 'es'} before auto-staging again."
+        return {
+            "ready": ready,
+            "reason": reason,
+            "labels": len(rows),
+            "positiveLabels": positives,
+            "negativeLabels": negatives,
+            "labelsDroppedOtherModel": int(dropped),
+            "dominantModel": dominant_model,
+            "minimumLabels": self.CALIBRATION_MIN_LABELS,
+            "minimumPerClass": self.CALIBRATION_MIN_PER_CLASS,
+            "autoStageMinNewLabels": self.CALIBRATION_AUTO_STAGE_MIN_NEW_LABELS,
+            "newLabelsSinceLastArtifact": new_labels,
+            "currentTrainingDataHash": current_hash,
+            "latestArtifactId": str(latest.get("artifact_id", "") or "") if latest else "",
+            "latestArtifactStatus": str(latest.get("status", "") or "") if latest else "",
+            "latestTrainingDataHash": latest_hash,
+            "latestInputCount": latest_count,
+            "consentRequired": consent_required,
+            "consentActive": consent_active,
+            "workspaceLocked": self._workspace_state_lock_active(),
+            "learningMode": learning_mode,
+        }
+
+    def _build_calibration_candidate(self) -> dict[str, Any]:
+        all_rows, rows, dominant_model, dropped = self._calibration_scoped_rows()
         calibrator = fit_score_calibrator(
             rows,
             min_count=self.CALIBRATION_MIN_LABELS,
@@ -5576,16 +6631,6 @@ class ProjectState:
                 f"(need at least {self.CALIBRATION_MIN_LABELS} labels with "
                 f"{self.CALIBRATION_MIN_PER_CLASS}+ of each)."
             )
-        # §6 guardrail: refuse to move the live operating point if the change REGRESSES on
-        # a held-out (by-identity) split of THIS user's own labels -- a benchmarked gain
-        # that does not generalize locally must not silently degrade the thresholds.
-        # Equal-or-better still adopts (the calibrator adds the probability map + FMR bands).
-        validation = self.validate_calibration_change()
-        if "baselineAccuracy" in validation and float(validation.get("delta", 0.0)) < -0.02:
-            self._append_audit(
-                {"action": "apply_calibration_to_config", "promoted": False, "reason": validation.get("reason", "held-out regression")}
-            )
-            return {"promoted": False, "validation": validation, "summary": self.calibration_summary(), "config": asdict(self.config)}
         scores = [float(row["matchScore"]) for row in rows]
         labels = [1.0 if row["isMatch"] else 0.0 for row in rows]
 
@@ -5598,11 +6643,87 @@ class ProjectState:
         # Enforce strictly-descending bands (config validation requires it).
         likely = min(likely, confident)
         relaxed = min(relaxed, likely)
-        self.config.thresholds.confident = confident
-        self.config.thresholds.likely = likely
-        self.config.thresholds.relaxed_child = relaxed
-        self.config.calibration_platt = calibrator.to_list()
-        self.config.calibration_model = dominant_model
+        validation = self.validate_calibration_change(rows=rows)
+        positives = int(sum(labels))
+        negatives = len(labels) - positives
+        previous = {
+            "thresholds": asdict(self.config.thresholds),
+            "calibrationPlatt": list(self.config.calibration_platt),
+            "calibrationModel": str(self.config.calibration_model or ""),
+        }
+        payload = {
+            "thresholds": {
+                "confident": confident,
+                "likely": likely,
+                "relaxedChild": relaxed,
+                "relaxed_child": relaxed,
+            },
+            "platt": calibrator.to_list(),
+            "calibrationModel": dominant_model,
+            "previousConfig": previous,
+            "targetFmr": dict(self.CALIBRATION_TARGET_FMR),
+            "labels": len(rows),
+            "positiveLabels": positives,
+            "negativeLabels": negatives,
+            "labelsDroppedOtherModel": dropped,
+            "trainingDataHash": self._calibration_training_hash(rows),
+        }
+        metrics = {
+            "validation": validation,
+            "labels": len(rows),
+            "positiveLabels": positives,
+            "negativeLabels": negatives,
+            "labelsDroppedOtherModel": dropped,
+            "thresholds": payload["thresholds"],
+        }
+        return {
+            "payload": payload,
+            "metrics": metrics,
+            "validation": validation,
+            "rows": rows,
+            "allRows": all_rows,
+            "dominantModel": dominant_model,
+            "trainingDataHash": payload["trainingDataHash"],
+            "promotable": not self._calibration_validation_regressed(validation),
+        }
+
+    def _threshold_payload_value(self, thresholds: dict[str, Any], snake: str, camel: str) -> float:
+        value = thresholds.get(snake)
+        if value is None:
+            value = thresholds.get(camel)
+        return float(value)
+
+    def _apply_calibration_payload(self, payload: dict[str, Any]) -> None:
+        thresholds = payload.get("thresholds")
+        if not isinstance(thresholds, dict):
+            raise ValueError("Calibration artifact is missing thresholds.")
+        platt = payload.get("platt", payload.get("calibrationPlatt", []))
+        if not isinstance(platt, list):
+            raise ValueError("Calibration artifact is missing Platt parameters.")
+        if platt and len(platt) != 2:
+            raise ValueError("Calibration artifact has invalid Platt parameters.")
+        self.config.thresholds.confident = self._threshold_payload_value(thresholds, "confident", "confident")
+        self.config.thresholds.likely = self._threshold_payload_value(thresholds, "likely", "likely")
+        self.config.thresholds.relaxed_child = self._threshold_payload_value(thresholds, "relaxed_child", "relaxedChild")
+        self.config.calibration_platt = [float(platt[0]), float(platt[1])] if platt else []
+        self.config.calibration_model = str(payload.get("calibrationModel", payload.get("calibration_model", "")) or "")
+
+    def apply_calibration_to_config(self) -> dict[str, Any]:
+        # Replaces the (min_positive + max_negative)/2 midpoint with a probabilistic
+        # fit + FMR-targeted thresholds on the user's accept/reject labels. Fits on the
+        # fused match score (what band_for_score actually bands), keeping the operating
+        # point self-consistent with the live decision path. NOTE: this is a regularized
+        # GLOBAL fit; a held-out split is preferable once enough labels accumulate.
+        self._require_learning_consent("applying learned calibration")
+        candidate = self._build_calibration_candidate()
+        validation = candidate["validation"]
+        if not candidate["promotable"]:
+            self._append_audit(
+                {"action": "apply_calibration_to_config", "promoted": False, "reason": validation.get("reason", "held-out regression")}
+            )
+            return {"promoted": False, "validation": validation, "summary": self.calibration_summary(), "config": asdict(self.config)}
+        payload = candidate["payload"]
+        self._apply_calibration_payload(payload)
         self._append_audit(
             {
                 "action": "apply_calibration_to_config",
@@ -5610,13 +6731,693 @@ class ProjectState:
                 "confident": self.config.thresholds.confident,
                 "relaxed_child": self.config.thresholds.relaxed_child,
                 "platt": self.config.calibration_platt,
-                "calibration_model": dominant_model,
-                "labels": len(rows),
-                "labels_dropped_other_model": len(all_rows) - len(rows),
+                "calibration_model": self.config.calibration_model,
+                "labels": payload["labels"],
+                "labels_dropped_other_model": payload["labelsDroppedOtherModel"],
             }
         )
         self.save()
         return {"promoted": True, "validation": validation, "summary": self.calibration_summary(), "config": asdict(self.config)}
+
+    def calibration_learning_status(self) -> dict[str, Any]:
+        _, rows, dominant_model, dropped = self._calibration_scoped_rows()
+        return {
+            "summary": self.calibration_summary(),
+            "current": {
+                "thresholds": asdict(self.config.thresholds),
+                "calibrationPlatt": list(self.config.calibration_platt),
+                "calibrationModel": str(self.config.calibration_model or ""),
+            },
+            "artifacts": self.db.learned_artifact_rows(artifact_type="calibration", limit=10),
+            "readiness": self._calibration_learning_readiness(rows, dominant_model, dropped),
+        }
+
+    def stage_calibration_update(self) -> dict[str, Any]:
+        self._require_learning_consent("staging learned calibration")
+        candidate = self._build_calibration_candidate()
+        payload = candidate["payload"]
+        metrics = candidate["metrics"]
+        status = "staged" if candidate["promotable"] else "rejected"
+        artifact_id = new_id("learn")
+        artifact = self.db.upsert_learned_artifact(
+            artifact_id,
+            {
+                "artifactType": "calibration",
+                "status": status,
+                "modelName": payload["calibrationModel"],
+                "versionKey": "calibration-platt-fmr-v1",
+                "trainingDataHash": payload["trainingDataHash"],
+                "inputCount": payload["labels"],
+                "positiveCount": payload["positiveLabels"],
+                "negativeCount": payload["negativeLabels"],
+                "metrics": metrics,
+                "payload": payload,
+            },
+        )
+        self._append_audit(
+            {
+                "action": "stage_calibration_update",
+                "artifact_id": artifact_id,
+                "artifact_hash": artifact.get("artifactHash", ""),
+                "status": status,
+                "labels": payload["labels"],
+                "positive_labels": payload["positiveLabels"],
+                "negative_labels": payload["negativeLabels"],
+                "model_name": payload["calibrationModel"],
+                "old_thresholds": payload["previousConfig"].get("thresholds", {}),
+                "new_thresholds": payload["thresholds"],
+                "training_data_hash": payload["trainingDataHash"],
+                "labels_dropped_other_model": payload["labelsDroppedOtherModel"],
+                "validation": candidate["validation"],
+            }
+        )
+        return {
+            "artifact": {**artifact, "artifactType": "calibration"},
+            "status": status,
+            "promotable": candidate["promotable"],
+            "payload": payload,
+            "metrics": metrics,
+            "summary": self.calibration_summary(),
+        }
+
+    def run_learning_jobs(self) -> dict[str, Any]:
+        readiness = self._calibration_learning_readiness()
+        if not readiness["ready"]:
+            if readiness.get("workspaceLocked"):
+                return {
+                    "staged": False,
+                    "artifactCreated": False,
+                    "reason": readiness["reason"],
+                    "readiness": readiness,
+                    "summary": self.calibration_summary(),
+                }
+            self._append_audit(
+                {
+                    "action": "run_learning_jobs",
+                    "staged": False,
+                    "artifact_created": False,
+                    "reason": readiness["reason"],
+                    "labels": readiness["labels"],
+                    "new_labels": readiness["newLabelsSinceLastArtifact"],
+                    "consent_active": readiness["consentActive"],
+                }
+            )
+            return {
+                "staged": False,
+                "artifactCreated": False,
+                "reason": readiness["reason"],
+                "readiness": readiness,
+                "summary": self.calibration_summary(),
+            }
+        result = self.stage_calibration_update()
+        artifact = result.get("artifact") if isinstance(result.get("artifact"), dict) else {}
+        artifact_id = str(artifact.get("artifactId") or artifact.get("artifact_id") or "")
+        artifact_hash = str(artifact.get("artifactHash") or artifact.get("artifact_hash") or "")
+        artifact_status = str(result.get("status") or artifact.get("status") or "")
+        staged = artifact_status == "staged"
+        reason = (
+            "Learned calibration artifact staged for review."
+            if staged
+            else "Calibration feedback was evaluated and kept advisory because validation did not pass."
+        )
+        self._append_audit(
+            {
+                "action": "run_learning_jobs",
+                "staged": staged,
+                "artifact_created": True,
+                "artifact_id": artifact_id,
+                "artifact_hash": artifact_hash,
+                "artifact_status": artifact_status,
+                "reason": reason,
+                "labels": readiness["labels"],
+                "new_labels": readiness["newLabelsSinceLastArtifact"],
+                "training_data_hash": readiness["currentTrainingDataHash"],
+                "consent_active": readiness["consentActive"],
+            }
+        )
+        summary = result.get("summary") if isinstance(result.get("summary"), dict) else self.calibration_summary()
+        return {
+            "staged": staged,
+            "artifactCreated": True,
+            "artifactStatus": artifact_status,
+            "reason": reason,
+            "calibration": result,
+            "readiness": readiness,
+            "status": self.calibration_learning_status(),
+            "summary": summary,
+        }
+
+    def _calibration_artifact_for_action(self, artifact_id: str = "", status: str = "staged") -> dict[str, Any]:
+        artifact = self.db.learned_artifact_by_id(artifact_id) if artifact_id else self.db.latest_learned_artifact("calibration", status=status)
+        if not artifact:
+            raise ValueError("No calibration artifact is available for this action.")
+        if artifact.get("artifact_type") != "calibration":
+            raise ValueError("The selected artifact is not a calibration artifact.")
+        return artifact
+
+    def promote_calibration_artifact(self, artifact_id: str = "") -> dict[str, Any]:
+        self._require_learning_consent("promoting learned calibration")
+        artifact = self._calibration_artifact_for_action(artifact_id, status="staged")
+        if artifact.get("status") != "staged":
+            raise ValueError("Only staged calibration artifacts can be promoted.")
+        payload = artifact.get("payload")
+        metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
+        if not isinstance(payload, dict):
+            raise ValueError("Calibration artifact payload is unreadable.")
+        validation = metrics.get("validation", {})
+        if isinstance(validation, dict) and self._calibration_validation_regressed(validation):
+            self.db.update_learned_artifact_status(str(artifact["artifact_id"]), "rejected")
+            raise ValueError("Calibration artifact failed held-out validation and was rejected.")
+        self._apply_calibration_payload(payload)
+        promoted_at = now_iso()
+        self.db.update_learned_artifact_status(str(artifact["artifact_id"]), "promoted", promoted_at=promoted_at)
+        self._append_audit(
+            {
+                "action": "promote_calibration_artifact",
+                "artifact_id": artifact["artifact_id"],
+                "artifact_hash": artifact.get("artifact_hash", ""),
+                "training_data_hash": artifact.get("training_data_hash", ""),
+                "labels": artifact.get("input_count", 0),
+                "positive_labels": artifact.get("positive_count", 0),
+                "negative_labels": artifact.get("negative_count", 0),
+                "model_name": artifact.get("model_name", ""),
+                "old_thresholds": (payload.get("previousConfig", {}) if isinstance(payload.get("previousConfig"), dict) else {}).get("thresholds", {}),
+                "new_thresholds": payload.get("thresholds", {}),
+                "promoted_at": promoted_at,
+                "validation": validation,
+            }
+        )
+        self.save()
+        return {
+            "promoted": True,
+            "artifactId": artifact["artifact_id"],
+            "artifactHash": artifact.get("artifact_hash", ""),
+            "promotedAt": promoted_at,
+            "validation": validation,
+            "summary": self.calibration_summary(),
+            "config": asdict(self.config),
+        }
+
+    def rollback_calibration_artifact(self, artifact_id: str = "") -> dict[str, Any]:
+        artifact = self._calibration_artifact_for_action(artifact_id, status="promoted")
+        if artifact.get("status") != "promoted":
+            raise ValueError("Only promoted calibration artifacts can be rolled back.")
+        payload = artifact.get("payload")
+        if not isinstance(payload, dict) or not isinstance(payload.get("previousConfig"), dict):
+            raise ValueError("Calibration artifact does not include rollback metadata.")
+        previous = payload["previousConfig"]
+        rollback_payload = {
+            "thresholds": previous.get("thresholds", {}),
+            "platt": previous.get("calibrationPlatt", []),
+            "calibrationModel": previous.get("calibrationModel", ""),
+        }
+        self._apply_calibration_payload(rollback_payload)
+        self.db.update_learned_artifact_status(str(artifact["artifact_id"]), "rolled_back")
+        self._append_audit(
+            {
+                "action": "rollback_calibration_artifact",
+                "artifact_id": artifact["artifact_id"],
+                "artifact_hash": artifact.get("artifact_hash", ""),
+            }
+        )
+        self.save()
+        return {
+            "rolledBack": True,
+            "artifactId": artifact["artifact_id"],
+            "summary": self.calibration_summary(),
+            "config": asdict(self.config),
+        }
+
+    def _adapter_scoped_rows(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str, int]:
+        all_rows = self.db.training_example_rows()
+        rows, dominant_model, dropped = match_adapters.scoped_training_rows(all_rows)
+        return all_rows, rows, dominant_model, dropped
+
+    def _adapter_training_hash(self, rows: list[dict[str, Any]]) -> str:
+        body: list[dict[str, Any]] = []
+        for row in rows:
+            body.append(
+                {
+                    "candidateId": str(row.get("candidate_id", row.get("candidateId", "")) or ""),
+                    "sourceHash": str(row.get("source_hash", row.get("sourceHash", "")) or ""),
+                    "expectedPerson": str(row.get("expectedPerson", row.get("expected_person", "")) or ""),
+                    "isMatch": bool(row.get("isMatch")),
+                    "matchScore": float(row.get("matchScore", row.get("match_score", 0.0)) or 0.0),
+                    "rawCosine": float(row.get("rawCosine", row.get("raw_cosine", 0.0)) or 0.0),
+                    "modelName": str(row.get("modelName", row.get("model_name", "")) or ""),
+                    "features": match_adapters.extract_pair_features(row),
+                }
+            )
+        return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    def _adapter_validation_regressed(self, validation: dict[str, Any]) -> bool:
+        try:
+            return float(validation.get("delta")) < -1e-9
+        except (TypeError, ValueError):
+            return True
+
+    def _adapter_validation_improved(self, validation: dict[str, Any]) -> bool:
+        return validation.get("promote") is True and not self._adapter_validation_regressed(validation)
+
+    def _adapter_candidate_status(self, validation: dict[str, Any]) -> str:
+        if self._adapter_validation_improved(validation):
+            return "staged"
+        if self._adapter_validation_regressed(validation):
+            return "rejected"
+        return "candidate"
+
+    def _adapter_learning_readiness(
+        self,
+        rows: list[dict[str, Any]] | None = None,
+        dominant_model: str = "",
+        dropped: int = 0,
+    ) -> dict[str, Any]:
+        if rows is None:
+            _, rows, dominant_model, dropped = self._adapter_scoped_rows()
+        current_hash = self._adapter_training_hash(rows)
+        latest = self.db.latest_learned_artifact("embedding_adapter")
+        latest_hash = str(latest.get("training_data_hash", "") or "") if latest else ""
+        latest_count = int(latest.get("input_count", 0) or 0) if latest else 0
+        positives = sum(1 for row in rows if row.get("isMatch"))
+        negatives = len(rows) - positives
+        consent_required = bool(getattr(self.config, "require_consent", True))
+        consent_active = bool(self.consent_on_file())
+        learning_mode = str(getattr(self.config, "learning_mode", "manual") or "manual")
+        ready = True
+        reason = "Ready to stage an embedding adapter artifact."
+        if self._workspace_state_lock_active():
+            ready = False
+            reason = "Workspace state is locked; wait for the current operation to finish before running adapter learning."
+        elif learning_mode == "off":
+            ready = False
+            reason = "Learning mode is Off."
+        elif consent_required and not consent_active:
+            ready = False
+            reason = "Consent must be active before running adapter learning."
+        elif len(rows) < self.ADAPTER_MIN_LABELS or positives < self.ADAPTER_MIN_PER_CLASS or negatives < self.ADAPTER_MIN_PER_CLASS:
+            ready = False
+            reason = (
+                "Review more accepted and rejected matches before staging an adapter "
+                f"(need {self.ADAPTER_MIN_LABELS} examples with {self.ADAPTER_MIN_PER_CLASS}+ of each)."
+            )
+        elif latest_hash and latest_hash == current_hash:
+            ready = False
+            reason = "Current reviewed examples already have an embedding adapter artifact."
+        return {
+            "ready": ready,
+            "reason": reason,
+            "labels": len(rows),
+            "positiveLabels": positives,
+            "negativeLabels": negatives,
+            "labelsDroppedOtherModel": int(dropped),
+            "dominantModel": dominant_model,
+            "minimumLabels": self.ADAPTER_MIN_LABELS,
+            "minimumPerClass": self.ADAPTER_MIN_PER_CLASS,
+            "currentTrainingDataHash": current_hash,
+            "latestArtifactId": str(latest.get("artifact_id", "") or "") if latest else "",
+            "latestArtifactStatus": str(latest.get("status", "") or "") if latest else "",
+            "latestTrainingDataHash": latest_hash,
+            "latestInputCount": latest_count,
+            "consentRequired": consent_required,
+            "consentActive": consent_active,
+            "workspaceLocked": self._workspace_state_lock_active(),
+            "learningMode": learning_mode,
+            "featureVersion": match_adapters.FEATURE_VERSION,
+            "adapterVersion": match_adapters.ADAPTER_VERSION,
+        }
+
+    def _adapter_context_matches_target(self, target_id: str, context: dict[str, Any]) -> bool:
+        if target_id == "negative-cross-pose-low-score":
+            return bool(context.get("crossPose")) and bool(context.get("hardPose")) and bool(context.get("scoreLow"))
+        if target_id == "positive-cross-pose-hard":
+            return bool(context.get("crossPose")) and bool(context.get("hardPose"))
+        if target_id == "negative-video-low-score":
+            return bool(context.get("mediaVideo")) and bool(context.get("scoreLow"))
+        if target_id == "positive-video":
+            return bool(context.get("mediaVideo"))
+        if target_id == "negative-cross-age-low-score":
+            return bool(context.get("crossAge")) and bool(context.get("scoreLow"))
+        if target_id == "positive-cross-age":
+            return bool(context.get("crossAge"))
+        if target_id == "negative-unknown-or-zero-score":
+            return bool(context.get("poseUnknown")) or bool(context.get("scoreZero"))
+        return False
+
+    def embedding_adapter_context_coverage(self, rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        if rows is None:
+            rows = self._adapter_scoped_rows()[1]
+        canonical_rows = [item for row in rows if (item := match_adapters.canonical_row(dict(row))) is not None]
+        context_counts: dict[str, dict[str, Any]] = {}
+        target_counts: dict[str, int] = {str(target["id"]): 0 for target in self.ADAPTER_CONTEXT_TARGETS}
+        target_context_keys: dict[str, set[str]] = {str(target["id"]): set() for target in self.ADAPTER_CONTEXT_TARGETS}
+        for row in canonical_rows:
+            label = "positive" if bool(row.get("isMatch")) else "negative"
+            context = match_adapters.pair_context(row)
+            key = match_adapters.pair_context_key(row)
+            bucket = context_counts.setdefault(
+                key,
+                {
+                    "contextKey": key,
+                    "positive": 0,
+                    "negative": 0,
+                    "total": 0,
+                    "context": {
+                        "poseBucket": context.get("poseBucket", "unknown"),
+                        "mediaKind": context.get("mediaKind", "image"),
+                        "scoreZero": bool(context.get("scoreZero")),
+                        "scoreLow": bool(context.get("scoreLow")),
+                        "crossAge": bool(context.get("crossAge")),
+                        "crossPose": bool(context.get("crossPose")),
+                        "poseUnknown": bool(context.get("poseUnknown")),
+                        "hardPose": bool(context.get("hardPose")),
+                        "closeRunnerUp": bool(context.get("closeRunnerUp")),
+                        "singleReference": bool(context.get("singleReference")),
+                        "lowQuality": bool(context.get("lowQuality")),
+                    },
+                },
+            )
+            bucket[label] += 1
+            bucket["total"] += 1
+            for target in self.ADAPTER_CONTEXT_TARGETS:
+                target_id = str(target["id"])
+                if str(target.get("desiredLabel", "")) == label and self._adapter_context_matches_target(target_id, context):
+                    target_counts[target_id] += 1
+                    target_context_keys[target_id].add(key)
+        targets: list[dict[str, Any]] = []
+        for target in self.ADAPTER_CONTEXT_TARGETS:
+            target_id = str(target["id"])
+            count = int(target_counts.get(target_id, 0))
+            min_count = int(target.get("minCount", 1) or 1)
+            ready = count >= min_count
+            targets.append(
+                {
+                    "id": target_id,
+                    "label": str(target.get("label", "")),
+                    "desiredLabel": str(target.get("desiredLabel", "")),
+                    "count": count,
+                    "minCount": min_count,
+                    "ready": ready,
+                    "remaining": max(0, min_count - count),
+                    "action": str(target.get("action", "")),
+                    "contextKeys": sorted(target_context_keys.get(target_id, set()))[:10],
+                }
+            )
+        missing_targets = [target for target in targets if not bool(target.get("ready"))]
+        return {
+            "featureVersion": match_adapters.FEATURE_VERSION,
+            "contextVersion": match_adapters.PAIR_CONTEXT_VERSION,
+            "labels": len(canonical_rows),
+            "targetCount": len(targets),
+            "coveredTargets": len(targets) - len(missing_targets),
+            "missingTargets": len(missing_targets),
+            "ready": not missing_targets,
+            "targets": targets,
+            "nextActions": [target["action"] for target in missing_targets[:3] if target.get("action")],
+            "contextCounts": sorted(
+                context_counts.values(),
+                key=lambda item: (-int(item.get("total", 0)), str(item.get("contextKey", ""))),
+            )[:20],
+        }
+
+    def validate_embedding_adapter_change(
+        self,
+        rows: list[dict[str, Any]] | None = None,
+        *,
+        min_labels: int | None = None,
+        min_per_class: int | None = None,
+        model_name: str = "",
+    ) -> dict[str, Any]:
+        scoped = list(rows) if rows is not None else self._adapter_scoped_rows()[1]
+        minimum_labels = int(min_labels or self.ADAPTER_MIN_LABELS)
+        minimum_per_class = int(min_per_class or self.ADAPTER_MIN_PER_CLASS)
+        if not model_name:
+            _, model_name, _ = match_adapters.scoped_training_rows(scoped)
+
+        def fit_transform(train: list[dict[str, Any]]):
+            positives = sum(1 for row in train if row.get("isMatch"))
+            negatives = len(train) - positives
+            adapter = match_adapters.fit(
+                train,
+                min_count=max(2, len(train)),
+                min_per_class=max(1, min(positives, negatives)),
+                model_name=model_name,
+            )
+            if adapter is None:
+                return lambda row: float(row.get("matchScore", row.get("match_score", 0.0)) or 0.0)
+            return lambda row: match_adapters.score(row, adapter)
+
+        return held_out_gate(
+            scoped,
+            fit_transform,
+            score_key="matchScore",
+            min_labels=minimum_labels,
+            min_per_class=minimum_per_class,
+        )
+
+    def _build_embedding_adapter_candidate(
+        self,
+        *,
+        min_count: int | None = None,
+        min_per_class: int | None = None,
+    ) -> dict[str, Any]:
+        all_rows, rows, dominant_model, dropped = self._adapter_scoped_rows()
+        minimum_count = int(min_count or self.ADAPTER_MIN_LABELS)
+        minimum_per_class = int(min_per_class or self.ADAPTER_MIN_PER_CLASS)
+        adapter = match_adapters.fit(
+            rows,
+            min_count=minimum_count,
+            min_per_class=minimum_per_class,
+            model_name=dominant_model,
+        )
+        if adapter is None:
+            raise ValueError(
+                "Review more accepted and rejected matches before staging an adapter "
+                f"(need at least {minimum_count} examples with {minimum_per_class}+ of each)."
+            )
+        training_hash = self._adapter_training_hash(rows)
+        validation = self.validate_embedding_adapter_change(
+            rows,
+            min_labels=minimum_count,
+            min_per_class=minimum_per_class,
+            model_name=dominant_model,
+        )
+        positives = int(sum(1 for row in rows if row.get("isMatch")))
+        negatives = len(rows) - positives
+        coverage = self.embedding_adapter_context_coverage(rows)
+        payload = {
+            **adapter,
+            "trainingDataHash": training_hash,
+        }
+        metrics = {
+            "validation": validation,
+            "labels": len(rows),
+            "positiveLabels": positives,
+            "negativeLabels": negatives,
+            "labelsDroppedOtherModel": dropped,
+            "featureVersion": match_adapters.FEATURE_VERSION,
+            "adapterVersion": match_adapters.ADAPTER_VERSION,
+            "scoreKey": "matchScore",
+            "coverage": coverage,
+            "promotionEligible": self._adapter_validation_improved(validation),
+            "advisoryOnly": not self._adapter_validation_regressed(validation) and not self._adapter_validation_improved(validation),
+        }
+        return {
+            "payload": payload,
+            "metrics": metrics,
+            "validation": validation,
+            "rows": rows,
+            "allRows": all_rows,
+            "dominantModel": dominant_model,
+            "trainingDataHash": training_hash,
+            "promotable": self._adapter_validation_improved(validation),
+            "advisoryOnly": not self._adapter_validation_regressed(validation) and not self._adapter_validation_improved(validation),
+        }
+
+    def embedding_adapter_learning_status(self) -> dict[str, Any]:
+        _, rows, dominant_model, dropped = self._adapter_scoped_rows()
+        return {
+            "summary": self.db.training_example_summary(),
+            "artifacts": self.db.learned_artifact_rows(artifact_type="embedding_adapter", limit=10),
+            "activeArtifact": self.db.latest_learned_artifact("embedding_adapter", status="promoted"),
+            "readiness": self._adapter_learning_readiness(rows, dominant_model, dropped),
+            "coverage": self.embedding_adapter_context_coverage(rows),
+        }
+
+    def stage_embedding_adapter(self, *, min_count: int | None = None, min_per_class: int | None = None) -> dict[str, Any]:
+        self._require_learning_consent("running adapter learning")
+        candidate = self._build_embedding_adapter_candidate(min_count=min_count, min_per_class=min_per_class)
+        payload = candidate["payload"]
+        metrics = candidate["metrics"]
+        status = self._adapter_candidate_status(candidate["validation"])
+        artifact_id = new_id("learn")
+        artifact = self.db.upsert_learned_artifact(
+            artifact_id,
+            {
+                "artifactType": "embedding_adapter",
+                "status": status,
+                "modelName": payload["modelName"],
+                "versionKey": payload["versionKey"],
+                "trainingDataHash": payload["trainingDataHash"],
+                "inputCount": payload["inputCount"],
+                "positiveCount": payload["positiveCount"],
+                "negativeCount": payload["negativeCount"],
+                "metrics": metrics,
+                "payload": payload,
+            },
+        )
+        self._append_audit(
+            {
+                "action": "stage_embedding_adapter",
+                "artifact_id": artifact_id,
+                "artifact_hash": artifact.get("artifactHash", ""),
+                "status": status,
+                "labels": payload["inputCount"],
+                "positive_labels": payload["positiveCount"],
+                "negative_labels": payload["negativeCount"],
+                "labels_dropped_other_model": payload.get("labelsDroppedOtherModel", 0),
+                "model_name": payload["modelName"],
+                "feature_version": payload["featureVersion"],
+                "adapter_version": payload["versionKey"],
+                "training_data_hash": payload["trainingDataHash"],
+                "validation": candidate["validation"],
+            }
+        )
+        return {
+            "artifact": {**artifact, "artifactType": "embedding_adapter"},
+            "status": status,
+            "promotable": candidate["promotable"],
+            "advisoryOnly": candidate["advisoryOnly"],
+            "payload": payload,
+            "metrics": metrics,
+            "summary": self.db.training_example_summary(),
+        }
+
+    def _embedding_adapter_artifact_for_action(self, artifact_id: str = "", status: str = "staged") -> dict[str, Any]:
+        artifact = self.db.learned_artifact_by_id(artifact_id) if artifact_id else self.db.latest_learned_artifact("embedding_adapter", status=status)
+        if not artifact:
+            raise ValueError("No embedding adapter artifact is available for this action.")
+        if artifact.get("artifact_type") != "embedding_adapter":
+            raise ValueError("The selected artifact is not an embedding adapter artifact.")
+        return artifact
+
+    def promote_embedding_adapter(self, artifact_id: str = "") -> dict[str, Any]:
+        self._require_learning_consent("promoting an embedding adapter")
+        artifact = self._embedding_adapter_artifact_for_action(artifact_id, status="staged")
+        if artifact.get("status") != "staged":
+            raise ValueError("Only staged embedding adapter artifacts can be promoted.")
+        payload = artifact.get("payload")
+        metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
+        if not isinstance(payload, dict):
+            raise ValueError("Embedding adapter payload is unreadable.")
+        match_adapters.deserialize(payload)
+        validation = metrics.get("validation", {})
+        if not isinstance(validation, dict) or not self._adapter_validation_improved(validation):
+            self.db.update_learned_artifact_status(str(artifact["artifact_id"]), "rejected")
+            raise ValueError("Embedding adapter did not show a held-out improvement and was rejected.")
+        promoted_at = now_iso()
+        self.db.update_learned_artifact_status(str(artifact["artifact_id"]), "promoted", promoted_at=promoted_at)
+        self._append_audit(
+            {
+                "action": "promote_embedding_adapter",
+                "artifact_id": artifact["artifact_id"],
+                "artifact_hash": artifact.get("artifact_hash", ""),
+                "training_data_hash": artifact.get("training_data_hash", ""),
+                "labels": artifact.get("input_count", 0),
+                "positive_labels": artifact.get("positive_count", 0),
+                "negative_labels": artifact.get("negative_count", 0),
+                "model_name": artifact.get("model_name", ""),
+                "feature_version": payload.get("featureVersion", ""),
+                "promoted_at": promoted_at,
+                "validation": validation,
+            }
+        )
+        return {
+            "promoted": True,
+            "artifactId": artifact["artifact_id"],
+            "artifactHash": artifact.get("artifact_hash", ""),
+            "promotedAt": promoted_at,
+            "validation": validation,
+            "summary": self.db.training_example_summary(),
+        }
+
+    def rollback_embedding_adapter(self, artifact_id: str = "") -> dict[str, Any]:
+        artifact = self._embedding_adapter_artifact_for_action(artifact_id, status="promoted")
+        if artifact.get("status") != "promoted":
+            raise ValueError("Only promoted embedding adapter artifacts can be rolled back.")
+        self.db.update_learned_artifact_status(str(artifact["artifact_id"]), "rolled_back")
+        self._append_audit(
+            {
+                "action": "rollback_embedding_adapter",
+                "artifact_id": artifact["artifact_id"],
+                "artifact_hash": artifact.get("artifact_hash", ""),
+            }
+        )
+        return {
+            "rolledBack": True,
+            "artifactId": artifact["artifact_id"],
+            "summary": self.db.training_example_summary(),
+        }
+
+    def embedding_adapter_score(self, row: dict[str, Any], model_name: str | None = None) -> float | None:
+        artifact = self.db.latest_learned_artifact("embedding_adapter", status="promoted")
+        if not artifact:
+            return None
+        payload = artifact.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        artifact_model = str(payload.get("modelName", artifact.get("model_name", "")) or "")
+        active_model = str(model_name or row.get("modelName") or row.get("model_name") or "")
+        if artifact_model and active_model and artifact_model != active_model:
+            return None
+        try:
+            return match_adapters.score(row, payload)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _adapter_row_from_decision(
+        self,
+        decision: Any,
+        embedding: EmbeddingResult,
+        pose_bucket: str,
+        age_gap_years: float | None,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "expectedPerson": decision.person_name,
+            "modelName": embedding.model_name,
+            "matchScore": decision.score,
+            "rawCosine": decision.raw_cosine,
+            "quality": embedding.quality,
+            "poseBucket": pose_bucket,
+            "ageGapYears": age_gap_years,
+            "alignError": embedding.align_error,
+            "iedPx": embedding.ied_px,
+            "mediaKind": metadata.get("media_kind", "image"),
+            "features": {
+                "runnerUpMargin": decision.runner_up_margin,
+                "riskFlags": list(decision.flags),
+            },
+        }
+
+    def _apply_embedding_adapter_to_decision(
+        self,
+        decision: Any,
+        embedding: EmbeddingResult,
+        thresholds: Any,
+        pose_bucket: str,
+        age_gap_years: float | None,
+        metadata: dict[str, Any],
+    ) -> Any:
+        row = self._adapter_row_from_decision(decision, embedding, pose_bucket, age_gap_years, metadata)
+        adapter_score = self.embedding_adapter_score(row, embedding.model_name)
+        if adapter_score is None:
+            return decision
+        return replace(
+            decision,
+            score=float(adapter_score),
+            band=band_for_score(float(adapter_score), thresholds),
+            flags=tuple(dict.fromkeys((*decision.flags, "embedding-adapter"))),
+        )
 
     def match_probability(self, score: float, model_name: str | None = None, person_name: str | None = None) -> float | None:
         """Calibrated P(same identity) for a fused match score, or None if uncalibrated
@@ -5652,10 +7453,11 @@ class ProjectState:
         the user's own accept/reject labels) and persist them; match_probability then
         prefers a person's own calibrator over the global one. Same-embedding-space only
         (dominant recognizer). Returns which identities were personalized."""
+        self._require_learning_consent("applying personalized calibration")
         rows = self.db.calibration_label_rows()
         models = [str(r.get("modelName") or "") for r in rows if r.get("modelName")]
         dominant = max(set(models), key=models.count) if models else ""
-        scoped = [r for r in rows if str(r.get("modelName") or "") == dominant] if dominant else list(rows)
+        scoped = [r for r in rows if str(r.get("modelName") or "") in {"", dominant}] if dominant else list(rows)
         per = fit_per_identity_calibrators(
             scoped,
             min_per_identity=self.PERSONALIZE_MIN_PER_IDENTITY,
@@ -5667,11 +7469,11 @@ class ProjectState:
         self.save()
         return {"identities": sorted(per.keys()), "count": len(per)}
 
-    def validate_calibration_change(self) -> dict[str, Any]:
+    def validate_calibration_change(self, rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """§6: held-out (by-identity) check that the GLOBAL Platt calibrator actually
         improves separability on THIS user's labels before it is trusted -- the guardrail
         that converts a benchmarked gain into a real one (a paper +2pp can vanish locally)."""
-        rows = self.db.calibration_label_rows()
+        rows = list(rows) if rows is not None else self.db.calibration_label_rows()
 
         def fit_transform(train: list[dict[str, Any]]):
             calibrator = fit_score_calibrator(
@@ -5880,6 +7682,189 @@ class ProjectState:
         self._append_audit({"action": "import_accuracy_labels", "imported": imported, "skipped": skipped})
         return {"imported": imported, "skipped": skipped, "summary": summary}
 
+    def _training_example_export_row(self, row: dict[str, Any], include_paths: bool = False) -> dict[str, Any]:
+        features = row.get("features") if isinstance(row.get("features"), dict) else {}
+        result = {
+            "exampleId": str(row.get("example_id", "") or ""),
+            "naturalKey": str(row.get("natural_key", "") or ""),
+            "labelId": str(row.get("label_id", "") or ""),
+            "candidateId": str(row.get("candidate_id", "") or ""),
+            "sourceHash": str(row.get("source_hash", "") or ""),
+            "expectedPerson": str(row.get("expected_person", "") or ""),
+            "actualPerson": str(row.get("actual_person", "") or ""),
+            "isMatch": bool(row.get("is_match")),
+            "matchScore": row.get("match_score"),
+            "rawCosine": row.get("raw_cosine"),
+            "quality": row.get("quality"),
+            "modelName": str(row.get("model_name", "") or ""),
+            "detectorSize": int(row.get("detector_size", 0) or 0),
+            "candidateEmbeddingKey": str(row.get("candidate_embedding_key", "") or ""),
+            "bestRefId": str(row.get("best_ref_id", "") or ""),
+            "referenceModelName": str(row.get("reference_model_name", "") or ""),
+            "poseBucket": str(row.get("pose_bucket", "") or ""),
+            "ageGapYears": row.get("age_gap_years"),
+            "alignError": row.get("align_error"),
+            "iedPx": row.get("ied_px"),
+            "mediaKind": str(row.get("media_kind", "image") or "image"),
+            "features": features,
+            "createdAt": str(row.get("created_at", "") or ""),
+        }
+        result["trainingContext"] = match_adapters.pair_context(result)
+        if include_paths:
+            result["sourcePath"] = str(row.get("source_path", "") or "")
+            result["bestRefPath"] = str(row.get("best_ref_path", "") or "")
+        return result
+
+    def export_training_examples(self, folder: Path | None = None, include_paths: bool = False) -> dict[str, Any]:
+        export_root = (folder or self.root / "exports").expanduser().resolve()
+        export_root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        json_path = export_root / f"vintrace-training-examples-{stamp}.json"
+        csv_path = export_root / f"vintrace-training-examples-{stamp}.csv"
+        rows = [self._training_example_export_row(row, include_paths=include_paths) for row in self.db.training_example_rows()]
+        counts = {
+            "examples": len(rows),
+            "matches": sum(1 for row in rows if row["isMatch"]),
+            "nonMatches": sum(1 for row in rows if not row["isMatch"]),
+            "people": len({row["expectedPerson"] for row in rows if row["expectedPerson"]}),
+            "models": len({row["modelName"] for row in rows if row["modelName"]}),
+            "pathsIncluded": bool(include_paths),
+        }
+        training_data_hash = hashlib.sha256(json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        payload = {
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "workspace": str(self.root) if include_paths else "",
+            "counts": counts,
+            "trainingDataHash": training_data_hash,
+            "examples": rows,
+            "note": "Training-example export contains reviewed learning metadata only. It does not include photos, thumbnails, face vectors, or model files. Local file paths are excluded unless includePaths is true.",
+        }
+        json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        fieldnames = [
+            "exampleId",
+            "naturalKey",
+            "labelId",
+            "candidateId",
+            "sourceHash",
+            "expectedPerson",
+            "actualPerson",
+            "isMatch",
+            "matchScore",
+            "rawCosine",
+            "quality",
+            "modelName",
+            "detectorSize",
+            "candidateEmbeddingKey",
+            "bestRefId",
+            "referenceModelName",
+            "poseBucket",
+            "ageGapYears",
+            "alignError",
+            "iedPx",
+            "mediaKind",
+            "features",
+            "trainingContext",
+            "createdAt",
+        ]
+        if include_paths:
+            fieldnames.extend(["sourcePath", "bestRefPath"])
+        with csv_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                csv_row = dict(row)
+                csv_row["features"] = json.dumps(csv_row.get("features") if isinstance(csv_row.get("features"), dict) else {}, separators=(",", ":"), sort_keys=True)
+                csv_row["trainingContext"] = json.dumps(csv_row.get("trainingContext") if isinstance(csv_row.get("trainingContext"), dict) else {}, separators=(",", ":"), sort_keys=True)
+                writer.writerow({key: csv_row.get(key, "") for key in fieldnames})
+        self._append_audit(
+            {
+                "action": "export_training_examples",
+                "json_path": str(json_path),
+                "csv_path": str(csv_path),
+                "count": len(rows),
+                "include_paths": bool(include_paths),
+                "training_data_hash": training_data_hash,
+            }
+        )
+        return {"jsonPath": str(json_path), "csvPath": str(csv_path), "counts": counts, "trainingDataHash": training_data_hash}
+
+    def import_training_examples(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        def _value(row: dict[str, Any], *keys: str, default: Any = "") -> Any:
+            for key in keys:
+                if key in row and row.get(key) not in (None, ""):
+                    return row.get(key)
+            return default
+
+        def _bool(value: Any) -> bool:
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "match", "accepted"}
+            return bool(value)
+
+        def _int(value: Any, fallback: int = 0) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return fallback
+
+        imported = 0
+        skipped = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                skipped += 1
+                continue
+            source_hash = str(_value(row, "sourceHash", "source_hash", "fileHash", "file_hash")).strip()
+            expected_person = str(_value(row, "expectedPerson", "expected_person")).strip()
+            if not source_hash or not expected_person:
+                skipped += 1
+                continue
+            raw_features = _value(row, "features", "features_json", default={})
+            if isinstance(raw_features, str):
+                try:
+                    features = json.loads(raw_features) if raw_features.strip() else {}
+                except json.JSONDecodeError:
+                    features = {}
+            else:
+                features = raw_features if isinstance(raw_features, dict) else {}
+            context_source = dict(row)
+            context_source["features"] = features
+            context_source.pop("trainingContext", None)
+            context_source.pop("training_context", None)
+            training_context = match_adapters.pair_context(context_source)
+            self.db.add_training_example(
+                str(_value(row, "exampleId", "example_id", default="")).strip() or new_id("train"),
+                {
+                    "naturalKey": str(_value(row, "naturalKey", "natural_key")).strip(),
+                    "labelId": str(_value(row, "labelId", "label_id")).strip(),
+                    "candidateId": str(_value(row, "candidateId", "candidate_id")).strip(),
+                    "sourcePath": str(_value(row, "sourcePath", "source_path")).strip(),
+                    "sourceHash": source_hash,
+                    "expectedPerson": expected_person,
+                    "actualPerson": str(_value(row, "actualPerson", "actual_person")).strip(),
+                    "isMatch": _bool(_value(row, "isMatch", "is_match")),
+                    "matchScore": _value(row, "matchScore", "match_score", default=None),
+                    "rawCosine": _value(row, "rawCosine", "raw_cosine", default=None),
+                    "quality": _value(row, "quality", default=None),
+                    "modelName": str(_value(row, "modelName", "model_name")).strip(),
+                    "detectorSize": _int(_value(row, "detectorSize", "detector_size", default=0), 0),
+                    "candidateEmbeddingKey": str(_value(row, "candidateEmbeddingKey", "candidate_embedding_key")).strip(),
+                    "bestRefId": str(_value(row, "bestRefId", "best_ref_id")).strip(),
+                    "bestRefPath": str(_value(row, "bestRefPath", "best_ref_path")).strip(),
+                    "referenceModelName": str(_value(row, "referenceModelName", "reference_model_name")).strip(),
+                    "poseBucket": str(_value(row, "poseBucket", "pose_bucket")).strip(),
+                    "ageGapYears": _value(row, "ageGapYears", "age_gap_years", default=None),
+                    "alignError": _value(row, "alignError", "align_error", default=None),
+                    "iedPx": _value(row, "iedPx", "ied_px", default=None),
+                    "mediaKind": str(_value(row, "mediaKind", "media_kind", default="image") or "image"),
+                    "features": features,
+                    "trainingContext": training_context,
+                    "createdAt": str(_value(row, "createdAt", "created_at")).strip(),
+                },
+            )
+            imported += 1
+        summary = self.db.training_example_summary()
+        self._append_audit({"action": "import_training_examples", "imported": imported, "skipped": skipped})
+        return {"imported": imported, "skipped": skipped, "summary": summary}
+
     def privacy_report(self) -> dict[str, Any]:
         generated_bytes = 0
         generated_files = 0
@@ -5905,13 +7890,15 @@ class ProjectState:
             "safetyCacheEntries": int(scale.get("safetyCacheEntries", 0) or 0),
             "embeddingCacheEntries": int(scale.get("embeddingCacheEntries", 0) or 0),
             "calibrationLabels": int(scale.get("calibrationLabels", 0) or 0),
+            "trainingExamples": int(scale.get("trainingExamples", 0) or 0),
+            "learnedArtifacts": int(scale.get("learnedArtifacts", 0) or 0),
             "auditEvents": self._audit_event_count(),
             # PC-03: be explicit that face embeddings and previews are stored
             # unencrypted at rest and that Workspace Lock is an in-app access
             # control, not on-disk encryption.
             "dataAtRest": {
                 "encrypted": False,
-                "biometricStorage": "Face embeddings and generated previews are stored unencrypted in the app folder.",
+                "biometricStorage": "Face embeddings, training examples, learned artifacts, and generated previews are stored unencrypted in the app folder.",
                 "workspaceLock": "Workspace Lock gates access inside the app; it does not encrypt files on disk.",
                 "backupEncryption": (
                     "Available now: set VINTRACE_BACKUP_PASSPHRASE and workspace backups are encrypted at rest "
@@ -6439,7 +8426,8 @@ class ProjectState:
         # non-browser-renderable ones). Previously jpg/png/webp fell through to
         # here returning None, so the renderer used the full-resolution original
         # as the list thumbnail. Any image we can load gets a small cached preview.
-        if not source.exists() or not source.is_file() or source.suffix.lower() not in IMAGE_EXTENSIONS:
+        suffix = source.suffix.lower()
+        if not source.exists() or not source.is_file() or suffix not in IMAGE_EXTENSIONS | VIDEO_EXTENSIONS:
             return None
         try:
             preview = self._preview_cache_path(source)
@@ -6449,7 +8437,43 @@ class ProjectState:
                 self._ensure_generated_dir_sentinel(self.previews_path)
                 if not self._generated_dir_is_owned(self.previews_path):
                     return None
-                write_preview_image(source, preview)
+                if suffix in VIDEO_EXTENSIONS:
+                    self._ensure_generated_dir_sentinel(self.video_frames_path)
+                    if not self._generated_dir_is_owned(self.video_frames_path):
+                        return None
+                    samples = sample_video_frames(source, self.video_frames_path, max_frames=1, interval_seconds=0.5, jpeg_quality=84)
+                    if not samples:
+                        return None
+                    temp = preview.with_suffix(preview.suffix + ".tmp")
+                    shutil.copy2(samples[0].path, temp)
+                    temp.replace(preview)
+                else:
+                    write_preview_image(source, preview)
+            return str(preview)
+        except (ImageLoadError, VideoLoadError, OSError, ValueError):
+            return None
+
+    def preview_path_for_proxy(self, value: str | None, proxy_value: str | None, create: bool = True) -> str | None:
+        if not value or not proxy_value:
+            return None
+        source = Path(value).expanduser()
+        proxy = Path(proxy_value).expanduser()
+        try:
+            if not source.exists() or not source.is_file():
+                return None
+            if not proxy.exists() or not proxy.is_file():
+                return None
+            proxy_suffix = proxy.suffix.lower()
+            if proxy_suffix not in IMAGE_EXTENSIONS or proxy_suffix in RAW_IMAGE_EXTENSIONS:
+                return None
+            preview = self._preview_cache_path(source)
+            if not create and not preview.exists():
+                return None
+            if not preview.exists() or preview.stat().st_size <= 0:
+                self._ensure_generated_dir_sentinel(self.previews_path)
+                if not self._generated_dir_is_owned(self.previews_path):
+                    return None
+                write_preview_image(proxy, preview)
             return str(preview)
         except (ImageLoadError, OSError, ValueError):
             return None
@@ -6479,6 +8503,104 @@ class ProjectState:
             if maybe_prepare(candidate.best_ref_path):
                 return prepared
         return prepared
+
+    def rebuild_previews_for_paths(
+        self,
+        values: Iterable[str | Path],
+        *,
+        limit: int = 64,
+        force: bool = True,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        max_items = max(1, min(1000, int(limit)))
+        generated_at = now_iso()
+        seen: set[str] = set()
+        rows: list[dict[str, Any]] = []
+        skipped: list[dict[str, str]] = []
+        failed: list[dict[str, str]] = []
+        removed_files = 0
+        removed_bytes = 0
+        generated = 0
+        considered = 0
+        clean_values = [str(value or "").strip() for value in values if str(value or "").strip()]
+        for raw in clean_values:
+            if considered >= max_items:
+                break
+            source = Path(raw).expanduser()
+            try:
+                resolved = source.resolve()
+            except OSError:
+                resolved = source
+            key = str(resolved)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            considered += 1
+            if not resolved.exists() or not resolved.is_file():
+                skipped.append({"sourcePath": str(resolved), "reason": "Source file is missing."})
+                continue
+            if resolved.suffix.lower() not in IMAGE_EXTENSIONS | VIDEO_EXTENSIONS:
+                skipped.append({"sourcePath": str(resolved), "reason": "Preview rebuild only supports image and video files."})
+                continue
+            try:
+                preview = self._preview_cache_path(resolved)
+            except OSError as exc:
+                failed.append({"sourcePath": str(resolved), "reason": f"Could not inspect preview cache path: {exc}"})
+                continue
+            existing = preview.exists()
+            existing_size = 0
+            if existing:
+                try:
+                    existing_size = preview.stat().st_size
+                except OSError:
+                    existing_size = 0
+            if dry_run:
+                rows.append({
+                    "sourcePath": str(resolved),
+                    "previewPath": str(preview),
+                    "existingPreview": existing,
+                    "wouldRemove": bool(force and existing),
+                    "wouldGenerate": True,
+                })
+                continue
+            try:
+                self._ensure_generated_dir_sentinel(self.previews_path)
+                if not self._generated_dir_is_owned(self.previews_path):
+                    skipped.append({"sourcePath": str(resolved), "reason": "Preview cache folder is not owned by this workspace."})
+                    continue
+                if force and existing:
+                    preview.unlink()
+                    removed_files += 1
+                    removed_bytes += existing_size
+                next_preview = self.preview_path_for(str(resolved), create=True)
+                if not next_preview:
+                    failed.append({"sourcePath": str(resolved), "reason": "Preview could not be generated."})
+                    continue
+                generated += 1
+                rows.append({
+                    "sourcePath": str(resolved),
+                    "previewPath": str(next_preview),
+                    "existingPreview": existing,
+                    "removedPreview": bool(force and existing),
+                    "generated": True,
+                })
+            except (ImageLoadError, VideoLoadError, OSError, ValueError) as exc:
+                failed.append({"sourcePath": str(resolved), "reason": str(exc) or "Preview rebuild failed."})
+        return {
+            "generatedAt": generated_at,
+            "dryRun": bool(dry_run),
+            "force": bool(force),
+            "requested": len(clean_values),
+            "considered": considered,
+            "limit": max_items,
+            "removedPreviewFiles": removed_files,
+            "removedPreviewBytes": removed_bytes,
+            "generatedPreviews": generated,
+            "skipped": skipped[:50],
+            "failed": failed[:50],
+            "rebuilt": rows[:200],
+            "truncated": len(seen) < len(dict.fromkeys(clean_values)),
+        }
 
     def _preview_cache_path(self, source: Path) -> Path:
         stat = source.stat()
@@ -6847,4 +8969,3 @@ class ProjectState:
                 self.lock_path.unlink()
             except OSError:
                 pass
-

@@ -7,6 +7,7 @@ Run: PYTHONPATH=. .venv/bin/python tests/calibration_units.py
 from __future__ import annotations
 
 import tempfile
+import os
 from pathlib import Path
 
 from crossage_fr.match.calibration import (
@@ -21,6 +22,12 @@ from crossage_fr.match.calibration import (
     threshold_for_fmr,
 )
 from crossage_fr.store.workspace_db import WorkspaceDb
+
+
+def _use_temp_registry(base: Path) -> None:
+    registry = str(base / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
 
 
 def test_fit_per_identity_calibrators_skips_sparse_identities() -> None:
@@ -131,7 +138,9 @@ def test_apply_calibration_replaces_midpoint_with_fmr_thresholds() -> None:
     from crossage_fr.enroll.manager import ProjectState
 
     with tempfile.TemporaryDirectory() as tmp:
+        _use_temp_registry(Path(tmp))
         project = ProjectState(Path(tmp) / "workspace")
+        project.set_consent(True, source="unit-test", operator="Calibration")
         # Insufficient labels -> refuses (no half-calibrated operating point).
         try:
             project.apply_calibration_to_config()
@@ -166,6 +175,7 @@ def test_accuracy_det_report_from_labels() -> None:
     from crossage_fr.enroll.manager import ProjectState
 
     with tempfile.TemporaryDirectory() as tmp:
+        _use_temp_registry(Path(tmp))
         project = ProjectState(Path(tmp) / "workspace")
         for i in range(10):
             project.db.add_calibration_label(
@@ -185,6 +195,7 @@ def test_accuracy_det_report_by_age_gap_buckets() -> None:
     from crossage_fr.enroll.manager import ProjectState
 
     with tempfile.TemporaryDirectory() as tmp:
+        _use_temp_registry(Path(tmp))
         project = ProjectState(Path(tmp) / "workspace")
         # Near-age-gap matches and a wide-gap (child<->adult) cohort, separately labeled.
         for i in range(6):
@@ -207,7 +218,9 @@ def test_apply_personalized_calibration_per_identity() -> None:
     from crossage_fr.enroll.manager import ProjectState
 
     with tempfile.TemporaryDirectory() as tmp:
+        _use_temp_registry(Path(tmp))
         project = ProjectState(Path(tmp) / "workspace")
+        project.set_consent(True, source="unit-test", operator="Calibration")
         # Two people with plenty of labels each (separable per person) + a sparse third.
         for person in ("Alice", "Bob"):
             for i in range(8):
@@ -234,7 +247,9 @@ def test_calibration_is_model_pack_versioned() -> None:
     from crossage_fr.enroll.manager import ProjectState
 
     with tempfile.TemporaryDirectory() as tmp:
+        _use_temp_registry(Path(tmp))
         project = ProjectState(Path(tmp) / "workspace")
+        project.set_consent(True, source="unit-test", operator="Calibration")
         # Dominant model "modelA" (20 labels) + a few stray "modelB" labels.
         for i in range(10):
             project.db.add_calibration_label(
@@ -261,11 +276,42 @@ def test_calibration_is_model_pack_versioned() -> None:
         assert project.match_probability(0.45) is not None
 
 
+def test_calibration_keeps_untagged_legacy_labels_with_dominant_model() -> None:
+    from crossage_fr.enroll.manager import ProjectState
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _use_temp_registry(Path(tmp))
+        project = ProjectState(Path(tmp) / "workspace")
+        project.set_consent(True, source="unit-test", operator="Calibration")
+        # A new model-tagged review should not make older/imported untagged labels
+        # invisible to calibration. Untagged rows are kept with the dominant local
+        # model unless a conflicting non-empty model tag is present.
+        project.db.add_calibration_label(
+            "tagged",
+            {"sourcePath": "/tagged", "expectedPerson": "A", "actualPerson": "A",
+             "matchScore": 0.70, "isMatch": True, "rawCosine": 0.70, "modelName": "modelA"},
+        )
+        for i in range(10):
+            project.db.add_calibration_label(
+                f"legacy_p{i}", {"sourcePath": f"/lp{i}", "expectedPerson": "A", "actualPerson": "A",
+                                 "matchScore": 0.55 + 0.01 * i, "isMatch": True, "rawCosine": 0.55 + 0.01 * i}
+            )
+            project.db.add_calibration_label(
+                f"legacy_n{i}", {"sourcePath": f"/ln{i}", "expectedPerson": "B", "actualPerson": "",
+                                 "matchScore": 0.12 + 0.01 * i, "isMatch": False, "rawCosine": 0.12 + 0.01 * i}
+            )
+        result = project.apply_calibration_to_config()
+        assert result["promoted"] is True
+        assert project.config.calibration_model == "modelA"
+        assert len(project.config.calibration_platt) == 2
+
+
 def test_ordered_review_candidates_surfaces_matches_abstains_noise() -> None:
     from crossage_fr.enroll.manager import ProjectState
     from crossage_fr.models import ReviewCandidate, new_id
 
     with tempfile.TemporaryDirectory() as tmp:
+        _use_temp_registry(Path(tmp))
         project = ProjectState(Path(tmp) / "workspace")
 
         def cand(name, score, band, *, align=0.0, ied=80.0, quality=0.6):
@@ -298,6 +344,7 @@ def main() -> None:
     test_accuracy_det_report_by_age_gap_buckets()
     test_apply_personalized_calibration_per_identity()
     test_calibration_is_model_pack_versioned()
+    test_calibration_keeps_untagged_legacy_labels_with_dominant_model()
     test_ordered_review_candidates_surfaces_matches_abstains_noise()
     test_platt_calibrator_monotonic_and_separating()
     test_empirical_fmr_and_threshold_for_fmr()

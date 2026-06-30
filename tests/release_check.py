@@ -149,6 +149,87 @@ def run_real_public_benchmark_gate_check(required: bool = False) -> dict[str, An
     }
 
 
+def _load_self_learning_audit(audit: dict[str, Any] | str | Path | None) -> dict[str, Any]:
+    from crossage_fr.experiments import self_learning_audit
+
+    payload, load_errors = self_learning_audit._load_audit_source_with_errors(audit)
+    if load_errors:
+        blockers = [*payload.get("blockers", []), *load_errors] if isinstance(payload.get("blockers"), list) else load_errors
+        return {**payload, "blockers": blockers, "loadErrors": load_errors}
+    return payload
+
+
+def _self_learning_audit_source_from_env() -> dict[str, Any] | Path | None:
+    audit_path = os.environ.get("VINTRACE_SELF_LEARNING_AUDIT", "").strip()
+    if audit_path:
+        return Path(audit_path).expanduser()
+    phase5_path = os.environ.get("VINTRACE_PHASE5_DECISION", "").strip()
+    phase6_path = os.environ.get("VINTRACE_PHASE6_READINESS", "").strip()
+    if not phase5_path and not phase6_path:
+        return None
+    from crossage_fr.experiments import self_learning_audit
+
+    return self_learning_audit.self_learning_rd_audit(
+        phase5_decision_path=Path(phase5_path).expanduser() if phase5_path else None,
+        phase6_readiness_path=Path(phase6_path).expanduser() if phase6_path else None,
+    )
+
+
+def _default_self_learning_audit_source() -> Path | None:
+    audit_path = repo_root() / "benchmarks" / "evidence" / "self-learning-rd" / "self_learning_rd_audit.json"
+    return audit_path if audit_path.is_file() else None
+
+
+def run_self_learning_r_and_d_check(
+    *,
+    plan_path: Path | None = None,
+    audit: dict[str, Any] | str | Path | None = None,
+) -> dict[str, Any]:
+    from crossage_fr.experiments import self_learning_audit
+
+    resolved_plan = plan_path or repo_root() / "docs" / "2026-self-learning-loop-plan.md"
+    if audit is None:
+        audit = _self_learning_audit_source_from_env()
+    if audit is None:
+        audit = _default_self_learning_audit_source()
+    audit_payload = _load_self_learning_audit(audit)
+    load_errors = audit_payload.get("loadErrors") if isinstance(audit_payload.get("loadErrors"), list) else []
+    semantic_errors = [*load_errors, *self_learning_audit._audit_semantic_errors(audit_payload)]
+    plan_audit_source = audit if audit is not None and not isinstance(audit, dict) else audit_payload
+    plan = self_learning_audit.plan_checklist_consistency(resolved_plan, audit=plan_audit_source)
+    requirements = audit_payload.get("requirements") if isinstance(audit_payload.get("requirements"), list) else []
+    blocked = [
+        str(row.get("id", "") or "")
+        for row in requirements
+        if isinstance(row, dict) and row.get("ok") is not True
+    ]
+    satisfied = [
+        str(row.get("id", "") or "")
+        for row in requirements
+        if isinstance(row, dict) and row.get("ok") is True
+    ]
+    ok = bool(not semantic_errors and plan.get("ok") is True)
+    return {
+        "ok": ok,
+        "status": "production-safe-r-and-d-separated" if ok else "fail",
+        "auditOk": audit_payload.get("ok") is True,
+        "auditStatus": audit_payload.get("status"),
+        "notProductionAuthorization": audit_payload.get("notProductionAuthorization") is True,
+        "planConsistencyOk": plan.get("ok") is True,
+        "blockedRequirements": blocked,
+        "satisfiedRequirements": satisfied,
+        "semanticErrors": semantic_errors,
+        "planBlockers": plan.get("blockers", []),
+        "message": (
+            "Self-learning R&D is separated from production release posture; blocked R&D is documented."
+            if ok and blocked
+            else "Self-learning R&D evidence is satisfied, but remains non-authorizing for production retraining."
+            if ok
+            else "Self-learning R&D posture is inconsistent; do not imply production retraining readiness."
+        ),
+    }
+
+
 def _benchmark_age_days(generated_at: str) -> int | None:
     if not generated_at:
         return None
@@ -183,7 +264,9 @@ def main() -> None:
     root = Path(tempfile.mkdtemp(prefix="vintrace-release-check-"))
     workspace = root / "workspace"
     os.environ["CROSSAGE_FORCE_FALLBACK"] = os.environ.get("CROSSAGE_FORCE_FALLBACK", "1")
-    os.environ["CROSSAGE_REGISTRY_HOME"] = str(root / "registry")
+    registry = str(root / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
     api = DesktopApi(workspace)
     checks: list[dict[str, Any]] = []
 
@@ -205,6 +288,7 @@ def main() -> None:
         lambda: run_real_public_benchmark_gate_check(required=strict or os.environ.get("VINTRACE_REQUIRE_PUBLIC_BENCHMARK", "").strip() == "1"),
         checks,
     ) or {}
+    self_learning_rd = capture("self-learning R&D release posture", run_self_learning_r_and_d_check, checks) or {}
 
     structural_ok = all(check["ok"] for check in checks)
     runtime_ok = bool(runtime.get("ok", False))
@@ -214,7 +298,17 @@ def main() -> None:
     package_ok = bool(package_artifacts.get("ok", False))
     dataset_gate_ok = bool(dataset_gates.get("ok", False))
     real_dataset_gate_ok = bool(real_dataset_gates.get("ok", False))
-    no_credential_ok = structural_ok and database_ok and storage_ok and update_ok and package_ok and dataset_gate_ok and real_dataset_gate_ok
+    self_learning_rd_ok = bool(self_learning_rd.get("ok", False))
+    no_credential_ok = (
+        structural_ok
+        and database_ok
+        and storage_ok
+        and update_ok
+        and package_ok
+        and dataset_gate_ok
+        and real_dataset_gate_ok
+        and self_learning_rd_ok
+    )
     release_ready = bool(readiness.get("ok", False))
     distribution_blockers = [
         recommendation
@@ -278,6 +372,7 @@ def main() -> None:
             "failedGates": real_dataset_gates.get("failedGates"),
             "reportPath": real_dataset_gates.get("reportPath"),
         },
+        "selfLearningRd": self_learning_rd,
         "distributionBlockers": distribution_blockers,
     }
     print(json.dumps(result, indent=2))

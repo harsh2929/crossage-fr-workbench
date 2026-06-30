@@ -1,0 +1,89 @@
+{
+  "dataset": "large-four-public-benchmark",
+  "decision": "keep-none-as-default",
+  "reason": "Standardization is implemented as an explicit R&D option, but this held-out public split reduced the best metric gain below the floor and added accuracy/recall regressions.",
+  "results": [
+    {
+      "delta": {
+        "accuracy": 0.0,
+        "precision": 0.011697,
+        "recall": -0.011718
+      },
+      "featurePreprocessing": "none",
+      "jsonMetrics": {
+        "accuracy": 0.93125,
+        "count": 320,
+        "falseNegatives": 15,
+        "falsePositives": 7,
+        "precision": 0.971774,
+        "recall": 0.941406,
+        "specificity": 0.890625,
+        "threshold": 0.5,
+        "trueNegatives": 57,
+        "truePositives": 241
+      },
+      "onnxMetrics": {
+        "accuracy": 0.93125,
+        "count": 320,
+        "falseNegatives": 18,
+        "falsePositives": 4,
+        "precision": 0.983471,
+        "recall": 0.929688,
+        "specificity": 0.9375,
+        "threshold": 0.361976,
+        "trueNegatives": 60,
+        "truePositives": 238
+      },
+      "status": "pass",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.361976,
+        "requested": 0.5
+      },
+      "validationReportPath": "benchmarks/evidence/self-learning-rd/public-validation-large-four/row-training-validation/phase5_onnx_training_validation.json"
+    },
+    {
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.00765,
+        "recall": -0.011718
+      },
+      "featurePreprocessing": "standardize",
+      "jsonMetrics": {
+        "accuracy": 0.93125,
+        "count": 320,
+        "falseNegatives": 15,
+        "falsePositives": 7,
+        "precision": 0.971774,
+        "recall": 0.941406,
+        "specificity": 0.890625,
+        "threshold": 0.5,
+        "trueNegatives": 57,
+        "truePositives": 241
+      },
+      "onnxMetrics": {
+        "accuracy": 0.928125,
+        "count": 320,
+        "falseNegatives": 18,
+        "falsePositives": 5,
+        "precision": 0.979424,
+        "recall": 0.929688,
+        "specificity": 0.921875,
+        "threshold": 0.387115,
+        "trueNegatives": 59,
+        "truePositives": 238
+      },
+      "status": "pass",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.387115,
+        "requested": 0.5
+      },
+      "validationReportPath": "benchmarks/results/onnx-public-dataset-validation-large-four/run-mlp-h64-lr0p08-e128-standardized/row-training-validation/phase5_onnx_training_validation.json"
+    }
+  ],
+  "schemaVersion": 1,
+  "scope": "phase5-large-four-feature-preprocessing-study",
+  "trainingRowsPath": "benchmarks/evidence/self-learning-rd/public-validation-large-four/rows/training-rows.json",
+  "validationRowsPath": "benchmarks/evidence/self-learning-rd/public-validation-large-four/rows/validation-rows.json"
+}

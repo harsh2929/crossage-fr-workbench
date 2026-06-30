@@ -11,6 +11,7 @@ MAX_CLUSTER_MIN_SIZE = 20
 MIN_FACE_DETECTOR_SIZE = 320
 MAX_FACE_DETECTOR_SIZE = 1024
 PERFORMANCE_MODES = {"auto", "fast", "balanced", "quality"}
+LEARNING_MODES = {"off", "manual", "auto_stage"}
 DEFAULT_EXCLUDED_DIR_NAMES = [
     ".git",
     ".hg",
@@ -45,6 +46,7 @@ class RuntimeConfig:
     recognizer_filename: str = ""
     review_only: bool = True
     require_consent: bool = True
+    learning_mode: str = "manual"
     per_subject_consent: bool = False
     jurisdiction_preset: str = "standard"
     retention_reviewed_days: int = 90
@@ -184,12 +186,20 @@ def _require_performance_mode(value: object) -> str:
     return mode
 
 
+def _require_learning_mode(value: object) -> str:
+    mode = str(value or "manual").strip().lower().replace("-", "_")
+    if mode not in LEARNING_MODES:
+        raise ValueError("learning_mode must be off, manual, or auto_stage.")
+    return mode
+
+
 def _validate_config(config: RuntimeConfig) -> RuntimeConfig:
     config.model_pack = str(config.model_pack)
     config.model_root = str(config.model_root)
     config.recognizer_filename = str(config.recognizer_filename or "")[:200]
     config.review_only = _require_bool(config.review_only, "review_only")
     config.require_consent = _require_bool(config.require_consent, "require_consent")
+    config.learning_mode = _require_learning_mode(config.learning_mode)
     config.per_subject_consent = _require_bool(config.per_subject_consent, "per_subject_consent")
     config.jurisdiction_preset = str(config.jurisdiction_preset or "standard").strip().lower()[:40] or "standard"
     config.retention_reviewed_days = _require_int(config.retention_reviewed_days, "retention_reviewed_days", minimum=1)

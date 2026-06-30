@@ -42,3 +42,34 @@ Photo on*.jpg
 # Downloaded model cache; keep the tracked placeholder.
 models/insightface/*
 !models/insightface/.gitkeep
+
+# Optional on-device ONNX model packs (matting / semantic search / depth):
+# weights are downloaded or vendored at build time (sha256-pinned in code),
+# never committed. Keep the tracked README/placeholder describing each pack.
+models/matting/*
+!models/matting/.gitkeep
+!models/matting/README.md
+models/semantic/*
+!models/semantic/.gitkeep
+!models/semantic/README.md
+models/depth/*
+!models/depth/.gitkeep
+!models/depth/README.md
+
+# Runtime / generated workspace artifacts (the repo root doubles as a dev
+# workspace). These are written by the app at runtime, not source.
+workspace.sqlite3
+.vintrace-workspace.json
+audit_log.jsonl
+accuracy_validation_history.json
+validation-packs/
+previews/
+video-frames/
+
+# Downloaded benchmark datasets (multi-GB; see benchmarks/README.md to fetch).
+# benchmarks/evidence/ IS tracked (consumed by release:check).
+benchmarks/public-data/
+
+# Playwright test output
+test-results/
+playwright-report/

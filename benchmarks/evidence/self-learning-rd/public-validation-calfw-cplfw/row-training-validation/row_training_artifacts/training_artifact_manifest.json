@@ -1,0 +1,143 @@
+{
+  "artifactType": "onnx-tiny-scoring-head",
+  "artifacts": [
+    {
+      "exists": true,
+      "isDirectory": false,
+      "kind": "forwardModel",
+      "path": "row_forward.onnx",
+      "sha256": "de8d431a08a2d37c61473dc1a0cd054bb0104cb25e738e384aa10e1043693579",
+      "sizeBytes": 554
+    },
+    {
+      "exists": true,
+      "isDirectory": false,
+      "kind": "trainingModel",
+      "path": "row_training_model.onnx",
+      "sha256": "adf1842bf8c1c3b603862f50c8ab2d83cb693e2e3513690a3facf0a248771074",
+      "sizeBytes": 1997
+    },
+    {
+      "exists": true,
+      "isDirectory": false,
+      "kind": "evalModel",
+      "path": "row_eval_model.onnx",
+      "sha256": "22558ea97e07dc352d2d029eb1a9541b5375692ecd202d04d5afb7dcd6bbbfac",
+      "sizeBytes": 528
+    },
+    {
+      "exists": true,
+      "isDirectory": false,
+      "kind": "optimizerModel",
+      "path": "row_optimizer_model.onnx",
+      "sha256": "b85c5f4fbbe2ad30f46db486b4d808b45c19d0c4743e8b84eaf6913cf47c0e51",
+      "sizeBytes": 541
+    },
+    {
+      "exists": true,
+      "isDirectory": false,
+      "kind": "checkpoint",
+      "path": "row_checkpoint",
+      "sha256": "814400d2621387f8525454886d697b6109f37b321e2fde631cb12e7f4de2a1b9",
+      "sizeBytes": 1456
+    },
+    {
+      "exists": true,
+      "isDirectory": false,
+      "kind": "inferenceModel",
+      "path": "row_inference.onnx",
+      "sha256": "fb94c53dcaff09db386cd148cb3b48d526eddd0805a5976cfeaf594055157cd5",
+      "sizeBytes": 824
+    }
+  ],
+  "createdAtUnix": 1781849111.032,
+  "dependencyMatrix": {
+    "currentPlatform": "macos-arm64",
+    "enabled": true,
+    "featureFlag": "VINTRACE_EXPERIMENTAL_ONNX_TRAINING",
+    "installed": {
+      "numpy": true,
+      "onnx": true,
+      "onnxruntime": true,
+      "onnxruntime.training": true
+    },
+    "legacyFeatureFlag": "CROSSAGE_EXPERIMENTAL_ONNX_TRAINING",
+    "rows": [
+      {
+        "blockers": [],
+        "currentHost": true,
+        "installedOnCurrentHost": {
+          "numpy": true,
+          "onnx": true,
+          "onnxruntime": true,
+          "onnxruntime.training": true
+        },
+        "requiredModules": [
+          "onnxruntime",
+          "onnxruntime.training",
+          "onnx",
+          "numpy"
+        ],
+        "status": "available",
+        "target": "macos-arm64"
+      },
+      {
+        "blockers": [],
+        "currentHost": false,
+        "installedOnCurrentHost": null,
+        "requiredModules": [
+          "onnxruntime",
+          "onnxruntime.training",
+          "onnx",
+          "numpy"
+        ],
+        "status": "not-verified",
+        "target": "macos-x64"
+      },
+      {
+        "blockers": [],
+        "currentHost": false,
+        "installedOnCurrentHost": null,
+        "requiredModules": [
+          "onnxruntime",
+          "onnxruntime.training",
+          "onnx",
+          "numpy"
+        ],
+        "status": "not-verified",
+        "target": "windows-x64"
+      },
+      {
+        "blockers": [],
+        "currentHost": false,
+        "installedOnCurrentHost": null,
+        "requiredModules": [
+          "onnxruntime",
+          "onnxruntime.training",
+          "onnx",
+          "numpy"
+        ],
+        "status": "not-verified",
+        "target": "linux-x64"
+      }
+    ],
+    "summary": "ONNX training dependencies are available on this host."
+  },
+  "featureFlag": "VINTRACE_EXPERIMENTAL_ONNX_TRAINING",
+  "manifestHash": "ef5e61bab04cd90320689a167d16c13d7f72683647f5407e51ef0da5860b35bd",
+  "manifestId": "ortlearn_8e46c9948bb0",
+  "missingRequiredKinds": [],
+  "parentManifestId": "",
+  "platform": "macos-arm64",
+  "prefix": "row_",
+  "requiredKinds": [
+    "forwardModel",
+    "trainingModel",
+    "evalModel",
+    "optimizerModel",
+    "checkpoint"
+  ],
+  "schemaVersion": 1,
+  "status": "complete",
+  "validation": {}
+}

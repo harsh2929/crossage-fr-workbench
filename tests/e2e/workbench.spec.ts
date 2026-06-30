@@ -98,8 +98,15 @@ async function expectTopbarControlsReadable(page: Page, colorScheme: "light" | "
   const activeContrasts = await page.locator(".topbar-actions").evaluate((container) => {
     function parseColor(value: string) {
       const match = value.match(/rgba?\(([^)]+)\)/);
-      if (!match) return [0, 0, 0];
-      return match[1].split(",").slice(0, 3).map((part) => Number.parseFloat(part.trim()));
+      if (match) return match[1].replace(/\//g, " ").split(/[,\s]+/).filter(Boolean).slice(0, 3).map((part) => Number.parseFloat(part.trim()));
+      const srgb = value.match(/color\(srgb\s+([^)]+)\)/);
+      if (srgb) {
+        return srgb[1].replace(/\//g, " ").split(/[,\s]+/).filter(Boolean).slice(0, 3).map((part) => {
+          const parsed = Number.parseFloat(part.trim());
+          return parsed <= 1 ? parsed * 255 : parsed;
+        });
+      }
+      return [0, 0, 0];
     }
     function channel(value: number) {
       const normalized = value / 255;
@@ -113,11 +120,24 @@ async function expectTopbarControlsReadable(page: Page, colorScheme: "light" | "
       const dark = Math.min(luminance(parseColor(foreground)), luminance(parseColor(background)));
       return (light + 0.05) / (dark + 0.05);
     }
+    function effectiveBackground(node: HTMLElement) {
+      for (let current: HTMLElement | null = node; current; current = current.parentElement) {
+        const background = window.getComputedStyle(current).backgroundColor;
+        if (background && background !== "transparent" && !/^rgba?\(\s*0\s*,\s*0\s*,\s*0\s*(?:,\s*0\s*)?\)$/i.test(background)) {
+          return background;
+        }
+      }
+      return "rgb(255, 255, 255)";
+    }
     return Array.from(container.querySelectorAll<HTMLElement>("button, label")).map((node) => {
       const style = window.getComputedStyle(node);
+      const background = effectiveBackground(node);
       return {
+        background,
+        className: node.getAttribute("class") || "",
+        color: style.color,
         label: node.textContent?.trim() || node.getAttribute("aria-label") || node.getAttribute("title") || node.tagName,
-        contrast: contrast(style.color, style.backgroundColor)
+        contrast: contrast(style.color, background)
       };
     });
   });
@@ -128,6 +148,8 @@ async function expectTopbarControlsReadable(page: Page, colorScheme: "light" | "
     const inputs = Array.from(container.querySelectorAll<HTMLInputElement>("input"));
     const buttonStates = buttons.map((button) => button.disabled);
     const inputStates = inputs.map((input) => input.disabled);
+    const containerWasDisabled = container.classList.contains("disabled");
+    container.classList.add("disabled");
     buttons.forEach((button) => {
       button.disabled = true;
     });
@@ -136,8 +158,15 @@ async function expectTopbarControlsReadable(page: Page, colorScheme: "light" | "
     });
     function parseColor(value: string) {
       const match = value.match(/rgba?\(([^)]+)\)/);
-      if (!match) return [0, 0, 0];
-      return match[1].split(",").slice(0, 3).map((part) => Number.parseFloat(part.trim()));
+      if (match) return match[1].replace(/\//g, " ").split(/[,\s]+/).filter(Boolean).slice(0, 3).map((part) => Number.parseFloat(part.trim()));
+      const srgb = value.match(/color\(srgb\s+([^)]+)\)/);
+      if (srgb) {
+        return srgb[1].replace(/\//g, " ").split(/[,\s]+/).filter(Boolean).slice(0, 3).map((part) => {
+          const parsed = Number.parseFloat(part.trim());
+          return parsed <= 1 ? parsed * 255 : parsed;
+        });
+      }
+      return [0, 0, 0];
     }
     function channel(value: number) {
       const normalized = value / 255;
@@ -151,11 +180,24 @@ async function expectTopbarControlsReadable(page: Page, colorScheme: "light" | "
       const dark = Math.min(luminance(parseColor(foreground)), luminance(parseColor(background)));
       return (light + 0.05) / (dark + 0.05);
     }
+    function effectiveBackground(node: HTMLElement) {
+      for (let current: HTMLElement | null = node; current; current = current.parentElement) {
+        const background = window.getComputedStyle(current).backgroundColor;
+        if (background && background !== "transparent" && !/^rgba?\(\s*0\s*,\s*0\s*,\s*0\s*(?:,\s*0\s*)?\)$/i.test(background)) {
+          return background;
+        }
+      }
+      return "rgb(255, 255, 255)";
+    }
     const result = Array.from(container.querySelectorAll<HTMLElement>("button, label")).map((node) => {
       const style = window.getComputedStyle(node);
+      const background = effectiveBackground(node);
       return {
+        background,
+        className: node.getAttribute("class") || "",
+        color: style.color,
         label: node.textContent?.trim() || node.getAttribute("aria-label") || node.getAttribute("title") || node.tagName,
-        contrast: contrast(style.color, style.backgroundColor)
+        contrast: contrast(style.color, background)
       };
     });
     buttons.forEach((button, index) => {
@@ -164,6 +206,9 @@ async function expectTopbarControlsReadable(page: Page, colorScheme: "light" | "
     inputs.forEach((input, index) => {
       input.disabled = inputStates[index];
     });
+    if (!containerWasDisabled) {
+      container.classList.remove("disabled");
+    }
     return result;
   });
   expect(disabledContrasts.filter((item) => item.contrast < 4.5)).toEqual([]);
@@ -272,7 +317,7 @@ async function closeBlockingDialogIfVisible(page: Page) {
 
 async function auditVisibleTabButtons(page: Page, pageErrors: string[]) {
   const skip = /download|install update|quit|start camera|capture best frame|arm auto capture|auto ready|stop camera|choose|open$|reveal$|export diagnostics|delete face data/i;
-  const tabs = ["Dashboard", "People", "Scan", "Review", "Settings"];
+  const tabs = ["Dashboard", "People", "Scan", "Review", "Photos", "Settings"];
   const clicked = new Set<string>();
   for (const tab of tabs) {
     await page.locator(".nav-list").getByRole("button", { name: tab }).click();
@@ -304,6 +349,8 @@ test("desktop workbench renders and every primary control path works", async () 
   const projectRoot = process.cwd();
   const temp = mkdtempSync(path.join(os.tmpdir(), "vintrace-e2e-"));
   const workspace = path.join(temp, "workspace");
+  const initialWorkspace = path.join(temp, "initial-workspace");
+  const registry = path.join(temp, "registry");
   const fixtures = makeFixtures(temp);
   const pageErrors: string[] = [];
   const failedRequests: string[] = [];
@@ -311,9 +358,11 @@ test("desktop workbench renders and every primary control path works", async () 
     ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
     CROSSAGE_FORCE_FALLBACK: "1",
     CROSSAGE_TEST_CAMERA: "1",
-    CROSSAGE_TEST_DIALOG_PATHS: [workspace, fixtures.refs, fixtures.scan].join(path.delimiter),
-    CROSSAGE_REGISTRY_HOME: path.join(temp, "registry"),
-    CROSSAGE_WORKSPACE: path.join(temp, "initial-workspace"),
+    CROSSAGE_TEST_DIALOG_PATHS: [workspace, fixtures.refs, fixtures.adultRefs, fixtures.scan, fixtures.refs].join(path.delimiter),
+    VINTRACE_REGISTRY_HOME: registry,
+    CROSSAGE_REGISTRY_HOME: registry,
+    VINTRACE_WORKSPACE: initialWorkspace,
+    CROSSAGE_WORKSPACE: initialWorkspace,
     CROSSAGE_ALLOW_MULTI_INSTANCE: "1",
     PYTHONPATH: projectRoot
   };
@@ -354,7 +403,7 @@ test("desktop workbench renders and every primary control path works", async () 
   expect(pageErrors).toEqual([]);
   expect(failedRequests).toEqual([]);
 
-  for (const name of ["Dashboard", "People", "Scan", "Review", "Settings"]) {
+  for (const name of ["Dashboard", "People", "Scan", "Review", "Photos", "Settings"]) {
     await page.locator(".nav-list").getByRole("button", { name }).click();
     await expect(page.locator(".nav-list").getByRole("button", { name })).toHaveClass(/active/);
   }
@@ -365,12 +414,12 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(page.locator(".status-row").getByText("Ready", { exact: true })).toBeVisible();
 
   await page.locator(".nav-list").getByRole("button", { name: "People" }).click();
+  const addPersonPanel = page.locator(".add-person-panel");
   await page.getByLabel("Person name").fill("Person A");
   await page.getByLabel("Age range in these photos").selectOption("child");
-  await page.getByRole("button", { name: "Choose person photo folder" }).click();
-  await expect(page.getByRole("textbox", { name: "Person photo folder", exact: true })).toHaveValue(fixtures.refs);
-  const enrollButton = page.locator(".form-panel").getByRole("button", { name: /^Add photos$/ });
-  await expect(enrollButton).toBeDisabled();
+  await addPersonPanel.getByRole("button", { name: "Choose person photo folder" }).click();
+  await expect(addPersonPanel.getByText("1 photo ready")).toBeVisible({ timeout: 120_000 });
+  const enrollButton = addPersonPanel.getByRole("button", { name: /^Add 1 photo to/ });
 
   await page.locator(".topbar-actions").getByText("Permission").click();
   await expect(page.getByRole("dialog", { name: "Confirm permission" })).toBeVisible();
@@ -378,12 +427,18 @@ test("desktop workbench renders and every primary control path works", async () 
   await page.getByRole("button", { name: "Confirm permission" }).click();
   await expect(enrollButton).toBeEnabled();
   await enrollButton.click();
-  await expect(page.getByText(/Added 1 saved face photo/)).toBeVisible({ timeout: 120_000 });
-  await expect(page.getByText("person_a.jpg")).toBeVisible();
-  await page.getByRole("textbox", { name: "Adult photo folder" }).fill(fixtures.adultRefs);
-  await page.getByRole("button", { name: "Add age folders" }).click();
-  await expect(page.getByText(/across 1 age folder/)).toBeVisible({ timeout: 120_000 });
-  await expect(page.getByText("person_a_adult.jpg")).toBeVisible();
+  await expect(page.getByText(/Added 1 photo to Person A/)).toBeVisible({ timeout: 120_000 });
+  const personCard = page.locator(".person-card").filter({ hasText: "Person A" });
+  await expect(personCard).toBeVisible();
+  await expect(personCard.locator(".person-count")).toHaveText("1");
+  await expect(personCard.getByText("Child", { exact: true })).toBeVisible();
+  await page.getByLabel("Age range in these photos").selectOption("adult");
+  await addPersonPanel.getByRole("button", { name: "Choose person photo folder" }).click();
+  await expect(addPersonPanel.getByText("1 photo ready")).toBeVisible({ timeout: 120_000 });
+  await addPersonPanel.getByRole("button", { name: /^Add 1 photo to/ }).click();
+  await expect(page.getByText(/Added 1 photo to Person A/)).toBeVisible({ timeout: 120_000 });
+  await expect(personCard.locator(".person-count")).toHaveText("2");
+  await expect(personCard.getByText("Adult", { exact: true })).toBeVisible();
 
   await page.locator(".nav-list").getByRole("button", { name: "Scan" }).click();
   await expect(page.getByText("Add from camera")).toBeVisible();
@@ -409,16 +464,17 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(page.getByText("Needs attention")).toBeVisible();
   await expect(page.getByText("Files that need attention")).toBeVisible();
   await page.locator(".form-panel").getByRole("button", { name: /^Scan folder$/ }).click();
-  await expect(page.getByText(/Found 1 possible match/)).toBeVisible({ timeout: 120_000 });
-  await expect(page.getByText("candidate_a.jpg")).toBeVisible();
+  await confirmDialog(page);
   const scanActivity = page.locator(".scan-activity").first();
   await expect(scanActivity.locator(".activity-head-actions strong")).toHaveText(/\d+\/\d+/, { timeout: 120_000 });
   await expect(scanActivity).toContainText("cached faces");
   await expect(scanActivity).toContainText("rechecked");
+  await expect(page.locator(".nav-list").getByRole("button", { name: /Review\s+\d+/ })).toBeVisible();
   await page.getByRole("button", { name: "Toggle scan ETA" }).click();
   await expect(scanActivity.locator(".eta-detail")).toBeVisible();
 
   await page.getByRole("button", { name: "Clear results" }).click();
+  await confirmDialog(page);
   await expect(page.getByText("No possible matches yet")).toBeVisible();
   await page.getByRole("button", { name: "Watch for new files" }).click();
   await expect(page.locator(".scan-activity small")).toHaveText("Watching for new media files.");
@@ -479,15 +535,19 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(page.getByText("No possible matches yet")).toBeVisible();
 
   await page.locator(".nav-list").getByRole("button", { name: "People" }).click();
-  await page.getByRole("button", { name: "Delete selected saved photo" }).click();
-  await confirmDialog(page);
-  await expect(page.getByText("person_a_adult.jpg")).toBeVisible();
-  await page.getByRole("button", { name: "Clear saved face photos" }).click();
+  const currentPersonCard = page.locator(".person-card").filter({ hasText: "Person A" });
+  await currentPersonCard.getByRole("button", { name: "Delete this photo" }).first().click();
+  await expect(currentPersonCard.locator(".person-count")).toHaveText("1", { timeout: 120_000 });
+  await currentPersonCard.getByRole("button", { name: "Delete Person A" }).click();
   await confirmDialog(page);
   await expect(page.getByText("No people added yet")).toBeVisible();
-  await enrollButton.click();
-  await expect(page.getByText(/Added 1 saved face photo/)).toBeVisible({ timeout: 120_000 });
-  await expect(page.getByText("person_a.jpg")).toBeVisible();
+  await page.getByLabel("Person name").fill("Person A");
+  await page.getByLabel("Age range in these photos").selectOption("child");
+  await addPersonPanel.getByRole("button", { name: "Choose person photo folder" }).click();
+  await expect(addPersonPanel.getByText("1 photo ready")).toBeVisible({ timeout: 120_000 });
+  await addPersonPanel.getByRole("button", { name: /^Add 1 photo to/ }).click();
+  await expect(page.getByText(/Added 1 photo to Person A/)).toBeVisible({ timeout: 120_000 });
+  await expect(page.locator(".person-card").filter({ hasText: "Person A" }).locator(".person-count")).toHaveText("1");
 
   await page.locator(".nav-list").getByRole("button", { name: "Settings" }).click();
   await expect(page.getByRole("group", { name: "Configuration presets" })).toBeVisible();
@@ -504,6 +564,12 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(page.getByText("System check")).toBeVisible();
   await page.locator(".panel", { hasText: "Local engine" }).getByRole("button", { name: "Run check" }).click();
   await expect(page.getByText(/System check (passed|found items to review)/)).toBeVisible({ timeout: 120_000 });
+  const accuracyLab = page.locator(".panel", { hasText: "Accuracy lab" });
+  await expect(accuracyLab.getByText("Learned calibration", { exact: true })).toBeVisible();
+  await expect(accuracyLab.getByRole("button", { name: "Update learning status" })).toBeVisible();
+  await accuracyLab.getByRole("button", { name: "Run learning check" }).click();
+  await expect(page.getByRole("dialog", { name: "Please confirm" })).toBeVisible();
+  await page.getByRole("dialog", { name: "Please confirm" }).getByRole("button", { name: "Cancel" }).click();
   const updatesPanel = page.locator(".panel").filter({ has: page.getByRole("button", { name: "Check updates" }) });
   await expect(updatesPanel).toBeVisible();
   await expect(updatesPanel.getByRole("button", { name: "Check updates" })).toBeVisible();
@@ -545,10 +611,13 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(page.getByText(/Exported report/)).toBeVisible({ timeout: 120_000 });
   await page.getByRole("button", { name: "Backup app folder" }).click();
   await expect(page.getByText(/Backup created:/)).toBeVisible({ timeout: 120_000 });
-  await page.getByLabel("New person name").fill("Person Renamed");
-  await page.getByRole("button", { name: "Rename" }).click();
+  const renameRow = page.locator(".person-rename-row");
+  await expect(renameRow.getByLabel("Person to rename")).toHaveValue("Person A");
+  await renameRow.getByLabel("New person name").fill("Person Renamed");
+  await renameRow.getByRole("button", { name: "Rename" }).click();
+  await confirmDialog(page);
   await expect(page.getByText(/Updated 1 saved photo/)).toBeVisible({ timeout: 120_000 });
-  await expect(page.getByLabel("Person to rename")).toHaveValue("Person Renamed");
+  await expect(renameRow.getByLabel("Person to rename")).toHaveValue("Person Renamed");
   await page.getByLabel("Retention days").fill("1");
   await page.getByRole("button", { name: "Remove old reviewed" }).click();
   await confirmDialog(page);  // purging reviewed matches prompts "Please confirm"

@@ -455,7 +455,7 @@ def _probe_video_ffmpeg(path: Path) -> dict[str, object]:
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=width,height,nb_frames,r_frame_rate,duration",
+        "stream=codec_name,codec_long_name,profile,width,height,nb_frames,r_frame_rate,duration,pix_fmt,color_space,color_transfer,color_primaries:format=format_name,format_long_name,duration,size,bit_rate",
         "-of",
         "json",
         str(resolved),
@@ -466,12 +466,16 @@ def _probe_video_ffmpeg(path: Path) -> dict[str, object]:
     try:
         payload = json.loads(completed.stdout or "{}")
         stream = (payload.get("streams") or [{}])[0]
+        container = payload.get("format") or {}
     except (json.JSONDecodeError, AttributeError, IndexError):
         stream = {}
+        container = {}
     width = _safe_int(stream.get("width"))
     height = _safe_int(stream.get("height"))
     frame_rate = _parse_frame_rate(stream.get("r_frame_rate"))
     duration_seconds = _safe_float(stream.get("duration"))
+    if duration_seconds <= 0:
+        duration_seconds = _safe_float(container.get("duration"))
     frame_count = _safe_int(stream.get("nb_frames"))
     if frame_count <= 0 and duration_seconds > 0 and frame_rate > 0:
         frame_count = int(round(duration_seconds * frame_rate))
@@ -484,6 +488,19 @@ def _probe_video_ffmpeg(path: Path) -> dict[str, object]:
         "width": width,
         "height": height,
         "durationMs": int(duration_seconds * 1000) if duration_seconds > 0 else 0,
+        "codec": str(stream.get("codec_name") or ""),
+        "codecName": str(stream.get("codec_name") or ""),
+        "codecLongName": str(stream.get("codec_long_name") or ""),
+        "profile": str(stream.get("profile") or ""),
+        "pixelFormat": str(stream.get("pix_fmt") or ""),
+        "colorSpace": str(stream.get("color_space") or ""),
+        "colorTransfer": str(stream.get("color_transfer") or ""),
+        "colorPrimaries": str(stream.get("color_primaries") or ""),
+        "container": str(container.get("format_name") or ""),
+        "format": str(container.get("format_name") or ""),
+        "formatLongName": str(container.get("format_long_name") or ""),
+        "bitRate": _safe_int(container.get("bit_rate")),
+        "size": _safe_int(container.get("size")),
         "backend": "ffmpeg",
     }
 

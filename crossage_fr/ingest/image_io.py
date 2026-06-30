@@ -6,7 +6,7 @@ import hashlib
 import importlib.util
 import os
 import warnings
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 from PIL import ExifTags, Image, ImageOps
 
@@ -219,6 +219,23 @@ def _to_rgb(image: Image.Image) -> Image.Image:
     return image.convert("RGB")
 
 
+def _raw_postprocess_kwargs(rawpy_module: Any) -> dict[str, Any]:
+    """High-fidelity LibRaw postprocess settings for RAW decode (APL-RAW-01).
+
+    Prefers LibRaw's DHT demosaic (user_qual 11) and an explicit sRGB output
+    color space for top-tier color fidelity, degrading gracefully to LibRaw's
+    defaults when a given build (or a test stub) lacks those options.
+    """
+    kwargs: dict[str, Any] = {"use_camera_wb": True, "no_auto_bright": False, "output_bps": 8}
+    color_space = getattr(getattr(rawpy_module, "ColorSpace", None), "sRGB", None)
+    if color_space is not None:
+        kwargs["output_color"] = color_space
+    demosaic = getattr(getattr(rawpy_module, "DemosaicAlgorithm", None), "DHT", None)
+    if demosaic is not None:
+        kwargs["demosaic_algorithm"] = demosaic
+    return kwargs
+
+
 def _load_raw_image(path: Path) -> Image.Image:
     try:
         import rawpy
@@ -240,7 +257,11 @@ def _load_raw_image(path: Path) -> Image.Image:
                 raise ImageLoadError(
                     f"RAW/DNG image exceeds the maximum allowed pixels ({pixels} > {limit}): {path}"
                 )
-            rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=False, output_bps=8)
+            try:
+                rgb = raw.postprocess(**_raw_postprocess_kwargs(rawpy))
+            except Exception:
+                # A given LibRaw build may reject DHT (user_qual 11); fall back to defaults.
+                rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=False, output_bps=8)
         return Image.fromarray(rgb).convert("RGB")
     except ImageLoadError:
         raise

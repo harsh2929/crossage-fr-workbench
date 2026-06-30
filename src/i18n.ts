@@ -82,7 +82,28 @@ export type TranslationKey =
   | "consent.note"
   | "consent.notePlaceholder"
   | "consent.cancel"
-  | "consent.confirm";
+  | "consent.confirm"
+  | "addPerson.title"
+  | "addPerson.body"
+  | "addPerson.who"
+  | "addPerson.personName"
+  | "addPerson.namePlaceholder"
+  | "addPerson.age"
+  | "addPerson.ageRange"
+  | "addPerson.photosStep"
+  | "addPerson.dropzone"
+  | "addPerson.or"
+  | "addPerson.choosePhotos"
+  | "addPerson.choosePersonPhotos"
+  | "addPerson.chooseFolder"
+  | "addPerson.choosePersonPhotoFolder"
+  | "addPerson.review"
+  | "addPerson.emptyPreview"
+  | "addPerson.addPhotos"
+  | "addPerson.clear"
+  | "addPerson.clearStaged"
+  | "addPerson.removePhoto"
+  | "addPerson.removeFolder";
 
 export type UiMessageKey =
   | "notice.savedFacePhotosAdded"
@@ -127,6 +148,12 @@ export type UiMessageKey =
   | "notice.retryFilesComplete"
   | "notice.scanQueueFinished"
   | "notice.failedFoldersReady"
+  | "addPerson.stagedReadyOne"
+  | "addPerson.stagedReadyMany"
+  | "addPerson.addCountOne"
+  | "addPerson.addCountMany"
+  | "addPerson.addCountNamedOne"
+  | "addPerson.addCountNamedMany"
   | "dialog.deleteSavedPhoto"
   | "dialog.clearMatches"
   | "dialog.clearSavedPhotos"
@@ -214,7 +241,28 @@ const en: TranslationTable = {
   "consent.note": "Optional note",
   "consent.notePlaceholder": "Add a case, folder, or operator note",
   "consent.cancel": "Cancel",
-  "consent.confirm": "Confirm permission"
+  "consent.confirm": "Confirm permission",
+  "addPerson.title": "Add a person",
+  "addPerson.body": "Name them, add a few clear photos, and they'll appear in your people list.",
+  "addPerson.who": "Who is this?",
+  "addPerson.personName": "Person name",
+  "addPerson.namePlaceholder": "Name shown in results",
+  "addPerson.age": "Age",
+  "addPerson.ageRange": "Age range in these photos",
+  "addPerson.photosStep": "Add their photos",
+  "addPerson.dropzone": "Drag photos or a folder here",
+  "addPerson.or": "or",
+  "addPerson.choosePhotos": "Choose photos",
+  "addPerson.choosePersonPhotos": "Choose person photos",
+  "addPerson.chooseFolder": "Choose folder",
+  "addPerson.choosePersonPhotoFolder": "Choose person photo folder",
+  "addPerson.review": "Review & add",
+  "addPerson.emptyPreview": "Photos you add will preview here before they're saved.",
+  "addPerson.addPhotos": "Add photos",
+  "addPerson.clear": "Clear",
+  "addPerson.clearStaged": "Clear staged photos",
+  "addPerson.removePhoto": "Remove photo",
+  "addPerson.removeFolder": "Remove folder"
 };
 
 const translations: Record<LanguageCode, TranslationTable> = {
@@ -292,7 +340,28 @@ const translations: Record<LanguageCode, TranslationTable> = {
     "consent.note": "वैकल्पिक नोट",
     "consent.notePlaceholder": "केस, फ़ोल्डर या ऑपरेटर नोट जोड़ें",
     "consent.cancel": "रद्द करें",
-    "consent.confirm": "अनुमति पुष्टि करें"
+    "consent.confirm": "अनुमति पुष्टि करें",
+    "addPerson.title": "व्यक्ति जोड़ें",
+    "addPerson.body": "नाम दें, कुछ साफ़ फोटो जोड़ें, और वे आपकी लोगों की सूची में दिखाई देंगे।",
+    "addPerson.who": "यह कौन है?",
+    "addPerson.personName": "व्यक्ति का नाम",
+    "addPerson.namePlaceholder": "परिणामों में दिखने वाला नाम",
+    "addPerson.age": "उम्र",
+    "addPerson.ageRange": "इन फोटो में उम्र सीमा",
+    "addPerson.photosStep": "उनकी फोटो जोड़ें",
+    "addPerson.dropzone": "फोटो या फ़ोल्डर यहाँ खींचें",
+    "addPerson.or": "या",
+    "addPerson.choosePhotos": "फोटो चुनें",
+    "addPerson.choosePersonPhotos": "व्यक्ति की फोटो चुनें",
+    "addPerson.chooseFolder": "फ़ोल्डर चुनें",
+    "addPerson.choosePersonPhotoFolder": "व्यक्ति की फोटो का फ़ोल्डर चुनें",
+    "addPerson.review": "समीक्षा करें और जोड़ें",
+    "addPerson.emptyPreview": "आप जो फोटो जोड़ेंगे वे सेव होने से पहले यहाँ दिखेंगी।",
+    "addPerson.addPhotos": "फोटो जोड़ें",
+    "addPerson.clear": "साफ़ करें",
+    "addPerson.clearStaged": "तैयार फोटो साफ़ करें",
+    "addPerson.removePhoto": "फोटो हटाएँ",
+    "addPerson.removeFolder": "फ़ोल्डर हटाएँ"
   },
   es: {
     ...en,
@@ -367,7 +436,28 @@ const translations: Record<LanguageCode, TranslationTable> = {
     "consent.note": "Nota opcional",
     "consent.notePlaceholder": "Agrega un caso, carpeta o nota del operador",
     "consent.cancel": "Cancelar",
-    "consent.confirm": "Confirmar permiso"
+    "consent.confirm": "Confirmar permiso",
+    "addPerson.title": "Agregar una persona",
+    "addPerson.body": "Ponle un nombre, agrega algunas fotos claras y aparecerá en tu lista de personas.",
+    "addPerson.who": "¿Quién es?",
+    "addPerson.personName": "Nombre de la persona",
+    "addPerson.namePlaceholder": "Nombre mostrado en resultados",
+    "addPerson.age": "Edad",
+    "addPerson.ageRange": "Rango de edad en estas fotos",
+    "addPerson.photosStep": "Agrega sus fotos",
+    "addPerson.dropzone": "Arrastra fotos o una carpeta aquí",
+    "addPerson.or": "o",
+    "addPerson.choosePhotos": "Elegir fotos",
+    "addPerson.choosePersonPhotos": "Elegir fotos de la persona",
+    "addPerson.chooseFolder": "Elegir carpeta",
+    "addPerson.choosePersonPhotoFolder": "Elegir carpeta de fotos de la persona",
+    "addPerson.review": "Revisar y agregar",
+    "addPerson.emptyPreview": "Las fotos que agregues se previsualizarán aquí antes de guardarse.",
+    "addPerson.addPhotos": "Agregar fotos",
+    "addPerson.clear": "Quitar",
+    "addPerson.clearStaged": "Quitar fotos preparadas",
+    "addPerson.removePhoto": "Quitar foto",
+    "addPerson.removeFolder": "Quitar carpeta"
   },
   zh: {
     ...en,
@@ -442,7 +532,28 @@ const translations: Record<LanguageCode, TranslationTable> = {
     "consent.note": "可选备注",
     "consent.notePlaceholder": "添加案件、文件夹或操作员备注",
     "consent.cancel": "取消",
-    "consent.confirm": "确认权限"
+    "consent.confirm": "确认权限",
+    "addPerson.title": "添加人物",
+    "addPerson.body": "为人物命名，添加几张清晰照片，他们就会出现在人物列表中。",
+    "addPerson.who": "这是谁？",
+    "addPerson.personName": "人物姓名",
+    "addPerson.namePlaceholder": "结果中显示的名称",
+    "addPerson.age": "年龄",
+    "addPerson.ageRange": "这些照片中的年龄范围",
+    "addPerson.photosStep": "添加他们的照片",
+    "addPerson.dropzone": "将照片或文件夹拖到这里",
+    "addPerson.or": "或",
+    "addPerson.choosePhotos": "选择照片",
+    "addPerson.choosePersonPhotos": "选择人物照片",
+    "addPerson.chooseFolder": "选择文件夹",
+    "addPerson.choosePersonPhotoFolder": "选择人物照片文件夹",
+    "addPerson.review": "检查并添加",
+    "addPerson.emptyPreview": "你添加的照片会先在这里预览，然后再保存。",
+    "addPerson.addPhotos": "添加照片",
+    "addPerson.clear": "清除",
+    "addPerson.clearStaged": "清除待添加照片",
+    "addPerson.removePhoto": "移除照片",
+    "addPerson.removeFolder": "移除文件夹"
   },
   fr: {
     ...en,
@@ -517,7 +628,28 @@ const translations: Record<LanguageCode, TranslationTable> = {
     "consent.note": "Note facultative",
     "consent.notePlaceholder": "Ajouter un dossier, un cas ou une note opérateur",
     "consent.cancel": "Annuler",
-    "consent.confirm": "Confirmer la permission"
+    "consent.confirm": "Confirmer la permission",
+    "addPerson.title": "Ajouter une personne",
+    "addPerson.body": "Nommez-la, ajoutez quelques photos nettes, et elle apparaîtra dans votre liste de personnes.",
+    "addPerson.who": "Qui est-ce ?",
+    "addPerson.personName": "Nom de la personne",
+    "addPerson.namePlaceholder": "Nom affiché dans les résultats",
+    "addPerson.age": "Âge",
+    "addPerson.ageRange": "Tranche d'âge dans ces photos",
+    "addPerson.photosStep": "Ajouter ses photos",
+    "addPerson.dropzone": "Glissez des photos ou un dossier ici",
+    "addPerson.or": "ou",
+    "addPerson.choosePhotos": "Choisir des photos",
+    "addPerson.choosePersonPhotos": "Choisir des photos de la personne",
+    "addPerson.chooseFolder": "Choisir un dossier",
+    "addPerson.choosePersonPhotoFolder": "Choisir le dossier de photos de la personne",
+    "addPerson.review": "Vérifier et ajouter",
+    "addPerson.emptyPreview": "Les photos ajoutées s'afficheront ici avant d'être enregistrées.",
+    "addPerson.addPhotos": "Ajouter des photos",
+    "addPerson.clear": "Effacer",
+    "addPerson.clearStaged": "Effacer les photos préparées",
+    "addPerson.removePhoto": "Retirer la photo",
+    "addPerson.removeFolder": "Retirer le dossier"
   },
   ar: {
     ...en,
@@ -592,7 +724,28 @@ const translations: Record<LanguageCode, TranslationTable> = {
     "consent.note": "ملاحظة اختيارية",
     "consent.notePlaceholder": "أضف حالة أو مجلدا أو ملاحظة للمشغل",
     "consent.cancel": "إلغاء",
-    "consent.confirm": "تأكيد الإذن"
+    "consent.confirm": "تأكيد الإذن",
+    "addPerson.title": "إضافة شخص",
+    "addPerson.body": "سمّه، وأضف بعض الصور الواضحة، وسيظهر في قائمة الأشخاص.",
+    "addPerson.who": "من هذا؟",
+    "addPerson.personName": "اسم الشخص",
+    "addPerson.namePlaceholder": "الاسم الظاهر في النتائج",
+    "addPerson.age": "العمر",
+    "addPerson.ageRange": "نطاق العمر في هذه الصور",
+    "addPerson.photosStep": "أضف صوره",
+    "addPerson.dropzone": "اسحب الصور أو مجلدا إلى هنا",
+    "addPerson.or": "أو",
+    "addPerson.choosePhotos": "اختر الصور",
+    "addPerson.choosePersonPhotos": "اختر صور الشخص",
+    "addPerson.chooseFolder": "اختر مجلدا",
+    "addPerson.choosePersonPhotoFolder": "اختر مجلد صور الشخص",
+    "addPerson.review": "راجع وأضف",
+    "addPerson.emptyPreview": "ستظهر الصور التي تضيفها هنا قبل حفظها.",
+    "addPerson.addPhotos": "إضافة صور",
+    "addPerson.clear": "مسح",
+    "addPerson.clearStaged": "مسح الصور الجاهزة",
+    "addPerson.removePhoto": "إزالة الصورة",
+    "addPerson.removeFolder": "إزالة المجلد"
   },
   ja: {
     ...en,
@@ -667,7 +820,28 @@ const translations: Record<LanguageCode, TranslationTable> = {
     "consent.note": "任意メモ",
     "consent.notePlaceholder": "ケース、フォルダ、担当者メモを追加",
     "consent.cancel": "キャンセル",
-    "consent.confirm": "許可を確認"
+    "consent.confirm": "許可を確認",
+    "addPerson.title": "人物を追加",
+    "addPerson.body": "名前を付け、鮮明な写真を数枚追加すると、人物リストに表示されます。",
+    "addPerson.who": "これは誰ですか？",
+    "addPerson.personName": "人物名",
+    "addPerson.namePlaceholder": "結果に表示する名前",
+    "addPerson.age": "年齢",
+    "addPerson.ageRange": "これらの写真の年齢範囲",
+    "addPerson.photosStep": "その人物の写真を追加",
+    "addPerson.dropzone": "写真またはフォルダをここにドラッグ",
+    "addPerson.or": "または",
+    "addPerson.choosePhotos": "写真を選択",
+    "addPerson.choosePersonPhotos": "人物の写真を選択",
+    "addPerson.chooseFolder": "フォルダを選択",
+    "addPerson.choosePersonPhotoFolder": "人物写真のフォルダを選択",
+    "addPerson.review": "確認して追加",
+    "addPerson.emptyPreview": "追加した写真は保存前にここでプレビューされます。",
+    "addPerson.addPhotos": "写真を追加",
+    "addPerson.clear": "クリア",
+    "addPerson.clearStaged": "準備中の写真をクリア",
+    "addPerson.removePhoto": "写真を削除",
+    "addPerson.removeFolder": "フォルダを削除"
   }
 };
 
@@ -730,6 +904,12 @@ const uiMessageEn: UiMessageTable = {
   "notice.retryFilesComplete": "Retried {files} file(s) and found {matches} possible match(es).{skipped}",
   "notice.scanQueueFinished": "Scan queue finished {count} folder(s).",
   "notice.failedFoldersReady": "{count} failed folder(s) ready to retry.",
+  "addPerson.stagedReadyOne": "{count} photo ready",
+  "addPerson.stagedReadyMany": "{count} photos ready",
+  "addPerson.addCountOne": "Add {count} photo",
+  "addPerson.addCountMany": "Add {count} photos",
+  "addPerson.addCountNamedOne": "Add {count} photo to “{name}”",
+  "addPerson.addCountNamedMany": "Add {count} photos to “{name}”",
   "dialog.deleteSavedPhoto": "Delete this saved photo for {person}?",
   "dialog.clearMatches": "Clear all possible matches from the review list?",
   "dialog.clearSavedPhotos": "Clear all saved face photos? Activity history is preserved.",
@@ -788,6 +968,12 @@ const uiMessageTranslations: Record<LanguageCode, Partial<UiMessageTable>> = {
     "notice.retryFilesComplete": "已重试 {files} 个文件，找到 {matches} 个可能匹配项。{skipped}",
     "notice.scanQueueFinished": "扫描队列已完成 {count} 个文件夹。",
     "notice.failedFoldersReady": "{count} 个失败文件夹已准备重试。",
+    "addPerson.stagedReadyOne": "{count} 张照片已就绪",
+    "addPerson.stagedReadyMany": "{count} 张照片已就绪",
+    "addPerson.addCountOne": "添加 {count} 张照片",
+    "addPerson.addCountMany": "添加 {count} 张照片",
+    "addPerson.addCountNamedOne": "将 {count} 张照片添加到“{name}”",
+    "addPerson.addCountNamedMany": "将 {count} 张照片添加到“{name}”",
     "dialog.deleteSavedPhoto": "删除 {person} 的这张保存照片？",
     "dialog.clearMatches": "清除审核列表中的所有可能匹配项？",
     "dialog.clearSavedPhotos": "清除所有保存的人脸照片？活动历史会保留。",
@@ -843,6 +1029,12 @@ const uiMessageTranslations: Record<LanguageCode, Partial<UiMessageTable>> = {
     "notice.retryFilesComplete": "Se reintentaron {files} archivos y se encontraron {matches} coincidencias posibles. {skipped}",
     "notice.scanQueueFinished": "La cola de escaneo terminó {count} carpetas.",
     "notice.failedFoldersReady": "{count} carpetas fallidas listas para reintentar.",
+    "addPerson.stagedReadyOne": "{count} foto lista",
+    "addPerson.stagedReadyMany": "{count} fotos listas",
+    "addPerson.addCountOne": "Agregar {count} foto",
+    "addPerson.addCountMany": "Agregar {count} fotos",
+    "addPerson.addCountNamedOne": "Agregar {count} foto a “{name}”",
+    "addPerson.addCountNamedMany": "Agregar {count} fotos a “{name}”",
     "dialog.deleteSavedPhoto": "¿Eliminar esta foto guardada de {person}?",
     "dialog.clearMatches": "¿Borrar todas las coincidencias posibles de la lista de revisión?",
     "dialog.clearSavedPhotos": "¿Borrar todas las fotos faciales guardadas? El historial de actividad se conserva.",
@@ -898,6 +1090,12 @@ const uiMessageTranslations: Record<LanguageCode, Partial<UiMessageTable>> = {
     "notice.retryFilesComplete": "{files} fichiers réessayés et {matches} correspondances possibles trouvées. {skipped}",
     "notice.scanQueueFinished": "File de scan terminée pour {count} dossiers.",
     "notice.failedFoldersReady": "{count} dossiers échoués prêts à être réessayés.",
+    "addPerson.stagedReadyOne": "{count} photo prête",
+    "addPerson.stagedReadyMany": "{count} photos prêtes",
+    "addPerson.addCountOne": "Ajouter {count} photo",
+    "addPerson.addCountMany": "Ajouter {count} photos",
+    "addPerson.addCountNamedOne": "Ajouter {count} photo à “{name}”",
+    "addPerson.addCountNamedMany": "Ajouter {count} photos à “{name}”",
     "dialog.deleteSavedPhoto": "Supprimer cette photo enregistrée pour {person} ?",
     "dialog.clearMatches": "Effacer toutes les correspondances possibles de la liste de revue ?",
     "dialog.clearSavedPhotos": "Effacer toutes les photos de visage enregistrées ? L'historique d'activité est conservé.",
@@ -953,6 +1151,12 @@ const uiMessageTranslations: Record<LanguageCode, Partial<UiMessageTable>> = {
     "notice.retryFilesComplete": "تمت إعادة محاولة {files} ملف/ملفات والعثور على {matches} مطابقة/مطابقات محتملة. {skipped}",
     "notice.scanQueueFinished": "اكتمل صف الفحص لـ {count} مجلد/مجلدات.",
     "notice.failedFoldersReady": "{count} مجلد/مجلدات فاشلة جاهزة لإعادة المحاولة.",
+    "addPerson.stagedReadyOne": "{count} صورة جاهزة",
+    "addPerson.stagedReadyMany": "{count} صور جاهزة",
+    "addPerson.addCountOne": "إضافة {count} صورة",
+    "addPerson.addCountMany": "إضافة {count} صور",
+    "addPerson.addCountNamedOne": "إضافة {count} صورة إلى “{name}”",
+    "addPerson.addCountNamedMany": "إضافة {count} صور إلى “{name}”",
     "dialog.deleteSavedPhoto": "هل تريد حذف هذه الصورة المحفوظة لـ {person}؟",
     "dialog.clearMatches": "هل تريد مسح كل المطابقات المحتملة من قائمة المراجعة؟",
     "dialog.clearSavedPhotos": "هل تريد مسح كل صور الوجوه المحفوظة؟ سيتم الاحتفاظ بسجل النشاط.",
@@ -1008,6 +1212,12 @@ const uiMessageTranslations: Record<LanguageCode, Partial<UiMessageTable>> = {
     "notice.retryFilesComplete": "{files} फ़ाइलों को फिर आज़माया गया और {matches} संभावित मैच मिले. {skipped}",
     "notice.scanQueueFinished": "स्कैन कतार ने {count} फ़ोल्डर पूरे किए.",
     "notice.failedFoldersReady": "{count} विफल फ़ोल्डर फिर से कोशिश के लिए तैयार हैं.",
+    "addPerson.stagedReadyOne": "{count} फोटो तैयार",
+    "addPerson.stagedReadyMany": "{count} फोटो तैयार",
+    "addPerson.addCountOne": "{count} फोटो जोड़ें",
+    "addPerson.addCountMany": "{count} फोटो जोड़ें",
+    "addPerson.addCountNamedOne": "“{name}” में {count} फोटो जोड़ें",
+    "addPerson.addCountNamedMany": "“{name}” में {count} फोटो जोड़ें",
     "dialog.deleteSavedPhoto": "{person} की यह सेव फोटो हटाएँ?",
     "dialog.clearMatches": "समीक्षा सूची से सभी संभावित मैच साफ़ करें?",
     "dialog.clearSavedPhotos": "सभी सेव फेस फोटो साफ़ करें? गतिविधि इतिहास सुरक्षित रहेगा.",
@@ -1063,6 +1273,12 @@ const uiMessageTranslations: Record<LanguageCode, Partial<UiMessageTable>> = {
     "notice.retryFilesComplete": "{files} ファイルを再試行し、候補 {matches} 件が見つかりました。{skipped}",
     "notice.scanQueueFinished": "スキャンキューで {count} フォルダが完了しました。",
     "notice.failedFoldersReady": "失敗した {count} フォルダを再試行できます。",
+    "addPerson.stagedReadyOne": "{count} 枚の写真が準備完了",
+    "addPerson.stagedReadyMany": "{count} 枚の写真が準備完了",
+    "addPerson.addCountOne": "写真を {count} 枚追加",
+    "addPerson.addCountMany": "写真を {count} 枚追加",
+    "addPerson.addCountNamedOne": "“{name}” に写真を {count} 枚追加",
+    "addPerson.addCountNamedMany": "“{name}” に写真を {count} 枚追加",
     "dialog.deleteSavedPhoto": "{person} のこの保存済み写真を削除しますか？",
     "dialog.clearMatches": "レビューリストのすべての候補を消去しますか？",
     "dialog.clearSavedPhotos": "すべての保存済み顔写真を消去しますか？アクティビティ履歴は保持されます。",
@@ -1450,6 +1666,21 @@ const literalTranslations: Record<LanguageCode, Record<string, string>> = {
     "Delete face data": "चेहरा डेटा हटाएँ",
     "Load history": "इतिहास लोड करें",
     "Load more": "और लोड करें",
+    "Choose person photos": "व्यक्ति की फ़ोटो चुनें",
+    "Choose person photo folder": "व्यक्ति का फ़ोटो फ़ोल्डर चुनें",
+    "Clear staged photos": "तैयार फ़ोटो साफ़ करें",
+    "Photo folders": "फ़ोटो फ़ोल्डर",
+    "All Photos": "सभी फ़ोटो",
+    "No photos here yet": "यहाँ अभी कोई फ़ोटो नहीं",
+    "Scan or watch a folder to fill your library.": "लाइब्रेरी भरने के लिए फ़ोल्डर स्कैन करें या देखें।",
+    "Open photo": "फ़ोटो खोलें",
+    "Photo preview": "फ़ोटो पूर्वावलोकन",
+    "Previous photo": "पिछली फ़ोटो",
+    "Next photo": "अगली फ़ोटो",
+    "Close": "बंद करें",
+    "Loading...": "लोड हो रहा है...",
+    "photo": "फ़ोटो",
+    "photos": "फ़ोटो",
     "Preview hidden": "प्रीव्यू छिपा है"
   },
   es: {
@@ -1665,6 +1896,21 @@ const literalTranslations: Record<LanguageCode, Record<string, string>> = {
     "Delete face data": "Eliminar datos faciales",
     "Load history": "Cargar historial",
     "Load more": "Cargar más",
+    "Choose person photos": "Elegir fotos de la persona",
+    "Choose person photo folder": "Elegir carpeta de fotos de la persona",
+    "Clear staged photos": "Quitar fotos preparadas",
+    "Photo folders": "Carpetas de fotos",
+    "All Photos": "Todas las fotos",
+    "No photos here yet": "Aún no hay fotos aquí",
+    "Scan or watch a folder to fill your library.": "Escanea o vigila una carpeta para llenar tu biblioteca.",
+    "Open photo": "Abrir foto",
+    "Photo preview": "Vista previa de foto",
+    "Previous photo": "Foto anterior",
+    "Next photo": "Foto siguiente",
+    "Close": "Cerrar",
+    "Loading...": "Cargando...",
+    "photo": "foto",
+    "photos": "fotos",
     "Preview hidden": "Vista previa oculta"
   },
   zh: {
@@ -1880,6 +2126,21 @@ const literalTranslations: Record<LanguageCode, Record<string, string>> = {
     "Delete face data": "删除人脸数据",
     "Load history": "加载历史",
     "Load more": "加载更多",
+    "Choose person photos": "选择人物照片",
+    "Choose person photo folder": "选择人物照片文件夹",
+    "Clear staged photos": "清除待添加照片",
+    "Photo folders": "照片文件夹",
+    "All Photos": "所有照片",
+    "No photos here yet": "这里还没有照片",
+    "Scan or watch a folder to fill your library.": "扫描或监视文件夹以填充照片库。",
+    "Open photo": "打开照片",
+    "Photo preview": "照片预览",
+    "Previous photo": "上一张照片",
+    "Next photo": "下一张照片",
+    "Close": "关闭",
+    "Loading...": "正在加载...",
+    "photo": "张照片",
+    "photos": "张照片",
     "Preview hidden": "预览已隐藏"
   },
   fr: {
@@ -2095,6 +2356,21 @@ const literalTranslations: Record<LanguageCode, Record<string, string>> = {
     "Delete face data": "Supprimer les données visage",
     "Load history": "Charger l'historique",
     "Load more": "Charger plus",
+    "Choose person photos": "Choisir des photos de la personne",
+    "Choose person photo folder": "Choisir le dossier photo de la personne",
+    "Clear staged photos": "Effacer les photos préparées",
+    "Photo folders": "Dossiers photo",
+    "All Photos": "Toutes les photos",
+    "No photos here yet": "Aucune photo ici pour le moment",
+    "Scan or watch a folder to fill your library.": "Scannez ou surveillez un dossier pour remplir votre bibliothèque.",
+    "Open photo": "Ouvrir la photo",
+    "Photo preview": "Aperçu de la photo",
+    "Previous photo": "Photo précédente",
+    "Next photo": "Photo suivante",
+    "Close": "Fermer",
+    "Loading...": "Chargement...",
+    "photo": "photo",
+    "photos": "photos",
     "Preview hidden": "Aperçu masqué"
   },
   ar: {
@@ -2310,6 +2586,21 @@ const literalTranslations: Record<LanguageCode, Record<string, string>> = {
     "Delete face data": "حذف بيانات الوجه",
     "Load history": "تحميل السجل",
     "Load more": "تحميل المزيد",
+    "Choose person photos": "اختيار صور الشخص",
+    "Choose person photo folder": "اختيار مجلد صور الشخص",
+    "Clear staged photos": "مسح الصور الجاهزة",
+    "Photo folders": "مجلدات الصور",
+    "All Photos": "كل الصور",
+    "No photos here yet": "لا توجد صور هنا بعد",
+    "Scan or watch a folder to fill your library.": "امسح مجلدا أو راقبه لملء مكتبتك.",
+    "Open photo": "فتح الصورة",
+    "Photo preview": "معاينة الصورة",
+    "Previous photo": "الصورة السابقة",
+    "Next photo": "الصورة التالية",
+    "Close": "إغلاق",
+    "Loading...": "جار التحميل...",
+    "photo": "صورة",
+    "photos": "صور",
     "Preview hidden": "المعاينة مخفية"
   },
   ja: {
@@ -2525,6 +2816,21 @@ const literalTranslations: Record<LanguageCode, Record<string, string>> = {
     "Delete face data": "顔データを削除",
     "Load history": "履歴を読み込む",
     "Load more": "さらに読み込む",
+    "Choose person photos": "人物の写真を選択",
+    "Choose person photo folder": "人物の写真フォルダを選択",
+    "Clear staged photos": "準備中の写真をクリア",
+    "Photo folders": "写真フォルダ",
+    "All Photos": "すべての写真",
+    "No photos here yet": "ここにはまだ写真がありません",
+    "Scan or watch a folder to fill your library.": "ライブラリを増やすにはフォルダをスキャンまたは監視します。",
+    "Open photo": "写真を開く",
+    "Photo preview": "写真プレビュー",
+    "Previous photo": "前の写真",
+    "Next photo": "次の写真",
+    "Close": "閉じる",
+    "Loading...": "読み込み中...",
+    "photo": "枚",
+    "photos": "枚",
     "Preview hidden": "プレビュー非表示"
   }
 };

@@ -1,0 +1,5398 @@
+{
+  "bestNoRegression": [],
+  "bestOverall": [
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.035156,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.05,
+        "precision": -0.085249,
+        "recall": 0.035156
+      },
+      "epochs": 32,
+      "hiddenUnits": 0,
+      "index": 1,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.406205,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/001-linear-h0-lr0p005-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.035156,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.05,
+        "precision": -0.085249,
+        "recall": 0.035156
+      },
+      "epochs": 32,
+      "hiddenUnits": 2,
+      "index": 33,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.605003,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/033-mlp-h2-lr0p005-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.035156,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.05,
+        "precision": -0.085249,
+        "recall": 0.035156
+      },
+      "epochs": 32,
+      "hiddenUnits": 8,
+      "index": 97,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.596146,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/097-mlp-h8-lr0p005-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.028226,
+        "recall": -0.03125
+      },
+      "epochs": 128,
+      "hiddenUnits": 16,
+      "index": 151,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.847904,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/151-mlp-h16-lr0p08-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.028226,
+        "recall": -0.046875
+      },
+      "epochs": 256,
+      "hiddenUnits": 16,
+      "index": 152,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.842761,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/152-mlp-h16-lr0p08-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.028226,
+        "recall": -0.035156
+      },
+      "epochs": 128,
+      "hiddenUnits": 16,
+      "index": 155,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.854142,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/155-mlp-h16-lr0p1-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.028226,
+        "recall": -0.035156
+      },
+      "epochs": 256,
+      "hiddenUnits": 16,
+      "index": 156,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.873838,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/156-mlp-h16-lr0p1-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.028226,
+        "recall": -0.035156
+      },
+      "epochs": 256,
+      "hiddenUnits": 32,
+      "index": 168,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.848955,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/168-mlp-h32-lr0p01-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.028226,
+        "recall": -0.03125
+      },
+      "epochs": 256,
+      "hiddenUnits": 32,
+      "index": 176,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.863222,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/176-mlp-h32-lr0p03-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.028226,
+        "recall": -0.035156
+      },
+      "epochs": 128,
+      "hiddenUnits": 32,
+      "index": 179,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.859621,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/179-mlp-h32-lr0p05-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    }
+  ],
+  "clearing": [],
+  "clearingCount": 0,
+  "configCount": 224,
+  "generatedAtUnix": 1781852466.791,
+  "resultCount": 224,
+  "results": [
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.035156,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.05,
+        "precision": -0.085249,
+        "recall": 0.035156
+      },
+      "epochs": 32,
+      "hiddenUnits": 0,
+      "index": 1,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.406205,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/001-linear-h0-lr0p005-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": -0.005387,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0375,
+        "precision": -0.005387,
+        "recall": -0.042968
+      },
+      "epochs": 64,
+      "hiddenUnits": 0,
+      "index": 2,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.821603,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/002-linear-h0-lr0p005-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": -0.012926,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.034375,
+        "precision": -0.012926,
+        "recall": -0.03125
+      },
+      "epochs": 128,
+      "hiddenUnits": 0,
+      "index": 3,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.78082,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/003-linear-h0-lr0p005-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.00704,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": 0.00704,
+        "recall": -0.039062
+      },
+      "epochs": 256,
+      "hiddenUnits": 0,
+      "index": 4,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.787867,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/004-linear-h0-lr0p005-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": -0.005387,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0375,
+        "precision": -0.005387,
+        "recall": -0.042968
+      },
+      "epochs": 32,
+      "hiddenUnits": 0,
+      "index": 5,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.856895,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/005-linear-h0-lr0p01-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": -0.012926,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.034375,
+        "precision": -0.012926,
+        "recall": -0.03125
+      },
+      "epochs": 64,
+      "hiddenUnits": 0,
+      "index": 6,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.77768,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/006-linear-h0-lr0p01-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.011205,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.011205,
+        "recall": -0.039062
+      },
+      "epochs": 128,
+      "hiddenUnits": 0,
+      "index": 7,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.790852,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/007-linear-h0-lr0p01-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": -0.011718,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": -0.012097,
+        "recall": -0.011718
+      },
+      "epochs": 256,
+      "hiddenUnits": 0,
+      "index": 8,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.709,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/008-linear-h0-lr0p01-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": -0.012926,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.034375,
+        "precision": -0.012926,
+        "recall": -0.03125
+      },
+      "epochs": 32,
+      "hiddenUnits": 0,
+      "index": 9,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.812554,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/009-linear-h0-lr0p02-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.01535,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.01535,
+        "recall": -0.042968
+      },
+      "epochs": 64,
+      "hiddenUnits": 0,
+      "index": 10,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.802436,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/010-linear-h0-lr0p02-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": -0.011718,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": -0.012097,
+        "recall": -0.011718
+      },
+      "epochs": 128,
+      "hiddenUnits": 0,
+      "index": 11,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.709232,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/011-linear-h0-lr0p02-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.01546,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.01546,
+        "recall": -0.035156
+      },
+      "epochs": 256,
+      "hiddenUnits": 0,
+      "index": 12,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.803834,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/012-linear-h0-lr0p02-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.011719,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": -0.036908,
+        "recall": 0.011719
+      },
+      "epochs": 32,
+      "hiddenUnits": 0,
+      "index": 13,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.389813,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/013-linear-h0-lr0p03-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": -0.011718,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": -0.015951,
+        "recall": -0.011718
+      },
+      "epochs": 64,
+      "hiddenUnits": 0,
+      "index": 14,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.706272,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/014-linear-h0-lr0p03-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.003226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": 0.003226,
+        "recall": -0.027344
+      },
+      "epochs": 128,
+      "hiddenUnits": 0,
+      "index": 15,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.782693,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/015-linear-h0-lr0p03-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.019679,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.019679,
+        "recall": -0.035156
+      },
+      "epochs": 256,
+      "hiddenUnits": 0,
+      "index": 16,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.806263,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/016-linear-h0-lr0p03-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.007129,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.007129,
+        "recall": -0.035156
+      },
+      "epochs": 32,
+      "hiddenUnits": 0,
+      "index": 17,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.757056,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/017-linear-h0-lr0p05-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": -0.011718,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": -0.012097,
+        "recall": -0.011718
+      },
+      "epochs": 64,
+      "hiddenUnits": 0,
+      "index": 18,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.689365,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/018-linear-h0-lr0p05-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.01546,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.01546,
+        "recall": -0.035156
+      },
+      "epochs": 128,
+      "hiddenUnits": 0,
+      "index": 19,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.798482,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/019-linear-h0-lr0p05-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.003535,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.003535,
+        "recall": -0.015625
+      },
+      "epochs": 256,
+      "hiddenUnits": 0,
+      "index": 20,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.624228,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/020-linear-h0-lr0p05-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": -0.011718,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": -0.015951,
+        "recall": -0.011718
+      },
+      "epochs": 32,
+      "hiddenUnits": 0,
+      "index": 21,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.776523,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/021-linear-h0-lr0p08-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.019642,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.019642,
+        "recall": -0.039062
+      },
+      "epochs": 64,
+      "hiddenUnits": 0,
+      "index": 22,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.833378,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/022-linear-h0-lr0p08-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": -0.004427,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": -0.004427,
+        "recall": -0.015625
+      },
+      "epochs": 128,
+      "hiddenUnits": 0,
+      "index": 23,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.638668,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/023-linear-h0-lr0p08-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.007479,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.007479,
+        "recall": -0.019531
+      },
+      "epochs": 256,
+      "hiddenUnits": 0,
+      "index": 24,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.630391,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/024-linear-h0-lr0p08-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": -0.007812,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": -0.011935,
+        "recall": -0.007812
+      },
+      "epochs": 32,
+      "hiddenUnits": 0,
+      "index": 25,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.730201,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/025-linear-h0-lr0p1-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.01546,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.01546,
+        "recall": -0.035156
+      },
+      "epochs": 64,
+      "hiddenUnits": 0,
+      "index": 26,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.818029,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/026-linear-h0-lr0p1-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.003433,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.003433,
+        "recall": -0.019531
+      },
+      "epochs": 128,
+      "hiddenUnits": 0,
+      "index": 27,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.635362,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/027-linear-h0-lr0p1-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.007479,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.007479,
+        "recall": -0.019531
+      },
+      "epochs": 256,
+      "hiddenUnits": 0,
+      "index": 28,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.607788,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/028-linear-h0-lr0p1-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": -0.003906,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": -0.015599,
+        "recall": -0.003906
+      },
+      "epochs": 32,
+      "hiddenUnits": 0,
+      "index": 29,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.447467,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/029-linear-h0-lr0p15-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.007218,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": 0.007218,
+        "recall": -0.03125
+      },
+      "epochs": 64,
+      "hiddenUnits": 0,
+      "index": 30,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.771569,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/030-linear-h0-lr0p15-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.003535,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.003535,
+        "recall": -0.015625
+      },
+      "epochs": 128,
+      "hiddenUnits": 0,
+      "index": 31,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.586477,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/031-linear-h0-lr0p15-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "linear",
+      "bestMetricGain": 0.011419,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.011419,
+        "recall": -0.027344
+      },
+      "epochs": 256,
+      "hiddenUnits": 0,
+      "index": 32,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.661477,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/032-linear-h0-lr0p15-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.035156,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.05,
+        "precision": -0.085249,
+        "recall": 0.035156
+      },
+      "epochs": 32,
+      "hiddenUnits": 2,
+      "index": 33,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.605003,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/033-mlp-h2-lr0p005-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.015625,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.04375,
+        "precision": -0.038703,
+        "recall": -0.015625
+      },
+      "epochs": 64,
+      "hiddenUnits": 2,
+      "index": 34,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.825403,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/034-mlp-h2-lr0p005-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.012758,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.03125,
+        "precision": -0.012758,
+        "recall": -0.027344
+      },
+      "epochs": 128,
+      "hiddenUnits": 2,
+      "index": 35,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.792257,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/035-mlp-h2-lr0p005-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.011718,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": -0.015951,
+        "recall": -0.011718
+      },
+      "epochs": 256,
+      "hiddenUnits": 2,
+      "index": 36,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.63299,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/036-mlp-h2-lr0p005-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.016489,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.03125,
+        "precision": -0.016489,
+        "recall": -0.023437
+      },
+      "epochs": 32,
+      "hiddenUnits": 2,
+      "index": 37,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.895745,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/037-mlp-h2-lr0p01-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.012926,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.034375,
+        "precision": -0.012926,
+        "recall": -0.03125
+      },
+      "epochs": 64,
+      "hiddenUnits": 2,
+      "index": 38,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.790037,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/038-mlp-h2-lr0p01-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.012758,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.03125,
+        "precision": -0.012758,
+        "recall": -0.027344
+      },
+      "epochs": 128,
+      "hiddenUnits": 2,
+      "index": 39,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.649436,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/039-mlp-h2-lr0p01-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.004969,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.028125,
+        "precision": -0.004969,
+        "recall": -0.03125
+      },
+      "epochs": 256,
+      "hiddenUnits": 2,
+      "index": 40,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.609187,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/040-mlp-h2-lr0p01-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.012926,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.034375,
+        "precision": -0.012926,
+        "recall": -0.03125
+      },
+      "epochs": 32,
+      "hiddenUnits": 2,
+      "index": 41,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.837034,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/041-mlp-h2-lr0p02-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.012758,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.03125,
+        "precision": -0.012758,
+        "recall": -0.027344
+      },
+      "epochs": 64,
+      "hiddenUnits": 2,
+      "index": 42,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.634634,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/042-mlp-h2-lr0p02-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.001063,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.028125,
+        "precision": -0.001063,
+        "recall": -0.035156
+      },
+      "epochs": 128,
+      "hiddenUnits": 2,
+      "index": 43,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.607749,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/043-mlp-h2-lr0p02-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.011132,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": 0.011132,
+        "recall": -0.042968
+      },
+      "epochs": 256,
+      "hiddenUnits": 2,
+      "index": 44,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.64865,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/044-mlp-h2-lr0p02-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.005107,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.03125,
+        "precision": -0.005107,
+        "recall": -0.035156
+      },
+      "epochs": 32,
+      "hiddenUnits": 2,
+      "index": 45,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.773811,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/045-mlp-h2-lr0p03-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.016672,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.034375,
+        "precision": -0.016672,
+        "recall": -0.027344
+      },
+      "epochs": 64,
+      "hiddenUnits": 2,
+      "index": 46,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.602369,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/046-mlp-h2-lr0p03-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.001063,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.028125,
+        "precision": -0.001063,
+        "recall": -0.035156
+      },
+      "epochs": 128,
+      "hiddenUnits": 2,
+      "index": 47,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.606527,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/047-mlp-h2-lr0p03-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.011132,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": 0.011132,
+        "recall": -0.042968
+      },
+      "epochs": 256,
+      "hiddenUnits": 2,
+      "index": 48,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.650184,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/048-mlp-h2-lr0p03-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003121,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.003121,
+        "recall": -0.03125
+      },
+      "epochs": 32,
+      "hiddenUnits": 2,
+      "index": 49,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.800793,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/049-mlp-h2-lr0p05-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.006949,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.028125,
+        "precision": 0.006949,
+        "recall": -0.042968
+      },
+      "epochs": 64,
+      "hiddenUnits": 2,
+      "index": 50,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.735172,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/050-mlp-h2-lr0p05-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.00704,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": 0.00704,
+        "recall": -0.039062
+      },
+      "epochs": 128,
+      "hiddenUnits": 2,
+      "index": 51,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.603061,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/051-mlp-h2-lr0p05-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023897,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.023897,
+        "recall": -0.042968
+      },
+      "epochs": 256,
+      "hiddenUnits": 2,
+      "index": 52,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.814179,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/052-mlp-h2-lr0p05-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.016672,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.034375,
+        "precision": -0.016672,
+        "recall": -0.027344
+      },
+      "epochs": 32,
+      "hiddenUnits": 2,
+      "index": 53,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.614701,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/053-mlp-h2-lr0p08-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.001063,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.028125,
+        "precision": -0.001063,
+        "recall": -0.035156
+      },
+      "epochs": 64,
+      "hiddenUnits": 2,
+      "index": 54,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.580383,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/054-mlp-h2-lr0p08-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019605,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": 0.019605,
+        "recall": -0.042968
+      },
+      "epochs": 128,
+      "hiddenUnits": 2,
+      "index": 55,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.728835,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/055-mlp-h2-lr0p08-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023859,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.023859,
+        "recall": -0.050781
+      },
+      "epochs": 256,
+      "hiddenUnits": 2,
+      "index": 56,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.820308,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/056-mlp-h2-lr0p08-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.016489,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.03125,
+        "precision": -0.016489,
+        "recall": -0.023437
+      },
+      "epochs": 32,
+      "hiddenUnits": 2,
+      "index": 57,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.386381,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/057-mlp-h2-lr0p1-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.00704,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": 0.00704,
+        "recall": -0.039062
+      },
+      "epochs": 64,
+      "hiddenUnits": 2,
+      "index": 58,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.616428,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/058-mlp-h2-lr0p1-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019605,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": 0.019605,
+        "recall": -0.042968
+      },
+      "epochs": 128,
+      "hiddenUnits": 2,
+      "index": 59,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.816641,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/059-mlp-h2-lr0p1-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01953,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": 0.01953,
+        "recall": -0.050781
+      },
+      "epochs": 256,
+      "hiddenUnits": 2,
+      "index": 60,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.83114,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/060-mlp-h2-lr0p1-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.015239,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.028125,
+        "precision": 0.015239,
+        "recall": -0.050781
+      },
+      "epochs": 32,
+      "hiddenUnits": 2,
+      "index": 61,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.742981,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/061-mlp-h2-lr0p15-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01535,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.01535,
+        "recall": -0.042968
+      },
+      "epochs": 64,
+      "hiddenUnits": 2,
+      "index": 62,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.711294,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/062-mlp-h2-lr0p15-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.02384,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": 0.02384,
+        "recall": -0.054687
+      },
+      "epochs": 128,
+      "hiddenUnits": 2,
+      "index": 63,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.82396,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/063-mlp-h2-lr0p15-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023859,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.023859,
+        "recall": -0.050781
+      },
+      "epochs": 256,
+      "hiddenUnits": 2,
+      "index": 64,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.809464,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/064-mlp-h2-lr0p15-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.015625,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.028125,
+        "precision": -0.019967,
+        "recall": -0.015625
+      },
+      "epochs": 32,
+      "hiddenUnits": 4,
+      "index": 65,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.617672,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/065-mlp-h4-lr0p005-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": 0.003226,
+        "recall": -0.027344
+      },
+      "epochs": 64,
+      "hiddenUnits": 4,
+      "index": 66,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.760713,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/066-mlp-h4-lr0p005-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019715,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.019715,
+        "recall": -0.03125
+      },
+      "epochs": 128,
+      "hiddenUnits": 4,
+      "index": 67,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.801122,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/067-mlp-h4-lr0p005-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003535,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.003535,
+        "recall": -0.015625
+      },
+      "epochs": 256,
+      "hiddenUnits": 4,
+      "index": 68,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.595653,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/068-mlp-h4-lr0p005-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.007813,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.028125,
+        "precision": -0.04074,
+        "recall": 0.007813
+      },
+      "epochs": 32,
+      "hiddenUnits": 4,
+      "index": 69,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.664602,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/069-mlp-h4-lr0p01-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.004427,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": -0.004427,
+        "recall": -0.015625
+      },
+      "epochs": 64,
+      "hiddenUnits": 4,
+      "index": 70,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.722859,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/070-mlp-h4-lr0p01-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003433,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.003433,
+        "recall": -0.019531
+      },
+      "epochs": 128,
+      "hiddenUnits": 4,
+      "index": 71,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.611819,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/071-mlp-h4-lr0p01-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003836,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": 0.0,
+        "precision": 0.003836,
+        "recall": -0.003906
+      },
+      "epochs": 256,
+      "hiddenUnits": 4,
+      "index": 72,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.457321,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/072-mlp-h4-lr0p01-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.0,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": -0.030368,
+        "recall": 0.0
+      },
+      "epochs": 32,
+      "hiddenUnits": 4,
+      "index": 73,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.5,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/073-mlp-h4-lr0p02-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01546,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.01546,
+        "recall": -0.035156
+      },
+      "epochs": 64,
+      "hiddenUnits": 4,
+      "index": 74,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.826829,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/074-mlp-h4-lr0p02-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01149,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.01149,
+        "recall": -0.023437
+      },
+      "epochs": 128,
+      "hiddenUnits": 4,
+      "index": 75,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.645606,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/075-mlp-h4-lr0p02-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019751,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.019751,
+        "recall": -0.027344
+      },
+      "epochs": 256,
+      "hiddenUnits": 4,
+      "index": 76,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.728729,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/076-mlp-h4-lr0p02-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.007129,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.007129,
+        "recall": -0.035156
+      },
+      "epochs": 32,
+      "hiddenUnits": 4,
+      "index": 77,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.813271,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/077-mlp-h4-lr0p03-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.015514,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.015514,
+        "recall": -0.03125
+      },
+      "epochs": 64,
+      "hiddenUnits": 4,
+      "index": 78,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.833489,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/078-mlp-h4-lr0p03-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.00765,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.00765,
+        "recall": -0.011718
+      },
+      "epochs": 128,
+      "hiddenUnits": 4,
+      "index": 79,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.538303,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/079-mlp-h4-lr0p03-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023971,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.023971,
+        "recall": -0.027344
+      },
+      "epochs": 256,
+      "hiddenUnits": 4,
+      "index": 80,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.799051,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/080-mlp-h4-lr0p03-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.007812,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.03125,
+        "precision": -0.030829,
+        "recall": -0.007812
+      },
+      "epochs": 32,
+      "hiddenUnits": 4,
+      "index": 81,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.395827,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/081-mlp-h4-lr0p05-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01546,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.01546,
+        "recall": -0.035156
+      },
+      "epochs": 64,
+      "hiddenUnits": 4,
+      "index": 82,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.83812,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/082-mlp-h4-lr0p05-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003836,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": 0.0,
+        "precision": 0.003836,
+        "recall": -0.003906
+      },
+      "epochs": 128,
+      "hiddenUnits": 4,
+      "index": 83,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.458253,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/083-mlp-h4-lr0p05-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023952,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.023952,
+        "recall": -0.03125
+      },
+      "epochs": 256,
+      "hiddenUnits": 4,
+      "index": 84,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.788964,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/084-mlp-h4-lr0p05-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.000941,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": -0.000941,
+        "recall": -0.03125
+      },
+      "epochs": 32,
+      "hiddenUnits": 4,
+      "index": 85,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.687675,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/085-mlp-h4-lr0p08-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01535,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.01535,
+        "recall": -0.042968
+      },
+      "epochs": 64,
+      "hiddenUnits": 4,
+      "index": 86,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.778225,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/086-mlp-h4-lr0p08-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.0,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": -0.003903,
+        "recall": 0.0
+      },
+      "epochs": 128,
+      "hiddenUnits": 4,
+      "index": 87,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.450644,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/087-mlp-h4-lr0p08-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.011559,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.011559,
+        "recall": -0.019531
+      },
+      "epochs": 256,
+      "hiddenUnits": 4,
+      "index": 88,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.604029,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/088-mlp-h4-lr0p08-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.002802,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.03125,
+        "precision": 0.002802,
+        "recall": -0.042968
+      },
+      "epochs": 32,
+      "hiddenUnits": 4,
+      "index": 89,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.748876,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/089-mlp-h4-lr0p1-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01535,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.01535,
+        "recall": -0.042968
+      },
+      "epochs": 64,
+      "hiddenUnits": 4,
+      "index": 90,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.657857,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/090-mlp-h4-lr0p1-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023859,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.023859,
+        "recall": -0.050781
+      },
+      "epochs": 128,
+      "hiddenUnits": 4,
+      "index": 91,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.792971,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/091-mlp-h4-lr0p1-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019605,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": 0.019605,
+        "recall": -0.042968
+      },
+      "epochs": 256,
+      "hiddenUnits": 4,
+      "index": 92,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.750528,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/092-mlp-h4-lr0p1-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01953,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": 0.01953,
+        "recall": -0.050781
+      },
+      "epochs": 32,
+      "hiddenUnits": 4,
+      "index": 93,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.808773,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/093-mlp-h4-lr0p15-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023878,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": 0.023878,
+        "recall": -0.046875
+      },
+      "epochs": 64,
+      "hiddenUnits": 4,
+      "index": 94,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.798927,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/094-mlp-h4-lr0p15-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019605,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": 0.019605,
+        "recall": -0.042968
+      },
+      "epochs": 128,
+      "hiddenUnits": 4,
+      "index": 95,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.716085,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/095-mlp-h4-lr0p15-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019568,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.019568,
+        "recall": -0.046875
+      },
+      "epochs": 256,
+      "hiddenUnits": 4,
+      "index": 96,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.724279,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/096-mlp-h4-lr0p15-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.035156,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.05,
+        "precision": -0.085249,
+        "recall": 0.035156
+      },
+      "epochs": 32,
+      "hiddenUnits": 8,
+      "index": 97,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.596146,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/097-mlp-h8-lr0p005-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003906,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": -0.03014,
+        "recall": 0.003906
+      },
+      "epochs": 64,
+      "hiddenUnits": 8,
+      "index": 98,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.575635,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/098-mlp-h8-lr0p005-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.011718,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": -0.012097,
+        "recall": -0.011718
+      },
+      "epochs": 128,
+      "hiddenUnits": 8,
+      "index": 99,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.624251,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/099-mlp-h8-lr0p005-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019679,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.019679,
+        "recall": -0.035156
+      },
+      "epochs": 256,
+      "hiddenUnits": 8,
+      "index": 100,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.811708,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/100-mlp-h8-lr0p005-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.015625,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0375,
+        "precision": -0.031298,
+        "recall": -0.015625
+      },
+      "epochs": 32,
+      "hiddenUnits": 8,
+      "index": 101,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.824055,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/101-mlp-h8-lr0p01-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003016,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": 0.003016,
+        "recall": -0.035156
+      },
+      "epochs": 64,
+      "hiddenUnits": 8,
+      "index": 102,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.824281,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/102-mlp-h8-lr0p01-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.011718,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": -0.012097,
+        "recall": -0.011718
+      },
+      "epochs": 128,
+      "hiddenUnits": 8,
+      "index": 103,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.597568,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/103-mlp-h8-lr0p01-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.007393,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.007393,
+        "recall": -0.023437
+      },
+      "epochs": 256,
+      "hiddenUnits": 8,
+      "index": 104,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.604425,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/104-mlp-h8-lr0p01-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.015295,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": 0.015295,
+        "recall": -0.046875
+      },
+      "epochs": 32,
+      "hiddenUnits": 8,
+      "index": 105,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.784209,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/105-mlp-h8-lr0p02-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.006949,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.028125,
+        "precision": 0.006949,
+        "recall": -0.042968
+      },
+      "epochs": 64,
+      "hiddenUnits": 8,
+      "index": 106,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.792575,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/106-mlp-h8-lr0p02-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.00704,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": 0.00704,
+        "recall": -0.039062
+      },
+      "epochs": 128,
+      "hiddenUnits": 8,
+      "index": 107,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.644688,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/107-mlp-h8-lr0p02-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023897,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.023897,
+        "recall": -0.042968
+      },
+      "epochs": 256,
+      "hiddenUnits": 8,
+      "index": 108,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.784032,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/108-mlp-h8-lr0p02-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003121,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.003121,
+        "recall": -0.03125
+      },
+      "epochs": 32,
+      "hiddenUnits": 8,
+      "index": 109,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.807713,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/109-mlp-h8-lr0p03-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003016,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": 0.003016,
+        "recall": -0.035156
+      },
+      "epochs": 64,
+      "hiddenUnits": 8,
+      "index": 110,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.619521,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/110-mlp-h8-lr0p03-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01535,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.01535,
+        "recall": -0.042968
+      },
+      "epochs": 128,
+      "hiddenUnits": 8,
+      "index": 111,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.76954,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/111-mlp-h8-lr0p03-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023878,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": 0.023878,
+        "recall": -0.046875
+      },
+      "epochs": 256,
+      "hiddenUnits": 8,
+      "index": 112,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.809993,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/112-mlp-h8-lr0p03-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.016672,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.034375,
+        "precision": -0.016672,
+        "recall": -0.027344
+      },
+      "epochs": 32,
+      "hiddenUnits": 8,
+      "index": 113,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.406104,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/113-mlp-h8-lr0p05-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.002802,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.03125,
+        "precision": 0.002802,
+        "recall": -0.042968
+      },
+      "epochs": 64,
+      "hiddenUnits": 8,
+      "index": 114,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.653178,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/114-mlp-h8-lr0p05-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.006949,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.028125,
+        "precision": 0.006949,
+        "recall": -0.042968
+      },
+      "epochs": 128,
+      "hiddenUnits": 8,
+      "index": 115,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.648932,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/115-mlp-h8-lr0p05-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01953,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": 0.01953,
+        "recall": -0.050781
+      },
+      "epochs": 256,
+      "hiddenUnits": 8,
+      "index": 116,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.792299,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/116-mlp-h8-lr0p05-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003121,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.003121,
+        "recall": -0.03125
+      },
+      "epochs": 32,
+      "hiddenUnits": 8,
+      "index": 117,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.670875,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/117-mlp-h8-lr0p08-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.006949,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.028125,
+        "precision": 0.006949,
+        "recall": -0.042968
+      },
+      "epochs": 64,
+      "hiddenUnits": 8,
+      "index": 118,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.687356,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/118-mlp-h8-lr0p08-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01535,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.01535,
+        "recall": -0.042968
+      },
+      "epochs": 128,
+      "hiddenUnits": 8,
+      "index": 119,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.679084,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/119-mlp-h8-lr0p08-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019605,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": 0.019605,
+        "recall": -0.042968
+      },
+      "epochs": 256,
+      "hiddenUnits": 8,
+      "index": 120,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.662119,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/120-mlp-h8-lr0p08-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.000941,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": -0.000941,
+        "recall": -0.03125
+      },
+      "epochs": 32,
+      "hiddenUnits": 8,
+      "index": 121,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.516192,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/121-mlp-h8-lr0p1-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.006949,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.028125,
+        "precision": 0.006949,
+        "recall": -0.042968
+      },
+      "epochs": 64,
+      "hiddenUnits": 8,
+      "index": 122,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.624698,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/122-mlp-h8-lr0p1-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.015405,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": 0.015405,
+        "recall": -0.039062
+      },
+      "epochs": 128,
+      "hiddenUnits": 8,
+      "index": 123,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.613614,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/123-mlp-h8-lr0p1-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019605,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": 0.019605,
+        "recall": -0.042968
+      },
+      "epochs": 256,
+      "hiddenUnits": 8,
+      "index": 124,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.704745,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/124-mlp-h8-lr0p1-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003121,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.003121,
+        "recall": -0.03125
+      },
+      "epochs": 32,
+      "hiddenUnits": 8,
+      "index": 125,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.610203,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/125-mlp-h8-lr0p15-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.011205,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.011205,
+        "recall": -0.039062
+      },
+      "epochs": 64,
+      "hiddenUnits": 8,
+      "index": 126,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.674284,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/126-mlp-h8-lr0p15-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023897,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.023897,
+        "recall": -0.042968
+      },
+      "epochs": 128,
+      "hiddenUnits": 8,
+      "index": 127,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.809427,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/127-mlp-h8-lr0p15-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023897,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.023897,
+        "recall": -0.042968
+      },
+      "epochs": 256,
+      "hiddenUnits": 8,
+      "index": 128,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.7552,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/128-mlp-h8-lr0p15-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.012926,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.034375,
+        "precision": -0.012926,
+        "recall": -0.03125
+      },
+      "epochs": 32,
+      "hiddenUnits": 16,
+      "index": 129,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.84657,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/129-mlp-h16-lr0p005-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019642,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.019642,
+        "recall": -0.039062
+      },
+      "epochs": 64,
+      "hiddenUnits": 16,
+      "index": 130,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.771031,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/130-mlp-h16-lr0p005-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.00333,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.00333,
+        "recall": -0.023437
+      },
+      "epochs": 128,
+      "hiddenUnits": 16,
+      "index": 131,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.710709,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/131-mlp-h16-lr0p005-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.007479,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.007479,
+        "recall": -0.019531
+      },
+      "epochs": 256,
+      "hiddenUnits": 16,
+      "index": 132,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.585525,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/132-mlp-h16-lr0p005-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.001063,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.028125,
+        "precision": -0.001063,
+        "recall": -0.035156
+      },
+      "epochs": 32,
+      "hiddenUnits": 16,
+      "index": 133,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.735538,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/133-mlp-h16-lr0p01-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019642,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.019642,
+        "recall": -0.039062
+      },
+      "epochs": 64,
+      "hiddenUnits": 16,
+      "index": 134,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.84964,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/134-mlp-h16-lr0p01-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.007479,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.007479,
+        "recall": -0.019531
+      },
+      "epochs": 128,
+      "hiddenUnits": 16,
+      "index": 135,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.590598,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/135-mlp-h16-lr0p01-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023971,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.023971,
+        "recall": -0.027344
+      },
+      "epochs": 256,
+      "hiddenUnits": 16,
+      "index": 136,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.794648,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/136-mlp-h16-lr0p01-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.007812,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.028125,
+        "precision": -0.02711,
+        "recall": -0.007812
+      },
+      "epochs": 32,
+      "hiddenUnits": 16,
+      "index": 137,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.5,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/137-mlp-h16-lr0p02-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019679,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.019679,
+        "recall": -0.035156
+      },
+      "epochs": 64,
+      "hiddenUnits": 16,
+      "index": 138,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.828964,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/138-mlp-h16-lr0p02-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01149,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.01149,
+        "recall": -0.023437
+      },
+      "epochs": 128,
+      "hiddenUnits": 16,
+      "index": 139,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.657544,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/139-mlp-h16-lr0p02-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023952,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.023952,
+        "recall": -0.03125
+      },
+      "epochs": 256,
+      "hiddenUnits": 16,
+      "index": 140,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.817435,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/140-mlp-h16-lr0p02-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.011718,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": -0.012097,
+        "recall": -0.011718
+      },
+      "epochs": 32,
+      "hiddenUnits": 16,
+      "index": 141,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.572699,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/141-mlp-h16-lr0p03-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003535,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.003535,
+        "recall": -0.015625
+      },
+      "epochs": 64,
+      "hiddenUnits": 16,
+      "index": 142,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.634731,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/142-mlp-h16-lr0p03-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01149,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.01149,
+        "recall": -0.023437
+      },
+      "epochs": 128,
+      "hiddenUnits": 16,
+      "index": 143,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.657445,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/143-mlp-h16-lr0p03-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023971,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.023971,
+        "recall": -0.027344
+      },
+      "epochs": 256,
+      "hiddenUnits": 16,
+      "index": 144,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.813935,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/144-mlp-h16-lr0p03-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.00333,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.00333,
+        "recall": -0.023437
+      },
+      "epochs": 32,
+      "hiddenUnits": 16,
+      "index": 145,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.732365,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/145-mlp-h16-lr0p05-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.007479,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.007479,
+        "recall": -0.019531
+      },
+      "epochs": 64,
+      "hiddenUnits": 16,
+      "index": 146,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.585179,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/146-mlp-h16-lr0p05-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023971,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.023971,
+        "recall": -0.027344
+      },
+      "epochs": 128,
+      "hiddenUnits": 16,
+      "index": 147,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.796231,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/147-mlp-h16-lr0p05-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023952,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.023952,
+        "recall": -0.03125
+      },
+      "epochs": 256,
+      "hiddenUnits": 16,
+      "index": 148,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.825712,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/148-mlp-h16-lr0p05-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003433,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.003433,
+        "recall": -0.019531
+      },
+      "epochs": 32,
+      "hiddenUnits": 16,
+      "index": 149,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.5,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/149-mlp-h16-lr0p08-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.011419,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.011419,
+        "recall": -0.027344
+      },
+      "epochs": 64,
+      "hiddenUnits": 16,
+      "index": 150,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.670193,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/150-mlp-h16-lr0p08-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.028226,
+        "recall": -0.03125
+      },
+      "epochs": 128,
+      "hiddenUnits": 16,
+      "index": 151,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.847904,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/151-mlp-h16-lr0p08-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.028226,
+        "recall": -0.046875
+      },
+      "epochs": 256,
+      "hiddenUnits": 16,
+      "index": 152,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.842761,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/152-mlp-h16-lr0p08-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003433,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.003433,
+        "recall": -0.019531
+      },
+      "epochs": 32,
+      "hiddenUnits": 16,
+      "index": 153,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.554561,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/153-mlp-h16-lr0p1-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.011419,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.011419,
+        "recall": -0.027344
+      },
+      "epochs": 64,
+      "hiddenUnits": 16,
+      "index": 154,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.683412,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/154-mlp-h16-lr0p1-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.028226,
+        "recall": -0.035156
+      },
+      "epochs": 128,
+      "hiddenUnits": 16,
+      "index": 155,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.854142,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/155-mlp-h16-lr0p1-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.028226,
+        "recall": -0.035156
+      },
+      "epochs": 256,
+      "hiddenUnits": 16,
+      "index": 156,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.873838,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/156-mlp-h16-lr0p1-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01535,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.021875,
+        "precision": 0.01535,
+        "recall": -0.042968
+      },
+      "epochs": 32,
+      "hiddenUnits": 16,
+      "index": 157,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.677008,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/157-mlp-h16-lr0p15-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023897,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.023897,
+        "recall": -0.042968
+      },
+      "epochs": 64,
+      "hiddenUnits": 16,
+      "index": 158,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.768944,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/158-mlp-h16-lr0p15-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019605,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": 0.019605,
+        "recall": -0.042968
+      },
+      "epochs": 128,
+      "hiddenUnits": 16,
+      "index": 159,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.758193,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/159-mlp-h16-lr0p15-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019642,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.019642,
+        "recall": -0.039062
+      },
+      "epochs": 256,
+      "hiddenUnits": 16,
+      "index": 160,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.704374,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/160-mlp-h16-lr0p15-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.008964,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.03125,
+        "precision": -0.008964,
+        "recall": -0.03125
+      },
+      "epochs": 32,
+      "hiddenUnits": 32,
+      "index": 161,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.758211,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/161-mlp-h32-lr0p005-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.011718,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": -0.012097,
+        "recall": -0.011718
+      },
+      "epochs": 64,
+      "hiddenUnits": 32,
+      "index": 162,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.66365,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/162-mlp-h32-lr0p005-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.000345,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": -0.000345,
+        "recall": -0.011718
+      },
+      "epochs": 128,
+      "hiddenUnits": 32,
+      "index": 163,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.605862,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/163-mlp-h32-lr0p005-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003736,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.003736,
+        "recall": -0.007812
+      },
+      "epochs": 256,
+      "hiddenUnits": 32,
+      "index": 164,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.467817,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/164-mlp-h32-lr0p005-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.000941,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": -0.000941,
+        "recall": -0.03125
+      },
+      "epochs": 32,
+      "hiddenUnits": 32,
+      "index": 165,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.779721,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/165-mlp-h32-lr0p01-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019679,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.019679,
+        "recall": -0.035156
+      },
+      "epochs": 64,
+      "hiddenUnits": 32,
+      "index": 166,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.821792,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/166-mlp-h32-lr0p01-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003736,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.003736,
+        "recall": -0.007812
+      },
+      "epochs": 128,
+      "hiddenUnits": 32,
+      "index": 167,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.463736,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/167-mlp-h32-lr0p01-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.028226,
+        "recall": -0.035156
+      },
+      "epochs": 256,
+      "hiddenUnits": 32,
+      "index": 168,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.848955,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/168-mlp-h32-lr0p01-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.011718,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": -0.012097,
+        "recall": -0.011718
+      },
+      "epochs": 32,
+      "hiddenUnits": 32,
+      "index": 169,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.70818,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/169-mlp-h32-lr0p02-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003535,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.003535,
+        "recall": -0.015625
+      },
+      "epochs": 64,
+      "hiddenUnits": 32,
+      "index": 170,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.571728,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/170-mlp-h32-lr0p02-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.000114,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": -0.000114,
+        "recall": -0.003906
+      },
+      "epochs": 128,
+      "hiddenUnits": 32,
+      "index": 171,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.361388,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/171-mlp-h32-lr0p02-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019858,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": 0.003125,
+        "precision": 0.019858,
+        "recall": -0.015625
+      },
+      "epochs": 256,
+      "hiddenUnits": 32,
+      "index": 172,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.60939,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/172-mlp-h32-lr0p02-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.015514,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.015514,
+        "recall": -0.03125
+      },
+      "epochs": 32,
+      "hiddenUnits": 32,
+      "index": 173,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.731778,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/173-mlp-h32-lr0p03-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01149,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.01149,
+        "recall": -0.023437
+      },
+      "epochs": 64,
+      "hiddenUnits": 32,
+      "index": 174,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.66519,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/174-mlp-h32-lr0p03-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023952,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.023952,
+        "recall": -0.03125
+      },
+      "epochs": 128,
+      "hiddenUnits": 32,
+      "index": 175,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.831217,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/175-mlp-h32-lr0p03-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.028226,
+        "recall": -0.03125
+      },
+      "epochs": 256,
+      "hiddenUnits": 32,
+      "index": 176,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.863222,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/176-mlp-h32-lr0p03-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003636,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.003636,
+        "recall": -0.011718
+      },
+      "epochs": 32,
+      "hiddenUnits": 32,
+      "index": 177,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.554599,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/177-mlp-h32-lr0p05-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01149,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.01149,
+        "recall": -0.023437
+      },
+      "epochs": 64,
+      "hiddenUnits": 32,
+      "index": 178,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.631352,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/178-mlp-h32-lr0p05-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.028226,
+        "recall": -0.035156
+      },
+      "epochs": 128,
+      "hiddenUnits": 32,
+      "index": 179,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.859621,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/179-mlp-h32-lr0p05-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023971,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.023971,
+        "recall": -0.027344
+      },
+      "epochs": 256,
+      "hiddenUnits": 32,
+      "index": 180,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.687698,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/180-mlp-h32-lr0p05-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003433,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.003433,
+        "recall": -0.019531
+      },
+      "epochs": 32,
+      "hiddenUnits": 32,
+      "index": 181,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.586848,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/181-mlp-h32-lr0p08-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01149,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.01149,
+        "recall": -0.023437
+      },
+      "epochs": 64,
+      "hiddenUnits": 32,
+      "index": 182,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.641101,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/182-mlp-h32-lr0p08-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": 0.0,
+        "precision": 0.028226,
+        "recall": -0.027344
+      },
+      "epochs": 128,
+      "hiddenUnits": 32,
+      "index": 183,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.819194,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/183-mlp-h32-lr0p08-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019787,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.019787,
+        "recall": -0.023437
+      },
+      "epochs": 256,
+      "hiddenUnits": 32,
+      "index": 184,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.650253,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/184-mlp-h32-lr0p08-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003636,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.003636,
+        "recall": -0.011718
+      },
+      "epochs": 32,
+      "hiddenUnits": 32,
+      "index": 185,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.5,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/185-mlp-h32-lr0p1-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.028226,
+        "recall": -0.03125
+      },
+      "epochs": 64,
+      "hiddenUnits": 32,
+      "index": 186,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.831224,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/186-mlp-h32-lr0p1-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023971,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.023971,
+        "recall": -0.027344
+      },
+      "epochs": 128,
+      "hiddenUnits": 32,
+      "index": 187,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.699685,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/187-mlp-h32-lr0p1-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019751,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.019751,
+        "recall": -0.027344
+      },
+      "epochs": 256,
+      "hiddenUnits": 32,
+      "index": 188,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.64454,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/188-mlp-h32-lr0p1-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019751,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.019751,
+        "recall": -0.027344
+      },
+      "epochs": 32,
+      "hiddenUnits": 32,
+      "index": 189,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.744737,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/189-mlp-h32-lr0p15-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": 0.0,
+        "precision": 0.028226,
+        "recall": -0.027344
+      },
+      "epochs": 64,
+      "hiddenUnits": 32,
+      "index": 190,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.775885,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/190-mlp-h32-lr0p15-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023971,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.023971,
+        "recall": -0.027344
+      },
+      "epochs": 128,
+      "hiddenUnits": 32,
+      "index": 191,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.758268,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/191-mlp-h32-lr0p15-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023989,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": 0.0,
+        "precision": 0.023989,
+        "recall": -0.023437
+      },
+      "epochs": 256,
+      "hiddenUnits": 32,
+      "index": 192,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.754536,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/192-mlp-h32-lr0p15-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.015625,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.01875,
+        "precision": -0.036659,
+        "recall": 0.015625
+      },
+      "epochs": 32,
+      "hiddenUnits": 64,
+      "index": 193,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.449067,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/193-mlp-h64-lr0p005-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019642,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.015625,
+        "precision": 0.019642,
+        "recall": -0.039062
+      },
+      "epochs": 64,
+      "hiddenUnits": 64,
+      "index": 194,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.846134,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/194-mlp-h64-lr0p005-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003535,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.003535,
+        "recall": -0.015625
+      },
+      "epochs": 128,
+      "hiddenUnits": 64,
+      "index": 195,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.553214,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/195-mlp-h64-lr0p005-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023952,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.023952,
+        "recall": -0.03125
+      },
+      "epochs": 256,
+      "hiddenUnits": 64,
+      "index": 196,
+      "learningRate": 0.005,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.778067,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/196-mlp-h64-lr0p005-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": -0.007812,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.025,
+        "precision": -0.023361,
+        "recall": -0.007812
+      },
+      "epochs": 32,
+      "hiddenUnits": 64,
+      "index": 197,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.644065,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/197-mlp-h64-lr0p01-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "regression"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019679,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.019679,
+        "recall": -0.035156
+      },
+      "epochs": 64,
+      "hiddenUnits": 64,
+      "index": 198,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.828797,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/198-mlp-h64-lr0p01-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003836,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": 0.0,
+        "precision": 0.003836,
+        "recall": -0.003906
+      },
+      "epochs": 128,
+      "hiddenUnits": 64,
+      "index": 199,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.457091,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/199-mlp-h64-lr0p01-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023952,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.023952,
+        "recall": -0.03125
+      },
+      "epochs": 256,
+      "hiddenUnits": 64,
+      "index": 200,
+      "learningRate": 0.01,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.832355,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/200-mlp-h64-lr0p01-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.015514,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.015514,
+        "recall": -0.03125
+      },
+      "epochs": 32,
+      "hiddenUnits": 64,
+      "index": 201,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.75075,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/201-mlp-h64-lr0p02-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003433,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.0125,
+        "precision": 0.003433,
+        "recall": -0.019531
+      },
+      "epochs": 64,
+      "hiddenUnits": 64,
+      "index": 202,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.543401,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/202-mlp-h64-lr0p02-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023952,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.023952,
+        "recall": -0.03125
+      },
+      "epochs": 128,
+      "hiddenUnits": 64,
+      "index": 203,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.822354,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/203-mlp-h64-lr0p02-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": 0.003125,
+        "precision": 0.028226,
+        "recall": -0.023437
+      },
+      "epochs": 256,
+      "hiddenUnits": 64,
+      "index": 204,
+      "learningRate": 0.02,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.833432,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/204-mlp-h64-lr0p02-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.011559,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.011559,
+        "recall": -0.019531
+      },
+      "epochs": 32,
+      "hiddenUnits": 64,
+      "index": 205,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.709011,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/205-mlp-h64-lr0p03-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01149,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.01149,
+        "recall": -0.023437
+      },
+      "epochs": 64,
+      "hiddenUnits": 64,
+      "index": 206,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.655366,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/206-mlp-h64-lr0p03-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023971,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.023971,
+        "recall": -0.027344
+      },
+      "epochs": 128,
+      "hiddenUnits": 64,
+      "index": 207,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.82282,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/207-mlp-h64-lr0p03-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023971,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.023971,
+        "recall": -0.027344
+      },
+      "epochs": 256,
+      "hiddenUnits": 64,
+      "index": 208,
+      "learningRate": 0.03,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.777167,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/208-mlp-h64-lr0p03-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.01149,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.009375,
+        "precision": 0.01149,
+        "recall": -0.023437
+      },
+      "epochs": 32,
+      "hiddenUnits": 64,
+      "index": 209,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.711576,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/209-mlp-h64-lr0p05-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023989,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": 0.0,
+        "precision": 0.023989,
+        "recall": -0.023437
+      },
+      "epochs": 64,
+      "hiddenUnits": 64,
+      "index": 210,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.770932,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/210-mlp-h64-lr0p05-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023971,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.023971,
+        "recall": -0.027344
+      },
+      "epochs": 128,
+      "hiddenUnits": 64,
+      "index": 211,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.779105,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/211-mlp-h64-lr0p05-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019823,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": 0.0,
+        "precision": 0.019823,
+        "recall": -0.019531
+      },
+      "epochs": 256,
+      "hiddenUnits": 64,
+      "index": 212,
+      "learningRate": 0.05,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.645479,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/212-mlp-h64-lr0p05-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.015621,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.015621,
+        "recall": -0.023437
+      },
+      "epochs": 32,
+      "hiddenUnits": 64,
+      "index": 213,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.636436,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/213-mlp-h64-lr0p08-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.028226,
+        "recall": -0.03125
+      },
+      "epochs": 64,
+      "hiddenUnits": 64,
+      "index": 214,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.845136,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/214-mlp-h64-lr0p08-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.011697,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": 0.0,
+        "precision": 0.011697,
+        "recall": -0.011718
+      },
+      "epochs": 128,
+      "hiddenUnits": 64,
+      "index": 215,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.361976,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/215-mlp-h64-lr0p08-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019858,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": 0.003125,
+        "precision": 0.019858,
+        "recall": -0.015625
+      },
+      "epochs": 256,
+      "hiddenUnits": 64,
+      "index": 216,
+      "learningRate": 0.08,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.570091,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/216-mlp-h64-lr0p08-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.011628,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.011628,
+        "recall": -0.015625
+      },
+      "epochs": 32,
+      "hiddenUnits": 64,
+      "index": 217,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.613734,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/217-mlp-h64-lr0p1-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023952,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.023952,
+        "recall": -0.03125
+      },
+      "epochs": 64,
+      "hiddenUnits": 64,
+      "index": 218,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.801727,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/218-mlp-h64-lr0p1-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.023971,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.023971,
+        "recall": -0.027344
+      },
+      "epochs": 128,
+      "hiddenUnits": 64,
+      "index": 219,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.854777,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/219-mlp-h64-lr0p1-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.015674,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.015674,
+        "recall": -0.019531
+      },
+      "epochs": 256,
+      "hiddenUnits": 64,
+      "index": 220,
+      "learningRate": 0.1,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.516236,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/220-mlp-h64-lr0p1-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.007565,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.007565,
+        "recall": -0.015625
+      },
+      "epochs": 32,
+      "hiddenUnits": 64,
+      "index": 221,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.560146,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/221-mlp-h64-lr0p15-e32/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.028226,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.003125,
+        "precision": 0.028226,
+        "recall": -0.03125
+      },
+      "epochs": 64,
+      "hiddenUnits": 64,
+      "index": 222,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.856351,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/222-mlp-h64-lr0p15-e64/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.003836,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": 0.0,
+        "precision": 0.003836,
+        "recall": -0.003906
+      },
+      "epochs": 128,
+      "hiddenUnits": 64,
+      "index": 223,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.258562,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/223-mlp-h64-lr0p15-e128/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "bestMetricGain": 0.019751,
+      "clearsPhase5Gain": false,
+      "delta": {
+        "accuracy": -0.00625,
+        "precision": 0.019751,
+        "recall": -0.027344
+      },
+      "epochs": 256,
+      "hiddenUnits": 64,
+      "index": 224,
+      "learningRate": 0.15,
+      "noRegression": false,
+      "status": "complete",
+      "thresholds": {
+        "jsonAdapter": 0.5,
+        "onnxHead": 0.597233,
+        "requested": 0.5
+      },
+      "validationReportPath": "/tmp/vintrace-onnx-large-four-sweep-20260619/224-mlp-h64-lr0p15-e256/phase5_onnx_training_validation.json",
+      "validationStatus": "pass"
+    }
+  ],
+  "schemaVersion": 1,
+  "scope": "phase5-large-four-onnx-training-sweep",
+  "trainingRowsPath": "benchmarks/results/onnx-public-dataset-validation-large-four/rows/split/training-rows.json",
+  "validationRowsPath": "benchmarks/results/onnx-public-dataset-validation-large-four/rows/split/validation-rows.json"
+}

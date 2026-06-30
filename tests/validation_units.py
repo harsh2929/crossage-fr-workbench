@@ -38,6 +38,11 @@ def test_gate_promotes_a_change_that_improves_held_out_separability() -> None:
     gate = held_out_gate(_rows(), lambda train: (lambda r: r["betterScore"]), score_key="rawCosine", seed=3)
     assert gate["promote"] is True
     assert gate["candidateAccuracy"] >= gate["baselineAccuracy"]
+    assert gate["candidateMetrics"]["precision"] >= gate["baselineMetrics"]["precision"]
+    assert "falseMatchRate" in gate["candidateMetrics"]
+    assert "falseRejectRate" in gate["candidateMetrics"]
+    assert isinstance(gate["identityRegressions"], list)
+    assert isinstance(gate["segmentRegressions"], list)
 
 
 def test_gate_rejects_a_harmful_or_noop_change() -> None:

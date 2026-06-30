@@ -1,0 +1,325 @@
+{
+  "baselineTraining": {
+    "count": 120,
+    "inputCount": 120,
+    "labelsDroppedOtherModel": 0,
+    "negativeCount": 24,
+    "positiveCount": 96,
+    "rowsHash": "b1d74e3bc6a3e10b04f377958d0f5227a46f0a67c79574267f4adb47c2d4d579",
+    "source": "training-rows"
+  },
+  "count": 40,
+  "delta": {
+    "accuracy": 0.0,
+    "precision": 0.0,
+    "recall": 0.0
+  },
+  "diagnostics": {
+    "fixedThreshold": {
+      "jsonAdapter": {
+        "accuracy": 0.975,
+        "count": 40,
+        "falseNegatives": 0,
+        "falsePositives": 1,
+        "precision": 0.969697,
+        "recall": 1.0,
+        "specificity": 0.875,
+        "threshold": 0.5,
+        "trueNegatives": 7,
+        "truePositives": 32
+      },
+      "onnxHead": {
+        "accuracy": 0.975,
+        "count": 40,
+        "falseNegatives": 0,
+        "falsePositives": 1,
+        "precision": 0.969697,
+        "recall": 1.0,
+        "specificity": 0.875,
+        "threshold": 0.5,
+        "trueNegatives": 7,
+        "truePositives": 32
+      },
+      "threshold": 0.5
+    },
+    "onnxThresholdSweep": {
+      "bestAccuracy": {
+        "accuracy": 0.975,
+        "count": 40,
+        "falseNegatives": 0,
+        "falsePositives": 1,
+        "precision": 0.969697,
+        "recall": 1.0,
+        "specificity": 0.875,
+        "threshold": 0.5,
+        "trueNegatives": 7,
+        "truePositives": 32
+      },
+      "bestPrecision": {
+        "accuracy": 0.2,
+        "count": 40,
+        "falseNegatives": 32,
+        "falsePositives": 0,
+        "precision": 1.0,
+        "recall": 0.0,
+        "specificity": 1.0,
+        "threshold": 0.99997,
+        "trueNegatives": 8,
+        "truePositives": 0
+      },
+      "candidateCount": 69
+    },
+    "predictionErrors": {
+      "jsonAdapter": {
+        "falseNegatives": [],
+        "falsePositives": [
+          {
+            "actualPerson": "0011 0011-Abdulaziz_Kamilov",
+            "candidateId": "public:cplfw:antelopev2:031ac0673f4844cc17bfe99d:74",
+            "datasetId": "cplfw",
+            "difficulty": "non-match",
+            "expectedPerson": "0038-Adrian_Nastase",
+            "index": 19,
+            "matchScore": 0.220129,
+            "rowHash": "f80ca75b61314eeeab5504e021c5d323affe0076327559455061f13d89783c2d",
+            "scenario": "cplfw-pose-three-quarter",
+            "score": 0.998829,
+            "sourceHashPrefix": "031ac0673f48",
+            "threshold": 0.5,
+            "validationBucket": "pose:three-quarter"
+          }
+        ]
+      },
+      "onnxHead": {
+        "falseNegatives": [],
+        "falsePositives": [
+          {
+            "actualPerson": "0011 0011-Abdulaziz_Kamilov",
+            "candidateId": "public:cplfw:antelopev2:031ac0673f4844cc17bfe99d:74",
+            "datasetId": "cplfw",
+            "difficulty": "non-match",
+            "expectedPerson": "0038-Adrian_Nastase",
+            "index": 19,
+            "matchScore": 0.220129,
+            "rowHash": "f80ca75b61314eeeab5504e021c5d323affe0076327559455061f13d89783c2d",
+            "scenario": "cplfw-pose-three-quarter",
+            "score": 0.999969,
+            "sourceHashPrefix": "031ac0673f48",
+            "threshold": 0.5,
+            "validationBucket": "pose:three-quarter"
+          }
+        ]
+      }
+    },
+    "scoreSummary": {
+      "jsonAdapter": {
+        "negative": {
+          "count": 8,
+          "max": 0.998829,
+          "mean": 0.127984,
+          "min": 0.003577
+        },
+        "overall": {
+          "count": 40,
+          "max": 0.998829,
+          "mean": 0.819913,
+          "min": 0.003577
+        },
+        "positive": {
+          "count": 32,
+          "max": 0.99874,
+          "mean": 0.992895,
+          "min": 0.921413
+        },
+        "separation": {
+          "meanPositiveMinusMeanNegative": 0.864911,
+          "minPositiveMinusMaxNegative": -0.077416
+        }
+      },
+      "onnxHead": {
+        "negative": {
+          "count": 8,
+          "max": 0.999969,
+          "mean": 0.12711,
+          "min": 0.002416
+        },
+        "overall": {
+          "count": 40,
+          "max": 0.999969,
+          "mean": 0.821027,
+          "min": 0.002416
+        },
+        "positive": {
+          "count": 32,
+          "max": 0.999824,
+          "mean": 0.994506,
+          "min": 0.868055
+        },
+        "separation": {
+          "meanPositiveMinusMeanNegative": 0.867396,
+          "minPositiveMinusMaxNegative": -0.131914
+        }
+      }
+    },
+    "trainingCoverage": {
+      "coveredValidationRows": 39,
+      "missingValidationContexts": [
+        {
+          "contextKey": "pose=three-quarter|media=image|scoreZero=False|scoreLow=True|crossAge=False|crossPose=True|poseUnknown=False|hardPose=True|closeRunnerUp=False|singleReference=False|lowQuality=False",
+          "examples": [
+            {
+              "actualPerson": "0011 0011-Abdulaziz_Kamilov",
+              "candidateId": "public:cplfw:antelopev2:031ac0673f4844cc17bfe99d:74",
+              "datasetId": "cplfw",
+              "difficulty": "non-match",
+              "expectedPerson": "0038-Adrian_Nastase",
+              "index": 19,
+              "matchScore": 0.220129,
+              "rowHash": "f80ca75b61314eeeab5504e021c5d323affe0076327559455061f13d89783c2d",
+              "scenario": "cplfw-pose-three-quarter",
+              "sourceHashPrefix": "031ac0673f48",
+              "validationBucket": "pose:three-quarter"
+            }
+          ],
+          "label": "negative",
+          "trainingCount": 0,
+          "validationCount": 1
+        }
+      ],
+      "missingValidationRows": 1,
+      "trainingContextCount": 10,
+      "validationContextCount": 6,
+      "validationRows": 40
+    }
+  },
+  "generatedAtUnix": 1781849111.071,
+  "input": {
+    "count": 40,
+    "minCount": 20,
+    "minPerClass": 5,
+    "negativeCount": 8,
+    "positiveCount": 32,
+    "rowsHash": "c937c8230922cb87002a892e39e97b7b251cf12c7aca7dc2637fdb219e09dd3c",
+    "scoresHash": "b4a4e09a13a33b25e872bad92a89e31f7e3f023d596c76b61f2d0a8dd3b6354a"
+  },
+  "jsonAdapter": {
+    "artifact": {
+      "featureVersion": "pair-adapter-features-v2",
+      "inputCount": 120,
+      "trainer": "numpy-logistic-regression",
+      "versionKey": "logistic-pair-adapter-v1"
+    },
+    "metrics": {
+      "accuracy": 0.975,
+      "count": 40,
+      "falseNegatives": 0,
+      "falsePositives": 1,
+      "precision": 0.969697,
+      "recall": 1.0,
+      "specificity": 0.875,
+      "threshold": 0.5,
+      "trueNegatives": 7,
+      "truePositives": 32
+    }
+  },
+  "notProductionAuthorization": true,
+  "onnxHead": {
+    "featureCount": 36,
+    "featureVersion": "onnx-tiny-head-app-context-features-v4",
+    "metrics": {
+      "accuracy": 0.975,
+      "count": 40,
+      "falseNegatives": 0,
+      "falsePositives": 1,
+      "precision": 0.969697,
+      "recall": 1.0,
+      "specificity": 0.875,
+      "threshold": 0.5,
+      "trueNegatives": 7,
+      "truePositives": 32
+    }
+  },
+  "reason": "ONNX scoring head matches or beats the JSON adapter baseline within tolerance.",
+  "reportHash": "acaba4fecdbad1486202d0f420aed1779bdbbf231e3ce62f2b0208fb5ffa317f",
+  "schemaVersion": 1,
+  "scope": "phase5-onnx-training-validation",
+  "status": "pass",
+  "threshold": 0.5,
+  "thresholdCalibration": {
+    "bestPrecision": {
+      "accuracy": 1.0,
+      "count": 120,
+      "falseNegatives": 0,
+      "falsePositives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "specificity": 1.0,
+      "threshold": 0.5,
+      "trueNegatives": 24,
+      "truePositives": 96
+    },
+    "candidateCount": 183,
+    "fixedThreshold": {
+      "accuracy": 1.0,
+      "count": 120,
+      "falseNegatives": 0,
+      "falsePositives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "specificity": 1.0,
+      "threshold": 0.5,
+      "trueNegatives": 24,
+      "truePositives": 96
+    },
+    "requestedThreshold": 0.5,
+    "scope": "phase5-onnx-training-threshold-calibration",
+    "scoreSummary": {
+      "negative": {
+        "count": 24,
+        "max": 0.350352,
+        "mean": 0.016913,
+        "min": 0.002416
+      },
+      "overall": {
+        "count": 120,
+        "max": 0.999994,
+        "mean": 0.800277,
+        "min": 0.002416
+      },
+      "positive": {
+        "count": 96,
+        "max": 0.999994,
+        "mean": 0.996118,
+        "min": 0.868055
+      },
+      "separation": {
+        "meanPositiveMinusMeanNegative": 0.979205,
+        "minPositiveMinusMaxNegative": 0.517702
+      }
+    },
+    "selected": {
+      "accuracy": 1.0,
+      "count": 120,
+      "falseNegatives": 0,
+      "falsePositives": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "specificity": 1.0,
+      "threshold": 0.5,
+      "trueNegatives": 24,
+      "truePositives": 96
+    },
+    "source": "training-rows"
+  },
+  "thresholds": {
+    "jsonAdapter": 0.5,
+    "onnxHead": 0.5,
+    "requested": 0.5
+  },
+  "trainingConfig": {
+    "epochs": 64,
+    "featureCount": 36,
+    "featureVersion": "onnx-tiny-head-app-context-features-v4",
+    "learningRate": 0.05
+  }
+}
