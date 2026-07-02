@@ -24,6 +24,7 @@ import {
   EyeOff,
   FileText,
   FolderOpen,
+  FolderPlus,
   Focus,
   Gauge,
   HardDrive,
@@ -59,9 +60,16 @@ import type { CSSProperties, ReactNode } from "react";
 // so it imports a 192px (~8KB) variant to keep the master off the boot path.
 import appIconUrl from "../desktop/assets/icon-192.webp";
 import type {
+  AccuracyValidationRun,
   AgeBucket,
   AgeReferenceGroup,
   AppState,
+  AuditChainStatus,
+  Jurisdiction,
+  ModelDistributionAudit,
+  PhotoAssetIndexPage,
+  PhotoImportSession,
+  StorageIoBenchmarkResult,
   AuditEventsResult,
   CameraSaveResult,
   CandidateMediaAction,
@@ -216,6 +224,24 @@ import type {
 import { computeScannedCounts, countExcludedBranches, excludeNode, includeNode } from "./lib/folderTreeSelection";
 import { filterPeople, groupReferencesByPerson, type Person } from "./lib/peopleGrouping";
 import { PhotosView } from "./views/PhotosView";
+import { AppShell } from "./shell/AppShell";
+import { Sidebar } from "./shell/Sidebar";
+import { StatusRow } from "./shell/StatusRow";
+import {
+  tabs,
+  type TabKey,
+  type LegacyTab,
+  type ToolsSection,
+  type PeopleSection,
+  type SettingsSection,
+  type NavTarget,
+  type NavMeta,
+  PHOTOS_BACKED_TABS,
+  PHOTO_TAB_ACTIVE_ID,
+  legacyTabTarget,
+} from "./shell/navModel";
+import { SearchView } from "./shell/SearchView";
+import { SectionTabs } from "./shell/SectionTabs";
 import { photoReviewMoreCandidateReasons } from "./views/photoGroupReview";
 import {
   normalizeReviewFocusHistory,
@@ -229,7 +255,6 @@ import { initBootBackground } from "./lib/bootBackground";
 import { formatErrorMessage, formatUiMessage, languageOptions, localizeDom, normalizeLanguage, translate, translateUiText } from "./i18n";
 import type { LanguageCode, TranslationKey, UiMessageKey } from "./i18n";
 
-type TabKey = "dashboard" | "enroll" | "scan" | "review" | "photos" | "settings";
 type UiMessageValues = Record<string, string | number>;
 type NoticeState = { tone: "ok" | "warn" | "error"; text: string; messageKey?: UiMessageKey; values?: UiMessageValues; errorCode?: string; action?: string };
 
@@ -326,14 +351,6 @@ function protectedSummary(count: number) {
   return count > 0 ? ` Safe Mode protected ${count} file(s).` : "";
 }
 
-const tabs: Array<{ key: TabKey; labelKey: TranslationKey; icon: typeof Gauge }> = [
-  { key: "dashboard", labelKey: "nav.dashboard", icon: Gauge },
-  { key: "enroll", labelKey: "nav.enroll", icon: UserPlus },
-  { key: "scan", labelKey: "nav.scan", icon: Search },
-  { key: "review", labelKey: "nav.review", icon: ShieldCheck },
-  { key: "photos", labelKey: "nav.photos", icon: Images },
-  { key: "settings", labelKey: "nav.settings", icon: Settings }
-];
 
 const ageBuckets: AgeBucket[] = ["child", "adolescent", "adult", "unknown"];
 const referenceAgeBuckets: AgeBucket[] = ["child", "adolescent", "adult"];
@@ -1761,7 +1778,11 @@ function normalizeAppState(incoming: AppState, previous: AppState | null): AppSt
 export default function App() {
   const [language, setLanguage] = useState<LanguageCode>(() => readInitialLanguage());
   const [state, setState] = useState<AppState | null>(null);
-  const [activeTab, setActiveTab] = useState<TabKey>("dashboard");
+  const [activeTab, setActiveTab] = useState<TabKey>("library");
+  const [toolsSection, setToolsSection] = useState<ToolsSection>("overview");
+  const [peopleSection, setPeopleSection] = useState<PeopleSection>("browse");
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
+  const [photosReloadSignal, setPhotosReloadSignal] = useState(0);
   const [busy, setBusy] = useState<string | null>("Starting local engine");
   const [bootError, setBootError] = useState<string | null>(null);
   const [bootStartedAt, setBootStartedAt] = useState(() => Date.now());
@@ -1846,6 +1867,18 @@ export default function App() {
   const [workspaceRelinkResult, setWorkspaceRelinkResult] = useState<WorkspaceRelinkResult | null>(null);
   const [scanManifestPruneResult, setScanManifestPruneResult] = useState<ScanManifestPruneValue | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEventsResult | null>(null);
+  const [auditChain, setAuditChain] = useState<AuditChainStatus | null>(null);
+  const [jurisdictions, setJurisdictions] = useState<Jurisdiction[]>([]);
+  const [jurisdictionDisclaimer, setJurisdictionDisclaimer] = useState("");
+  const [accuracyValidationHistory, setAccuracyValidationHistory] = useState<AccuracyValidationRun[]>([]);
+  const [storageIo, setStorageIo] = useState<StorageIoBenchmarkResult | null>(null);
+  const [storageIoPath, setStorageIoPath] = useState("");
+  const [modelDistribution, setModelDistribution] = useState<ModelDistributionAudit | null>(null);
+  // The jurisdiction catalog is a static backend table; fetch it once on mount.
+  useEffect(() => {
+    void loadJurisdictions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [runtimeSelfTest, setRuntimeSelfTest] = useState<RuntimeSelfTestResult | null>(null);
   const [modelIntegrity, setModelIntegrity] = useState<ModelIntegrityResult | null>(null);
   const [runtimeBenchmark, setRuntimeBenchmark] = useState<RuntimeBenchmarkResult | null>(null);
@@ -2467,6 +2500,15 @@ export default function App() {
     []
   );
 
+  // Raw photo_assets index inspector (list_photo_assets) — unlike the curated
+  // list_photo_folder_items, this returns the unfiltered table including
+  // hidden/deleted/orphaned rows. Diagnostic use only (Tools › Diagnostics).
+  const listPhotoAssets = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<PhotoAssetIndexPage>("list_photo_assets", params),
+    []
+  );
+
   const listPhotoDateBuckets = useCallback(
     (params: Record<string, unknown>) =>
       window.crossAge.invoke<PhotoDateBucketList>("list_photo_date_buckets", params),
@@ -2818,6 +2860,18 @@ export default function App() {
     []
   );
 
+  // Re-tag the source of many import sessions (and re-stamp their assets) in one
+  // call (bulk_update_photo_import_session_provenance) — the multi-session sibling
+  // of the single-session editor above.
+  const bulkUpdatePhotoImportSessionProvenance = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { changed: number; updated: PhotoImportSession[]; missing: string[]; updatedAssets: number } }>(
+        "bulk_update_photo_import_session_provenance",
+        params
+      ),
+    []
+  );
+
   const archivePhotoImportSessions = useCallback(
     (params: Record<string, unknown>) =>
       window.crossAge.invoke<{ value: PhotoImportSessionArchiveUpdateValue }>("archive_photo_import_sessions", params),
@@ -3134,6 +3188,9 @@ export default function App() {
     const value = result.value;
     if (!value) return null;
     const warningCount = value.failedCount || 0;
+    if ((value.importedCount || 0) > 0) {
+      try { window.localStorage?.setItem("vintrace.hasImportedPhotos", "1"); } catch { /* non-fatal */ }
+    }
     setNotice({
       tone: warningCount ? "warn" : "ok",
       text: `Imported ${value.importedCount} photo${value.importedCount === 1 ? "" : "s"}${warningCount ? `; ${warningCount} failed` : ""}.`
@@ -3492,13 +3549,14 @@ export default function App() {
   }
 
   async function semanticSearchPhotos(params: Record<string, unknown>) {
-    const result = await invoke<CommandResult<SemanticSearchPhotosValue>>(
+    // Returns unwrapped (so the main process decorates item previewPath -> previewUrl).
+    const result = await invoke<SemanticSearchPhotosValue>(
       "Searching by meaning",
       "semantic_search_photos",
       params,
       { quiet: true }
     );
-    return result.value ?? null;
+    return result ?? null;
   }
 
   async function setPhotoLiveKeyPhoto(params: Record<string, unknown>) {
@@ -3589,7 +3647,7 @@ export default function App() {
         return next;
       });
       setSelectedCandidateId(ids[0]);
-      setActiveTab("review");
+      legacyNavigate("review");
       setNotice({ tone: "ok", text: `Opened Review for ${ids.length} selected match${ids.length === 1 ? "" : "es"}.` });
     };
     const loaded = new Set(state?.candidates.map((candidate) => candidate.candidateId) || []);
@@ -3760,6 +3818,21 @@ export default function App() {
     setNotice({ tone: "ok", text: "App folder opened. Please confirm permission again." });
   }
 
+  // Register a folder in the case switcher WITHOUT making it active (add_workspace),
+  // unlike chooseWorkspace which opens + switches. Lets an operator pre-register
+  // other case folders while staying in the current case.
+  async function addWorkspaceFolder() {
+    const folder = await window.crossAge.chooseFolder();
+    if (!folder) return;
+    const result = await invoke<{ workspaces: WorkspaceListItem[]; registered: string }>(
+      "Adding case folder",
+      "add_workspace",
+      { path: folder }
+    );
+    setRecentWorkspaces(result?.workspaces ?? []);
+    setNotice({ tone: "ok", text: "Case folder added to the switcher." });
+  }
+
   async function chooseFolder(setter: (value: string) => void) {
     const folder = await window.crossAge.chooseFolder();
     if (folder) setter(folder);
@@ -3897,7 +3970,7 @@ export default function App() {
       "Saved person photos need a model backfill before this scan. Continue anyway? This can miss matches until saved photos are backfilled."
     );
     if (!proceed) {
-      setActiveTab("settings");
+      legacyNavigate("settings");
       setNotice({ tone: "warn", text: "Scan paused. Backfill saved photos in Settings before scanning with this model." });
       return null;
     }
@@ -4287,18 +4360,18 @@ export default function App() {
   async function startWatchForFolder(folder: string) {
     if (!state?.consentOnFile || !state.references.length) {
       setScanFolder(folder);
-      setActiveTab("scan");
+      legacyNavigate("scan");
       setNotice({ tone: "warn", text: "Add a person and confirm permission before watching this folder." });
       return;
     }
     if (workspaceLocked) {
       setScanFolder(folder);
-      setActiveTab("scan");
+      legacyNavigate("scan");
       setNotice({ tone: "warn", text: "Unlock the workspace before watching this folder." });
       return;
     }
     setScanFolder(folder);
-    setActiveTab("scan");
+    legacyNavigate("scan");
     try {
       const status = await window.crossAge.startFolderWatch(folder);
       applyWatchStatus(status);
@@ -4390,11 +4463,11 @@ export default function App() {
 
   async function handleAppCommand(command: AppCommand) {
     if (command.type === "navigate") {
-      setActiveTab(command.tab);
+      legacyNavigate(command.tab);
       return;
     }
     if (command.type === "photos-shortcut") {
-      if (workspaceLocked || activeTab !== "photos") return;
+      if (workspaceLocked || !PHOTOS_BACKED_TABS.includes(activeTab)) return;
       setPhotoAppShortcutCommand((current) => ({
         id: (current?.id || 0) + 1,
         shortcut: command.shortcut,
@@ -4410,7 +4483,7 @@ export default function App() {
       return;
     }
     if (command.type === "scan") {
-      setActiveTab("scan");
+      legacyNavigate("scan");
       if (scanDisabled) {
         setNotice({ tone: "warn", text: "Choose a folder, add a person, and confirm permission before scanning." });
         return;
@@ -4419,7 +4492,7 @@ export default function App() {
       return;
     }
     if (command.type === "start-watch") {
-      setActiveTab("scan");
+      legacyNavigate("scan");
       await startWatchFolder();
       return;
     }
@@ -4450,7 +4523,7 @@ export default function App() {
     }
     if (payload.type === "scan-folder") {
       setScanFolder(payload.path);
-      setActiveTab("scan");
+      legacyNavigate("scan");
       setNotice({ tone: "ok", text: "Folder received from the system." });
       return;
     }
@@ -4465,7 +4538,7 @@ export default function App() {
       const rawPaths = Array.isArray(payload.paths) ? payload.paths : [];
       const paths = [...new Set(rawPaths.map((entry) => String(entry || "").trim()).filter(Boolean))];
       if (!paths.length) {
-        setActiveTab("photos");
+        legacyNavigate("photos");
         return;
       }
       if (payload.source === "protocol") {
@@ -4475,7 +4548,7 @@ export default function App() {
           return;
         }
       }
-      setActiveTab("photos");
+      legacyNavigate("photos");
       setPhotoExternalImportRequest((current) => ({
         id: (current?.id || 0) + 1,
         paths,
@@ -4487,7 +4560,7 @@ export default function App() {
       return;
     }
     if (payload.type === "scan-files") {
-      setActiveTab("scan");
+      legacyNavigate("scan");
       if (!state?.consentOnFile || !state.references.length) {
         setPendingExternalIntent(payload);
         setNotice({ tone: "warn", text: "Files received. Add a person and confirm permission before scanning." });
@@ -4508,13 +4581,13 @@ export default function App() {
   async function resumePendingExternalIntent() {
     if (!pendingExternalIntent) return;
     if (!state?.consentOnFile || !state.references.length) {
-      setActiveTab(state?.references.length ? "scan" : "enroll");
+      legacyNavigate(state?.references.length ? "scan" : "enroll");
       setNotice({ tone: "warn", text: "Confirm permission and add a person before scanning received files." });
       return;
     }
     const payload = pendingExternalIntent;
     setPendingExternalIntent(null);
-    setActiveTab("scan");
+    legacyNavigate("scan");
     const compatibilityParams = await scanCompatibilityParams();
     if (!compatibilityParams) {
       setPendingExternalIntent(payload);
@@ -4539,7 +4612,7 @@ export default function App() {
     setAgeBucket("unknown");
     setEnrollFolder("");
     setAgeGroupFolders(emptyAgeFolders());
-    setActiveTab("enroll");
+    legacyNavigate("enroll");
     setNotice({
       tone: "ok",
       text: target ? `Add clearer, angled, side, or age-range photos for ${target}.` : "Add clearer saved-person photos."
@@ -5143,6 +5216,21 @@ export default function App() {
     }
   }
 
+  // Authoritative jurisdiction catalog (presets + per-preset posture + the legal
+  // disclaimer) — replaces the hand-maintained, drift-prone JURISDICTION_OPTIONS.
+  async function loadJurisdictions() {
+    try {
+      const result = await window.crossAge.invoke<{ jurisdictions: Jurisdiction[]; disclaimer: string }>(
+        "list_jurisdictions",
+        {}
+      );
+      setJurisdictions(result?.jurisdictions ?? []);
+      setJurisdictionDisclaimer(result?.disclaimer ?? "");
+    } catch {
+      // Non-fatal: the select falls back to its own static labels if the catalog fails.
+    }
+  }
+
   async function exportExaminationReport() {
     const result = await invoke<CommandResult<{ markdownPath: string; candidateCount: number }>>(
       "Exporting examination report",
@@ -5207,6 +5295,19 @@ export default function App() {
     setNoticeMessage("ok", "notice.activityEventsLoaded", { count: result.events.length }, `Loaded ${result.events.length} activity event${result.events.length === 1 ? "" : "s"}.`);
   }
 
+  // Live tamper-evidence check of the hash-chained audit log (audit_chain_status).
+  // Returns a bare dict (no {value} envelope, no state piggyback) — read it directly.
+  async function verifyAuditChain() {
+    const result = await invoke<AuditChainStatus>("Checking audit integrity", "audit_chain_status");
+    setAuditChain(result);
+    if (result.verified) {
+      setNotice({ tone: "ok", text: `Audit chain verified — ${result.chained} chained entr${result.chained === 1 ? "y" : "ies"}.` });
+    } else {
+      const where = result.firstBreak ? ` at line ${result.firstBreak.index} (${result.firstBreak.reason})` : "";
+      setNotice({ tone: "error", text: `Audit chain integrity broken${where}.` });
+    }
+  }
+
   async function runRuntimeSelfTest() {
     const result = await invoke<RuntimeSelfTestResult>("Running system check", "runtime_self_test");
     setRuntimeSelfTest(result);
@@ -5250,6 +5351,38 @@ export default function App() {
     setNotice({ tone: "ok", text: "Benchmark complete." });
   }
 
+  // Real read/write throughput test on an arbitrary folder (storage_io_benchmark).
+  // Unlike runtime_benchmark (which only tests the app-folder root), this lets the
+  // operator probe any drive/share before choosing it as an app folder or scanning it.
+  async function runStorageIoBenchmark(path?: string, sizeMb = 8) {
+    const target = (path ?? storageIoPath).trim() || state?.workspace || "";
+    const result = await invoke<StorageIoBenchmarkResult>("Testing drive speed", "storage_io_benchmark", {
+      path: target,
+      sizeMb,
+      source: "settings_storage"
+    });
+    setStorageIo(result);
+    setNotice(
+      result.ok
+        ? { tone: "ok", text: `Drive ${Math.round(result.writeMBps)} MB/s write · ${Math.round(result.readMBps)} MB/s read.` }
+        : { tone: "warn", text: result.error || "Drive speed test failed." }
+    );
+  }
+
+  // Per-model license & redistribution manifest (model_distribution_audit). The
+  // same audit is computed inside model_integrity/release_readiness but its detail
+  // is discarded there; this surfaces it in full.
+  async function runModelDistributionAudit() {
+    const result = await invoke<ModelDistributionAudit>("Checking model licenses", "model_distribution_audit");
+    setModelDistribution(result);
+    setNotice({
+      tone: result.ok ? "ok" : "warn",
+      text: result.ok
+        ? "Model licenses are ready for distribution."
+        : "Model license review needed before sharing installers."
+    });
+  }
+
   async function runReleaseReadiness() {
     const result = await invoke<ReleaseReadinessResult>("Checking release", "release_readiness");
     setReleaseReadiness(result);
@@ -5278,7 +5411,7 @@ export default function App() {
       return;
     }
     setScanFolder(source.path);
-    setActiveTab("scan");
+    legacyNavigate("scan");
     setNotice({ tone: "ok", text: `${source.label} selected for scanning.` });
   }
 
@@ -5289,7 +5422,7 @@ export default function App() {
       return;
     }
     setScanFolder(folder);
-    setActiveTab("scan");
+    legacyNavigate("scan");
     setNotice({ tone: "ok", text: "Past scan source selected. Check the folder, then scan again." });
   }
 
@@ -5590,10 +5723,24 @@ export default function App() {
       return;
     }
     setAccuracyValidationPack(result.value);
+    // run_accuracy_validation_pack already carries the run history; hydrate the
+    // history list from it to avoid a second round-trip on the just-run case.
+    if (result.value.history) setAccuracyValidationHistory(result.value.history);
     setNotice({
       tone: result.value.status === "fail" ? "error" : result.value.status === "warn" ? "warn" : "ok",
       text: `Validation pack ${result.value.status ?? "complete"}: ${result.value.counts.cases} scenario cases.`
     });
+  }
+
+  // Read-only loader for past validation runs (accuracy_validation_history) — the
+  // cheap, non-mutating way to populate the history list on panel mount.
+  async function loadAccuracyValidationHistory() {
+    const result = await invoke<{ history: AccuracyValidationRun[] }>(
+      "Loading validation history",
+      "accuracy_validation_history",
+      { limit: 20 }
+    );
+    setAccuracyValidationHistory(result.history ?? []);
   }
 
   async function choosePublicDatasetFolder() {
@@ -6198,9 +6345,23 @@ export default function App() {
     setShowOnboarding(true);
   }
 
-  function onboardingNavigate(tab: TabKey) {
+  // Photos-first navigation. Centralizes tab + sub-section switching so legacy
+  // recognition deep-links (Dashboard/Scan/Review/Enroll) resolve to their new
+  // homes (Tools / People & Pets) in one place.
+  function navigateTo(target: NavTarget) {
+    setActiveTab(target.tab);
+    if (target.toolsSection) setToolsSection(target.toolsSection);
+    if (target.peopleSection) setPeopleSection(target.peopleSection);
+    if (target.settingsSection) setSettingsSection(target.settingsSection);
+  }
+
+  function legacyNavigate(tab: LegacyTab) {
+    navigateTo(legacyTabTarget(tab));
+  }
+
+  function onboardingNavigate(tab: LegacyTab) {
     dismissOnboarding();
-    setActiveTab(tab);
+    legacyNavigate(tab);
   }
 
   function onboardingConsent() {
@@ -6271,139 +6432,73 @@ export default function App() {
     );
   }
 
-  const navMeta: Partial<Record<TabKey, { label: string; tone: "green" | "amber" | "blue" }>> = {
-    dashboard: { label: state.counts.pending ? `${state.counts.pending}` : "Live", tone: state.counts.pending ? "amber" : "blue" },
-    enroll: { label: `${state.counts.references}`, tone: state.counts.references ? "green" : "amber" },
-    scan: { label: watchStatus.active ? "Watch" : `${state.scanTotals.processed}`, tone: watchStatus.active ? "green" : "blue" },
-    review: { label: `${state.counts.pending}`, tone: state.counts.pending ? "amber" : "green" },
-    settings: { label: state.config.safeMode ? "Safe" : "Open", tone: state.config.safeMode ? "green" : "amber" }
+  const navMeta: NavMeta = {
+    people: state.counts.pending
+      ? { label: `${state.counts.pending}`, tone: "amber" }
+      : { label: `${state.counts.references}`, tone: state.counts.references ? "green" : "blue" },
+    tools: watchStatus.active ? { label: "Watch", tone: "green" } : undefined,
+    settings: { label: state.config.safeMode ? "Safe" : "Open", tone: state.config.safeMode ? "green" : "amber" },
   };
-  const shellReadyItems = [
-    { label: t("shell.local"), value: isDemoMode ? t("shell.demo") : t("shell.model"), tone: isDemoMode ? "amber" : "green" },
-    { label: t("shell.safeMode"), value: state.config.safeMode ? t("shell.on") : t("shell.off"), tone: state.config.safeMode ? "green" : "amber" },
-    { label: t("shell.toReview"), value: `${state.counts.pending}`, tone: state.counts.pending ? "amber" : "blue" }
-  ] as const;
+  // Photos-first body routing: Library/Memories/Albums (and People → Browse) all
+  // render the single shared PhotosView, seeded to the right rail section.
+  const photosTabActiveId: string | null =
+    activeTab === "library"
+      ? "all"
+      : activeTab === "memories"
+      ? "memories"
+      : activeTab === "albums"
+      ? "albums"
+      : activeTab === "people" && peopleSection === "browse"
+      ? "people"
+      : null;
+  const showPhotosBody = !workspaceLocked && photosTabActiveId !== null;
 
   return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark"><img src={appIconUrl} alt="" /></div>
-          <div>
-            <strong>Vintrace</strong>
-            <span>{t("app.subtitle")}</span>
-          </div>
-        </div>
-        <nav className="nav-list" aria-label="Primary navigation">
-          {tabs.map((tab) => {
-            const Icon = tab.icon;
-            return (
-              <button
-                key={tab.key}
-                className={activeTab === tab.key ? "active" : ""}
-                onClick={() => setActiveTab(tab.key)}
-                aria-current={activeTab === tab.key ? "page" : undefined}
-              >
-                <Icon size={18} />
-                <span className="nav-label">{t(tab.labelKey)}</span>
-                {navMeta[tab.key] && <span className={`nav-badge ${navMeta[tab.key]?.tone}`}>{navMeta[tab.key]?.label}</span>}
-              </button>
-            );
-          })}
-        </nav>
-        <div className="sidebar-card">
-          <span className="subtle">Mode</span>
-          <strong>{isDemoMode ? "Simple engine" : "Full model"}</strong>
-          <span className={isDemoMode ? "pill amber" : "pill green"} title={state.engine}>{engineLabel(state.engine)}</span>
-        </div>
-      </aside>
-
-      <section className="workspace" ref={workspaceRef}>
-        <header className="topbar">
-          <div className="workspace-path">
-            <HardDrive size={18} />
-            <div>
-              <small>{t("topbar.appFolder")}</small>
-              <span title={state.workspace}>{state.workspace}</span>
-              <div className="workspace-meta-strip" aria-label={t("topbar.folderReadiness")}>
-                {shellReadyItems.map((item) => (
-                  <span key={item.label} className={item.tone}>
-                    {item.label}: <strong>{item.value}</strong>
-                  </span>
-                ))}
-              </div>
-            </div>
-          </div>
-          <div className={`topbar-actions${busy ? " disabled" : ""}`}>
-            <button className="ghost" onClick={openOnboarding} title="Open first-use guide">
-              <BookOpen size={17} />
-              <span>{t("topbar.guide")}</span>
-            </button>
-            <button className="ghost" onClick={chooseWorkspace} disabled={Boolean(busy)} title="Choose app folder">
-              <FolderOpen size={17} />
-              <span>{t("topbar.choose")}</span>
-            </button>
-            <button className="ghost" onClick={revealWorkspace} disabled={Boolean(busy)} title="Show app folder">
-              <HardDrive size={17} />
-              <span>{t("topbar.show")}</span>
-            </button>
-            <button className="ghost" onClick={() => invoke<AppState>("Refreshing", "get_state")} disabled={Boolean(busy)} title="Refresh">
-              <RefreshCcw size={17} />
-              <span>{t("topbar.refresh")}</span>
-            </button>
-            {workspaceLock?.enabled && (
-              <button className="ghost workspace-lock-toggle" aria-pressed={workspaceLock.locked} onClick={workspaceLock.locked ? unlockWorkspace : lockWorkspace} title={localizeImperativeText(workspaceLock.message)}>
-                {workspaceLock.locked ? <Lock size={17} /> : <Unlock size={17} />}
-                <span>{workspaceLock.locked ? t("topbar.unlock") : t("topbar.lock")}</span>
-              </button>
-            )}
-            <label className="language-picker" title={t("language.title")}>
-              <span>{t("language.label")}</span>
-              <select value={language} onChange={(event) => changeLanguage(normalizeLanguage(event.currentTarget.value))} aria-label={t("language.title")}>
-                {languageOptions.map((option) => (
-                  <option key={option.code} value={option.code}>{option.nativeLabel}</option>
-                ))}
-              </select>
-            </label>
-            <label className={`${state.consentOnFile ? "consent on" : "consent"}${busy ? " disabled" : ""}`}>
-              <input type="checkbox" checked={state.consentOnFile} disabled={Boolean(busy)} onChange={(event) => setConsent(event.currentTarget.checked)} />
-              <ShieldCheck size={17} />
-              <span>{t("topbar.permission")}</span>
-            </label>
-          </div>
-        </header>
-
-        <div className="status-row">
-          {busy ? (
-            <div className="notice busy" role="status" aria-live="polite" aria-atomic="true">
-              <Loader2 className="spin" size={16} /> {uiText(busy)}
-              {scanInFlight && (
-                <button
-                  type="button"
-                  className="ghost compact-action danger inline-cancel-scan"
-                  onClick={cancelActiveScan}
-                  disabled={scanCancelRequested}
-                  aria-label="Cancel scan"
-                >
-                  <X size={14} />
-                  <span>{scanCancelRequested ? "Cancelling…" : "Cancel scan"}</span>
-                </button>
-              )}
-            </div>
-          ) : notice ? (
-            <div className={`notice ${notice.tone}`} role={notice.tone === "error" ? "alert" : "status"} aria-live={notice.tone === "error" ? "assertive" : "polite"} aria-atomic="true">
-              {notice.tone === "error" ? <AlertCircle size={16} /> : <Check size={16} />}
-              {notice.errorCode
-                ? formatErrorMessage(language, notice.errorCode, notice.text, notice.action)
-                : notice.messageKey && language !== "en"
-                ? uiMessage(notice.messageKey, notice.values)
-                : uiText(notice.text)}
-            </div>
-          ) : (
-            <div className="notice neutral" role="status" aria-live="polite" aria-atomic="true">{t("status.ready")}</div>
-          )}
-          {isDemoMode && <div className="notice warn">{t("status.simpleMatching")}</div>}
-        </div>
+    <AppShell
+      workspaceRef={workspaceRef}
+      sidebar={
+        <Sidebar
+          tabs={tabs}
+          activeTab={activeTab}
+          onSelect={(key) => {
+            setActiveTab(key);
+            if (key === "tools") setToolsSection("overview");
+            else if (key === "people") setPeopleSection("browse");
+            else if (key === "settings") setSettingsSection("general");
+            // Re-selecting a photos-backed tab refreshes its rail + grid.
+            if (key === "library" || key === "memories" || key === "albums" || key === "people") {
+              setPhotosReloadSignal((signal) => signal + 1);
+            }
+          }}
+          navMeta={navMeta}
+          t={t}
+          iconUrl={appIconUrl}
+          isDemoMode={isDemoMode}
+          engineBadge={engineLabel(state.engine)}
+          engineTitle={state.engine}
+          language={language}
+          onChangeLanguage={(value) => changeLanguage(normalizeLanguage(value))}
+          openOnboarding={openOnboarding}
+          onManageEngine={() => {
+            setActiveTab("settings");
+            setSettingsSection("engine");
+          }}
+        />
+      }
+    >
+        <StatusRow
+          busy={busy}
+          uiText={uiText}
+          scanInFlight={scanInFlight}
+          cancelActiveScan={cancelActiveScan}
+          scanCancelRequested={scanCancelRequested}
+          notice={notice}
+          language={language}
+          formatErrorMessage={formatErrorMessage}
+          uiMessage={uiMessage}
+          t={t}
+          isDemoMode={isDemoMode}
+        />
 
         {workspaceLocked && workspaceLock && (
           <WorkspaceLockGate
@@ -6413,37 +6508,46 @@ export default function App() {
           />
         )}
 
-        {!workspaceLocked && activeTab === "dashboard" && (
-          <Dashboard
-            state={state}
-            scanProgress={scanProgress}
-            watchStatus={watchStatus}
-            latencySamples={latencySamples}
-            latencySummary={latencySummary}
-            workspaceHealth={workspaceHealth}
-            performanceChoice={performanceChoice}
-            performanceProfile={performanceProfile}
-            navigate={setActiveTab}
-            chooseWorkspace={chooseWorkspace}
-            runWorkspaceHealth={runWorkspaceHealth}
-            requestConsent={() => setConsent(true).catch(setErrorNotice)}
-            chooseModelRoot={chooseModelRoot}
-            downloadModel={downloadModel}
-            backfillModelReferences={backfillModelReferences}
-            modelDownloadProgress={modelDownloadProgress}
-            updateStatus={updateStatus}
-            mediaActionProgress={mediaActionProgress}
-            scanQueue={scanQueue}
-            scanQueueRunning={scanQueueRunning}
-            rerunScanSource={rerunScanSource}
-            cancelScan={cancelActiveScan}
-            pauseScan={pauseActiveScan}
-            resumeScan={resumeActiveScan}
-            localScanMarkers={localScanMarkers}
-            busy={Boolean(busy)}
+        {!workspaceLocked && activeTab === "tools" && (
+          <SectionTabs
+            ariaLabel="Tools sections"
+            items={[
+              { key: "overview", label: t("nav.toolsOverview") },
+              { key: "scan", label: t("nav.scan") },
+              { key: "models", label: t("nav.toolsModels") },
+              { key: "diagnostics", label: t("nav.toolsDiagnostics") },
+            ]}
+            active={toolsSection}
+            onSelect={setToolsSection}
           />
         )}
-        {!workspaceLocked && activeTab === "enroll" && (
+        {!workspaceLocked && activeTab === "people" && (
+          <SectionTabs
+            ariaLabel="People and pets sections"
+            items={[
+              { key: "browse", label: uiText("Browse") },
+              { key: "enroll", label: uiText("Add person") },
+              { key: "review", label: t("nav.review") },
+            ]}
+            active={peopleSection}
+            onSelect={setPeopleSection}
+          />
+        )}
+        {!workspaceLocked && activeTab === "settings" && settings && (
+          <SectionTabs
+            ariaLabel="Settings sections"
+            items={[
+              { key: "general", label: uiText("General") },
+              { key: "engine", label: uiText("Engine & Models") },
+              { key: "privacy", label: uiText("Privacy & Safety") },
+              { key: "storage", label: uiText("Storage & Data") },
+              { key: "advanced", label: uiText("Advanced") },
+            ]}
+            active={settingsSection}
+            onSelect={setSettingsSection}
+          />
+        )}
+        {!workspaceLocked && activeTab === "people" && peopleSection === "enroll" && (
           <EnrollView
             state={state}
             personName={personName}
@@ -6473,7 +6577,7 @@ export default function App() {
             uiText={uiText}
           />
         )}
-        {!workspaceLocked && activeTab === "scan" && (
+        {!workspaceLocked && activeTab === "tools" && toolsSection === "scan" && (
           <ScanView
             state={state}
             scanFolder={scanFolder}
@@ -6532,11 +6636,45 @@ export default function App() {
             ignoreIssuePaths={ignoreIssuePaths}
             selectCandidate={(id) => {
               setSelectedCandidateId(id);
-              setActiveTab("review");
+              legacyNavigate("review");
             }}
           />
         )}
-        {!workspaceLocked && activeTab === "review" && (
+        {!workspaceLocked && activeTab === "tools" && toolsSection !== "scan" && (
+          <Dashboard
+            section={toolsSection}
+            state={state}
+            scanProgress={scanProgress}
+            watchStatus={watchStatus}
+            latencySamples={latencySamples}
+            latencySummary={latencySummary}
+            workspaceHealth={workspaceHealth}
+            performanceChoice={performanceChoice}
+            performanceProfile={performanceProfile}
+            navigate={legacyNavigate}
+            chooseWorkspace={chooseWorkspace}
+            runWorkspaceHealth={runWorkspaceHealth}
+            requestConsent={() => setConsent(true).catch(setErrorNotice)}
+            chooseModelRoot={chooseModelRoot}
+            downloadModel={downloadModel}
+            backfillModelReferences={backfillModelReferences}
+            modelDownloadProgress={modelDownloadProgress}
+            modelDistribution={modelDistribution}
+            runModelDistributionAudit={runModelDistributionAudit}
+            listPhotoAssets={listPhotoAssets}
+            updateStatus={updateStatus}
+            mediaActionProgress={mediaActionProgress}
+            scanQueue={scanQueue}
+            scanQueueRunning={scanQueueRunning}
+            rerunScanSource={rerunScanSource}
+            cancelScan={cancelActiveScan}
+            pauseScan={pauseActiveScan}
+            resumeScan={resumeActiveScan}
+            localScanMarkers={localScanMarkers}
+            busy={Boolean(busy)}
+          />
+        )}
+        {!workspaceLocked && activeTab === "people" && peopleSection === "review" && (
           <ReviewView
             state={state}
             selectedCandidate={selectedCandidate}
@@ -6574,8 +6712,12 @@ export default function App() {
             busy={Boolean(busy)}
           />
         )}
-        {!workspaceLocked && activeTab === "photos" && (
+        {showPhotosBody && (
           <PhotosView
+            key="photos-main"
+            initialActiveId={photosTabActiveId ?? "all"}
+            reloadSignal={photosReloadSignal}
+            onRequestPeopleSection={(section) => { setActiveTab("people"); setPeopleSection(section); }}
             listPhotoFolders={listPhotoFolders}
             listPhotoFolderItems={listPhotoFolderItems}
             listPhotoDateBuckets={listPhotoDateBuckets}
@@ -6628,6 +6770,7 @@ export default function App() {
             suggestPhotoAlbums={suggestPhotoAlbums}
             listPhotoImportFailures={listPhotoImportFailures}
             updatePhotoImportSessionProvenance={updatePhotoImportSessionProvenance}
+            bulkUpdatePhotoImportSessionProvenance={bulkUpdatePhotoImportSessionProvenance}
             archivePhotoImportSessions={archivePhotoImportSessions}
             dismissPhotoImportFailure={dismissPhotoImportFailure}
             retryPhotoImportFailure={retryPhotoImportFailure}
@@ -6739,8 +6882,17 @@ export default function App() {
             appShortcutCommand={photoAppShortcutCommand}
           />
         )}
+        {!workspaceLocked && activeTab === "search" && (
+          <SearchView
+            searchPhotoLibrary={searchPhotoLibrary}
+            semanticSearchPhotos={semanticSearchPhotos}
+            t={t}
+            uiText={uiText}
+          />
+        )}
         {!workspaceLocked && activeTab === "settings" && settings && (
           <SettingsView
+            section={settingsSection}
             state={state}
             settings={settings}
             setSettings={updateSettingsDraft}
@@ -6760,6 +6912,14 @@ export default function App() {
             exportSupportBundle={exportSupportBundle}
             revealWorkspace={revealWorkspace}
             openWorkspaceFolder={openWorkspaceFolder}
+            chooseWorkspace={chooseWorkspace}
+            addWorkspaceFolder={addWorkspaceFolder}
+            onRefresh={() => invoke<AppState>("Refreshing", "get_state")}
+            openOnboarding={openOnboarding}
+            language={language}
+            onChangeLanguage={(value) => changeLanguage(normalizeLanguage(value))}
+            consentOnFile={state.consentOnFile}
+            setConsent={setConsent}
             recentWorkspaces={recentWorkspaces}
             switchWorkspace={switchWorkspace}
             people={settingsPeople}
@@ -6799,11 +6959,20 @@ export default function App() {
             optimizeWorkspace={optimizeWorkspace}
             pruneScanManifests={pruneScanManifests}
             scanManifestPruneResult={scanManifestPruneResult}
+            storageIo={storageIo}
+            storageIoPath={storageIoPath}
+            setStorageIoPath={setStorageIoPath}
+            runStorageIoBenchmark={runStorageIoBenchmark}
+            chooseFolder={chooseFolder}
             enforceStorageBudget={enforceStorageBudget}
             deletePerson={deletePerson}
             renamePerson={renamePerson}
             auditEvents={auditEvents}
             loadAuditEvents={loadAuditEvents}
+            auditChain={auditChain}
+            verifyAuditChain={verifyAuditChain}
+            jurisdictions={jurisdictions}
+            jurisdictionDisclaimer={jurisdictionDisclaimer}
             runtimeSelfTest={runtimeSelfTest}
             runRuntimeSelfTest={runRuntimeSelfTest}
             runtimeBenchmark={runtimeBenchmark}
@@ -6831,6 +7000,8 @@ export default function App() {
             promoteEmbeddingAdapter={promoteEmbeddingAdapter}
             rollbackEmbeddingAdapter={rollbackEmbeddingAdapter}
             generateAccuracyValidationPack={generateAccuracyValidationPack}
+            accuracyValidationHistory={accuracyValidationHistory}
+            loadAccuracyValidationHistory={loadAccuracyValidationHistory}
             choosePublicDatasetFolder={choosePublicDatasetFolder}
             inspectPublicDataset={inspectPublicDataset}
             runPublicDatasetBenchmark={runPublicDatasetBenchmark}
@@ -6907,8 +7078,7 @@ export default function App() {
           />
         )}
         <ConfirmHost />
-      </section>
-    </main>
+      </AppShell>
   );
 }
 
@@ -7116,7 +7286,7 @@ function OnboardingGuide({
   t(key: TranslationKey, values?: Record<string, string | number>): string;
   onClose(): void;
   onLater(): void;
-  navigate(tab: TabKey): void;
+  navigate(tab: LegacyTab): void;
   chooseWorkspace(): void;
   requestConsent(): void;
 }) {
@@ -7125,8 +7295,10 @@ function OnboardingGuide({
   const hasScan = state.scanTotals.runs > 0 || state.candidates.length > 0;
   const hasReviewed = state.counts.reviewed > 0;
   const safeModeReady = state.config.safeMode;
-  const completed = [hasWorkspace, state.consentOnFile, hasReferences, hasScan, hasReviewed, safeModeReady].filter(Boolean).length;
-  const progress = Math.round((completed / 6) * 100);
+  let hasPhotos = false;
+  try { hasPhotos = window.localStorage?.getItem("vintrace.hasImportedPhotos") === "1"; } catch { hasPhotos = false; }
+  const completed = [hasWorkspace, state.consentOnFile, hasPhotos, hasReferences, hasScan, hasReviewed, safeModeReady].filter(Boolean).length;
+  const progress = Math.round((completed / 7) * 100);
 
   const steps: Array<{
     title: string;
@@ -7151,6 +7323,14 @@ function OnboardingGuide({
       icon: ShieldCheck,
       actionLabel: state.consentOnFile ? t("onboarding.permission.done") : t("onboarding.permission.action"),
       action: state.consentOnFile ? () => navigate("enroll") : requestConsent
+    },
+    {
+      title: "Bring in your photos",
+      detail: "Index every photo on this computer into one library you can browse and search — or add specific folders. Originals stay where they are.",
+      status: hasPhotos,
+      icon: Images,
+      actionLabel: hasPhotos ? "Open Library" : "Add photos",
+      action: () => navigate("photos")
     },
     {
       title: t("onboarding.person.title"),
@@ -7289,7 +7469,172 @@ function ConsentSheet({
   );
 }
 
+function ModelLicensePanel({
+  result,
+  busy,
+  runModelDistributionAudit
+}: {
+  result: ModelDistributionAudit | null;
+  busy: boolean;
+  runModelDistributionAudit(): void | Promise<void>;
+}) {
+  function licenseTone(state: string) {
+    if (state === "declared") return "pill green";
+    if (state === "needs-review") return "pill amber";
+    return "pill red";
+  }
+  return (
+    <div className="panel model-license-panel">
+      <div className="panel-title">
+        <ShieldCheck size={18} /> Model licenses &amp; distribution
+        <div className="spacer" />
+        {result && <span className={result.ok ? "pill green" : "pill amber"}>{result.ok ? "Ready to redistribute" : "License review needed"}</span>}
+      </div>
+      <p className="subtle">Per-model license, redistribution readiness, and integrity (SHA-256) for the face packs and Safe Mode model. Check before sharing installers.</p>
+      {result ? (
+        <>
+          <div className="model-license-list">
+            {result.items.map((item) => (
+              <div className="model-license-row" key={`${item.kind}-${item.id}`}>
+                <div className="model-license-head">
+                  <strong>{item.name}</strong>
+                  <span className={licenseTone(item.licenseState)}>{item.license || "license unknown"}</span>
+                  {item.redistributionReady ? <span className="pill green">redistributable</span> : <span className="pill amber">restricted</span>}
+                  {item.installed ? <span className="pill blue">installed</span> : <span className="pill">not installed</span>}
+                </div>
+                <small className="compact">{item.kind} · {item.accuracyTier || "—"}{item.sizeBytes ? ` · ${formatBytes(item.sizeBytes)}` : ""}{item.sha256 ? ` · ${item.sha256.slice(0, 12)}…` : ""}</small>
+                {item.limitations?.length ? <small className="compact">{item.limitations.slice(0, 2).join(" · ")}</small> : null}
+              </div>
+            ))}
+          </div>
+          {result.recommendations?.length ? (
+            <div className="health-list">
+              {result.recommendations.slice(0, 3).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+            </div>
+          ) : null}
+        </>
+      ) : (
+        <p className="compact">Run the audit to review each model's license and whether it can be redistributed in an installer.</p>
+      )}
+      <div className="button-row">
+        <button className="secondary" onClick={() => void runModelDistributionAudit()} disabled={busy}>
+          <ShieldCheck size={17} />
+          <span>Check model licenses</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PhotoAssetIndexInspector({
+  listPhotoAssets
+}: {
+  listPhotoAssets(params?: Record<string, unknown>): Promise<PhotoAssetIndexPage>;
+}) {
+  const PAGE = 50;
+  const [page, setPage] = useState<PhotoAssetIndexPage | null>(null);
+  const [pageIndex, setPageIndex] = useState(0);
+  const [mediaKind, setMediaKind] = useState("");
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const load = useCallback(
+    async (offsetPage: number, kind: string, search: string, backfill = false) => {
+      setLoading(true);
+      setError("");
+      try {
+        const result = await listPhotoAssets({ offset: offsetPage * PAGE, limit: PAGE, mediaKind: kind, query: search.trim(), backfill });
+        setPage(result);
+        setPageIndex(offsetPage);
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [listPhotoAssets]
+  );
+  const total = page?.total ?? 0;
+  const maxPage = Math.max(0, Math.ceil(total / PAGE) - 1);
+  const indexHealthy = page?.searchIndex && Object.keys(page.searchIndex).length > 0;
+  return (
+    <div className="panel dashboard-span photo-asset-inspector">
+      <div className="panel-title">
+        <Database size={18} /> Photo asset index
+        <div className="spacer" />
+        {page && <span className="title-count">{page.returned}/{total}</span>}
+      </div>
+      <p className="subtle">Raw indexed-asset table — includes hidden, deleted, and un-foldered rows the Library hides. Diagnostic only.</p>
+      <div className="bands">
+        <select value={mediaKind} disabled={loading} onChange={(event) => setMediaKind(event.currentTarget.value)} aria-label="Media kind filter">
+          <option value="">All media kinds</option>
+          {["image", "video", "live_photo", "raw", "screenshot", "screen_recording", "panorama", "portrait", "burst", "time_lapse", "other"].map((kind) => (
+            <option key={kind} value={kind}>{kind.replace(/_/g, " ")}</option>
+          ))}
+        </select>
+        <input
+          type="search"
+          value={query}
+          disabled={loading}
+          placeholder="Search indexed assets…"
+          onChange={(event) => setQuery(event.currentTarget.value)}
+          onKeyDown={(event) => { if (event.key === "Enter") void load(0, mediaKind, query); }}
+          aria-label="Search indexed assets"
+        />
+        <button className="secondary" onClick={() => void load(0, mediaKind, query)} disabled={loading}>
+          <Activity size={16} />
+          <span>Inspect index</span>
+        </button>
+        <button className="ghost compact-action" onClick={() => void load(0, mediaKind, query, true)} disabled={loading} title="Backfill the photo_assets table and rebuild the search index">
+          <RefreshCcw size={16} />
+          <span>Rebuild search index</span>
+        </button>
+      </div>
+      {error && <span className="pill red" role="alert">{error}</span>}
+      {page && (
+        <span className={indexHealthy ? "pill green" : "pill amber"} title="Full-text search index status">
+          {indexHealthy ? "Search index ready" : "Search index not built"}
+        </span>
+      )}
+      {page?.items.length ? (
+        <div className="dashboard-list">
+          {page.items.map((asset) => (
+            <div className="scan-run-row" key={String((asset as { assetId?: unknown }).assetId ?? asset.sourcePath)}>
+              <div>
+                <strong>{basename(asset.sourcePath) || asset.sourcePath}</strong>
+                <span>{asset.mediaKind || "image"}{asset.captureDate ? ` • ${formatDateTime(asset.captureDate)}` : ""}{(asset as { missingAt?: unknown }).missingAt ? " • missing" : ""}</span>
+              </div>
+              <div className="run-metrics">
+                <span>{asset.people?.length ?? 0} people</span>
+                {(asset as { contentHash?: string }).contentHash ? <span>{String((asset as { contentHash?: string }).contentHash).slice(0, 10)}…</span> : null}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : page ? (
+        <p className="compact">No assets match this filter.</p>
+      ) : (
+        <p className="compact">Inspect the index to list raw asset rows.</p>
+      )}
+      {page && total > PAGE && (
+        <div className="button-row">
+          <button className="ghost compact-action" onClick={() => void load(pageIndex - 1, mediaKind, query)} disabled={loading || pageIndex <= 0}>
+            <ChevronRight size={16} style={{ transform: "rotate(180deg)" }} />
+            <span>Prev</span>
+          </button>
+          <span className="subtle">Page {pageIndex + 1} / {maxPage + 1}</span>
+          <button className="ghost compact-action" onClick={() => void load(pageIndex + 1, mediaKind, query)} disabled={loading || pageIndex >= maxPage}>
+            <span>Next</span>
+            <ChevronRight size={16} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Dashboard({
+  section,
   state,
   scanProgress,
   watchStatus,
@@ -7304,7 +7649,11 @@ function Dashboard({
   requestConsent,
   chooseModelRoot,
   downloadModel,
+  backfillModelReferences,
   modelDownloadProgress,
+  modelDistribution,
+  runModelDistributionAudit,
+  listPhotoAssets,
   updateStatus,
   mediaActionProgress,
   scanQueue,
@@ -7316,6 +7665,7 @@ function Dashboard({
   localScanMarkers,
   busy
 }: {
+  section: ToolsSection;
   state: AppState;
   scanProgress: ScanProgress | null;
   watchStatus: FolderWatchStatus;
@@ -7324,7 +7674,7 @@ function Dashboard({
   workspaceHealth: WorkspaceHealth | null;
   performanceChoice: PerformanceChoice;
   performanceProfile: PerformanceProfile;
-  navigate(tab: TabKey): void;
+  navigate(tab: LegacyTab): void;
   chooseWorkspace(): void;
   runWorkspaceHealth(): void;
   requestConsent(): void;
@@ -7332,6 +7682,9 @@ function Dashboard({
   downloadModel(pack: string, root?: string, force?: boolean): void | Promise<void>;
   backfillModelReferences(): void | Promise<void>;
   modelDownloadProgress: ModelDownloadProgress | null;
+  modelDistribution: ModelDistributionAudit | null;
+  runModelDistributionAudit(): void | Promise<void>;
+  listPhotoAssets(params?: Record<string, unknown>): Promise<PhotoAssetIndexPage>;
   updateStatus: UpdateStatus | null;
   mediaActionProgress: MediaActionProgress | null;
   scanQueue: ScanQueueItem[];
@@ -7420,24 +7773,25 @@ function Dashboard({
     { label: "Folder watch", ok: watchStatus.active, value: watchStatus.active ? "Watching" : "Idle" }
   ];
   const metrics = [
-    { label: "Needs review", value: formatNumber(state.counts.pending), detail: `${formatRate(reviewCompletion)} reviewed`, tone: "amber" },
-    { label: "Files scanned", value: formatNumber(totals.processed), detail: `${formatNumber(totals.runs)} scans`, tone: "blue" },
-    { label: "Video frames", value: formatNumber(totals.videoFrames ?? 0), detail: `${formatNumber(totals.videoFiles ?? 0)} video files`, tone: "blue" },
-    { label: "Hard-angle checks", value: formatNumber(totals.poseReranked ?? 0), detail: `${formatNumber(totals.poseAmbiguous ?? 0)} close identity scores`, tone: (totals.poseAmbiguous ?? 0) ? "amber" : "blue" },
-    { label: "Possible matches", value: formatNumber(totals.added), detail: `${formatRate(matchRate)} search yield`, tone: "green" },
-    { label: "Private photos protected", value: formatNumber(totals.safeFiltered), detail: `${formatRate(protectedRate)} kept out`, tone: "rose" },
-    { label: "Match strength", value: scoreLabel(averageScore), detail: `${percent(averageQuality)} photo quality`, tone: toneFor(averageScore) },
-    { label: "Command p95", value: latencySummary.count ? formatDuration(latencySummary.p95) : "Live", detail: lastLatency ? `${lastLatency.label}: ${formatDuration(lastLatency.durationMs)}` : `Budget ${formatDuration(performanceProfile.slowCommandMs)}`, tone: latencySummary.p95 > performanceProfile.slowCommandMs ? "amber" : "blue" },
-    { label: "Perf mode", value: performanceChoice === "auto" ? `Auto: ${performanceProfile.label}` : performanceProfile.label, detail: `${performanceProfile.reviewBatchSize} review rows per batch`, tone: performanceProfile.showListThumbnails ? "green" : "blue" },
-    { label: "Last scan", value: totals.lastCompletedAt ? formatDateTime(totals.lastCompletedAt) : "None", detail: `${formatDuration(totals.durationMs)} total runtime`, tone: "neutral" }
+    { label: "Needs review", value: formatNumber(state.counts.pending), detail: `${formatRate(reviewCompletion)} reviewed`, tone: "amber", tier: "everyday" },
+    { label: "Files scanned", value: formatNumber(totals.processed), detail: `${formatNumber(totals.runs)} scans`, tone: "blue", tier: "everyday" },
+    { label: "Video frames", value: formatNumber(totals.videoFrames ?? 0), detail: `${formatNumber(totals.videoFiles ?? 0)} video files`, tone: "blue", tier: "engineer" },
+    { label: "Hard-angle checks", value: formatNumber(totals.poseReranked ?? 0), detail: `${formatNumber(totals.poseAmbiguous ?? 0)} close identity scores`, tone: (totals.poseAmbiguous ?? 0) ? "amber" : "blue", tier: "engineer" },
+    { label: "Possible matches", value: formatNumber(totals.added), detail: `${formatRate(matchRate)} search yield`, tone: "green", tier: "everyday" },
+    { label: "Private photos protected", value: formatNumber(totals.safeFiltered), detail: `${formatRate(protectedRate)} kept out`, tone: "rose", tier: "everyday" },
+    { label: "Match strength", value: scoreLabel(averageScore), detail: `${percent(averageQuality)} photo quality`, tone: toneFor(averageScore), tier: "engineer" },
+    { label: "Command p95", value: latencySummary.count ? formatDuration(latencySummary.p95) : "Live", detail: lastLatency ? `${lastLatency.label}: ${formatDuration(lastLatency.durationMs)}` : `Budget ${formatDuration(performanceProfile.slowCommandMs)}`, tone: latencySummary.p95 > performanceProfile.slowCommandMs ? "amber" : "blue", tier: "engineer" },
+    { label: "Perf mode", value: performanceChoice === "auto" ? `Auto: ${performanceProfile.label}` : performanceProfile.label, detail: `${performanceProfile.reviewBatchSize} review rows per batch`, tone: performanceProfile.showListThumbnails ? "green" : "blue", tier: "engineer" },
+    { label: "Last scan", value: totals.lastCompletedAt ? formatDateTime(totals.lastCompletedAt) : "None", detail: `${formatDuration(totals.durationMs)} total runtime`, tone: "neutral", tier: "everyday" }
   ];
+  const overviewMetrics = metrics.filter((metric) => metric.tier === "everyday");
   const heroVisualStyle = {
     "--review-progress": `${Math.round(reviewCompletion * 100)}%`,
     "--match-progress": `${Math.round(matchRate * 100)}%`,
     "--protect-progress": `${Math.round(protectedRate * 100)}%`
   } as CSSProperties;
   const singleBucketPeople = allReferencesByPerson.filter((person) => person.buckets.length < 2).length;
-  const rankedUseCases: Array<{ rank: number; label: string; status: string; tab: TabKey; tone: "green" | "amber" | "rose" | "blue" }> = [
+  const rankedUseCases: Array<{ rank: number; label: string; status: string; tab: LegacyTab; tone: "green" | "amber" | "rose" | "blue" }> = [
     {
       rank: 1,
       label: "Finish first-scan setup",
@@ -7490,6 +7844,7 @@ function Dashboard({
   ];
   return (
     <section className="dashboard-page">
+      {section === "overview" && (<>
       <div className="panel dashboard-hero">
         <div>
           <span className="section-kicker">Home</span>
@@ -7543,7 +7898,9 @@ function Dashboard({
         modelDownloadProgress={modelDownloadProgress}
         busy={busy}
       />
+      </>)}
 
+      {section === "models" && (
       <ModelSetupCard
         state={state}
         progress={modelDownloadProgress}
@@ -7551,7 +7908,26 @@ function Dashboard({
         chooseModelRoot={chooseModelRoot}
         downloadModel={downloadModel}
       />
+      )}
 
+      {section === "models" && (
+      <div className="panel models-extra-actions">
+        <div className="panel-title"><Database size={18} /> Reference maintenance</div>
+        <p className="subtle">Re-link enrolled people to the current model after a model change.</p>
+        <div className="button-row">
+          <button className="secondary" onClick={() => void backfillModelReferences()} disabled={busy}>
+            <RefreshCcw size={17} />
+            <span>Backfill model references</span>
+          </button>
+        </div>
+      </div>
+      )}
+
+      {section === "models" && (
+      <ModelLicensePanel result={modelDistribution} busy={busy} runModelDistributionAudit={runModelDistributionAudit} />
+      )}
+
+      {section === "diagnostics" && (
       <BackgroundJobCenter
         state={state}
         scanProgress={scanProgress}
@@ -7568,9 +7944,11 @@ function Dashboard({
         scanPaused={Boolean(state.scanJob?.paused || localScanMarkers?.paused)}
         busy={busy}
       />
+      )}
 
+      {(section === "overview" || section === "diagnostics") && (
       <div className="metrics dashboard-metrics">
-        {metrics.map((metric) => (
+        {(section === "overview" ? overviewMetrics : metrics).map((metric) => (
           <div className="metric" key={metric.label}>
             <span>{metric.label}</span>
             <strong className={metric.tone}>{metric.value}</strong>
@@ -7578,7 +7956,9 @@ function Dashboard({
           </div>
         ))}
       </div>
+      )}
 
+      {section === "diagnostics" && (
       <div className="panel dashboard-span">
         <div className="panel-title"><Activity size={18} /> Health summary</div>
         <div className="workspace-health-grid">
@@ -7601,7 +7981,9 @@ function Dashboard({
           </button>
         </div>
       </div>
+      )}
 
+      {section === "overview" && (
       <div className="panel dashboard-rankings">
         <div className="panel-title"><Gauge size={18} /> Top 7 current priorities</div>
         <div className="ranked-list">
@@ -7615,12 +7997,20 @@ function Dashboard({
           ))}
         </div>
       </div>
+      )}
 
+      {section === "diagnostics" && (
       <div className="panel dashboard-span">
         <div className="panel-title"><Activity size={18} /> Live scan stream</div>
         <ScanActivity progress={scanProgress} watchStatus={watchStatus} cancelScan={cancelScan} pauseScan={pauseScan} resumeScan={resumeScan} scanPaused={Boolean(state.scanJob?.paused || localScanMarkers?.paused)} />
       </div>
+      )}
 
+      {section === "diagnostics" && (
+      <PhotoAssetIndexInspector listPhotoAssets={listPhotoAssets} />
+      )}
+
+      {section === "diagnostics" && (<>
       <div className="panel">
         <div className="panel-title"><Archive size={18} /> Recent scan runs</div>
         <div className="dashboard-list">
@@ -7647,7 +8037,6 @@ function Dashboard({
           )}
         </div>
       </div>
-
       <div className="panel">
         <div className="panel-title"><Crosshair size={18} /> Review mix</div>
         <div className="review-bars">
@@ -7716,6 +8105,7 @@ function Dashboard({
           </div>
         )}
       </div>
+      </>)}
     </section>
   );
 }
@@ -7729,7 +8119,7 @@ function TesterModePanel({
   busy
 }: {
   state: AppState;
-  navigate(tab: TabKey): void;
+  navigate(tab: LegacyTab): void;
   requestConsent(): void;
   downloadModel(pack: string, root?: string, force?: boolean): void | Promise<void>;
   modelDownloadProgress: ModelDownloadProgress | null;
@@ -7820,7 +8210,7 @@ function FirstScanGuide({
 }: {
   state: AppState;
   watchStatus: FolderWatchStatus;
-  navigate(tab: TabKey): void;
+  navigate(tab: LegacyTab): void;
   chooseWorkspace(): void;
   requestConsent(): void;
 }) {
@@ -8973,41 +9363,47 @@ function ScanView(props: {
           setExcludedDirs={props.setExcludedDirs}
           busy={props.busy}
         />
-        <button className="primary" onClick={props.scan} disabled={props.disabled}>
-          {props.busy ? <Loader2 className="spin" size={17} /> : <Search size={17} />}
-          <span>Scan folder</span>
-        </button>
-        <button className="secondary" onClick={props.analyzeFolder} disabled={!props.scanFolder.trim() || props.busy}>
-          <Activity size={17} />
-          <span>Check folder</span>
-        </button>
-        <button className="secondary danger" onClick={props.cancelScan} disabled={!scanActive}>
-          <X size={17} />
-          <span>Cancel scan</span>
-        </button>
-        <button className="secondary" onClick={props.pauseScan} disabled={!scanActive || props.state.scanJob?.paused}>
-          <Pause size={17} />
-          <span>Pause</span>
-        </button>
-        <button className="secondary" onClick={props.resumeScan} disabled={!props.state.scanJob?.paused}>
-          <Play size={17} />
-          <span>Resume</span>
-        </button>
-        <button className="secondary danger" onClick={props.clearQueue} disabled={!props.state.candidates.length || props.busy}>
-          <Trash2 size={17} />
-          <span>Clear results</span>
-        </button>
-        {props.watchStatus.active ? (
-          <button className="secondary active-scan" onClick={props.stopWatchFolder} disabled={props.busy}>
-            <Activity size={17} />
-            <span>{props.watchStatus.scanning ? "Watching..." : "Stop watching"}</span>
+        <div className="button-row scan-action-row">
+          <button className="primary" onClick={props.scan} disabled={props.disabled}>
+            {props.busy ? <Loader2 className="spin" size={17} /> : <Search size={17} />}
+            <span>Scan folder</span>
           </button>
-        ) : (
-          <button className="secondary" onClick={props.startWatchFolder} disabled={props.disabled || props.busy}>
+          <button className="secondary" onClick={props.analyzeFolder} disabled={!props.scanFolder.trim() || props.busy}>
             <Activity size={17} />
-            <span>Watch for new files</span>
+            <span>Check folder</span>
           </button>
-        )}
+        </div>
+        <div className="button-row scan-action-row" role="group" aria-label="Scan controls">
+          <button className="secondary danger" onClick={props.cancelScan} disabled={!scanActive}>
+            <X size={17} />
+            <span>Cancel scan</span>
+          </button>
+          <button className="secondary" onClick={props.pauseScan} disabled={!scanActive || props.state.scanJob?.paused}>
+            <Pause size={17} />
+            <span>Pause</span>
+          </button>
+          <button className="secondary" onClick={props.resumeScan} disabled={!props.state.scanJob?.paused}>
+            <Play size={17} />
+            <span>Resume</span>
+          </button>
+        </div>
+        <div className="button-row scan-action-row">
+          <button className="secondary danger" onClick={props.clearQueue} disabled={!props.state.candidates.length || props.busy}>
+            <Trash2 size={17} />
+            <span>Clear results</span>
+          </button>
+          {props.watchStatus.active ? (
+            <button className="secondary active-scan" onClick={props.stopWatchFolder} disabled={props.busy}>
+              <Activity size={17} />
+              <span>{props.watchStatus.scanning ? "Watching..." : "Stop watching"}</span>
+            </button>
+          ) : (
+            <button className="secondary" onClick={props.startWatchFolder} disabled={props.disabled || props.busy}>
+              <Activity size={17} />
+              <span>Watch for new files</span>
+            </button>
+          )}
+        </div>
         <div className="readiness-list" aria-label="Scan readiness">
           {readiness.map((item) => (
             <span key={item.label} className={item.ok ? "pill green" : "pill neutral"}>{item.label}</span>
@@ -10014,7 +10410,7 @@ function BackgroundJobCenter({
   mediaActionProgress: MediaActionProgress | null;
   scanQueue: ScanQueueItem[];
   scanQueueRunning: boolean;
-  navigate(tab: TabKey): void;
+  navigate(tab: LegacyTab): void;
   cancelScan(): void;
   pauseScan(): void;
   resumeScan(): void;
@@ -11811,6 +12207,7 @@ function CandidateReferenceStrength({ candidate, state }: { candidate: ReviewCan
 }
 
 function SettingsView(props: {
+  section: SettingsSection;
   state: AppState;
   settings: SettingsDraft;
   setSettings(value: SettingsDraft): void;
@@ -11830,6 +12227,14 @@ function SettingsView(props: {
   exportSupportBundle(includePaths?: boolean): void;
   revealWorkspace(): void;
   openWorkspaceFolder(): void;
+  chooseWorkspace(): void;
+  addWorkspaceFolder(): void;
+  onRefresh(): void;
+  openOnboarding(): void;
+  language: LanguageCode;
+  onChangeLanguage(value: string): void;
+  consentOnFile: boolean;
+  setConsent(value: boolean): void;
   recentWorkspaces: WorkspaceListItem[];
   switchWorkspace(path: string): void;
   people: string[];
@@ -11869,11 +12274,20 @@ function SettingsView(props: {
   optimizeWorkspace(): void;
   pruneScanManifests(): void;
   scanManifestPruneResult: ScanManifestPruneValue | null;
+  storageIo: StorageIoBenchmarkResult | null;
+  storageIoPath: string;
+  setStorageIoPath(value: string): void;
+  runStorageIoBenchmark(path?: string, sizeMb?: number): void | Promise<void>;
+  chooseFolder(setter: (value: string) => void): void | Promise<void>;
   enforceStorageBudget(): void;
   deletePerson(personName: string): void;
   renamePerson(oldName: string, newName: string): void;
   auditEvents: AuditEventsResult | null;
   loadAuditEvents(): void;
+  auditChain: AuditChainStatus | null;
+  verifyAuditChain(): void;
+  jurisdictions: Jurisdiction[];
+  jurisdictionDisclaimer: string;
   runtimeSelfTest: RuntimeSelfTestResult | null;
   runRuntimeSelfTest(): void;
   runtimeBenchmark: RuntimeBenchmarkResult | null;
@@ -11901,6 +12315,8 @@ function SettingsView(props: {
   promoteEmbeddingAdapter(artifactId?: string): void;
   rollbackEmbeddingAdapter(artifactId?: string): void;
   generateAccuracyValidationPack(): void;
+  accuracyValidationHistory: AccuracyValidationRun[];
+  loadAccuracyValidationHistory(): void;
   choosePublicDatasetFolder(): Promise<string | null>;
   inspectPublicDataset(options: { datasetId: string; folder: string; includeVideos?: boolean }): void | Promise<void>;
   runPublicDatasetBenchmark(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; downloadIfMissing?: boolean; includeVideos?: boolean }): void | Promise<void>;
@@ -12074,6 +12490,7 @@ function SettingsView(props: {
     Boolean(props.state.candidateWindow?.truncated && props.state.counts.reviewed > 0);
   return (
     <section className="page-grid">
+      {props.section === "general" && (<>
       <div className="panel settings-panel primary-settings">
         <div className="panel-title"><SlidersHorizontal size={18} /> Matching choices</div>
         <p className="compact">Most people should use a preset. Custom controls are still here for advanced tuning.</p>
@@ -12285,6 +12702,8 @@ function SettingsView(props: {
           </button>
         </div>
       </div>
+      </>)}
+      {props.section === "engine" && (<>
       <div className="panel settings-panel model-switch-panel">
         <ModelSwitchWizard
           state={props.state}
@@ -12321,6 +12740,8 @@ function SettingsView(props: {
         copyText={props.copyText}
         busy={props.busy}
       />
+      </>)}
+      {props.section === "advanced" && (<>
       <InstallerDiagnosticsPanel
         result={props.installerDiagnostics}
         modelIntegrity={props.modelIntegrity}
@@ -12330,6 +12751,8 @@ function SettingsView(props: {
         runModelIntegrity={props.runModelIntegrity}
         runModelDriftReport={props.runModelDriftReport}
       />
+      </>)}
+      {props.section === "engine" && (<>
       <ReferenceGapPanel
         report={props.referenceGapReport}
         busy={props.busy}
@@ -12337,7 +12760,11 @@ function SettingsView(props: {
         copyText={props.copyText}
         startReferenceFix={props.startReferenceFix}
       />
+      </>)}
+      {props.section === "general" && (<>
       <RuntimeSelfTestPanel result={props.runtimeSelfTest} />
+      </>)}
+      {props.section === "advanced" && (<>
       <PerformanceCenter
         state={props.state}
         mode={props.performanceMode}
@@ -12352,7 +12779,20 @@ function SettingsView(props: {
         copyPerformanceReport={props.copyPerformanceReport}
         clearLatencySamples={props.clearLatencySamples}
       />
+      </>)}
+      {props.section === "storage" && (<>
       <ScaleReadinessPanel state={props.state} pruneScanManifests={props.pruneScanManifests} pruneResult={props.scanManifestPruneResult} busy={props.busy} />
+      <StorageIoPanel
+        result={props.storageIo}
+        path={props.storageIoPath}
+        setPath={props.setStorageIoPath}
+        workspace={props.state.workspace}
+        busy={props.busy}
+        runStorageIoBenchmark={props.runStorageIoBenchmark}
+        chooseFolder={props.chooseFolder}
+      />
+      </>)}
+      {props.section === "advanced" && (<>
       <BenchmarkPanel result={props.runtimeBenchmark} history={props.state.benchmarkHistory ?? []} busy={props.busy} runBenchmark={props.runRuntimeBenchmark} />
       <AccuracyLabPanel
         result={props.accuracyEvaluation}
@@ -12378,6 +12818,8 @@ function SettingsView(props: {
         promoteEmbeddingAdapter={props.promoteEmbeddingAdapter}
         rollbackEmbeddingAdapter={props.rollbackEmbeddingAdapter}
         generateAccuracyValidationPack={props.generateAccuracyValidationPack}
+        validationHistory={props.accuracyValidationHistory}
+        loadValidationHistory={props.loadAccuracyValidationHistory}
         chooseDatasetFolder={props.choosePublicDatasetFolder}
         inspectDataset={props.inspectPublicDataset}
         runDatasetBenchmark={props.runPublicDatasetBenchmark}
@@ -12390,6 +12832,8 @@ function SettingsView(props: {
         importTrainingExamples={props.importTrainingExamples}
         copyText={props.copyText}
       />
+      </>)}
+      {props.section === "engine" && (<>
       <ReviewRulesPanel
         settings={props.settings}
         setSettings={props.setSettings}
@@ -12398,7 +12842,11 @@ function SettingsView(props: {
         busy={props.busy}
         applyReviewRules={props.applyReviewRules}
       />
+      </>)}
+      {props.section === "advanced" && (<>
       <ReleaseReadinessPanel result={props.releaseReadiness} busy={props.busy} runReleaseReadiness={props.runReleaseReadiness} />
+      </>)}
+      {props.section === "general" && (<>
       <UpdateCenterPanel
         status={props.updateStatus}
         busy={props.busy}
@@ -12407,6 +12855,8 @@ function SettingsView(props: {
         downloadUpdate={props.downloadUpdate}
         installUpdate={props.installUpdate}
       />
+      </>)}
+      {props.section === "advanced" && (<>
       <DiagnosticsPanel
         report={props.diagnosticsReport}
         busy={props.busy}
@@ -12414,6 +12864,8 @@ function SettingsView(props: {
         exportDiagnostics={props.exportDiagnostics}
         exportSupportBundle={props.exportSupportBundle}
       />
+      </>)}
+      {props.section === "general" && (<>
       <div className="panel settings-panel">
         <div className="panel-title"><Activity size={18} /> System</div>
         <label className="switch-row">
@@ -12441,7 +12893,39 @@ function SettingsView(props: {
             <FolderOpen size={17} />
             <span>Open folder</span>
           </button>
+          <button className="secondary" onClick={props.chooseWorkspace} disabled={props.busy} title="Choose a different app folder">
+            <FolderOpen size={17} />
+            <span>Choose folder</span>
+          </button>
+          <button className="secondary" onClick={props.addWorkspaceFolder} disabled={props.busy} title="Register a folder in the switcher without leaving this case">
+            <FolderPlus size={17} />
+            <span>Add case folder</span>
+          </button>
+          <button className="secondary" onClick={props.onRefresh} disabled={props.busy} title="Refresh app state">
+            <RefreshCcw size={17} />
+            <span>Refresh</span>
+          </button>
+          <button className="secondary" onClick={props.openOnboarding} title="Open the first-use guide">
+            <BookOpen size={17} />
+            <span>Open guide</span>
+          </button>
         </div>
+        <label className="switch-row">
+          <span>
+            <strong>Language</strong>
+            <small>Interface language for the whole app.</small>
+          </span>
+          <select
+            value={props.language}
+            disabled={props.busy}
+            onChange={(event) => props.onChangeLanguage(event.currentTarget.value)}
+            aria-label="Interface language"
+          >
+            {languageOptions.map((option) => (
+              <option key={option.code} value={option.code}>{option.nativeLabel}</option>
+            ))}
+          </select>
+        </label>
         {props.recentWorkspaces.length > 1 && (
           <label className="switch-row">
             <span>
@@ -12463,6 +12947,8 @@ function SettingsView(props: {
           </label>
         )}
       </div>
+      </>)}
+      {props.section === "storage" && (<>
       <WorkspaceHealthPanel
         health={props.workspaceHealth}
         optimizeResult={props.workspaceOptimizeResult}
@@ -12510,6 +12996,8 @@ function SettingsView(props: {
         loadDuplicatePeople={props.loadDuplicatePeople}
         mergeDuplicatePeople={props.mergeDuplicatePeople}
       />
+      </>)}
+      {props.section === "privacy" && (<>
       <WorkspaceLockPanel
         status={props.workspaceLock}
         busy={props.busy}
@@ -12518,6 +13006,8 @@ function SettingsView(props: {
         unlock={props.unlockWorkspace}
         disable={props.disableWorkspaceLock}
       />
+      </>)}
+      {props.section === "storage" && (<>
       <div className="panel settings-panel data-ops-panel">
         <div className="panel-title"><Database size={18} /> Save and clean up</div>
         <button className="primary" onClick={props.exportReport} disabled={props.busy}>
@@ -12641,13 +13131,19 @@ function SettingsView(props: {
         </div>
         <p className="compact">Exports include JSON and CSV review records. Cleanup keeps the activity history for accountability.</p>
       </div>
+      </>)}
+      {props.section === "privacy" && (<>
       <PrivacyControlPanel
         report={props.privacyReport}
         retentionPolicy={props.retentionPolicy}
         busy={props.busy}
+        consentOnFile={props.consentOnFile}
+        setConsent={props.setConsent}
         jurisdictionPreset={props.state.config.jurisdictionPreset ?? "standard"}
         retentionReviewedDays={props.state.config.retentionReviewedDays ?? 90}
         setJurisdictionPreset={props.setJurisdictionPreset}
+        jurisdictions={props.jurisdictions}
+        jurisdictionDisclaimer={props.jurisdictionDisclaimer}
         exportCompliancePack={props.exportCompliancePack}
         exportExaminationReport={props.exportExaminationReport}
         loadPrivacyReport={props.loadPrivacyReport}
@@ -12656,7 +13152,15 @@ function SettingsView(props: {
         exportSafeModeAudit={props.exportSafeModeAudit}
         deleteFaceData={props.deleteFaceData}
       />
-      <AuditTrailPanel events={props.auditEvents} busy={props.busy} loadAuditEvents={props.loadAuditEvents} copyText={props.copyText} />
+      <AuditTrailPanel
+        events={props.auditEvents}
+        busy={props.busy}
+        loadAuditEvents={props.loadAuditEvents}
+        copyText={props.copyText}
+        chain={props.auditChain}
+        verifyAuditChain={props.verifyAuditChain}
+      />
+      </>)}
     </section>
   );
 }
@@ -13492,6 +13996,82 @@ function WorkspaceLockPanel({
   );
 }
 
+function StorageIoPanel({
+  result,
+  path,
+  setPath,
+  workspace,
+  busy,
+  runStorageIoBenchmark,
+  chooseFolder
+}: {
+  result: StorageIoBenchmarkResult | null;
+  path: string;
+  setPath(value: string): void;
+  workspace: string;
+  busy: boolean;
+  runStorageIoBenchmark(path?: string, sizeMb?: number): void | Promise<void>;
+  chooseFolder(setter: (value: string) => void): void | Promise<void>;
+}) {
+  const [sizeMb, setSizeMb] = useState(8);
+  const target = path.trim() || workspace;
+  const storage = result?.storage;
+  return (
+    <div className="panel settings-panel">
+      <div className="panel-title"><Gauge size={18} /> Drive speed test</div>
+      <p className="compact">Measure real read/write throughput on any folder or drive before choosing it as an app folder or scanning it. Writes a temporary file, then deletes it.</p>
+      <label className="switch-row">
+        <span>
+          <strong>Folder</strong>
+          <small title={target}>{target || "Choose a folder to test."}</small>
+        </span>
+        <button className="secondary" onClick={() => void chooseFolder(setPath)} disabled={busy} title="Choose a folder to test">
+          <FolderOpen size={17} />
+          <span>Choose…</span>
+        </button>
+      </label>
+      <label className="switch-row">
+        <span>
+          <strong>Sample size</strong>
+          <small>Larger samples are more accurate but slower on network drives.</small>
+        </span>
+        <select value={sizeMb} disabled={busy} onChange={(event) => setSizeMb(Number(event.currentTarget.value))} aria-label="Drive test sample size">
+          <option value={8}>8 MB</option>
+          <option value={32}>32 MB</option>
+          <option value={128}>128 MB</option>
+        </select>
+      </label>
+      {result && (
+        <>
+          <div className="workspace-health-grid">
+            <span><small>Write</small><strong>{Math.round(result.writeMBps)} MB/s</strong></span>
+            <span><small>Read</small><strong>{Math.round(result.readMBps)} MB/s</strong></span>
+            <span><small>Flush</small><strong>{result.fsyncMs.toFixed(1)} ms</strong></span>
+            <span><small>Free</small><strong>{formatBytes(storage?.freeBytes ?? 0)}</strong></span>
+          </div>
+          {storage?.volumeKind && (
+            <span className={storage.networkLikely || storage.externalLikely ? "pill amber" : "pill green"}>
+              {storage.volumeKind}{storage.networkLikely ? " · network" : storage.externalLikely ? " · external" : ""}
+            </span>
+          )}
+          {result.recommendations?.length ? (
+            <div className="health-list">
+              {result.recommendations.slice(0, 3).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+            </div>
+          ) : null}
+          {!result.ok && result.error && <small className="compact">{result.error}</small>}
+        </>
+      )}
+      <div className="button-row">
+        <button className="secondary" onClick={() => void runStorageIoBenchmark(target, sizeMb)} disabled={busy || !target}>
+          <Gauge size={17} />
+          <span>Test drive speed</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ScaleReadinessPanel({
   state,
   pruneScanManifests,
@@ -13721,6 +14301,8 @@ function AccuracyLabPanel({
   promoteEmbeddingAdapter,
   rollbackEmbeddingAdapter,
   generateAccuracyValidationPack,
+  validationHistory,
+  loadValidationHistory,
   chooseDatasetFolder,
   inspectDataset,
   runDatasetBenchmark,
@@ -13756,6 +14338,8 @@ function AccuracyLabPanel({
   promoteEmbeddingAdapter(artifactId?: string): void;
   rollbackEmbeddingAdapter(artifactId?: string): void;
   generateAccuracyValidationPack(): void;
+  validationHistory: AccuracyValidationRun[];
+  loadValidationHistory(): void;
   chooseDatasetFolder(): Promise<string | null>;
   inspectDataset(options: { datasetId: string; folder: string; includeVideos?: boolean }): void | Promise<void>;
   runDatasetBenchmark(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; downloadIfMissing?: boolean; includeVideos?: boolean }): void | Promise<void>;
@@ -13903,7 +14487,8 @@ function AccuracyLabPanel({
     void Promise.resolve(refreshLearning()).catch(() => undefined);
     void Promise.resolve(refreshAdapterLearning()).catch(() => undefined);
     void Promise.resolve(refreshSelfLearningRdStatus()).catch(() => undefined);
-  }, [refreshLearning, refreshAdapterLearning, refreshSelfLearningRdStatus]);
+    void Promise.resolve(loadValidationHistory()).catch(() => undefined);
+  }, [refreshLearning, refreshAdapterLearning, refreshSelfLearningRdStatus, loadValidationHistory]);
   async function submitImport() {
     if (!importText.trim()) return;
     await importAccuracyLabels(importText);
@@ -14164,6 +14749,29 @@ function AccuracyLabPanel({
           </div>
         </div>
       )}
+      <details className="accuracy-import validation-history" open={validationHistory.length > 0}>
+        <summary>Validation history</summary>
+        {validationHistory.length ? (
+          <div className="benchmark-history">
+            {validationHistory.slice(0, 8).map((run) => (
+              <span key={run.runId} className={run.status === "pass" ? "ok" : run.status === "warn" ? "warn" : "fail"}>
+                {run.status === "pass" ? <Check size={14} /> : <AlertCircle size={14} />}
+                <small>{formatDateTime(run.generatedAt)}</small>
+                <strong>{run.passed}/{run.warned}/{run.failed}</strong>
+                <small>pass/warn/fail</small>
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="compact">No validation runs yet — create a validation pack to record one.</p>
+        )}
+        <div className="button-row">
+          <button className="ghost compact-action" onClick={loadValidationHistory} disabled={busy} type="button">
+            <RefreshCcw size={16} />
+            <span>Refresh history</span>
+          </button>
+        </div>
+      </details>
       <details className="accuracy-import public-dataset-lab" open={Boolean(datasetBenchmark)}>
         <summary>Public dataset benchmark</summary>
         <div className="settings-form-grid">
@@ -14659,9 +15267,13 @@ function PrivacyControlPanel({
   report,
   retentionPolicy,
   busy,
+  consentOnFile,
+  setConsent,
   jurisdictionPreset,
   retentionReviewedDays,
   setJurisdictionPreset,
+  jurisdictions,
+  jurisdictionDisclaimer,
   exportCompliancePack,
   exportExaminationReport,
   loadPrivacyReport,
@@ -14673,9 +15285,13 @@ function PrivacyControlPanel({
   report: PrivacyReport | null;
   retentionPolicy: RetentionPolicyReport | null;
   busy: boolean;
+  consentOnFile: boolean;
+  setConsent(value: boolean): void;
   jurisdictionPreset: string;
   retentionReviewedDays: number;
   setJurisdictionPreset(preset: string): void;
+  jurisdictions: Jurisdiction[];
+  jurisdictionDisclaimer: string;
   exportCompliancePack(): void;
   exportExaminationReport(): void;
   loadPrivacyReport(): void;
@@ -14689,6 +15305,23 @@ function PrivacyControlPanel({
       <div className="panel-title"><EyeOff size={18} /> Privacy controls</div>
       <label className="switch-row">
         <span>
+          <strong>Permission for this app folder</strong>
+          <small>
+            {consentOnFile
+              ? "Granted. Adding people, matching scans, and folder watching are allowed. Turn off to pause all of them."
+              : "Not granted. Adding people, matching scans, and folder watching stay paused until you turn this on."}
+          </small>
+        </span>
+        <input
+          type="checkbox"
+          checked={consentOnFile}
+          disabled={busy}
+          onChange={(event) => setConsent(event.currentTarget.checked)}
+          aria-label="Permission for this app folder"
+        />
+      </label>
+      <label className="switch-row">
+        <span>
           <strong>Jurisdiction preset</strong>
           <small>Sets consent strictness and reviewed-match retention ({retentionReviewedDays} days). Operator default, not legal advice.</small>
         </span>
@@ -14698,11 +15331,21 @@ function PrivacyControlPanel({
           onChange={(event) => setJurisdictionPreset(event.currentTarget.value)}
           aria-label="Jurisdiction preset"
         >
-          {JURISDICTION_OPTIONS.map((option) => (
-            <option key={option.id} value={option.id}>{option.label}</option>
+          {(jurisdictions.length ? jurisdictions : JURISDICTION_OPTIONS).map((option) => (
+            <option key={option.id} value={option.id} title={"notes" in option && typeof option.notes === "string" ? option.notes : undefined}>{option.label}</option>
           ))}
         </select>
       </label>
+      {(() => {
+        const selected = jurisdictions.find((option) => option.id === jurisdictionPreset);
+        if (!selected) return null;
+        return (
+          <small className="compact">
+            {selected.notes} · reviewed-match retention {selected.retentionReviewedDays} days · audit retention {selected.auditRetentionDays} days · {selected.requireExplicitConsent ? "explicit consent required" : "implicit consent"}{selected.perSubjectConsent ? " · per-subject consent" : ""}{selected.dataMinimization ? " · data minimization" : ""}
+          </small>
+        );
+      })()}
+      {jurisdictionDisclaimer && <small className="compact">{jurisdictionDisclaimer}</small>}
       {report ? (
         <>
           <div className="workspace-health-grid">
@@ -14808,12 +15451,16 @@ function AuditTrailPanel({
   events,
   busy,
   loadAuditEvents,
-  copyText
+  copyText,
+  chain,
+  verifyAuditChain
 }: {
   events: AuditEventsResult | null;
   busy: boolean;
   loadAuditEvents(): void;
   copyText(text: string, label?: string): void;
+  chain: AuditChainStatus | null;
+  verifyAuditChain(): void;
 }) {
   const rows = events?.events ?? [];
   function eventLabel(row: Record<string, unknown>) {
@@ -14832,6 +15479,19 @@ function AuditTrailPanel({
         <div className="spacer" />
         {events && <span className="title-count">{events.total}</span>}
       </div>
+      {chain && (
+        chain.length === 0 ? (
+          <span className="pill blue" title="No audit entries recorded yet.">No chained entries yet</span>
+        ) : chain.verified ? (
+          <span className="pill green" title={`Head ${chain.head.slice(0, 12)} → tail ${chain.tail.slice(0, 12)}`}>
+            Tamper-evident: verified — {chain.chained} chained{chain.legacy ? ` (${chain.legacy} legacy)` : ""}
+          </span>
+        ) : (
+          <span className="pill amber" role="alert">
+            Integrity break{chain.firstBreak ? ` at line ${chain.firstBreak.index} (${chain.firstBreak.reason})` : ""}
+          </span>
+        )
+      )}
       {rows.length ? (
         <div className="audit-list">
           {rows.slice(0, 12).map((row, index) => (
@@ -14849,6 +15509,10 @@ function AuditTrailPanel({
         <button className="secondary" onClick={loadAuditEvents} disabled={busy}>
           <RefreshCcw size={17} />
           <span>Load history</span>
+        </button>
+        <button className="secondary" onClick={verifyAuditChain} disabled={busy} title="Re-verify the audit log hash chain">
+          <ShieldCheck size={17} />
+          <span>Verify integrity</span>
         </button>
         <button
           className="secondary"

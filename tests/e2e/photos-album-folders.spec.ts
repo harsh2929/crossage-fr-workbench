@@ -56,7 +56,7 @@ async function waitForPhotosBackendReady(page: Page) {
     }
   }), { timeout: 120_000 }).toBe(true);
   await continueStartupRecoveryIfVisible(page);
-  await expect(page.locator(".nav-list").getByRole("button", { name: "Photos" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator(".nav-list").getByRole("button", { name: "Library" })).toBeVisible({ timeout: 30_000 });
 }
 
 async function dropRailRowInside(page: Page, sourceText: string, targetText: string) {
@@ -717,7 +717,7 @@ test("Photos album folders support drag/drop moves in the rail", async () => {
     };
   });
 
-  await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+  await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
   const rail = page.locator(".photos-rail");
   await expect(rail.getByText("Trips E2E", { exact: true })).toBeVisible();
   await expect(rail.getByText("Loose Folder E2E", { exact: true })).toBeVisible();
@@ -867,7 +867,7 @@ test("Photos settings manage managed-root profile history", async () => {
       });
     });
 
-    const photosNavButton = page.getByRole("navigation", { name: "Primary navigation" }).getByRole("button", { name: "Photos" });
+    const photosNavButton = page.getByRole("navigation", { name: "Primary navigation" }).getByRole("button", { name: "Library" });
     await photosNavButton.scrollIntoViewIfNeeded();
     await photosNavButton.click();
     const rail = page.locator(".photos-rail");
@@ -1236,7 +1236,7 @@ test("Photos managed import destination selector follows root profile policy", a
       });
     }, { alphaRoot: alphaRootResolved, betaRoot: betaRootResolved });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const importStorageControls = page.locator(".photo-import-controls[aria-label='Import storage']");
     const copyDestination = importStorageControls.getByLabel("Copy destination");
     await expect(copyDestination).toBeVisible({ timeout: 20_000 });
@@ -1305,7 +1305,7 @@ test("Photos Recovered previews scans and saves managed-root orphans", async () 
       });
     }, { managedRoot: managedRootResolved });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await page.locator(".photos-rail").getByText("Recovered", { exact: true }).click();
     const recoveredPanel = page.locator(".photo-recovered-panel");
     await expect(recoveredPanel).toContainText("No recovered import issues.");
@@ -1429,7 +1429,7 @@ test("Photos export options reuse recent destinations", async () => {
       }
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Browser Export Alpha")).toBeVisible({ timeout: 20_000 });
     await tileByFilename(page, "Browser Export Alpha").locator(".photo-select-box").click();
     await page.getByRole("button", { name: "Export options" }).click();
@@ -1515,7 +1515,7 @@ test("Photos Recently Viewed and Shared show browser activity rows", async () =>
       });
     }, { mediaFolder: media, exportBundle: path.join(workspace, "exports", "browser-activity-export") });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const rail = page.locator(".photos-rail");
     await rail.getByRole("button", { name: "Settings" }).click();
     const activityRetention = page.locator("#photos-local-settings label").filter({ hasText: "Recent activity" }).locator("select");
@@ -1660,7 +1660,7 @@ api.project.db.rebuild_photo_duplicate_groups()
     await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
     await page.locator(".language-picker select").selectOption("en");
     await closeOnboardingIfVisible(page);
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Date chip duplicate A")).toBeVisible({ timeout: 20_000 });
     await page.setViewportSize(viewportSize);
 
@@ -1769,7 +1769,7 @@ api.save_photo_curation_preferences({
     await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
     await page.locator(".language-picker select").selectOption("en");
     await closeOnboardingIfVisible(page);
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Featureless favorite cover")).toBeVisible({ timeout: 20_000 });
 
     await page.getByLabel("Date view").getByRole("button", { name: "Months" }).click();
@@ -1853,7 +1853,7 @@ for name, fields in metadata.items():
     await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
     await page.locator(".language-picker select").selectOption("en");
     await closeOnboardingIfVisible(page);
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Matrix July Favorite")).toBeVisible({ timeout: 20_000 });
 
     await dateView().getByRole("button", { name: "Years", exact: true }).click();
@@ -1990,7 +1990,7 @@ target.write_bytes(ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).toby
       });
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Browser Rendered Image")).toBeVisible({ timeout: 20_000 });
     if (navigationViewport.width !== viewportSize.width || navigationViewport.height !== viewportSize.height) {
       await page.setViewportSize(viewportSize);
@@ -2016,7 +2016,9 @@ target.write_bytes(ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).toby
       if (customProfileFixture === "invalid") {
         await expect(page.getByText(/Profile check failed:/)).toBeVisible();
         await page.locator(".photo-bulk-bar").getByRole("button", { name: "Export", exact: true }).click();
-        await expect(page.getByText(/Custom color profile file is not a valid ICC\/ICM profile/)).toBeVisible();
+        // The invalid profile is rejected both by the inline status check and by the
+        // export preflight, so the message can appear in more than one element.
+        await expect(page.getByText(/Custom color profile file is not a valid ICC\/ICM profile/).first()).toBeVisible();
         expect(pageErrors).toEqual([]);
         return;
       }
@@ -2194,7 +2196,7 @@ test("Photos missing-original export drilldown works in compact layout", async (
     }, { mediaFolder: media });
     unlinkSync(path.join(media, "compact-missing.png"));
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "compact-missing.png")).toBeVisible({ timeout: 20_000 });
     await page.setViewportSize({ width: 390, height: 740 });
     await expect(tileByFilename(page, "compact-missing.png")).toBeVisible({ timeout: 20_000 });
@@ -2281,7 +2283,7 @@ test("Photos mixed export result shows written files and capped missing issues",
       unlinkSync(path.join(media, name));
     }
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "mixed-present.png")).toBeVisible({ timeout: 20_000 });
     await expect(page.locator(".photo-load-error").filter({ hasText: "Missing originals" })).toContainText("mixed-missing-1.png", { timeout: 20_000 });
     await page.locator(".photo-bulk-bar").getByRole("button", { name: "Select page" }).click();
@@ -2384,7 +2386,7 @@ test("Photos safety actions expose undo for delete and hide", async () => {
     }, { mediaFolder: media });
     unlinkSync(path.join(media, "kept.png"));
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const sensitiveDisplayToggle = page.locator(".photo-rail-display-controls label").filter({ hasText: "Sensitive" }).locator("input");
     await sensitiveDisplayToggle.uncheck();
     await expect.poll(async () => page.evaluate(() => window.localStorage.getItem("vintrace.photos.showSensitiveCollections"))).toBe("false");
@@ -3009,7 +3011,7 @@ test("Photos Recently Deleted permanent delete and lightbox restore stay recover
       }
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await page.getByLabel("Visibility filter").selectOption("deleted");
     await expect.poll(async () => photoFolderCounts(page), { timeout: 20_000 }).toEqual(expect.objectContaining({
       all: 0,
@@ -3183,7 +3185,7 @@ test("Photos lightbox related media can add relink remove and ignore generated p
       }
     }, { manualPrimaryPath: manualPrimary, generatedPrimaryPath: generatedPrimary });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Manual media pair")).toBeVisible({ timeout: 20_000 });
     await tileByFilename(page, "Manual media pair").getByRole("button", { name: /Open photo/ }).click();
     const manualLightbox = page.getByRole("dialog", { name: /Photo preview/ });
@@ -3330,7 +3332,7 @@ test("Photos related media missing companion repair clears backup warning", asyn
     }, { primaryPath: primary });
     unlinkSync(generatedRelated);
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Missing companion repair")).toBeVisible({ timeout: 20_000 });
     await tileByFilename(page, "Missing companion repair").getByRole("button", { name: /Open photo/ }).click();
     const lightbox = page.getByRole("dialog", { name: /Photo preview/ });
@@ -3484,7 +3486,7 @@ with api.project.db.connect() as conn:
     await page.locator(".language-picker select").selectOption("en");
     await closeOnboardingIfVisible(page);
 
-    const photosNavButton = page.getByRole("navigation", { name: "Primary navigation" }).getByRole("button", { name: "Photos" });
+    const photosNavButton = page.getByRole("navigation", { name: "Primary navigation" }).getByRole("button", { name: "Library" });
     await photosNavButton.scrollIntoViewIfNeeded();
     await photosNavButton.click();
     if (navigationViewport.width !== viewportSize.width || navigationViewport.height !== viewportSize.height) {
@@ -3601,7 +3603,7 @@ test("Photos shortcut discovery panel covers keyboard and restore routes", async
       await crossAge.invoke("save_photo_keyword", { name: "Browser Tag", shortcut: "Shift+B" });
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Shortcut alpha")).toBeVisible({ timeout: 20_000 });
     await expect(tileByFilename(page, "Shortcut beta")).toBeVisible();
     await expect.poll(async () => photoFolderCounts(page)).toEqual(expect.objectContaining({
@@ -3690,7 +3692,7 @@ test("Photos shortcut discovery panel covers keyboard and restore routes", async
     await expect(lightbox).toHaveCount(0);
     await tileByFilename(page, "Shortcut alpha polished").locator(".photo-select-box").click();
     await expect(page.locator(".photo-bulk-bar")).toContainText("1 selected");
-    await expect(page.locator(".photo-bulk-bar").getByRole("button", { name: "Delete" })).toBeEnabled();
+    await expect(page.locator(".photo-bulk-bar").getByRole("button", { name: "Delete", exact: true })).toBeEnabled();
     await page.keyboard.press("Delete");
     await expect.poll(async () => photoFolderCounts(page), { timeout: 20_000 }).toEqual(expect.objectContaining({
       all: 0,
@@ -3704,7 +3706,7 @@ test("Photos shortcut discovery panel covers keyboard and restore routes", async
     await expect(tileByFilename(page, "Shortcut alpha polished")).toBeVisible({ timeout: 20_000 });
     await tileByFilename(page, "Shortcut alpha polished").locator(".photo-select-box").click();
     await expect(page.locator(".photo-bulk-bar")).toContainText("1 selected");
-    await page.locator(".photo-bulk-bar").getByRole("button", { name: "Restore" }).click();
+    await page.locator(".photo-bulk-bar").getByRole("button", { name: "Restore", exact: true }).click();
     await expect.poll(async () => photoFolderCounts(page), { timeout: 20_000 }).toEqual(expect.objectContaining({
       all: 1,
       hidden: 1,
@@ -3781,7 +3783,7 @@ test("Photos keyword manager shortcuts chips and bulk apply work", async () => {
       }
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Keyword alpha")).toBeVisible({ timeout: 20_000 });
     await expect(tileByFilename(page, "Keyword beta")).toBeVisible();
 
@@ -3871,7 +3873,7 @@ test("Photos keyword vocabulary import export round trips", async () => {
       await crossAge.invoke("save_photo_keyword", { name: "Browser Beta", shortcut: "Shift+B" });
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "keyword-transfer.png")).toBeVisible({ timeout: 20_000 });
     await page.getByRole("button", { name: "Keyword manager" }).click();
     await expect(page.locator(".photos-keyword-panel")).toBeVisible();
@@ -3980,7 +3982,7 @@ test("Photos bulk date and timezone controls update selected photos", async () =
       }
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Bulk Date Alpha")).toBeVisible({ timeout: 20_000 });
     await expect(tileByFilename(page, "Bulk Date Beta")).toBeVisible();
     await tileByFilename(page, "Bulk Date Alpha").locator(".photo-select-box").click();
@@ -4072,7 +4074,7 @@ async function exercisePhotosDuplicateReview(
       });
     }, { mediaFolder: media });
 
-    const photosNavButton = page.getByRole("navigation", { name: "Primary navigation" }).getByRole("button", { name: "Photos" });
+    const photosNavButton = page.getByRole("navigation", { name: "Primary navigation" }).getByRole("button", { name: "Library" });
     await photosNavButton.scrollIntoViewIfNeeded();
     await photosNavButton.click();
     if (navigationViewport.width !== viewportSize.width || navigationViewport.height !== viewportSize.height) {
@@ -4186,7 +4188,7 @@ test("Photos copy and paste image edits across selected photos", async () => {
       }
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "edit-source")).toBeVisible({ timeout: 20_000 });
     await tileByFilename(page, "edit-source").getByRole("button", { name: /Open photo/ }).click();
     const lightbox = page.getByRole("dialog", { name: /Photo preview/ });
@@ -4378,7 +4380,7 @@ test("Photos manual curve graph saves and reloads image adjustments", async () =
       return { target };
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "manual-curve-source")).toBeVisible({ timeout: 20_000 });
     await tileByFilename(page, "manual-curve-source").getByRole("button", { name: /Open photo/ }).click();
     const lightbox = page.getByRole("dialog", { name: /Photo preview/ });
@@ -4530,7 +4532,7 @@ test("Photos Markup and description-region metadata persist from the lightbox", 
     }, { mediaFolder: media });
 
     await page.evaluate(() => window.localStorage.removeItem("vintrace.photos.imageSignaturePresets"));
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "markup-region")).toBeVisible({ timeout: 20_000 });
     await tileByFilename(page, "markup-region").getByRole("button", { name: /Open photo/ }).click();
     const lightbox = page.getByRole("dialog", { name: /Photo preview/ });
@@ -4749,7 +4751,7 @@ test("Photos saved filters can save apply pin reorder and delete from the rail",
     }, { mediaFolder: media });
 
     await page.evaluate(() => window.localStorage.removeItem("vintrace.photos.savedFilters"));
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(page.getByLabel("Search photos")).toBeVisible();
 
     await page.getByLabel("Search photos").fill("Harbor");
@@ -4923,7 +4925,7 @@ api.project.db.rebuild_photo_search_index()
     await page.locator(".language-picker select").selectOption("en");
     await closeOnboardingIfVisible(page);
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const rail = page.locator(".photos-rail");
     await expect(rail.getByText("Sources", { exact: true })).toBeVisible({ timeout: 20_000 });
     await expect(rail.getByRole("button", { name: /^Harbor Sources\b/ })).toBeVisible({ timeout: 20_000 });
@@ -5134,7 +5136,7 @@ api.enqueue_photo_indexing_job({"jobKind": "search", "scope": {"all": True, "bud
     await page.locator(".language-picker select").selectOption("en");
     await closeOnboardingIfVisible(page);
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Cold queued title 1")).toBeVisible({ timeout: 20_000 });
     const searchBox = page.getByLabel("Search photos");
     await searchBox.fill("Cold queued title 3");
@@ -5293,7 +5295,7 @@ api.project.db.replace_photo_ocr_blocks(asset["assetId"], regions, default_langu
     await page.locator(".language-picker select").selectOption("en");
     await closeOnboardingIfVisible(page);
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Live Text Ticket E2E")).toBeVisible({ timeout: 20_000 });
     await tileByFilename(page, "Live Text Ticket E2E").getByRole("button", { name: /Open photo/ }).click();
     const lightbox = page.getByRole("dialog", { name: /Photo preview/ });
@@ -5525,7 +5527,7 @@ api.project.db.rebuild_photo_search_index()
     await page.locator(".language-picker select").selectOption("en");
     await closeOnboardingIfVisible(page);
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "QR Browser Code")).toBeVisible({ timeout: 20_000 });
     await tileByFilename(page, "QR Browser Code").getByRole("button", { name: /Open photo/ }).click();
     const lightbox = page.getByRole("dialog", { name: /Photo preview/ });
@@ -5873,7 +5875,7 @@ test("Photos Places map supports modes zoom and nearby navigation", async () => 
       }
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const rail = page.locator(".photos-rail");
     await expect.poll(async () => page.evaluate(async () => {
       const crossAge = (window as any).crossAge as {
@@ -6034,7 +6036,7 @@ test("Photos reverse place lookup previews and applies from the lightbox", async
       });
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "GPS lookup target")).toBeVisible({ timeout: 20_000 });
     await tileByFilename(page, "GPS lookup target").getByRole("button", { name: /Open photo/ }).click();
 
@@ -6148,7 +6150,7 @@ test("Photos compact Places map supports modes radius results and density areas"
     }, { mediaFolder: media });
 
     await page.setViewportSize({ width: 900, height: 620 });
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const rail = page.locator(".photos-rail");
     await expect.poll(async () => page.evaluate(async () => {
       const crossAge = (window as any).crossAge as {
@@ -6333,7 +6335,7 @@ with api.project.db.connect() as conn:
     await page.locator(".language-picker select").selectOption("en");
     await closeOnboardingIfVisible(page);
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect.poll(async () => page.evaluate(async () => {
       const crossAge = (window as any).crossAge as {
         invoke<T>(command: string, params?: Record<string, unknown>): Promise<T>;
@@ -6664,7 +6666,7 @@ with api.project.db.connect() as conn:
       }
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Harbor sunset")).toBeVisible({ timeout: 20_000 });
 
     await page.locator(".photo-album-toolbar").getByRole("button", { name: "New album" }).click();
@@ -6958,7 +6960,7 @@ test("Photos album editor edits duplicates merges and deletes manual albums", as
       return { targetAlbumId: target.value.albumId };
     }, { mediaFolder: media, sourceAlbumName: sourceName, targetAlbumName: targetName });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const rail = page.locator(".photos-rail");
     const actions = page.locator(".photos-gallery-actions");
     await rail.getByText(sourceName, { exact: true }).click();
@@ -7069,7 +7071,7 @@ test("Photos video lightbox exposes play scrub mute and keyboard controls", asyn
       await crossAge.invoke("update_photo_asset_metadata", { sourcePath: clip, title: "Clip controls" });
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Clip controls")).toBeVisible({ timeout: 20_000 });
     await tileByFilename(page, "Clip controls").getByRole("button", { name: /Open photo/ }).click();
     const lightbox = page.getByRole("dialog", { name: /Photo preview/ });
@@ -7246,7 +7248,7 @@ test("Photos saved video edit stack applies to rendered selection export", async
       await crossAge.invoke("update_photo_asset_metadata", { sourcePath: clip, title: "Saved edited export clip" });
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Saved edited export clip")).toBeVisible({ timeout: 20_000 });
     await tileByFilename(page, "Saved edited export clip").getByRole("button", { name: /Open photo/ }).click();
     const lightbox = page.getByRole("dialog", { name: /Photo preview/ });
@@ -7426,7 +7428,7 @@ test("Photos video frame export writes a still-frame bundle from the lightbox", 
       return { clip };
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Frame export clip")).toBeVisible({ timeout: 20_000 });
     await page.getByRole("button", { name: "Export options" }).click();
     await page.getByLabel("Export kind").selectOption("rendered");
@@ -7560,7 +7562,7 @@ async function exercisePhotosRenderedVideoExport(
       await crossAge.invoke("update_photo_asset_metadata", { sourcePath: clip, title: "Rendered export clip" });
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Rendered export clip")).toBeVisible({ timeout: 20_000 });
     if (navigationViewport.width !== viewportSize.width || navigationViewport.height !== viewportSize.height) {
       await page.setViewportSize(viewportSize);
@@ -7774,7 +7776,7 @@ test("Photos Live Photo lightbox exposes motion and export controls", async () =
       await crossAge.invoke("update_photo_asset_metadata", { sourcePath: still, title: "Live controls" });
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Live controls")).toBeVisible({ timeout: 20_000 });
     await tileByFilename(page, "Live controls").getByRole("button", { name: /Open photo/ }).click();
     const lightbox = page.getByRole("dialog", { name: /Photo preview/ });
@@ -7856,7 +7858,7 @@ test("Photos manual albums support selection create cover and lightbox membershi
       return { alpha, beta, gamma };
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Alpha cover")).toBeVisible({ timeout: 20_000 });
     await expect(tileByFilename(page, "Beta member")).toBeVisible();
     await expect(tileByFilename(page, "Gamma extra")).toBeVisible();
@@ -7996,7 +7998,7 @@ test("Photos utility folders support custom covers", async () => {
       return { alpha, beta, extra };
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(page.locator(".photos-rail").getByText("Favorites", { exact: true })).toBeVisible({ timeout: 20_000 });
     await expect.poll(async () => photoFolderById(page, "favorites"), { timeout: 20_000 }).toEqual(expect.objectContaining({
       count: 2,
@@ -8101,7 +8103,7 @@ for index, name in enumerate(("alice-wide.png", "alice-close.png"), start=1):
     await page.locator(".language-picker select").selectOption("en");
     await closeOnboardingIfVisible(page);
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect.poll(async () => photoFolderById(page, "person:Alice"), { timeout: 20_000 }).toEqual(expect.objectContaining({
       count: 2,
       name: "Alice"
@@ -8253,7 +8255,7 @@ api.save_photo_person_profile({
     await closeOnboardingIfVisible(page);
 
     await expect.poll(peopleFolderCounts, { timeout: 20_000 }).toEqual({ alice: 1, alicia: 0 });
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const rail = page.locator(".photos-rail");
     await rail.getByText("Alice", { exact: true }).click();
     await expect(page.locator(".photos-gallery-title")).toContainText("Alice", { timeout: 20_000 });
@@ -8453,7 +8455,7 @@ api.save_photo_person_profile({"personName": "Bob", "manualOrder": 0})
       "bob-merge": "Bob",
     }));
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const rail = page.locator(".photos-rail");
     await rail.getByText("Alice", { exact: true }).click();
     await expect(page.locator(".photos-gallery-title")).toContainText("Alice", { timeout: 20_000 });
@@ -8611,7 +8613,7 @@ api.save_photo_person_profile({"personName": "Bob"})
     await closeOnboardingIfVisible(page);
 
     await expect.poll(peopleFolderCounts, { timeout: 20_000 }).toEqual({ alice: 1, bob: 1 });
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(page.locator(".photo-rail-people-sort button[title='Manage People']")).toBeVisible({ timeout: 20_000 });
     await page.locator(".photo-rail-people-sort button[title='Manage People']").click();
 
@@ -8740,7 +8742,7 @@ test("Photos creation suggestions apply export presets from the export panel", a
       return { landscape, memory, extra, memoryId: saved.value.memoryId };
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const rail = page.locator(".photos-rail");
     await expect(rail.getByText("Creation Memory E2E", { exact: true })).toBeVisible({ timeout: 20_000 });
     await rail.getByText("Creation Memory E2E", { exact: true }).click();
@@ -9004,6 +9006,12 @@ test("Photos Memory topic feedback reshapes generated memories", async () => {
       const crossAge = (window as any).crossAge as {
         invoke<T>(command: string, params?: Record<string, unknown>): Promise<T>;
       };
+      // This test drives the indexing queue manually ("Run next local indexing job"),
+      // so disable background auto-run — otherwise auto-running jobs keep the queue
+      // busy and the manual run button stays disabled (flaky under load).
+      await crossAge.invoke("save_photo_library_settings", {
+        localSettings: { backgroundIndexingAutoRun: false }
+      });
       const imported = await crossAge.invoke<{ value: { importedPaths: string[] } }>("import_photos", {
         sourcePaths: [mediaFolder],
         storageMode: "referenced",
@@ -9040,7 +9048,7 @@ test("Photos Memory topic feedback reshapes generated memories", async () => {
       });
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect.poll(async () => photoMemoryByName(page, "Birthday 2026"), { timeout: 20_000 }).toEqual(expect.objectContaining({
       count: 3,
       name: "Birthday 2026"
@@ -9259,7 +9267,7 @@ test("Photos IPTC XMP sidecars surface in Info search and export", async () => {
       jobId: "BROWSER-JOB-42"
     }));
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "IPTC Browser Harbor")).toBeVisible({ timeout: 20_000 });
     await tileByFilename(page, "IPTC Browser Harbor").getByRole("button", { name: /Open photo/ }).click();
     const lightbox = page.getByRole("dialog", { name: /Photo preview/ });
@@ -9439,7 +9447,7 @@ for index, (name, fields) in enumerate(metadata.items(), start=1):
     await page.locator(".language-picker select").selectOption("en");
     await closeOnboardingIfVisible(page);
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Album source one")).toBeVisible({ timeout: 20_000 });
     await tileByFilename(page, "Album source one").locator(".photo-select-box").click();
     await tileByFilename(page, "Album source two").locator(".photo-select-box").click();
@@ -9629,7 +9637,7 @@ async function exercisePhotosContactSheetExport(
       return { alpha, beta, extra };
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Sheet Alpha")).toBeVisible({ timeout: 20_000 });
     if (navigationViewport.width !== viewportSize.width || navigationViewport.height !== viewportSize.height) {
       await page.setViewportSize(viewportSize);
@@ -9941,7 +9949,7 @@ test("Photos burst stacks panel selects and clears a keeper", async () => {
       return result.value.stacks.map((stack) => ({ count: stack.count, keeperCount: stack.keeperCount }));
     }), { timeout: 20_000 }).toEqual([{ count: 3, keeperCount: 0 }]);
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "Birthday Burst 0001.png")).toBeVisible({ timeout: 20_000 });
     await page.getByLabel("Media filter").selectOption("burst");
 
@@ -10050,7 +10058,7 @@ test("Photos slideshow projects save and play selected photos", async () => {
       return { alpha, beta, extra };
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "slide-alpha.png")).toBeVisible({ timeout: 20_000 });
     await tileByFilename(page, "slide-alpha.png").locator(".photo-select-box").click();
     await tileByFilename(page, "slide-beta.png").locator(".photo-select-box").click();
@@ -11178,7 +11186,7 @@ test("Photos slideshow timeline drag moves selected slides as a block", async ()
       return { alpha, beta, gamma, projectId: project.value.id };
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "timeline-alpha.png")).toBeVisible({ timeout: 20_000 });
     await expect(tileByFilename(page, "timeline-beta.png")).toBeVisible();
     await expect(tileByFilename(page, "timeline-gamma.png")).toBeVisible();
@@ -11276,7 +11284,7 @@ async function exercisePhotosRealSlideshowMovieExport(
       }
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await expect(tileByFilename(page, "real-alpha.png")).toBeVisible({ timeout: 20_000 });
     if (navigationViewport.width !== viewportSize.width || navigationViewport.height !== viewportSize.height) {
       await page.setViewportSize(viewportSize);
@@ -11470,7 +11478,7 @@ async function exercisePhotosRealMemoryMovieExport(
       return { alpha, beta, memoryId: saved.value.memoryId };
     }, { mediaFolder: media });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const rail = page.locator(".photos-rail");
     await expect(rail.getByText("Real FFmpeg Memory", { exact: true })).toBeVisible({ timeout: 20_000 });
     await rail.getByText("Real FFmpeg Memory", { exact: true }).click();
@@ -11644,7 +11652,7 @@ test("Photos external import handoff preserves app attribution after confirm", a
     await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
     await page.locator(".language-picker select").selectOption("en");
     await closeOnboardingIfVisible(page);
-    await expect(page.locator(".nav-list").getByRole("button", { name: "Photos" })).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(".nav-list").getByRole("button", { name: "Library" })).toBeVisible({ timeout: 30_000 });
     await expect.poll(async () => Number((await photoFolderCounts(page)).all || 0)).toBe(0);
 
     await app.evaluate(({ app: electronApp }, url) => {
@@ -11755,7 +11763,7 @@ test("Photos import review can create a manual album destination", async () => {
       });
     }, reviewPhoto);
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await page.locator(".photo-album-toolbar").getByRole("button", { name: "Import files" }).click();
     const review = page.getByRole("status", { name: "Import review" });
     await expect(review).toBeVisible({ timeout: 20_000 });
@@ -11874,7 +11882,7 @@ test("Photos import review surfaces per-file import issues", async () => {
       });
     }, { paths: [validPhoto, unsupportedFile] });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await page.locator(".photo-album-toolbar").getByRole("button", { name: "Import files" }).click();
     const review = page.getByRole("status", { name: "Import review" });
     await expect(review).toBeVisible({ timeout: 20_000 });
@@ -11933,7 +11941,7 @@ test("Photos gallery drop stages dropped files for import review", async () => {
     await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
     await page.locator(".language-picker select").selectOption("en");
     await closeOnboardingIfVisible(page);
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
 
     await page.locator(".photos-gallery").evaluate((element, sourcePath) => {
       const file = new File(["vintrace dropped fixture"], "drop-import.png", { type: "image/png" });
@@ -12018,7 +12026,7 @@ test("Photos manual albums persist tile drag/drop custom order", async () => {
 
     expect(await manualAlbumFilenames(page, seeded.albumId)).toEqual(expectedStartOrder);
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const rail = page.locator(".photos-rail");
     await rail.getByText("Tile Drag Album E2E", { exact: true }).click();
     await expect(page.getByLabel("Sort photos")).toHaveValue("manual");
@@ -12114,7 +12122,7 @@ test("Photos manual albums save current filename sort as custom order", async ()
 
     expect(await manualAlbumFilenames(page, seeded.albumId, 10)).toEqual(expectedManualStart);
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const rail = page.locator(".photos-rail");
     await rail.getByText("Save Sort Album E2E", { exact: true }).click();
     const sortSelect = page.getByLabel("Sort photos");
@@ -12204,7 +12212,7 @@ test("Photos manual albums move selected items to a typed custom position", asyn
 
     expect(await manualAlbumFilenames(page, seeded.albumId, 10)).toEqual(filenames);
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const rail = page.locator(".photos-rail");
     await rail.getByText("Position Album E2E", { exact: true }).click();
     await expect(page.getByLabel("Sort photos")).toHaveValue("manual");
@@ -12298,7 +12306,7 @@ test("Photos manual album Move last uses the full order for large albums", async
 
     expect(await manualAlbumFilenames(page, seeded.albumId, 130)).toEqual(expectedStartOrder);
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const rail = page.locator(".photos-rail");
     await rail.getByText("Large Order Album E2E", { exact: true }).click();
     await expect(page.getByLabel("Sort photos")).toHaveValue("manual");
@@ -12406,7 +12414,7 @@ api.project.db.upsert_candidates([
       groupPeople: ["Ada", "Grace"],
     });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const rail = page.locator(".photos-rail");
     await rail.getByText("Ada & Grace", { exact: true }).click();
     await expect(page.locator(".photos-gallery-title")).toContainText("Ada & Grace", { timeout: 20_000 });
@@ -12470,7 +12478,7 @@ api.project.db.upsert_candidates([
     await expect(page.locator(".review-candidate-row")).toHaveCount(2);
     await recentReviewMore.getByRole("button", { name: "Remove Ada & Grace Review More from recent Review More" }).click();
     await expect(recentReviewMore.getByRole("button", { name: /Ada & Grace Review More\s+2/ })).toHaveCount(0);
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     await rail.getByText("Ada & Grace", { exact: true }).click();
     await expect(inlineReview.getByRole("button", { name: "Looks right Ada ada-pending.png" })).toBeVisible();
     await inlineReview.getByRole("button", { name: "Looks right Ada ada-pending.png" }).click();
@@ -12685,7 +12693,7 @@ api.save_photo_people_group({
       excludePeople: ["Bob"],
     });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const rail = page.locator(".photos-rail");
     await rail.getByText("Core Duo", { exact: true }).click();
     await expect(page.locator(".photos-gallery-title")).toContainText("Core Duo", { timeout: 20_000 });
@@ -12799,7 +12807,7 @@ api.project.db.update_photo_asset_metadata_json(
       };
     }), { timeout: 20_000 }).toEqual({ petReview: 3, milo: 1 });
 
-    await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+    await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
     const rail = page.locator(".photos-rail");
     await rail.getByText("Pet Review", { exact: true }).click();
     await expect(page.locator(".photos-gallery-title")).toContainText("Dog 2", { timeout: 20_000 });

@@ -17,7 +17,7 @@ const SHOT_DIR =
   process.env.QA_SHOT_DIR ||
   "/private/tmp/claude-501/-Users-harshbishnoi-face/8cb82d9f-58ab-4fff-a7db-d8bc428637ae/scratchpad/qa-shots";
 
-const NAV_VIEWS = ["Dashboard", "Enroll", "Scan", "Review", "Photos", "Settings"];
+const NAV_VIEWS = ["Library", "Memories", "Albums", "Search", "People & Pets", "Tools", "Settings"];
 
 function makeFixtures(dir: string): { red: string; blue: string; checker: string } {
   mkdirSync(dir, { recursive: true });
@@ -148,7 +148,7 @@ test("ML-enabled end-to-end QA: nav walk + screenshots + ML command IPC", async 
   report.cutout = { targetPath: cut?.targetPath, targetExists: cutoutTargetExists, algorithm: cut?.mask?.algorithm };
 
   // Final screenshot of Photos view with the imported library.
-  await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click().catch(() => undefined);
+  await page.locator(".nav-list").getByRole("button", { name: "Library" }).click().catch(() => undefined);
   await page.waitForTimeout(800);
   await page.screenshot({ path: path.join(SHOT_DIR, "photos-with-library.png") }).catch(() => undefined);
 
@@ -200,13 +200,16 @@ test("ML UI affordances: AI search box + Portrait blur button (clicked)", async 
     sourceLabel: "ML UI QA",
   });
 
-  await page.locator(".nav-list").getByRole("button", { name: "Photos" }).click();
+  // Library is the default tab, so PhotosView mounted before this IPC import; bounce
+  // through another tab to re-seed activeId and reload the grid with the new photos.
+  await page.locator(".nav-list").getByRole("button", { name: "Memories" }).click();
+  await page.waitForTimeout(400);
+  await page.locator(".nav-list").getByRole("button", { name: "Library" }).click();
   await dismissModals(page);
-  await page.locator(".photos-rail").getByRole("button", { name: /^All Photos\b/ }).first().click().catch(() => undefined);
   await expect(page.locator(".photo-tile-wrap").first()).toBeVisible({ timeout: 30_000 });
 
   // --- AI (semantic) search box ---
-  const aiInput = page.getByRole("searchbox", { name: "Search photos by meaning" });
+  const aiInput = page.getByRole("searchbox", { name: "Find photos by meaning" });
   await aiInput.fill("a solid red image");
   await page.getByRole("button", { name: "Search by meaning" }).click();
   const semanticPanel = page.locator(".photos-semantic-search");

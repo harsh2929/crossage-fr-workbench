@@ -32,7 +32,7 @@ async function clickSafeVisibleButtons(page: Page, pageErrors: string[], tabName
   const clicked = new Set<string>();
 
   for (let pass = 0; pass < 4; pass += 1) {
-    const buttons = page.locator(".workspace button:visible, .onboarding-card button:visible, .topbar-actions button:visible");
+    const buttons = page.locator(".workspace button:visible, .onboarding-card button:visible, .sidebar-footer button:visible");
     const count = await buttons.count();
     for (let index = 0; index < count; index += 1) {
       const button = buttons.nth(index);

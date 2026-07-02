@@ -102,6 +102,6 @@ test("UI interaction soak stays responsive without unbounded memory growth", asy
   if (heapGrowth > 0) {
     expect(heapGrowth, "renderer heap growth in bytes").toBeLessThan(120 * 1024 * 1024);
   }
-  await expect(page.locator(".nav-list").getByRole("button", { name: "Dashboard" })).toBeVisible();
+  await expect(page.locator(".nav-list").getByRole("button", { name: "Library" })).toBeVisible();
   await app.close();
 });

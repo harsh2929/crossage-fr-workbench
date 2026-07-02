@@ -24,6 +24,7 @@ import {
   Folder,
   FolderInput,
   FolderPlus,
+  HardDrive,
   Images,
   ImageIcon,
   Keyboard,
@@ -64,7 +65,9 @@ import {
   Wrench,
   X,
   ZoomIn,
-  ZoomOut
+  ZoomOut,
+  UserPlus,
+  ShieldCheck
 } from "lucide-react";
 import type {
   CandidateStatus,
@@ -880,6 +883,13 @@ function parsePhotoNearbyCoordinate(value: unknown, min: number, max: number): n
   return Number.isFinite(number) && number >= min && number <= max ? number : null;
 }
 
+// A blank coordinate string parses to 0 via Number(""), which would otherwise be
+// treated as the valid coordinate 0. Saved filters store "" for an unset location,
+// so reject blanks here to avoid materialising a spurious "near (0, 0)" filter.
+function hasPhotoNearbyCoordinateText(value: unknown): boolean {
+  return String(value ?? "").trim().length > 0;
+}
+
 function photoItemCoordinates(item: PhotoItem | null): { latitude: number; longitude: number } | null {
   if (!item || item.locationHidden) return null;
   const override = item.locationOverride || {};
@@ -928,6 +938,11 @@ function photoNearbyFilterFromItem(item: PhotoItem, label: string): PhotoNearbyF
 }
 
 function photoNearbyFilterFromSavedFilterState(filters: PhotoSavedFilterState): PhotoNearbyFilterState | null {
+  // A saved filter with no location stores blank coordinates; treat those as "no
+  // nearby filter" rather than coordinate 0, which would match nothing on apply.
+  if (!hasPhotoNearbyCoordinateText(filters.nearbyLatitude) || !hasPhotoNearbyCoordinateText(filters.nearbyLongitude)) {
+    return null;
+  }
   const latitude = parsePhotoNearbyCoordinate(filters.nearbyLatitude, -90, 90);
   const longitude = parsePhotoNearbyCoordinate(filters.nearbyLongitude, -180, 180);
   if (latitude === null || longitude === null) return null;
@@ -1316,6 +1331,9 @@ type PhotoSlideshowThemeTemplateLibraryImportValue = {
 };
 
 export function PhotosView(props: {
+  initialActiveId?: string;
+  visibleRailSections?: PhotoRailSectionId[];
+  reloadSignal?: number;
   listPhotoFolders: (params?: Record<string, unknown>) => Promise<PhotoFolderList>;
   listPhotoFolderItems: (params: Record<string, unknown>) => Promise<PhotoItemsPage>;
   listPhotoDateBuckets: (params: Record<string, unknown>) => Promise<PhotoDateBucketList>;
@@ -1377,6 +1395,7 @@ export function PhotosView(props: {
   suggestPhotoAlbums: () => Promise<{ value: PhotoAlbumSuggestionResult }>;
   listPhotoImportFailures: (params: Record<string, unknown>) => Promise<{ value: PhotoImportFailureListValue }>;
   updatePhotoImportSessionProvenance: (params: Record<string, unknown>) => Promise<{ value: PhotoImportSessionProvenanceUpdateValue }>;
+  bulkUpdatePhotoImportSessionProvenance: (params: Record<string, unknown>) => Promise<{ value: { changed: number; updated: PhotoImportSession[]; missing: string[]; updatedAssets: number } }>;
   archivePhotoImportSessions: (params: Record<string, unknown>) => Promise<{ value: PhotoImportSessionArchiveUpdateValue }>;
   dismissPhotoImportFailure: (params: Record<string, unknown>) => Promise<{ value: PhotoImportFailureDismissValue }>;
   retryPhotoImportFailure: (params: Record<string, unknown>) => Promise<{ value: PhotoImportFailureRetryValue }>;
@@ -1509,6 +1528,8 @@ export function PhotosView(props: {
   duplicatePeople: DuplicatePeopleResult | null;
   loadDuplicatePeople: () => void | Promise<void>;
   mergeDuplicatePeople: (sourceName: string, targetName: string) => void | Promise<void>;
+  // Phase 4: jump from the People & Pets gallery (Browse) to the Add person / Review sub-sections.
+  onRequestPeopleSection?: (section: "enroll" | "review") => void;
   people: string[];
   uiText?: (source: string) => string;
   formatNumber?: (value: number) => string;
@@ -1661,6 +1682,7 @@ export function PhotosView(props: {
     reviewCandidates,
     duplicatePeople,
     loadDuplicatePeople,
+    onRequestPeopleSection,
     people,
     copyText
   } = props;
@@ -1681,7 +1703,7 @@ export function PhotosView(props: {
   const [keywordImportJson, setKeywordImportJson] = useState("");
   const [keywordTransferMessage, setKeywordTransferMessage] = useState("");
   const [keywordExportPath, setKeywordExportPath] = useState("");
-  const [activeId, setActiveId] = useState<string>("all");
+  const [activeId, setActiveId] = useState<string>(props.initialActiveId ?? "all");
   const [items, setItems] = useState<PhotoItem[]>([]);
   const [total, setTotal] = useState(0);
   const [sort, setSort] = useState<PhotoSort>("newest");
@@ -1719,6 +1741,9 @@ export function PhotosView(props: {
   const [importHistoryEditDetail, setImportHistoryEditDetail] = useState("");
   const [importHistoryEditSaving, setImportHistoryEditSaving] = useState(false);
   const [importHistoryArchiveSaving, setImportHistoryArchiveSaving] = useState(false);
+  // Bulk "Set source for matches" editor (bulk_update_photo_import_session_provenance).
+  const [importHistoryBulkOpen, setImportHistoryBulkOpen] = useState(false);
+  const [importHistoryBulkSaving, setImportHistoryBulkSaving] = useState(false);
   const [importHistoryEditError, setImportHistoryEditError] = useState("");
   const [importHistoryEditStatus, setImportHistoryEditStatus] = useState("");
   const [locationFilter, setLocationFilter] = useState("");
@@ -1726,6 +1751,11 @@ export function PhotosView(props: {
   const [cameraFilter, setCameraFilter] = useState("");
   const [albumFilter, setAlbumFilter] = useState("");
   const [visibilityFilter, setVisibilityFilter] = useState<PhotoVisibilityFilter>("");
+  // Library toolbar "Filters" disclosure. Default open only when a filter is
+  // Filters are shown by default so every control stays immediately reachable;
+  // the new Filters toggle lets users collapse the row to declutter the toolbar
+  // down to search/sort/view when they don't need the long-tail filters.
+  const [galleryFiltersOpen, setGalleryFiltersOpen] = useState(true);
   const [petReviewKindFilter, setPetReviewKindFilter] = useState("");
   const [photoDateViewMode, setPhotoDateViewMode] = useState<PhotoDateViewMode>("all");
   const [activeDateBucketKey, setActiveDateBucketKey] = useState("");
@@ -1734,6 +1764,9 @@ export function PhotosView(props: {
   const [dateBucketLoaded, setDateBucketLoaded] = useState(false);
   const [dateBucketLoadError, setDateBucketLoadError] = useState("");
   const [dateBucketRefreshToken, setDateBucketRefreshToken] = useState(0);
+  // Bumped only when a photos tab is (re)selected, to reload the grid then — without
+  // the per-mutation grid reloads that bumping dateBucketRefreshToken would cause.
+  const [gridReloadToken, setGridReloadToken] = useState(0);
   const [photoSettings, setPhotoSettings] = useState<PhotoLocalSettings>(() => readStoredPhotoLocalSettings(PHOTO_LOCAL_SETTINGS_KEY));
   const photoSettingsRef = useRef<PhotoLocalSettings>(photoSettings);
   const [photoRuntimeHdrAvailable, setPhotoRuntimeHdrAvailable] = useState(() => browserAdvertisesPhotoHdr());
@@ -1795,6 +1828,7 @@ export function PhotosView(props: {
   const [placeMapMode, setPlaceMapMode] = useState<PhotoPlaceMapMode>("clusters");
   const [loading, setLoading] = useState(false);
   const [savingAlbum, setSavingAlbum] = useState(false);
+  const [savingSuggestionId, setSavingSuggestionId] = useState("");
   const [albumItemSaving, setAlbumItemSaving] = useState(false);
   const [savingMetadata, setSavingMetadata] = useState(false);
   const [metadataError, setMetadataError] = useState("");
@@ -1854,6 +1888,12 @@ export function PhotosView(props: {
   const [albumFolderError, setAlbumFolderError] = useState("");
   const [savingAlbumFolder, setSavingAlbumFolder] = useState(false);
   const [albumTreeDrag, setAlbumTreeDrag] = useState<PhotoAlbumTreeDragState | null>(null);
+  // Phase 3: which album folder the Albums gallery is browsing into ("" = root).
+  const [browsedAlbumFolderId, setBrowsedAlbumFolderId] = useState<string>("");
+  // Phase 3: a memory queued for in-app playback once its drill-down scope is active.
+  const [pendingMemoryPlayId, setPendingMemoryPlayId] = useState<string>("");
+  // Phase 4: which person circle in the People & Pets gallery is being inline-renamed.
+  const [renamingPersonId, setRenamingPersonId] = useState<string>("");
   const [peopleRailDrag, setPeopleRailDrag] = useState<PhotoPeopleRailDragState | null>(null);
   const [localRailItemDrag, setLocalRailItemDrag] = useState<PhotoLocalRailItemDragState | null>(null);
   const [railSectionDrag, setRailSectionDrag] = useState<PhotoRailSectionDragState | null>(null);
@@ -1926,6 +1966,15 @@ export function PhotosView(props: {
   const [importKeepFolderOrganization, setImportKeepFolderOrganization] = useState(() => readStoredBoolean(PHOTO_IMPORT_KEEP_FOLDERS_KEY, false));
   const [importDragOver, setImportDragOver] = useState(false);
   const [importingPhotos, setImportingPhotos] = useState(false);
+  // "Index everything on this computer" — a whole-Home broad crawl behind an
+  // explicit scope-consent sheet.
+  const [indexEverythingSource, setIndexEverythingSource] = useState<SystemPhotoSource | null>(null);
+  const [indexEverythingRunning, setIndexEverythingRunning] = useState(false);
+  const [pendingIndexEverything, setPendingIndexEverything] = useState(false);
+  // Optional extra folders/drives to fold into the whole-computer crawl, and
+  // whether to auto-hide screenshots / utility images afterward.
+  const [indexEverythingExtraPaths, setIndexEverythingExtraPaths] = useState<string[]>([]);
+  const [indexEverythingHideNoise, setIndexEverythingHideNoise] = useState(true);
   const [pendingImportEntries, setPendingImportEntries] = useState<PendingPhotoImportEntry[]>([]);
   const [pendingImportLabel, setPendingImportLabel] = useState("");
   const [pendingImportSourceLabelExplicit, setPendingImportSourceLabelExplicit] = useState(false);
@@ -2477,6 +2526,35 @@ export function PhotosView(props: {
           : creationSuggestionRefreshBlocked
             ? uiText("Retrying later")
             : uiText("All visible photos");
+  // Photos-first shell: when the top-level tab changes the seeded rail section,
+  // re-point the (key-stable, never-remounted) PhotosView at it.
+  useEffect(() => {
+    if (props.initialActiveId) setActiveId(props.initialActiveId);
+  }, [props.initialActiveId]);
+  // Re-selecting a photos tab (even when already active) refreshes the rail, grid,
+  // and library settings (import destination / managed roots), so changes made
+  // elsewhere — Settings, imports, another window — show up immediately.
+  useEffect(() => {
+    if (!props.reloadSignal) return;
+    // Re-selecting a photos tab behaves like the old nav-remount: re-read every
+    // library data source so changes made elsewhere — Settings, imports, keyword
+    // or saved-filter edits, slideshow projects, another window — show up
+    // immediately. These loaders are pure reads (fetch → setState). The library
+    // profile uses `preserveScope: true` so it refreshes the managed-roots /
+    // import-destination DATA without re-applying persisted scope or display
+    // toggles, which would clobber the scope being browsed / in-session toggles.
+    void loadFolders();
+    void loadSuggestions();
+    void loadKeywords();
+    void loadSavedFilters();
+    void loadPhotoSlideshowProjects();
+    void loadPhotoSlideshowThemeTemplates();
+    void loadPhotoOperations();
+    void loadPhotoLibraryProfile({ preserveScope: true });
+    void loadPhotoCurationPreferences();
+    setGridReloadToken((token) => token + 1);
+    setDateBucketRefreshToken((token) => token + 1);
+  }, [props.reloadSignal]);
   useEffect(() => {
     setCreationSuggestionItems([]);
     setCreationSuggestionScope("loaded");
@@ -2635,6 +2713,12 @@ export function PhotosView(props: {
       visibility: visibilityFilter,
     }),
     [searchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, albumFilterLabel, visibilityFilter]
+  );
+  // Count of active filters excluding the always-visible search box, for the
+  // collapsed "Filters" disclosure badge.
+  const activeFilterCount = useMemo(
+    () => activeFilterChips.filter((chip) => chip.kind !== "search").length,
+    [activeFilterChips]
   );
   const keywordFilterChips = useMemo(
     () => buildPhotoKeywordFilterOptions(keywordOptions, keywordFilter, 12),
@@ -2996,13 +3080,21 @@ export function PhotosView(props: {
     storeBoolean(PHOTO_IMPORT_KEEP_FOLDERS_KEY, keepFolders);
   }
 
-  const loadPhotoLibraryProfile = useCallback(async () => {
+  const loadPhotoLibraryProfile = useCallback(async (options?: { preserveScope?: boolean }) => {
     try {
       const res = await photoLibrarySettings({});
       let nextProfile = res.value || null;
-      if (nextProfile?.localSettingsPersisted) {
+      if (nextProfile?.localSettingsPersisted && options?.preserveScope) {
+        // Refresh-on-reselect: propagate externally-changed setting VALUES (e.g.
+        // network-intelligence / privacy flags toggled in Settings or another
+        // window) into local state + localStorage, mirroring the old nav-remount.
+        // Use the state-only persist — NOT the full apply — so we don't fire the
+        // side effects (re-locking sensitive collections the user unlocked
+        // in-session, re-deriving rail display state) on every tab click.
+        persistPhotoLocalSettings(normalizePhotoLocalSettingsWithLegacyRail(nextProfile.localSettings || {}));
+      } else if (nextProfile?.localSettingsPersisted) {
         applyWorkspacePhotoLocalSettings(nextProfile.localSettings || {});
-      } else {
+      } else if (!nextProfile?.localSettingsPersisted) {
         try {
           const seeded = await savePhotoLibrarySettings({ localSettings: photoSettingsRef.current });
           nextProfile = seeded.value || nextProfile;
@@ -3012,10 +3104,15 @@ export function PhotosView(props: {
       }
       setPhotoLibraryProfile(nextProfile);
       setPhotoLibraryProfileError("");
-      const persistedActiveRoot = String(nextProfile?.activeLibraryRoot || "").trim();
-      const persistedActiveProfileId = String(nextProfile?.activeLibraryRootProfileId || "").trim();
-      if (persistedActiveRoot !== activeLibraryRootRef.current || persistedActiveProfileId !== activeLibraryRootProfileIdRef.current) {
-        applyPhotoLibraryScopeState(persistedActiveRoot, persistedActiveProfileId);
+      // On a refresh-on-reselect we only want to re-read the settings DATA (managed
+      // roots / default destination for the import controls), not override the scope
+      // the user is currently browsing.
+      if (!options?.preserveScope) {
+        const persistedActiveRoot = String(nextProfile?.activeLibraryRoot || "").trim();
+        const persistedActiveProfileId = String(nextProfile?.activeLibraryRootProfileId || "").trim();
+        if (persistedActiveRoot !== activeLibraryRootRef.current || persistedActiveProfileId !== activeLibraryRootProfileIdRef.current) {
+          applyPhotoLibraryScopeState(persistedActiveRoot, persistedActiveProfileId);
+        }
       }
       const defaultMode = String(nextProfile?.defaultStorageMode || "").toLowerCase();
       if (defaultMode === "managed" || defaultMode === "referenced") {
@@ -3055,6 +3152,13 @@ export function PhotosView(props: {
     if (!peopleManagementOpen) return;
     void loadPeopleManagementFolders();
   }, [activeLibraryRoot, activeLibraryRootProfileId, peopleManagementOpen, loadPeopleManagementFolders]);
+  // Phase 4: the People & Pets gallery (Browse) needs the managed people/pets/groups
+  // (named + hidden, pre-sorted) loaded, which otherwise only happens when the manager
+  // overlay opens. Load it whenever the dedicated People tab landing is shown.
+  useEffect(() => {
+    if (activeId !== "people" || props.initialActiveId !== "people") return;
+    void loadPeopleManagementFolders();
+  }, [activeId, props.initialActiveId, props.reloadSignal, activeLibraryRoot, activeLibraryRootProfileId, loadPeopleManagementFolders]);
 
   useEffect(() => {
     storeBoolean(PHOTO_RAIL_SHOW_UTILITIES_KEY, showUtilityCollections);
@@ -3494,7 +3598,7 @@ export function PhotosView(props: {
       return;
     }
     loadPage(activeId, 0, sort, searchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, cameraFilter, albumFilter, visibilityFilter);
-  }, [activeId, sort, searchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, groupViewMode, activeDateBucketKey, activeLibraryRoot, activeLibraryRootProfileId, sensitiveCollectionLocked, clearLockedSensitiveItems, loadPage]);
+  }, [activeId, sort, searchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, groupViewMode, activeDateBucketKey, activeLibraryRoot, activeLibraryRootProfileId, sensitiveCollectionLocked, clearLockedSensitiveItems, loadPage, gridReloadToken]);
 
   useEffect(() => {
     setActiveDateBucketKey("");
@@ -3987,6 +4091,39 @@ export function PhotosView(props: {
       setImportHistoryEditError(errorMessage(error));
     } finally {
       setImportHistoryArchiveSaving(false);
+    }
+  }
+
+  // Re-tag the source of every matching import session at once. Label/detail are
+  // OMITTED when blank so each session keeps its own value (only the kind, and any
+  // non-blank label/detail, are applied across the batch).
+  async function applyBulkImportHistoryProvenance(importIds: string[]) {
+    const cleanIds = Array.from(new Set(importIds.map((value) => String(value || "").trim()).filter(Boolean)));
+    if (!cleanIds.length) return;
+    setImportHistoryBulkSaving(true);
+    setImportHistoryEditError("");
+    setImportHistoryEditStatus("");
+    try {
+      const params: Record<string, unknown> = { importIds: cleanIds, sourceKind: importHistoryEditKind };
+      const cleanLabel = importHistoryEditLabel.replace(/\s+/g, " ").trim();
+      if (cleanLabel) params.sourceLabel = cleanLabel;
+      const cleanDetail = importHistoryEditDetail.replace(/\s+/g, " ").trim();
+      if (cleanDetail) params.sourceDetail = cleanDetail;
+      const result = await props.bulkUpdatePhotoImportSessionProvenance(params);
+      const changed = Number(result.value?.changed || 0);
+      const updatedAssets = Number(result.value?.updatedAssets || 0);
+      setImportHistoryEditStatus(
+        `${uiText("Updated import source")} · ${formatCount(changed)} · ${formatCount(updatedAssets)} ${updatedAssets === 1 ? uiText("item") : uiText("items")}`
+      );
+      setImportHistoryBulkOpen(false);
+      setImportHistoryEditLabel("");
+      setImportHistoryEditDetail("");
+      await loadFolders();
+      await loadPage(activeId, 0, sort, searchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, cameraFilter, albumFilter, visibilityFilter);
+    } catch (error) {
+      setImportHistoryEditError(errorMessage(error));
+    } finally {
+      setImportHistoryBulkSaving(false);
     }
   }
 
@@ -5143,6 +5280,42 @@ export function PhotosView(props: {
     () => albumFolders.filter((folder) => !editingAlbumFolderId || folder.folderId !== editingAlbumFolderId),
     [albumFolders, editingAlbumFolderId]
   );
+  // --- Phase 3: dedicated Memories ("For You") + Albums gallery destinations ---
+  const memoryFolders = useMemo(() => folders.filter((folder) => folder.kind === "memory"), [folders]);
+  const featuredMemory = useMemo(() => {
+    if (!memoryFolders.length) return null;
+    return [...memoryFolders].sort((a, b) => {
+      const fav = Number(Boolean(b.memory?.favorite)) - Number(Boolean(a.memory?.favorite));
+      if (fav) return fav;
+      const hint = String(a.memory?.sortHint || "").localeCompare(String(b.memory?.sortHint || ""));
+      if (hint) return hint;
+      return String(b.memory?.endDate || b.memory?.startDate || "").localeCompare(String(a.memory?.endDate || a.memory?.startDate || ""));
+    })[0] || null;
+  }, [memoryFolders]);
+  const onThisDayMemories = useMemo(() => {
+    const now = new Date();
+    const monthDay = `${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    return memoryFolders
+      .filter((folder) => {
+        const start = String(folder.memory?.startDate || "").slice(5, 10);
+        const end = String(folder.memory?.endDate || "").slice(5, 10);
+        return Boolean(monthDay) && (start === monthDay || end === monthDay);
+      })
+      .slice(0, 12);
+  }, [memoryFolders]);
+  const albumGalleryAlbums = useMemo(() => folders.filter((folder) => folder.kind === "album"), [folders]);
+  const browsedAlbumFolder = useMemo(
+    () => (browsedAlbumFolderId ? albumFolders.find((folder) => albumTreeItemId(folder) === browsedAlbumFolderId) || null : null),
+    [albumFolders, browsedAlbumFolderId]
+  );
+  const visibleAlbumFolderCards = useMemo(
+    () => albumFolders.filter((folder) => albumTreeParentId(folder) === browsedAlbumFolderId),
+    [albumFolders, browsedAlbumFolderId]
+  );
+  const visibleAlbumCards = useMemo(
+    () => albumGalleryAlbums.filter((folder) => albumTreeParentId(folder) === browsedAlbumFolderId),
+    [albumGalleryAlbums, browsedAlbumFolderId]
+  );
   const manualAlbums = useMemo(() => folders.filter((folder) => folder.kind === "album" && folder.albumKind === "manual"), [folders]);
   const albumMergeTargets = useMemo(
     () => folders.filter((folder) => {
@@ -6139,6 +6312,30 @@ export function PhotosView(props: {
     () => buildPhotoImportSystemSourceRows(photoSources),
     [photoSources]
   );
+  // The whole-computer ("This computer") source, if the detector has surfaced it.
+  const indexEverythingCandidate = useMemo(
+    () => photoSources.find((source) => source.kind === "this-computer") || null,
+    [photoSources]
+  );
+  // Mounted external drives, offered as one-tap scope chips in the consent sheet.
+  const detectedDriveSources = useMemo(
+    () => photoSources.filter((source) => source.kind === "drive" && source.available),
+    [photoSources]
+  );
+  // Drives are handled via the whole-computer consent sheet, not the per-source
+  // staging list (a raw full-drive import would skip the broad excludes).
+  const visiblePhotoSystemSourceRows = useMemo(
+    () => photoSystemSourceRows.filter((row) => (row.source as SystemPhotoSource | undefined)?.kind !== "drive"),
+    [photoSystemSourceRows]
+  );
+  // If a CTA asked to index everything before sources were loaded, open the
+  // consent sheet as soon as the detector surfaces the Home source.
+  useEffect(() => {
+    if (pendingIndexEverything && indexEverythingCandidate) {
+      setIndexEverythingSource(indexEverythingCandidate);
+      setPendingIndexEverything(false);
+    }
+  }, [pendingIndexEverything, indexEverythingCandidate]);
   useEffect(() => {
     setManagedRootRenameDrafts((current) => {
       const next: Record<string, string> = {};
@@ -15216,11 +15413,76 @@ export function PhotosView(props: {
       setImportError(`${source.label || uiText("Photo source")} ${uiText("is not available on this computer.")}`);
       return;
     }
+    // The whole-computer source opens a scope-consent sheet instead of the
+    // per-folder staging review (the crawl is broad and needs explicit opt-in).
+    if (source.kind === "this-computer") {
+      setImportError("");
+      setIndexEverythingSource(source);
+      return;
+    }
     const sourceKind = photoImportSourceKindForSystemSource(source) as PhotoImportSourceKind;
     const detail = [source.label, source.detail, source.path].filter(Boolean).join(" · ");
     await stagePendingImport([source.path], source.label || uiText("Photo source"), {
       sourceKind,
       sourceDetail: detail,
+    });
+  }
+
+  // Run the whole-computer crawl: index every photo under the Home folder in
+  // reference mode (originals stay put), pruning caches / app data / system files.
+  async function runIndexEverything(source: SystemPhotoSource | null) {
+    if (!source?.path) return;
+    const sourcePaths = Array.from(new Set([source.path, ...indexEverythingExtraPaths].filter(Boolean)));
+    setIndexEverythingRunning(true);
+    setImportError("");
+    try {
+      const result = await importPhotos({
+        sourcePaths,
+        storageMode: "referenced",
+        applyBroadExcludes: true,
+        sourceKind: "folder",
+        sourceLabel: sourcePaths.length > 1 ? uiText("This computer + folders") : uiText("This computer"),
+        sourceDetail: sourcePaths.join(" · "),
+      });
+      // Auto-hide the noise a whole-computer crawl surfaces so the Library leads
+      // with real photos; the rail toggles let the user bring them back.
+      if (indexEverythingHideNoise) {
+        setPhotoRailDisplayPreference("showScreenshotCollections", false);
+        setPhotoRailDisplayPreference("showUtilityCollections", false);
+        setPhotoRailDisplayPreference("showLowValueCollections", false);
+      }
+      setIndexEverythingSource(null);
+      setIndexEverythingExtraPaths([]);
+      await finishImport(result);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIndexEverythingRunning(false);
+    }
+  }
+
+  // Open the scope-consent sheet from a CTA. If the Home source isn't detected
+  // yet, ask the detector to refresh and open once it surfaces.
+  function openIndexEverything() {
+    setImportError("");
+    setIndexEverythingExtraPaths([]);
+    if (indexEverythingCandidate) {
+      setIndexEverythingSource(indexEverythingCandidate);
+      return;
+    }
+    setPendingIndexEverything(true);
+    if (refreshPhotoSources) void refreshPhotoSources();
+  }
+
+  // Add another folder or drive to the whole-computer crawl scope.
+  async function addIndexEverythingFolder() {
+    const folder = await chooseImportFolder();
+    const clean = String(folder || "").trim();
+    if (!clean) return;
+    setIndexEverythingExtraPaths((current) => {
+      const home = indexEverythingSource?.path || "";
+      if (clean === home || current.includes(clean)) return current;
+      return [...current, clean];
     });
   }
 
@@ -18479,8 +18741,408 @@ export function PhotosView(props: {
     );
   }
 
+  // Phase 3: open a memory's drill-down scope, then auto-play its movie once active.
+  const playMemory = (folder: PhotoFolder) => {
+    setActiveId(folder.id);
+    setPendingMemoryPlayId(folder.memoryId || folder.memory?.memoryId || folder.id);
+  };
+  useEffect(() => {
+    if (!pendingMemoryPlayId) return;
+    const target = activeMemoryId || activeMemory?.id || "";
+    if (activeMemory && (activeMemoryId === pendingMemoryPlayId || activeMemory.id === pendingMemoryPlayId || target === pendingMemoryPlayId)) {
+      setPendingMemoryPlayId("");
+      void startPhotoSlideshow();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingMemoryPlayId, activeMemory, activeMemoryId]);
+
+  // Phase 3: Memories "For You" feed (replaces the flat grid for the memories landing).
+  const renderMemoriesFeed = () => {
+    const memoryPlayId = (folder: PhotoFolder) => folder.memoryId || folder.memory?.memoryId || folder.id;
+    const isMemoryOpening = (folder: PhotoFolder) => Boolean(pendingMemoryPlayId) && pendingMemoryPlayId === memoryPlayId(folder);
+    const memoryCategoryLabel = (category: string) =>
+      (({
+        on_this_day: uiText("On this day"),
+        best_of_year: uiText("Best of year"),
+        trip: uiText("Trip"),
+        people: uiText("People"),
+        place: uiText("Place"),
+        year: uiText("Year"),
+      } as Record<string, string>)[category] ?? category.replace(/_/g, " "));
+    if (!memoryFolders.length) {
+      // Show shimmer placeholders while the first load is in flight so the
+      // empty state doesn't flash before memories arrive.
+      if (loading) {
+        return (
+          <div className="memories-feed">
+            <div className="memories-grid" aria-hidden="true">
+              {Array.from({ length: 6 }).map((_, index) => (
+                <div key={index} className="memory-card memory-card-skeleton" />
+              ))}
+            </div>
+          </div>
+        );
+      }
+      return (
+        <div className="memories-empty">
+          <Sparkles size={30} />
+          <strong>{uiText("Memories appear here")}</strong>
+          <span>{uiText("As you add and scan photos, Vintrace builds Memories — trips, people, places, and the best of each year.")}</span>
+          <button type="button" className="primary memories-empty-cta" onClick={() => void createUserMemoryFromCurrentView()} disabled={props.busy || userMemorySaving}>
+            <Sparkles size={16} /><span>{userMemorySaving ? uiText("Saving") : uiText("New Memory")}</span>
+          </button>
+          {userMemoryError && <small className="photo-metadata-error" role="alert">{userMemoryError}</small>}
+        </div>
+      );
+    }
+    const hero = featuredMemory;
+    const surfacedIds = new Set([hero?.id, ...onThisDayMemories.map((folder) => folder.id)].filter(Boolean));
+    const gridMemories = memoryFolders.filter((folder) => !surfacedIds.has(folder.id));
+    return (
+      <div className="memories-feed">
+        {hero && (
+          <div className="memory-hero">
+            <button type="button" className="memory-hero-cover" onClick={() => setActiveId(hero.id)} aria-label={`${uiText("Open memory")} ${hero.name}`}>
+              {hero.coverPreviewUrl ? (
+                <img src={hero.coverPreviewUrl} alt="" decoding="async" style={photoCoverCropStyle(hero.coverCrop)} />
+              ) : (
+                <Sparkles size={44} />
+              )}
+              <span className="memory-hero-sheen" aria-hidden="true" />
+            </button>
+            <div className="memory-hero-meta">
+              <span className="memory-hero-kicker">{uiText("Featured memory")}</span>
+              <strong>{hero.name}</strong>
+              {hero.memory?.subtitle ? <span className="memory-hero-sub">{hero.memory.subtitle}</span> : null}
+              <span className="memory-hero-stat">
+                {hero.memory?.dateRangeLabel ? `${hero.memory.dateRangeLabel} · ` : ""}
+                {formatCount(hero.count)} {hero.count === 1 ? uiText("photo") : uiText("photos")}
+              </span>
+              <div className="memory-hero-actions">
+                <button type="button" className="primary memory-play" onClick={() => playMemory(hero)} disabled={Boolean(pendingMemoryPlayId)}>
+                  <Play size={16} /><span>{isMemoryOpening(hero) ? uiText("Opening") : uiText("Play the movie")}</span>
+                </button>
+                <button type="button" className="secondary memory-export" onClick={() => void exportActiveMemoryMovie(hero)} disabled={props.busy || memoryMovieExporting}>
+                  <Video size={16} /><span>{memoryMovieExporting ? uiText("Exporting") : uiText("Export movie")}</span>
+                </button>
+              </div>
+              {userMemoryError && <small className="photo-metadata-error" role="alert">{userMemoryError}</small>}
+            </div>
+          </div>
+        )}
+        {onThisDayMemories.length > 0 && (
+          <section className="memories-onthisday" aria-label={uiText("On this day")}>
+            <div className="memories-section-head"><CalendarDays size={16} /><strong>{uiText("On this day")}</strong></div>
+            <div className="memory-strip">
+              {onThisDayMemories.map((folder) => (
+                <button type="button" className="memory-strip-card" key={folder.id} onClick={() => setActiveId(folder.id)}>
+                  <span className="memory-strip-cover">{folder.coverPreviewUrl ? <img src={folder.coverPreviewUrl} alt="" loading="lazy" decoding="async" style={photoCoverCropStyle(folder.coverCrop)} /> : <Sparkles size={18} />}</span>
+                  <span className="memory-strip-name">{folder.name}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+        <section className="memories-section" aria-label={uiText("Memories")}>
+          <div className="memories-section-head">
+            <Sparkles size={16} /><strong>{uiText("For You")}</strong>
+            <button type="button" className="ghost compact-action memories-new" onClick={() => void createUserMemoryFromCurrentView()} disabled={props.busy || userMemorySaving}>
+              <Sparkles size={14} /><span>{userMemorySaving ? uiText("Saving") : uiText("New Memory")}</span>
+            </button>
+          </div>
+          {userMemoryError && <small className="photo-metadata-error" role="alert">{userMemoryError}</small>}
+          {gridMemories.length > 0 && (
+          <div className="memories-grid">
+            {gridMemories.map((folder) => (
+              <div className="memory-card" key={folder.id}>
+                <button type="button" className="memory-card-open" onClick={() => setActiveId(folder.id)} aria-label={`${uiText("Open memory")} ${folder.name}`}>
+                  <span className="memory-card-cover">
+                    {folder.coverPreviewUrl ? <img src={folder.coverPreviewUrl} alt="" loading="lazy" decoding="async" style={photoCoverCropStyle(folder.coverCrop)} /> : <Sparkles size={22} />}
+                    <span className="memory-card-play" aria-hidden="true"><Play size={18} /></span>
+                    {folder.memory?.category ? <span className="memory-card-pill">{memoryCategoryLabel(String(folder.memory.category))}</span> : null}
+                  </span>
+                  <span className="memory-card-meta">
+                    <strong>{folder.name}</strong>
+                    <small>{formatCount(folder.count)} {folder.count === 1 ? uiText("photo") : uiText("photos")}{folder.memory?.dateRangeLabel ? ` · ${folder.memory.dateRangeLabel}` : ""}</small>
+                  </span>
+                </button>
+                <div className="memory-card-actions">
+                  <button type="button" className="ghost icon-action" title={uiText("Play the movie")} aria-label={`${uiText("Play the movie")} ${folder.name}`} onClick={() => playMemory(folder)} disabled={Boolean(pendingMemoryPlayId)}><Play size={15} /></button>
+                  <button type="button" className="ghost icon-action" title={uiText("Export movie")} aria-label={`${uiText("Export movie")} ${folder.name}`} onClick={() => void exportActiveMemoryMovie(folder)} disabled={props.busy || memoryMovieExporting}><Video size={15} /></button>
+                  <button type="button" className={folder.memory?.favorite ? "ghost icon-action active" : "ghost icon-action"} aria-pressed={Boolean(folder.memory?.favorite)} title={folder.memory?.favorite ? uiText("Unfavorite") : uiText("Favorite")} aria-label={`${folder.memory?.favorite ? uiText("Unfavorite") : uiText("Favorite")} ${folder.name}`} onClick={() => void toggleMemoryFavorite(folder)}><Star size={15} fill={folder.memory?.favorite ? "currentColor" : "none"} /></button>
+                  <button type="button" className="ghost icon-action" title={uiText("Feature less")} aria-label={`${uiText("Feature less")} ${folder.name}`} onClick={() => void featureLessMemory(folder)}><EyeOff size={15} /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+          )}
+        </section>
+      </div>
+    );
+  };
+
+  // Phase 3: Albums gallery (replaces the flat grid for the albums landing).
+  const renderAlbumsGallery = () => {
+    const hasAny = albumFolders.length > 0 || albumGalleryAlbums.length > 0;
+    return (
+      <div className="albums-gallery">
+        <div className="albums-gallery-head">
+          <strong>{browsedAlbumFolder ? browsedAlbumFolder.name : uiText("Albums")}</strong>
+          <span className="albums-gallery-summary">{formatCount(visibleAlbumFolderCards.length)} {visibleAlbumFolderCards.length === 1 ? uiText("folder") : uiText("folders")} · {formatCount(visibleAlbumCards.length)} {visibleAlbumCards.length === 1 ? uiText("album") : uiText("albums")}</span>
+          <div className="albums-gallery-actions">
+            <button type="button" className="primary albums-new-control" onClick={() => startNewAlbum("smart")} disabled={props.busy || savingAlbum || savingAlbumFolder}><Sparkles size={15} /><span>{uiText("New smart album")}</span></button>
+            <button type="button" className="secondary compact-action" onClick={() => startNewAlbum("manual")} disabled={props.busy || savingAlbum || savingAlbumFolder}><Images size={15} /><span>{uiText("New album")}</span></button>
+            <button type="button" className="secondary compact-action" onClick={() => startNewAlbumFolder(browsedAlbumFolderId)} disabled={props.busy || savingAlbumFolder}><FolderPlus size={15} /><span>{uiText("New folder")}</span></button>
+            <button type="button" className="ghost compact-action" onClick={() => { void loadFolders(); void loadSuggestions(); }} disabled={props.busy}><RefreshCcw size={15} /><span>{uiText("Refresh")}</span></button>
+          </div>
+        </div>
+        {browsedAlbumFolder && (
+          <div className="albums-breadcrumb" aria-label={uiText("Album folder path")}>
+            <button type="button" className="ghost compact-action" onClick={() => setBrowsedAlbumFolderId("")}>{uiText("All albums")}</button>
+            {albumTreeAncestorIds(browsedAlbumFolder, folders)
+              .slice()
+              .reverse()
+              .map((id) => albumFolders.find((item) => albumTreeItemId(item) === id))
+              .filter((item): item is PhotoFolder => Boolean(item))
+              .map((ancestor) => (
+                <span className="albums-breadcrumb-seg" key={ancestor.id}>
+                  <ChevronRight size={14} aria-hidden="true" />
+                  <button type="button" className="ghost compact-action" onClick={() => setBrowsedAlbumFolderId(albumTreeItemId(ancestor))}>{ancestor.name}</button>
+                </span>
+              ))}
+            <ChevronRight size={14} aria-hidden="true" />
+            <span aria-current="page">{browsedAlbumFolder.name}</span>
+          </div>
+        )}
+        {hasAny ? (
+          <div className="albums-grid">
+            {visibleAlbumFolderCards.map((folder) => {
+              const folderKey = albumTreeItemId(folder);
+              const childCount = albumFolders.filter((item) => albumTreeParentId(item) === folderKey).length
+                + albumGalleryAlbums.filter((item) => albumTreeParentId(item) === folderKey).length;
+              return (
+                <button type="button" className="album-folder-card" key={folder.id} onClick={() => setBrowsedAlbumFolderId(folderKey)}>
+                  <span className="album-folder-cover">{folder.coverPreviewUrl ? <img src={folder.coverPreviewUrl} alt="" loading="lazy" decoding="async" style={photoCoverCropStyle(folder.coverCrop)} /> : <Folder size={26} />}</span>
+                  <span className="album-card-meta">
+                    <strong>{folder.name}</strong>
+                    <small>{formatCount(childCount)} {childCount === 1 ? uiText("item") : uiText("items")}</small>
+                  </span>
+                  <span className="album-folder-badge" aria-hidden="true"><Folder size={13} /></span>
+                </button>
+              );
+            })}
+            {visibleAlbumCards.map((folder) => (
+              <div className="album-card" key={folder.id}>
+                <button type="button" className="album-card-open" onClick={() => setActiveId(folder.id)} aria-label={`${uiText("Open album")} ${folder.name}`}>
+                  <span className="album-card-cover">
+                    {folder.coverPreviewUrl ? <img src={folder.coverPreviewUrl} alt="" loading="lazy" decoding="async" style={photoCoverCropStyle(folder.coverCrop)} /> : <Images size={22} />}
+                    {folder.validation && folder.validation.length > 0 ? <span className="album-card-warn" title={folder.validation.join(" · ")} aria-label={`${folder.validation.length} ${uiText("issues need attention")}`}><AlertTriangle size={14} /></span> : null}
+                  </span>
+                  <span className="album-card-meta">
+                    <strong>{folder.name}</strong>
+                    <small>{formatCount(folder.count)} {folder.count === 1 ? uiText("photo") : uiText("photos")}</small>
+                  </span>
+                </button>
+                <span className={folder.albumKind === "manual" ? "album-card-kind-badge manual" : "album-card-kind-badge"}>{folder.albumKind === "manual" ? uiText("Manual") : uiText("Smart")}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="albums-empty">
+            <Images size={30} />
+            <strong>{uiText("Create your first album")}</strong>
+            <span>{uiText("Group photos into albums, or let a smart album collect them by rule.")}</span>
+            <div className="albums-empty-actions">
+              <button type="button" className="primary" onClick={() => startNewAlbum("manual")}><Images size={16} /><span>{uiText("New album")}</span></button>
+              <button type="button" className="secondary" onClick={() => startNewAlbum("smart")}><Sparkles size={16} /><span>{uiText("New smart album")}</span></button>
+            </div>
+          </div>
+        )}
+        {suggestions.length > 0 && (
+          <section className="albums-suggested" aria-label={uiText("Suggested albums")}>
+            <div className="memories-section-head"><Sparkles size={16} /><strong>{uiText("Suggested albums")}</strong></div>
+            <div className="albums-grid">
+              {suggestions.slice(0, 12).map((suggestion) => (
+                <div className="album-suggestion-card" key={suggestion.id || suggestion.name}>
+                  <span className="album-suggestion-meta">
+                    <strong>{suggestion.name}</strong>
+                    {suggestion.reason ? <small>{suggestion.reason}</small> : null}
+                    <small>{formatCount(suggestion.matchCount)} {uiText("matches")}</small>
+                  </span>
+                  <button
+                    type="button"
+                    className="secondary compact-action"
+                    onClick={async () => {
+                      const key = suggestion.id || suggestion.name;
+                      setSavingSuggestionId(key);
+                      try {
+                        await saveSuggestion(suggestion);
+                      } finally {
+                        setSavingSuggestionId("");
+                      }
+                    }}
+                    disabled={props.busy || savingAlbum || savingSuggestionId === (suggestion.id || suggestion.name)}
+                  >
+                    <Images size={14} />
+                    <span>{savingSuggestionId === (suggestion.id || suggestion.name) ? uiText("Adding") : uiText("Add album")}</span>
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+      </div>
+    );
+  };
+
+  // Phase 4: People & Pets gallery (Apple-Photos face circles) for the Browse landing.
+  const renderPeopleGallery = () => {
+    const namedPeople = peopleManagementPeople.filter((folder) => !folder.personProfile?.hidden);
+    const pets = peopleManagementPets.filter((folder) => !folder.petProfile?.hidden);
+    const groups = peopleManagementGroups.filter((folder) => !folder.groupProfile?.hidden);
+    const unknownClusters = railFolders.filter((folder) => folder.kind === "unknown");
+    const petReviewFolder = folders.find((folder) => folder.id === "petReview") || null;
+    const favoritePeople = namedPeople.filter((folder) => folder.personProfile?.favorite);
+    const favoritePets = pets.filter((folder) => folder.petProfile?.favorite);
+    const reviewPending = reviewCandidates.length;
+    const hasAny = namedPeople.length > 0 || pets.length > 0 || groups.length > 0
+      || unknownClusters.length > 0 || Boolean(petReviewFolder && petReviewFolder.count > 0);
+    const startRename = (folder: PhotoFolder) => {
+      setPeopleManagementRenameDrafts((current) => ({ ...current, [folder.id]: folder.name }));
+      setRenamingPersonId(folder.id);
+    };
+    const commitRename = (folder: PhotoFolder) => {
+      setRenamingPersonId("");
+      void renameManagedPerson(folder);
+    };
+    const circle = (folder: PhotoFolder, kind: "person" | "pet" | "group") => {
+      const favorite = kind === "person" ? folder.personProfile?.favorite
+        : kind === "pet" ? folder.petProfile?.favorite : folder.groupProfile?.favorite;
+      const renaming = kind === "person" && renamingPersonId === folder.id;
+      const subLabel = kind === "pet" ? String(folder.petKindLabel || "").trim() : "";
+      return (
+        <div className="people-circle-card" key={folder.id}>
+          <button type="button" className="people-circle-cover-btn" onClick={() => setActiveId(folder.id)} aria-label={`${uiText("Open")} ${folder.name}`}>
+            <span className={favorite ? "people-circle-cover favorite" : "people-circle-cover"}>
+              {folder.coverPreviewUrl ? <img src={folder.coverPreviewUrl} alt="" loading="lazy" decoding="async" style={photoCoverCropStyle(folder.coverCrop)} /> : <Users size={26} />}
+            </span>
+          </button>
+          <div className="people-circle-meta">
+            {renaming ? (
+              <input
+                className="people-circle-rename"
+                autoFocus
+                value={peopleManagementRenameDrafts[folder.id] ?? folder.name}
+                onChange={(event) => setPeopleManagementRenameDrafts((current) => ({ ...current, [folder.id]: event.currentTarget.value }))}
+                onKeyDown={(event) => { if (event.key === "Enter") commitRename(folder); else if (event.key === "Escape") setRenamingPersonId(""); }}
+                onBlur={() => commitRename(folder)}
+                aria-label={`${uiText("Rename")} ${folder.name}`}
+              />
+            ) : kind === "person" ? (
+              <button type="button" className="people-circle-name" onClick={() => startRename(folder)} title={uiText("Rename")}>{folder.name}</button>
+            ) : (
+              <strong className="people-circle-name-static">{folder.name}</strong>
+            )}
+            <small>{subLabel ? `${subLabel} · ` : ""}{formatCount(folder.count)} {folder.count === 1 ? uiText("photo") : uiText("photos")}</small>
+          </div>
+          <div className="people-circle-actions">
+            <button type="button" className={favorite ? "icon-action active" : "icon-action"} aria-pressed={Boolean(favorite)} title={favorite ? uiText("Unfavorite") : uiText("Favorite")} aria-label={`${favorite ? uiText("Unfavorite") : uiText("Favorite")} ${folder.name}`} onClick={() => { if (kind === "person") void toggleFavoritePerson(folder); else if (kind === "pet") void toggleFavoritePet(folder); else void savePeopleGroupPatch(folder, { favorite: !favorite }); }}><Star size={15} fill={favorite ? "currentColor" : "none"} /></button>
+            {kind === "person" && <button type="button" className="icon-action" title={uiText("Rename")} aria-label={`${uiText("Rename")} ${folder.name}`} onClick={() => startRename(folder)}><Pencil size={15} /></button>}
+            <button type="button" className="icon-action" title={uiText("Hide")} aria-label={`${uiText("Hide")} ${folder.name}`} onClick={() => { if (kind === "person") void hidePerson(folder); else if (kind === "pet") void hidePet(folder); else void savePeopleGroupPatch(folder, { hidden: true }); }}><EyeOff size={15} /></button>
+          </div>
+        </div>
+      );
+    };
+    if (!hasAny) {
+      return (
+        <div className="people-gallery-empty">
+          <Users size={30} />
+          <strong>{uiText("Add the people and pets you love")}</strong>
+          <span>{uiText("Name a few faces and Vintrace groups every photo of them — privately, on your device.")}</span>
+          {onRequestPeopleSection && (
+            <button type="button" className="primary" onClick={() => onRequestPeopleSection("enroll")}><UserPlus size={16} /><span>{uiText("Add someone")}</span></button>
+          )}
+        </div>
+      );
+    }
+    return (
+      <div className="photos-people-gallery">
+        <div className="people-gallery-head">
+          <div className="people-gallery-title">
+            <strong>{uiText("People & Pets")}</strong>
+            <span className="people-gallery-summary">{formatCount(namedPeople.length)} {namedPeople.length === 1 ? uiText("person") : uiText("people")} · {formatCount(pets.length)} {pets.length === 1 ? uiText("pet") : uiText("pets")}</span>
+          </div>
+          <div className="people-gallery-actions">
+            {onRequestPeopleSection && <button type="button" className="primary albums-new-control" onClick={() => onRequestPeopleSection("enroll")}><UserPlus size={15} /><span>{uiText("Add someone")}</span></button>}
+            {onRequestPeopleSection && <button type="button" className="secondary compact-action people-review-btn" onClick={() => onRequestPeopleSection("review")}><ShieldCheck size={15} /><span>{uiText("Review matches")}</span>{reviewPending > 0 ? <span className="people-review-badge">{formatCount(reviewPending)}</span> : null}</button>}
+            <button type="button" className="ghost compact-action" onClick={() => void loadDuplicatePeople()} disabled={props.busy}><Users size={15} /><span>{uiText("Find duplicates")}</span></button>
+            <button type="button" className="ghost compact-action" onClick={() => { void loadFolders(); void loadPeopleManagementFolders(); }} disabled={props.busy}><RefreshCcw size={15} /><span>{uiText("Refresh")}</span></button>
+          </div>
+        </div>
+        {favoritePeople.length + favoritePets.length > 0 && (
+          <section className="people-section" aria-label={uiText("Favorites")}>
+            <div className="people-section-head"><Star size={16} /><strong>{uiText("Favorites")}</strong></div>
+            <div className="people-circle-grid">{favoritePeople.map((folder) => circle(folder, "person"))}{favoritePets.map((folder) => circle(folder, "pet"))}</div>
+          </section>
+        )}
+        {namedPeople.length > 0 && (
+          <section className="people-section" aria-label={uiText("People")}>
+            <div className="people-section-head"><Users size={16} /><strong>{uiText("People")}</strong></div>
+            <div className="people-circle-grid">{namedPeople.map((folder) => circle(folder, "person"))}</div>
+          </section>
+        )}
+        {pets.length > 0 && (
+          <section className="people-section" aria-label={uiText("Pets")}>
+            <div className="people-section-head"><Tag size={16} /><strong>{uiText("Pets")}</strong></div>
+            <div className="people-circle-grid">{pets.map((folder) => circle(folder, "pet"))}</div>
+          </section>
+        )}
+        {(unknownClusters.length > 0 || Boolean(petReviewFolder && petReviewFolder.count > 0)) && (
+          <section className="people-section people-to-name-band" aria-label={uiText("More people to name")}>
+            <div className="people-section-head"><UserPlus size={16} /><strong>{uiText("More people to name")}</strong></div>
+            <div className="people-circle-grid">
+              {petReviewFolder && petReviewFolder.count > 0 ? (
+                <div className="people-circle-card to-name" key="petReview">
+                  <button type="button" className="people-circle-cover-btn" onClick={() => setActiveId(petReviewFolder.id)} aria-label={uiText("Review pets")}>
+                    <span className="people-circle-cover">{petReviewFolder.coverPreviewUrl ? <img src={petReviewFolder.coverPreviewUrl} alt="" loading="lazy" decoding="async" style={photoCoverCropStyle(petReviewFolder.coverCrop)} /> : <Tag size={26} />}</span>
+                  </button>
+                  <div className="people-circle-meta"><strong className="people-circle-name-static">{petReviewFolder.name}</strong><small>{formatCount(petReviewFolder.count)} {uiText("to review")}</small></div>
+                </div>
+              ) : null}
+              {unknownClusters.map((folder) => (
+                <div className="people-circle-card to-name" key={folder.id}>
+                  <button type="button" className="people-circle-cover-btn" onClick={() => setActiveId(folder.id)} aria-label={`${uiText("Name")} ${folder.name}`}>
+                    <span className="people-circle-cover">{folder.coverPreviewUrl ? <img src={folder.coverPreviewUrl} alt="" loading="lazy" decoding="async" style={photoCoverCropStyle(folder.coverCrop)} /> : <Users size={26} />}</span>
+                  </button>
+                  <div className="people-circle-meta"><strong className="people-circle-name-static">{folder.name}</strong><small>{formatCount(folder.count)} {folder.count === 1 ? uiText("photo") : uiText("photos")}</small></div>
+                  <div className="people-circle-actions">
+                    <button type="button" className="icon-action" title={uiText("Name")} aria-label={`${uiText("Name")} ${folder.name}`} onClick={() => setActiveId(folder.id)}><Tag size={15} /></button>
+                    {onRequestPeopleSection && <button type="button" className="icon-action" title={uiText("Review")} aria-label={`${uiText("Review")} ${folder.name}`} onClick={() => onRequestPeopleSection("review")}><ShieldCheck size={15} /></button>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+        {groups.length > 0 && (
+          <section className="people-section" aria-label={uiText("People Together")}>
+            <div className="people-section-head"><Users size={16} /><strong>{uiText("People Together")}</strong></div>
+            <div className="people-circle-grid">{groups.map((folder) => circle(folder, "group"))}</div>
+          </section>
+        )}
+      </div>
+    );
+  };
+
+  // Only show the dedicated destinations on the Memories/Albums/People TABS (initialActiveId
+  // seeds them there). On the Library tab, clicking the memories/albums/people rail item keeps
+  // the classic rail + grid so existing collection workflows are unaffected.
+  const showMemoriesFeed = activeId === "memories" && props.initialActiveId === "memories" && !searchQuery.trim() && !sensitiveCollectionLocked;
+  const showAlbumsGallery = activeId === "albums" && props.initialActiveId === "albums" && !searchQuery.trim() && !sensitiveCollectionLocked;
+  const showPeopleGallery = activeId === "people" && props.initialActiveId === "people" && !searchQuery.trim() && !sensitiveCollectionLocked;
+
   return (
-    <section className="photos-page">
+    <section className={showMemoriesFeed || showAlbumsGallery || showPeopleGallery ? "photos-page photos-destination-mode" : "photos-page"}>
       <aside className="photos-rail" aria-label={uiText("Photo folders")}>
         <h2 className="photos-rail-title">
           <Images size={18} /> {uiText("Photos")}
@@ -18641,7 +19303,7 @@ export function PhotosView(props: {
             />
           </label>
         </div>
-        {(photoSystemSourceRows.length > 0 || refreshPhotoSources) && (
+        {(visiblePhotoSystemSourceRows.length > 0 || refreshPhotoSources) && (
           <div className="photo-import-system-sources" aria-label={uiText("Suggested import sources")}>
             <div className="photo-import-system-sources-head">
               <span>{uiText("Suggested sources")}</span>
@@ -18652,9 +19314,9 @@ export function PhotosView(props: {
                 </button>
               )}
             </div>
-            {photoSystemSourceRows.length > 0 ? (
+            {visiblePhotoSystemSourceRows.length > 0 ? (
               <div className="photo-import-system-source-list">
-                {photoSystemSourceRows.map((row) => (
+                {visiblePhotoSystemSourceRows.map((row) => (
                   <button
                     key={row.key}
                     type="button"
@@ -19983,6 +20645,92 @@ export function PhotosView(props: {
             )}
           </section>
         )}
+        {indexEverythingSource && (
+          <div
+            className="modal-backdrop"
+            role="presentation"
+            onClick={() => { if (!indexEverythingRunning) { setIndexEverythingSource(null); setIndexEverythingExtraPaths([]); } }}
+          >
+            <div
+              className="consent-sheet index-everything-sheet"
+              role="dialog"
+              aria-modal="true"
+              aria-label={uiText("Index all photos on this computer")}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="index-everything-hero" aria-hidden="true"><Images size={26} /></div>
+              <strong>{uiText("Index all photos on this computer")}</strong>
+              <p className="compact">{uiText("Vintrace will read image files across your Home folder and build one library you can browse, search, and organize. It skips caches, app data, and system files.")}</p>
+              <ul className="index-everything-points">
+                <li><ShieldCheck size={15} aria-hidden="true" /><span>{uiText("Everything stays on your device — nothing is uploaded.")}</span></li>
+                <li><Folder size={15} aria-hidden="true" /><span>{uiText("Originals are referenced in place — no copies and no moving your files.")}</span></li>
+                <li><EyeOff size={15} aria-hidden="true" /><span>{uiText("Hide categories like screenshots or utilities, or remove the whole library anytime.")}</span></li>
+              </ul>
+              <div className="index-everything-scope">
+                <span className="index-everything-scope-label">{uiText("Where to look")}</span>
+                <div className="index-everything-scope-chips">
+                  <span className="index-everything-scope-chip base" title={indexEverythingSource.path}>
+                    <Images size={13} aria-hidden="true" /><span>{uiText("Home folder")}</span>
+                  </span>
+                  {indexEverythingExtraPaths.map((extraPath) => (
+                    <span className="index-everything-scope-chip" key={extraPath}>
+                      <Folder size={13} aria-hidden="true" />
+                      <span title={extraPath}>{fileName(extraPath) || extraPath}</span>
+                      <button
+                        type="button"
+                        className="index-everything-scope-remove"
+                        aria-label={`${uiText("Remove")} ${extraPath}`}
+                        onClick={() => setIndexEverythingExtraPaths((current) => current.filter((item) => item !== extraPath))}
+                        disabled={indexEverythingRunning}
+                      >
+                        <X size={12} />
+                      </button>
+                    </span>
+                  ))}
+                  {detectedDriveSources
+                    .filter((drive) => !indexEverythingExtraPaths.includes(drive.path))
+                    .map((drive) => (
+                      <button
+                        type="button"
+                        className="index-everything-drive"
+                        key={drive.path}
+                        title={drive.path}
+                        onClick={() => setIndexEverythingExtraPaths((current) => (current.includes(drive.path) ? current : [...current, drive.path]))}
+                        disabled={indexEverythingRunning}
+                      >
+                        <HardDrive size={13} aria-hidden="true" /><span>{uiText(drive.label)}</span>
+                      </button>
+                    ))}
+                  <button type="button" className="index-everything-add" onClick={() => void addIndexEverythingFolder()} disabled={indexEverythingRunning}>
+                    <FolderPlus size={13} aria-hidden="true" /><span>{uiText("Add folder or drive")}</span>
+                  </button>
+                </div>
+              </div>
+              <label className="index-everything-hide">
+                <input
+                  type="checkbox"
+                  checked={indexEverythingHideNoise}
+                  onChange={(event) => setIndexEverythingHideNoise(event.currentTarget.checked)}
+                  disabled={indexEverythingRunning}
+                />
+                <span>
+                  <strong>{uiText("Hide screenshots and utility images")}</strong>
+                  <small>{uiText("Keeps the Library focused on real photos — show them anytime from the rail.")}</small>
+                </span>
+              </label>
+              {importError && <small className="photo-metadata-error" role="alert">{importError}</small>}
+              <div className="index-everything-actions">
+                <button type="button" className="ghost compact-action" onClick={() => { setIndexEverythingSource(null); setIndexEverythingExtraPaths([]); }} disabled={indexEverythingRunning}>
+                  <X size={15} /><span>{uiText("Cancel")}</span>
+                </button>
+                <button type="button" className="primary" onClick={() => void runIndexEverything(indexEverythingSource)} disabled={indexEverythingRunning || props.busy}>
+                  {indexEverythingRunning ? <RefreshCcw size={16} className="spin" /> : <Sparkles size={16} />}
+                  <span>{indexEverythingRunning ? uiText("Indexing your photos…") : uiText("Index my photos")}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {pendingImportEntries.length > 0 && (
           <div className="photo-import-review-panel" role="status" aria-label={uiText("Import review")}>
             <div className="photo-import-review-head">
@@ -21141,6 +21889,12 @@ export function PhotosView(props: {
         )}
       </aside>
 
+      {(showMemoriesFeed || showAlbumsGallery || showPeopleGallery) && (
+        <div className="photos-destination">
+          {showMemoriesFeed ? renderMemoriesFeed() : showAlbumsGallery ? renderAlbumsGallery() : renderPeopleGallery()}
+        </div>
+      )}
+
       <div
         className={importDragOver ? "photos-gallery import-drag-over" : "photos-gallery"}
         onDragOver={(event) => {
@@ -21171,6 +21925,29 @@ export function PhotosView(props: {
             ) : null}
           </div>
           <div className="photos-gallery-actions">
+            {activeId === "all" && !searchQuery && (
+              <div className="photo-zoom-spine" role="group" aria-label={uiText("Library zoom level")}>
+                {([
+                  ["years", uiText("Years")],
+                  ["months", uiText("Months")],
+                  ["days", uiText("Days")],
+                  ["all", uiText("All Photos")],
+                ] as Array<[PhotoDateViewMode, string]>).map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={`photo-zoom-spine-btn${photoDateViewMode === mode ? " active" : ""}`}
+                    aria-pressed={photoDateViewMode === mode}
+                    onClick={() => {
+                      setPhotoDateViewMode(mode);
+                      setActiveDateBucketKey("");
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
             <label className="photo-search-control">
               <Search size={14} />
               <input
@@ -21202,7 +21979,7 @@ export function PhotosView(props: {
               <Sparkles size={14} />
               <input
                 type="search"
-                aria-label={uiText("Search photos by meaning")}
+                aria-label={uiText("Find photos by meaning")}
                 value={semanticQuery}
                 onChange={(event) => setSemanticQuery(event.currentTarget.value)}
                 placeholder={uiText("Describe a photo (AI)")}
@@ -21229,6 +22006,19 @@ export function PhotosView(props: {
                 {semanticBusy ? uiText("Searching") : uiText("AI search")}
               </button>
             </form>
+            <button
+              type="button"
+              className={galleryFiltersOpen ? "secondary compact-action photo-filters-toggle active" : "ghost compact-action photo-filters-toggle"}
+              onClick={() => setGalleryFiltersOpen((open) => !open)}
+              aria-expanded={galleryFiltersOpen}
+              aria-label={uiText("Filters")}
+            >
+              <SlidersHorizontal size={14} />
+              <span>{uiText("Filters")}</span>
+              {activeFilterCount > 0 && <span className="photo-filters-toggle-badge">{formatCount(activeFilterCount)}</span>}
+            </button>
+            {galleryFiltersOpen && (
+            <>
             {keywordOptions.length > 0 && (
               <label className="photo-sort-control">
                 <Tag size={14} />
@@ -21385,6 +22175,8 @@ export function PhotosView(props: {
               <Keyboard size={14} />
               <span>{uiText("Shortcuts")}</span>
             </button>
+            </>
+            )}
             <label className="photo-sort-control">
               <SlidersHorizontal size={14} />
               <select aria-label={uiText("Sort photos")} value={sort} onChange={(event) => setSort(event.currentTarget.value as PhotoSort)}>
@@ -22874,6 +23666,18 @@ export function PhotosView(props: {
                   <span>{importHistoryArchiveSaving ? uiText("Archiving") : uiText("Archive matches")}</span>
                 </button>
               )}
+              {activeImportHistoryQueryFiltersActive && activeImportHistoryArchivableSummaries.length > 0 && (
+                <button
+                  type="button"
+                  className="ghost compact-action"
+                  onClick={() => setImportHistoryBulkOpen((open) => !open)}
+                  disabled={props.busy || importHistoryBulkSaving || importHistoryEditSaving}
+                  aria-expanded={importHistoryBulkOpen}
+                >
+                  <Tag size={14} />
+                  <span>{uiText("Set source for matches")}</span>
+                </button>
+              )}
               {activeImportHistoryFiltersActive && (
                 <button
                   type="button"
@@ -22893,6 +23697,60 @@ export function PhotosView(props: {
             </div>
             {importHistoryEditError && <small className="warn">{importHistoryEditError}</small>}
             {importHistoryEditStatus && !importHistoryEditError && <small>{importHistoryEditStatus}</small>}
+            {importHistoryBulkOpen && activeImportHistoryArchivableSummaries.length > 0 && (
+              <div className="photo-import-provenance-editor" role="group" aria-label={uiText("Set source for matches")}>
+                <label>
+                  <span>{uiText("Source")}</span>
+                  <select
+                    aria-label={uiText("Bulk import source kind")}
+                    value={importHistoryEditKind}
+                    onChange={(event) => setImportHistoryEditKind(event.currentTarget.value as PhotoImportSourceKind)}
+                    disabled={props.busy || importHistoryBulkSaving}
+                  >
+                    {PHOTO_IMPORT_SOURCE_OPTIONS.map((option) => (
+                      <option key={option.kind} value={option.kind}>{uiText(option.label)}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>{uiText("Label")}</span>
+                  <input
+                    aria-label={uiText("Bulk import source label")}
+                    value={importHistoryEditLabel}
+                    onChange={(event) => setImportHistoryEditLabel(event.currentTarget.value)}
+                    placeholder={uiText("Leave blank to keep each label")}
+                    disabled={props.busy || importHistoryBulkSaving}
+                    maxLength={128}
+                  />
+                </label>
+                <label>
+                  <span>{uiText("Detail")}</span>
+                  <input
+                    aria-label={uiText("Bulk import source detail")}
+                    value={importHistoryEditDetail}
+                    onChange={(event) => setImportHistoryEditDetail(event.currentTarget.value)}
+                    placeholder={uiText("Sender, webpage, or note")}
+                    disabled={props.busy || importHistoryBulkSaving}
+                    maxLength={240}
+                  />
+                </label>
+                <div className="photo-import-provenance-editor-actions">
+                  <button
+                    type="button"
+                    className="secondary compact-action"
+                    onClick={() => void applyBulkImportHistoryProvenance(activeImportHistoryArchivableSummaries.map((session) => session.importId))}
+                    disabled={props.busy || importHistoryBulkSaving}
+                  >
+                    <Save size={14} />
+                    <span>{importHistoryBulkSaving ? uiText("Saving") : `${uiText("Apply to")} ${formatCount(activeImportHistoryArchivableSummaries.length)}`}</span>
+                  </button>
+                  <button type="button" className="ghost compact-action" onClick={() => setImportHistoryBulkOpen(false)} disabled={importHistoryBulkSaving}>
+                    <X size={14} />
+                    <span>{uiText("Cancel")}</span>
+                  </button>
+                </div>
+              </div>
+            )}
             {activeImportHistorySummaries.length > 0 ? (
               <div className="photo-import-history-list">
                 {activeImportHistorySummaries.map((session) => {
@@ -23582,12 +24440,14 @@ export function PhotosView(props: {
         ) : null}
         {!sensitiveCollectionLocked && (
         <>
-        <div className="photo-bulk-bar">
+        <div className={selectedSources.size > 0 ? "photo-bulk-bar active" : "photo-bulk-bar"}>
           <button type="button" className="ghost compact-action" onClick={togglePageSelection} disabled={!items.length || props.busy}>
             <Check size={14} />
             <span>{allPageSelected ? uiText("Clear page") : uiText("Select page")}</span>
           </button>
           <span>{formatCount(selectedSources.size)} {uiText("selected")}</span>
+          {(
+          <>
           <button type="button" className="secondary compact-action" onClick={() => void exportSelected()} disabled={!selectedSources.size || props.busy}>
             <Download size={14} />
             <span>{uiText("Export")}</span>
@@ -24078,6 +24938,8 @@ export function PhotosView(props: {
                 <span>{uiText("Delete")}</span>
               </button>
             </>
+          )}
+          </>
           )}
         </div>
         <div className="photo-slideshow-projects" aria-label={uiText("Slideshow projects")}>
@@ -26243,9 +27105,13 @@ export function PhotosView(props: {
           <div className="empty">
             <ImageIcon size={24} />
             <strong>{uiText("No photos here yet")}</strong>
-            <span>{uiText("Import files, import a folder, or drop photos onto this view.")}</span>
+            <span>{uiText("Index every photo on this computer into one library, or bring in specific files and folders.")}</span>
+            <button type="button" className="primary photo-empty-index-all" onClick={openIndexEverything} disabled={props.busy || importingPhotos || indexEverythingRunning}>
+              <Sparkles size={16} />
+              <span>{uiText("Index all photos on this computer")}</span>
+            </button>
             <div className="photo-empty-actions">
-              <button type="button" className="secondary compact-action" onClick={() => void importPickedFiles()} disabled={props.busy || importingPhotos}>
+              <button type="button" className="compact-action photo-empty-primary" onClick={() => void importPickedFiles()} disabled={props.busy || importingPhotos}>
                 <FolderInput size={14} />
                 <span>{importingPhotos ? uiText("Importing") : uiText("Import files")}</span>
               </button>
@@ -26458,8 +27324,15 @@ export function PhotosView(props: {
             })}
           </div>
         )}
+        {!sensitiveCollectionLocked && loading && !items.length && (photoDateViewMode === "all" || activeDateBucketKey) && (
+          <div className="photos-grid photos-grid-skeleton" style={thumbnailGridStyle} aria-hidden="true">
+            {Array.from({ length: 12 }).map((_, index) => (
+              <div key={index} className="photo-tile-skeleton" />
+            ))}
+          </div>
+        )}
         <div ref={sentinelRef} className="photos-sentinel" aria-hidden="true" />
-        {loading && <p className="compact photos-loading">{uiText("Loading...")}</p>}
+        {loading && <p className="compact photos-loading" role="status" aria-live="polite">{uiText("Loading...")}</p>}
       </div>
 
       {slideshowItem && (

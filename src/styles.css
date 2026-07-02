@@ -762,6 +762,124 @@ label {
   margin-top: 2px;
 }
 
+/* App brand lockup — the app's persistent identity now that the App-folder top
+   bar is gone. Apple-clarity tile + wordmark with one vivid accent moment
+   (the gradient on the tile and the gradient-clipped wordmark). Scoped under
+   .brand--lockup so it outweighs the base .brand strong/.brand span rules. */
+.brand--lockup {
+  gap: 12px;
+  padding: 10px 8px;
+}
+
+.brand--lockup .brand-mark {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  background: var(--accent-vivid);
+  box-shadow:
+    0 4px 14px var(--accent-vivid-weak),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+.brand--lockup .brand-mark::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+  pointer-events: none;
+}
+
+.brand--lockup .brand-mark img {
+  border-radius: 9px;
+}
+
+.brand--lockup .brand-text {
+  min-width: 0;
+}
+
+.brand--lockup .brand-name {
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.1;
+  background: var(--accent-vivid);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.brand--lockup .brand-subtitle {
+  color: var(--secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  margin-top: 3px;
+  text-transform: uppercase;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .brand--lockup .brand-mark {
+    transition:
+      box-shadow 0.25s ease,
+      transform 0.25s ease;
+  }
+
+  .brand--lockup:hover .brand-mark {
+    transform: translateY(-1px);
+    box-shadow:
+      0 6px 20px var(--accent-vivid-weak),
+      inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  }
+}
+
+/* Sidebar footer — language + first-use guide, relocated out of the removed top
+   bar. Pinned with the Mode card at the bottom of the rail. The slim
+   .language-picker keeps the selector the e2e setup drives on first load. */
+.sidebar-footer {
+  -webkit-app-region: no-drag;
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.sidebar-footer .language-picker {
+  flex: 1 1 auto;
+  min-height: 40px;
+  min-width: 0;
+}
+
+.sidebar-footer .language-picker select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sidebar-guide-button {
+  align-items: center;
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  color: var(--control-text);
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  justify-content: center;
+  min-height: 40px;
+  transition:
+    background 150ms ease,
+    color 150ms ease;
+  width: 40px;
+}
+
+.sidebar-guide-button:hover {
+  background: var(--control-bg-hover);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .nav-list {
   -webkit-app-region: no-drag;
   display: grid;
@@ -869,7 +987,7 @@ label {
 }
 
 .nav-list button.active::before {
-  background: var(--accent);
+  background: var(--accent-vivid);
   border-radius: 999px;
   content: "";
   height: 22px;
@@ -878,25 +996,104 @@ label {
   width: 3px;
 }
 
+/* Selecting a tab plays a one-shot motion on its icon that echoes what the
+   destination *is*: a gear turns, a wrench twists a bolt, sparkles glint, the
+   search lens sweeps, people give a hello-bob, album tiles snap into a grid,
+   library photos flip to the top of the stack. Keyed off .active so the class
+   toggle restarts the animation on every fresh selection — no JS needed. The
+   transform is contained to the icon's grid cell and never reflows the row. */
+@media (prefers-reduced-motion: no-preference) {
+  .nav-list button.active svg {
+    transform-origin: center;
+    animation-duration: 0.5s;
+    animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+    animation-fill-mode: both;
+  }
+
+  .nav-list button.active[data-tab="library"] svg {
+    animation-name: navIconFlipStack;
+  }
+  .nav-list button.active[data-tab="memories"] svg {
+    animation-name: navIconTwinkle;
+  }
+  .nav-list button.active[data-tab="albums"] svg {
+    animation-name: navIconTiles;
+  }
+  .nav-list button.active[data-tab="search"] svg {
+    animation-name: navIconScan;
+  }
+  .nav-list button.active[data-tab="people"] svg {
+    animation-name: navIconBob;
+    animation-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  .nav-list button.active[data-tab="tools"] svg {
+    animation-name: navIconTwist;
+  }
+  .nav-list button.active[data-tab="settings"] svg {
+    animation-name: navIconGear;
+    animation-duration: 0.6s;
+  }
+}
+
+/* Library — the top photo flips up off the stack. */
+@keyframes navIconFlipStack {
+  0% { transform: perspective(120px) rotateY(-34deg); }
+  60% { transform: perspective(120px) rotateY(10deg); }
+  100% { transform: perspective(120px) rotateY(0); }
+}
+
+/* Memories — a sparkle scintillates: small, twist, and glint up to size. */
+@keyframes navIconTwinkle {
+  0% { transform: scale(0.62) rotate(-24deg); opacity: 0.55; }
+  50% { transform: scale(1.2) rotate(10deg); opacity: 1; }
+  100% { transform: scale(1) rotate(0); opacity: 1; }
+}
+
+/* Albums — tiles drop into the grid with a tiny over-settle. */
+@keyframes navIconTiles {
+  0% { transform: scale(0.5) rotate(-9deg); }
+  60% { transform: scale(1.14) rotate(4deg); }
+  100% { transform: scale(1) rotate(0); }
+}
+
+/* Search — the lens sweeps left-right and zooms in on the find. */
+@keyframes navIconScan {
+  0% { transform: translateX(0) scale(1); }
+  28% { transform: translateX(-2px) scale(1.06); }
+  58% { transform: translateX(2px) scale(1.12); }
+  100% { transform: translateX(0) scale(1); }
+}
+
+/* People & Pets — a friendly hello-bob with a small second nod. */
+@keyframes navIconBob {
+  0% { transform: translateY(0); }
+  32% { transform: translateY(-3.5px); }
+  56% { transform: translateY(0); }
+  74% { transform: translateY(-1.5px); }
+  100% { transform: translateY(0); }
+}
+
+/* Tools — the wrench twists a bolt: bite, back off, settle. */
+@keyframes navIconTwist {
+  0% { transform: rotate(0); }
+  30% { transform: rotate(-24deg); }
+  62% { transform: rotate(15deg); }
+  100% { transform: rotate(0); }
+}
+
+/* Settings — gears turn: one full, decelerating revolution. */
+@keyframes navIconGear {
+  0% { transform: rotate(0); }
+  100% { transform: rotate(360deg); }
+}
+
 .sidebar-card,
-.topbar,
 .panel,
 .metric,
 .notice {
   background: var(--glass);
   border: 1px solid var(--separator-soft);
   border-radius: 8px;
-}
-
-/* C1/M9: backdrop-filter re-rasterizes its blurred region every frame the
-   content behind it moves. Applied to cards inside the scrolling .workspace
-   (and nested inside the already-frosted .sidebar) it was the single largest
-   GPU/paint cost. Reserve the frosted blur for the sticky .topbar chrome that
-   overlays moving content; repeating cards use the flat --glass token, which is
-   visually near-identical on a static page background. */
-.topbar {
-  backdrop-filter: blur(28px) saturate(1.35);
-  -webkit-backdrop-filter: blur(28px) saturate(1.35);
 }
 
 .sidebar-card {
@@ -1007,49 +1204,6 @@ label {
   padding-inline-end: 2px;
 }
 
-.topbar {
-  align-items: center;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.58)),
-    var(--chrome);
-  box-shadow:
-    var(--inner-highlight),
-    0 12px 34px rgba(31, 35, 40, 0.08);
-  display: grid;
-  gap: 12px;
-  grid-template-columns: minmax(0, 1fr) auto;
-  min-height: 64px;
-  padding-block: 9px;
-  padding-inline: 14px 10px;
-  position: sticky;
-  top: 14px;
-  z-index: 30;
-}
-
-.workspace-path {
-  align-items: center;
-  color: #3a3a3c;
-  display: grid;
-  gap: 9px;
-  grid-template-columns: 20px minmax(0, 1fr);
-  min-width: 0;
-}
-
-.workspace-path small {
-  color: var(--secondary);
-  display: block;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.1;
-  margin-bottom: 2px;
-  text-transform: uppercase;
-}
-
-.workspace-path div {
-  min-width: 0;
-}
-
-.workspace-path > div > span,
 .row span:last-of-type,
 .image-preview span {
   display: block;
@@ -1058,46 +1212,6 @@ label {
   white-space: nowrap;
 }
 
-.workspace-meta-strip {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 7px;
-  min-width: 0;
-}
-
-.workspace-meta-strip span {
-  align-items: center;
-  background: var(--fill);
-  border: 1px solid var(--separator-soft);
-  border-radius: 999px;
-  color: var(--secondary);
-  display: inline-flex;
-  font-size: 11px;
-  gap: 3px;
-  min-height: 22px;
-  padding: 3px 8px;
-}
-
-.workspace-meta-strip strong {
-  color: var(--text);
-  font-weight: 700;
-}
-
-.workspace-meta-strip .green strong {
-  color: var(--green);
-}
-
-.workspace-meta-strip .amber strong {
-  color: var(--orange);
-}
-
-.workspace-meta-strip .blue strong {
-  color: var(--accent);
-}
-
-.topbar-actions,
 .status-row,
 .review-actions,
 .bands {
@@ -1106,22 +1220,9 @@ label {
   gap: 8px;
 }
 
-.topbar-actions,
 .review-actions,
 .bands {
   flex-wrap: wrap;
-}
-
-.topbar-actions {
-  flex-wrap: nowrap;
-  justify-content: flex-end;
-  min-width: 0;
-}
-
-.topbar-actions .ghost,
-.topbar-actions .consent {
-  background: #ffffff;
-  color: #1d1d1f;
 }
 
 .language-picker {
@@ -1159,12 +1260,6 @@ label {
   box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.16);
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-}
-
-.topbar-actions .consent.on {
-  background: #eaf7ee;
-  border-color: #9fd7ae;
-  color: #114f22;
 }
 
 .ghost,
@@ -1211,26 +1306,10 @@ label {
   color: var(--success-control-text);
 }
 
-.topbar-actions .ghost:not(:disabled),
-.topbar-actions .consent:not(.disabled):not(:has(input:disabled)),
 .language-picker {
   background: #ffffff;
   border-color: rgba(60, 60, 67, 0.28);
   color: #1d1d1f;
-}
-
-.topbar-actions .ghost:not(:disabled):hover,
-.topbar-actions .ghost:not(:disabled):focus-visible {
-  background: #f2f2f7;
-  color: #111113;
-}
-
-.topbar-actions .workspace-lock-toggle:not(:disabled) {
-  -webkit-text-fill-color: #1d1d1f;
-  background: #ffffff;
-  background-color: #ffffff !important;
-  background-image: none !important;
-  color: #1d1d1f !important;
 }
 
 .consent:focus-within {
@@ -1248,9 +1327,13 @@ label {
 }
 
 button:disabled,
+.secondary:disabled,
+.ghost:disabled,
 .consent:has(input:disabled) {
   cursor: not-allowed;
-  opacity: 1;
+  /* Dim disabled controls so users can tell which actions apply (esp. the
+     bulk action bar). transform:none independently prevents motion jitter. */
+  opacity: 0.55;
   transform: none;
 }
 
@@ -1269,21 +1352,6 @@ button:disabled,
   border-color: var(--control-disabled-border);
   box-shadow: none;
   color: var(--control-disabled-text);
-}
-
-.topbar-actions .ghost:disabled,
-.topbar-actions .workspace-lock-toggle:disabled,
-.topbar-actions .consent.disabled,
-.topbar-actions .consent:has(input:disabled),
-.topbar-actions .consent.on:has(input:disabled) {
-  appearance: none;
-  -webkit-text-fill-color: #4b4b52 !important;
-  background: #f4f4f7 !important;
-  background-color: #f4f4f7 !important;
-  background-image: none !important;
-  border-color: rgba(60, 60, 67, 0.28);
-  color: #4b4b52 !important;
-  opacity: 1;
 }
 
 button:not(:disabled):active {
@@ -12216,15 +12284,6 @@ button:not(:disabled):active {
   color: var(--red) !important;
 }
 
-.topbar-actions .workspace-lock-toggle {
-  appearance: none;
-  -webkit-text-fill-color: #1d1d1f !important;
-  background: #ffffff;
-  background-color: #ffffff !important;
-  background-image: none !important;
-  color: #1d1d1f !important;
-}
-
 .button-row.center {
   justify-content: center;
 }
@@ -14477,8 +14536,6 @@ textarea:disabled {
 }
 
 .compact-action span,
-.topbar-actions > button span,
-.topbar-actions > label.consent span,
 .review-actions span {
   white-space: nowrap;
 }
@@ -16192,19 +16249,6 @@ input[type="range"] {
 }
 
 @media (max-width: 1280px) {
-  .topbar {
-    align-items: start;
-    grid-template-columns: 1fr;
-  }
-
-  .topbar-actions {
-    justify-content: flex-start;
-    flex-wrap: wrap;
-  }
-
-  .workspace-meta-strip {
-    max-width: 100%;
-  }
 
   .dashboard-metrics {
     grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -16459,10 +16503,6 @@ input[type="range"] {
     padding: 10px;
   }
 
-  .topbar {
-    top: 10px;
-  }
-
   .boot {
     min-height: 560px;
   }
@@ -16493,19 +16533,6 @@ input[type="range"] {
   .model-progress > div {
     align-items: flex-start;
     flex-direction: column;
-  }
-
-  .topbar {
-    grid-template-columns: 1fr;
-  }
-
-  .topbar-actions {
-    justify-content: flex-start;
-    flex-wrap: wrap;
-  }
-
-  .workspace-meta-strip {
-    display: none;
   }
 
   .dashboard-metrics {
@@ -16758,6 +16785,10 @@ input[type="range"] {
   :root {
     --accent: #409cff;
     --accent-strong: #67b7ff;
+    /* Brighter vivid stops so the signature gradient (brand, active nav,
+       section badges, memory/album CTAs) keeps its punch on the dark canvas. */
+    --accent-vivid: linear-gradient(120deg, #9a7bff 0%, #d36bff 55%, #ff7ab8 100%);
+    --accent-vivid-weak: rgba(154, 123, 255, 0.18);
     --green: #30d158;
     --orange: #ff9f0a;
     --red: #ff453a;
@@ -16817,8 +16848,7 @@ input[type="range"] {
       rgba(28, 30, 34, 0.74);
   }
 
-  .nav-list button,
-  .workspace-path {
+  .nav-list button {
     color: #d1d1d6;
   }
 
@@ -16847,55 +16877,10 @@ input[type="range"] {
     color: #8ff0a4;
   }
 
-  .topbar {
-    background:
-      linear-gradient(180deg, rgba(48, 50, 58, 0.94), rgba(31, 33, 39, 0.9)),
-      var(--chrome);
-  }
-
-  .topbar-actions .ghost,
-  .topbar-actions .ghost:not(:disabled),
-  .topbar-actions .consent,
-  .topbar-actions .consent:not(.disabled):not(:has(input:disabled)),
   .language-picker {
     background: #3a3a40;
     border-color: rgba(235, 235, 245, 0.2);
     color: #f5f5f7;
-  }
-
-  .topbar-actions .ghost:not(:disabled):hover,
-  .topbar-actions .ghost:not(:disabled):focus-visible {
-    background: #484850;
-    color: #ffffff;
-  }
-
-  .topbar-actions .workspace-lock-toggle:not(:disabled) {
-    -webkit-text-fill-color: #f5f5f7;
-    background: #3a3a40;
-    background-color: #3a3a40 !important;
-    background-image: none !important;
-    color: #f5f5f7 !important;
-  }
-
-  .topbar-actions .consent.on {
-    background: #14341d;
-    border-color: #3a8650;
-    color: #c9ffd4;
-  }
-
-  .topbar-actions .ghost:disabled,
-  .topbar-actions .workspace-lock-toggle:disabled,
-  .topbar-actions .consent.disabled,
-  .topbar-actions .consent:has(input:disabled),
-  .topbar-actions .consent.on:has(input:disabled) {
-    appearance: none;
-    -webkit-text-fill-color: #ececf0 !important;
-    background: #25262c !important;
-    background-color: #25262c !important;
-    background-image: none !important;
-    border-color: rgba(235, 235, 245, 0.18);
-    color: #ececf0 !important;
-    opacity: 1;
   }
 
   .eta-detail {
@@ -17062,15 +17047,6 @@ input[type="range"] {
     color: #ff8a82;
   }
 
-  .topbar-actions .workspace-lock-toggle {
-    appearance: none;
-    -webkit-text-fill-color: #f5f5f7 !important;
-    background: #3a3a40;
-    background-color: #3a3a40 !important;
-    background-image: none !important;
-    color: #f5f5f7 !important;
-  }
-
   .row {
     background:
       linear-gradient(180deg, rgba(50, 52, 59, 0.82), rgba(34, 36, 42, 0.72)),
@@ -17090,124 +17066,6 @@ input[type="range"] {
   .empty,
   .thumb {
     background: #202229;
-  }
-}
-
-.topbar-actions .ghost:disabled,
-.topbar-actions .workspace-lock-toggle:disabled,
-.topbar-actions .consent.disabled,
-.topbar-actions .consent:has(input:disabled),
-.topbar-actions .consent.on:has(input:disabled) {
-  -webkit-text-fill-color: #2f3037 !important;
-  background: #f6f6f8 !important;
-  background-color: #f6f6f8 !important;
-  background-image: none !important;
-  border-color: rgba(60, 60, 67, 0.32) !important;
-  color: #2f3037 !important;
-  opacity: 1;
-}
-
-@media (prefers-color-scheme: dark) {
-  .topbar-actions .ghost:disabled,
-  .topbar-actions .workspace-lock-toggle:disabled,
-  .topbar-actions .consent.disabled,
-  .topbar-actions .consent:has(input:disabled),
-  .topbar-actions .consent.on:has(input:disabled) {
-    -webkit-text-fill-color: #f5f5f7 !important;
-    background: #1f2026 !important;
-    background-color: #1f2026 !important;
-    background-image: none !important;
-    border-color: rgba(235, 235, 245, 0.28) !important;
-    color: #f5f5f7 !important;
-  }
-}
-
-.topbar-actions button.ghost[disabled],
-.topbar-actions button.workspace-lock-toggle[disabled],
-.topbar-actions label.consent.disabled,
-.topbar-actions label.consent.on.disabled {
-  -webkit-text-fill-color: #2f3037 !important;
-  appearance: none;
-  background: #f6f6f8 !important;
-  background-color: #f6f6f8 !important;
-  background-image: none !important;
-  border-color: rgba(60, 60, 67, 0.32) !important;
-  color: #2f3037 !important;
-  opacity: 1 !important;
-}
-
-@supports selector(label:has(input:disabled)) {
-  .topbar-actions label.consent:has(input:disabled),
-  .topbar-actions label.consent:has(input[disabled]),
-  .topbar-actions label.consent.on:has(input:disabled),
-  .topbar-actions label.consent.on:has(input[disabled]) {
-    -webkit-text-fill-color: #2f3037 !important;
-    appearance: none;
-    background: #f6f6f8 !important;
-    background-color: #f6f6f8 !important;
-    background-image: none !important;
-    border-color: rgba(60, 60, 67, 0.32) !important;
-    color: #2f3037 !important;
-    opacity: 1 !important;
-  }
-}
-
-@media (prefers-color-scheme: dark) {
-  .topbar-actions button.ghost[disabled],
-  .topbar-actions button.workspace-lock-toggle[disabled],
-  .topbar-actions label.consent.disabled,
-  .topbar-actions label.consent.on.disabled {
-    -webkit-text-fill-color: #f5f5f7 !important;
-    background: #1f2026 !important;
-    background-color: #1f2026 !important;
-    background-image: none !important;
-    border-color: rgba(235, 235, 245, 0.28) !important;
-    color: #f5f5f7 !important;
-    opacity: 1 !important;
-  }
-
-  @supports selector(label:has(input:disabled)) {
-    .topbar-actions label.consent:has(input:disabled),
-    .topbar-actions label.consent:has(input[disabled]),
-    .topbar-actions label.consent.on:has(input:disabled),
-    .topbar-actions label.consent.on:has(input[disabled]) {
-      -webkit-text-fill-color: #f5f5f7 !important;
-      background: #1f2026 !important;
-      background-color: #1f2026 !important;
-      background-image: none !important;
-      border-color: rgba(235, 235, 245, 0.28) !important;
-      color: #f5f5f7 !important;
-      opacity: 1 !important;
-    }
-  }
-}
-
-.topbar-actions.disabled .ghost,
-.topbar-actions.disabled .workspace-lock-toggle,
-.topbar-actions.disabled .consent,
-.topbar-actions.disabled .consent.on {
-  -webkit-text-fill-color: #2f3037 !important;
-  appearance: none;
-  background: #f6f6f8 !important;
-  background-color: #f6f6f8 !important;
-  background-image: none !important;
-  border-color: rgba(60, 60, 67, 0.32) !important;
-  color: #2f3037 !important;
-  opacity: 1 !important;
-}
-
-@media (prefers-color-scheme: dark) {
-  .topbar-actions.disabled .ghost,
-  .topbar-actions.disabled .workspace-lock-toggle,
-  .topbar-actions.disabled .consent,
-  .topbar-actions.disabled .consent.on {
-    -webkit-text-fill-color: #f5f5f7 !important;
-    background: #1f2026 !important;
-    background-color: #1f2026 !important;
-    background-image: none !important;
-    border-color: rgba(235, 235, 245, 0.28) !important;
-    color: #f5f5f7 !important;
-    opacity: 1 !important;
   }
 }
 
@@ -17979,32 +17837,1029 @@ input[type="range"] {
   min-height: 200px;
 }
 
-.topbar-actions .ghost:disabled,
-.topbar-actions .workspace-lock-toggle:disabled,
-.topbar-actions .consent.disabled,
-.topbar-actions .consent:has(input:disabled),
-.topbar-actions .consent.on:has(input:disabled) {
-  -webkit-text-fill-color: #2f3037 !important;
-  appearance: none;
-  background: #f6f6f8 !important;
-  background-color: #f6f6f8 !important;
-  background-image: none !important;
-  border-color: rgba(60, 60, 67, 0.32) !important;
-  color: #2f3037 !important;
+/* ============================================================================
+   Phase 1 — Photos-first shell: section sub-tabs + unified Search.
+   Built on the existing light token system; adds a vivid accent for the
+   "alive" moments (AI search, active section) per the hybrid aesthetic.
+   ============================================================================ */
+:root {
+  --accent-vivid: linear-gradient(120deg, #7c5cff 0%, #c44bff 55%, #ff5ca8 100%);
+  --accent-vivid-weak: rgba(124, 92, 255, 0.12);
+}
+
+/* Segmented sub-navigation (Tools / People & Pets) */
+.section-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  margin: 0 0 18px;
+  background: var(--fill);
+  border: 1px solid var(--separator-soft);
+  border-radius: 16px;
+  width: fit-content;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.section-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  min-height: 36px;
+  padding: 9px 18px;
+  border: none;
+  border-radius: 11px;
+  background: transparent;
+  color: var(--secondary);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 180ms cubic-bezier(0.22, 1, 0.36, 1), color 180ms ease, box-shadow 180ms ease;
+}
+.section-tab:hover { color: var(--text); background: var(--control-bg); }
+.section-tab.active {
+  color: var(--text);
+  background: var(--content-strong);
+  box-shadow: var(--shadow), var(--inner-highlight);
+}
+.section-tab-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent-vivid-weak);
+  color: #6b3df0;
+}
+
+/* Unified Search destination */
+.search-view { max-width: 1080px; margin: 0 auto; padding: 8px 4px 40px; }
+.search-hero {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  background: var(--content-strong);
+  border: 1px solid var(--separator-soft);
+  border-radius: 20px;
+  box-shadow: var(--shadow), var(--inner-highlight);
+}
+.search-hero:focus-within { box-shadow: 0 0 0 4px var(--accent-vivid-weak), var(--shadow); }
+.search-hero-icon { color: var(--tertiary); flex: none; }
+.search-hero-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--text);
+  min-width: 0;
+}
+.search-hero-input::placeholder { color: var(--tertiary); font-weight: 400; }
+.search-hero-clear {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; border-radius: 50%;
+  border: none; background: var(--fill); color: var(--secondary); cursor: pointer; flex: none;
+}
+.search-hero-clear:hover { background: var(--fill-strong); }
+.search-ai-toggle {
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  padding: 8px 14px; border-radius: 999px;
+  border: 1px solid var(--separator); background: var(--control-bg);
+  color: var(--secondary); font-weight: 700; font-size: 13px; cursor: pointer;
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.search-ai-toggle.active {
+  background: var(--accent-vivid); color: #fff; border-color: transparent;
+  box-shadow: 0 8px 22px rgba(124, 92, 255, 0.35);
+}
+.search-ai-toggle:active { transform: scale(0.96); }
+.search-hero-submit {
+  display: inline-flex; align-items: center; gap: 7px; flex: none;
+  padding: 10px 18px; border-radius: 13px; border: none;
+  background: var(--accent); color: #fff; font-weight: 700; font-size: 14px; cursor: pointer;
+  box-shadow: var(--control-shadow);
+}
+.search-hero-submit:disabled { opacity: 0.6; cursor: default; }
+.search-scope-chips { display: flex; align-items: center; gap: 10px; margin: 14px 4px 0; }
+.search-scope-hint { font-size: 12px; font-weight: 600; color: var(--tertiary); text-transform: uppercase; letter-spacing: 0.04em; }
+.search-status {
+  display: flex; align-items: center; gap: 8px; margin: 18px 0;
+  padding: 12px 16px; border-radius: 14px; background: var(--fill); color: var(--secondary); font-size: 14px;
+}
+.search-suggestions { margin-top: 40px; text-align: center; }
+.search-suggestions-title { color: var(--tertiary); font-size: 13px; font-weight: 600; margin-bottom: 14px; }
+.search-suggestion-chips { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+.search-suggestion-chip {
+  padding: 9px 18px; border-radius: 999px; border: 1px solid var(--separator);
+  background: var(--content); color: var(--text); font-size: 14px; font-weight: 500; cursor: pointer;
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 180ms ease;
+}
+.search-suggestion-chip:hover { box-shadow: var(--shadow); transform: translateY(-1px); }
+.search-results { margin-top: 28px; }
+.search-results-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
+.search-results-head strong { font-size: 17px; font-weight: 700; color: var(--text); }
+.search-results-head span { font-size: 13px; color: var(--tertiary); font-variant-numeric: tabular-nums; }
+.search-results-grid {
+  display: grid; gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+}
+.search-result-card {
+  display: flex; flex-direction: column; gap: 8px; padding: 10px;
+  border: 1px solid var(--separator-soft); border-radius: 16px; background: var(--content);
+  cursor: pointer; text-align: left; position: relative;
+  transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 200ms ease;
+}
+.search-result-card:hover { transform: translateY(-2px); box-shadow: var(--shadow); }
+.search-result-thumb {
+  display: flex; align-items: center; justify-content: center;
+  aspect-ratio: 1 / 1; border-radius: 11px; overflow: hidden;
+  background: var(--fill); color: var(--tertiary);
+}
+.search-result-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.search-result-name { font-size: 12px; font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-result-score {
+  position: absolute; top: 16px; right: 16px;
+  padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700;
+  background: var(--accent-vivid); color: #fff; box-shadow: 0 4px 10px rgba(124, 92, 255, 0.4);
+}
+.search-result-open { position: absolute; top: 18px; right: 18px; color: var(--tertiary); }
+
+/* Library zoom spine (Years / Months / Days / All) — the Apple-style segmented
+   control that switches the time-grid density. Backed by photoDateViewMode. */
+.photo-zoom-spine {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--fill);
+  border: 1px solid var(--separator-soft);
+  border-radius: 12px;
+  order: -1;
+}
+.photo-zoom-spine-btn {
+  border: none;
+  background: transparent;
+  color: var(--secondary);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 9px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 160ms cubic-bezier(0.22, 1, 0.36, 1), color 160ms ease, box-shadow 160ms ease;
+}
+.photo-zoom-spine-btn:hover { color: var(--text); }
+.photo-zoom-spine-btn.active {
+  color: var(--accent);
+  background: var(--content-strong);
+  box-shadow: var(--shadow), var(--inner-highlight);
+}
+
+/* ===== Phase 3: Memories ("For You") + Albums gallery ===== */
+/* Dedicated destinations replace the whole Library surface (rail + gallery) with a
+   full-width feed/gallery; opening a memory/album exits this mode into the scoped grid. */
+.photos-page.photos-destination-mode { grid-template-columns: minmax(0, 1fr); }
+.photos-destination-mode .photos-rail,
+.photos-destination-mode .photos-gallery { display: none; }
+.photos-destination { min-width: 0; }
+.memories-feed, .albums-gallery { max-width: 1120px; margin: 0 auto; padding: 4px 4px 48px; display: flex; flex-direction: column; gap: 28px; }
+.memories-section-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.memories-section-head strong { font-size: 17px; font-weight: 700; }
+.memories-section-head svg { color: #8b5cf6; }
+.memories-new { margin-left: auto; min-height: 36px; }
+
+/* Featured memory hero */
+.memory-hero { position: relative; display: grid; grid-template-columns: 1.35fr 1fr; gap: 0; border-radius: 22px; overflow: hidden; box-shadow: var(--shadow), var(--inner-highlight); background: var(--content-strong); min-height: 320px; }
+.memory-hero-cover { position: relative; border: none; padding: 0; margin: 0; cursor: pointer; overflow: hidden; background: var(--fill); display: block; }
+.memory-hero-cover img { width: 100%; height: 100%; object-fit: cover; display: block; animation: memory-ken-burns 14s ease-in-out infinite alternate; }
+@keyframes memory-ken-burns { from { transform: scale(1); } to { transform: scale(1.07); } }
+.memory-hero-sheen { position: absolute; inset: 0; background: linear-gradient(115deg, rgba(124, 92, 255, 0.28), transparent 42%), linear-gradient(0deg, rgba(0,0,0,0.32), transparent 55%); pointer-events: none; transition: opacity 240ms cubic-bezier(0.22, 1, 0.36, 1); }
+.memory-hero-cover:hover .memory-hero-sheen { opacity: 0.78; }
+.memory-hero-meta { display: flex; flex-direction: column; justify-content: center; gap: 8px; padding: 28px 30px; }
+.memory-hero-kicker { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #8b5cf6; }
+.memory-hero-meta strong { font-size: 30px; line-height: 1.1; font-weight: 800; }
+.memory-hero-sub { color: var(--secondary); font-size: 15px; }
+.memory-hero-stat { color: var(--secondary); font-size: 13px; }
+.memory-hero-actions { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.memory-play, .memories-empty-cta { min-height: 44px; padding: 0 20px; border: none; border-radius: 13px; background: var(--accent-vivid); color: #fff; font-weight: 700; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; box-shadow: 0 6px 16px rgba(124, 92, 255, 0.36); transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 180ms ease; }
+.memory-play:hover, .memories-empty-cta:hover { transform: translateY(-1px); box-shadow: 0 10px 22px rgba(124, 92, 255, 0.46); }
+.memory-export { min-height: 44px; }
+
+/* On this day strip */
+.memory-strip { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 6px; scroll-snap-type: x proximity; }
+.memory-strip-card { flex: 0 0 auto; width: 180px; scroll-snap-align: start; display: flex; flex-direction: column; gap: 6px; border: none; background: none; padding: 0; cursor: pointer; text-align: left; }
+.memory-strip-cover { width: 100%; aspect-ratio: 3 / 2; border-radius: 14px; overflow: hidden; background: var(--fill); display: grid; place-items: center; box-shadow: var(--shadow); }
+.memory-strip-cover img { width: 100%; height: 100%; object-fit: cover; }
+.memory-strip-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Memory + album card grids */
+.memories-grid, .albums-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 18px; }
+.albums-grid { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+.memory-card, .album-card { position: relative; display: flex; flex-direction: column; border-radius: 16px; overflow: hidden; background: var(--content-strong); box-shadow: var(--shadow); transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 180ms ease; }
+.memory-card:hover, .album-card:hover { transform: translateY(-3px); box-shadow: 0 14px 30px rgba(15, 18, 40, 0.18); }
+.memory-card-open, .album-card-open { border: none; background: none; padding: 0; margin: 0; cursor: pointer; text-align: left; display: flex; flex-direction: column; }
+.memory-card-cover, .album-card-cover { position: relative; aspect-ratio: 3 / 2; background: var(--fill); display: grid; place-items: center; overflow: hidden; }
+.album-card-cover { aspect-ratio: 4 / 3; }
+.memory-card-cover img, .album-card-cover img { width: 100%; height: 100%; object-fit: cover; }
+.memory-card-play { position: absolute; inset: 0; margin: auto; width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center; color: #fff; background: rgba(20, 16, 48, 0.5); backdrop-filter: blur(4px); opacity: 0; transition: opacity 180ms ease; }
+.memory-card:hover .memory-card-play { opacity: 1; }
+.memory-card-pill { position: absolute; left: 10px; top: 10px; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; background: var(--accent-vivid-weak); color: #6b3df0; text-transform: capitalize; backdrop-filter: blur(6px); }
+.memory-card-meta, .album-card-meta { display: flex; flex-direction: column; gap: 2px; padding: 11px 13px; }
+.memory-card-meta strong, .album-card-meta strong { font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.memory-card-meta small, .album-card-meta small { font-size: 12px; color: var(--secondary); }
+.memory-card-actions { display: flex; gap: 4px; padding: 0 9px 10px; }
+.icon-action { min-width: 36px; min-height: 36px; display: inline-grid; place-items: center; border-radius: 9px; border: 1px solid var(--separator-soft); background: var(--fill); color: var(--secondary); cursor: pointer; transition: background 160ms ease, color 160ms ease, border-color 160ms ease; }
+.icon-action:hover { color: var(--text); background: var(--control-bg); }
+.icon-action.active { color: #ffb020; border-color: rgba(255, 176, 32, 0.4); }
+.icon-action:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* Album cards: kind badge, validation, folders */
+.album-card-kind-badge { position: absolute; right: 10px; top: 10px; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; background: var(--accent-vivid-weak); color: #6b3df0; backdrop-filter: blur(6px); }
+.album-card-kind-badge.manual { background: rgba(20, 140, 90, 0.16); color: #128a52; }
+.album-card-warn { position: absolute; left: 10px; top: 10px; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; background: rgba(220, 60, 60, 0.92); color: #fff; }
+.album-folder-card { position: relative; border: none; cursor: pointer; text-align: left; padding: 0; display: flex; flex-direction: column; border-radius: 16px; overflow: hidden; background: var(--content-strong); box-shadow: var(--shadow); transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 180ms ease; }
+.album-folder-card:hover { transform: translateY(-3px); box-shadow: 0 14px 30px rgba(15, 18, 40, 0.18); }
+.album-folder-cover { aspect-ratio: 4 / 3; background: linear-gradient(160deg, var(--fill), var(--control-bg)); display: grid; place-items: center; color: #8b5cf6; overflow: hidden; }
+.album-folder-cover img { width: 100%; height: 100%; object-fit: cover; }
+.album-folder-badge { position: absolute; right: 10px; top: 10px; min-width: 24px; height: 24px; padding: 0 7px; border-radius: 999px; display: grid; place-items: center; font-size: 12px; font-weight: 700; background: rgba(20, 16, 48, 0.6); color: #fff; backdrop-filter: blur(6px); }
+
+/* Albums gallery header + breadcrumb */
+.albums-gallery-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.albums-gallery-head > strong { font-size: 22px; font-weight: 800; margin-right: auto; }
+.albums-gallery-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.albums-new-control { min-height: 44px; padding: 0 18px; border: none; border-radius: 12px; background: var(--accent-vivid); color: #fff; font-weight: 700; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; box-shadow: 0 6px 16px rgba(124, 92, 255, 0.34); transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 180ms ease; }
+.albums-new-control:hover { transform: translateY(-1px); box-shadow: 0 10px 22px rgba(124, 92, 255, 0.44); }
+.albums-breadcrumb { display: flex; align-items: center; gap: 8px; color: var(--secondary); font-size: 14px; }
+.albums-breadcrumb .compact-action { min-height: 36px; }
+
+/* Suggested albums + empty states */
+.albums-suggested { display: flex; flex-direction: column; }
+.album-suggestion-card { display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: 14px; background: var(--content-strong); box-shadow: var(--shadow); }
+.album-suggestion-meta { display: flex; flex-direction: column; gap: 3px; }
+.album-suggestion-meta strong { font-size: 14px; font-weight: 700; }
+.album-suggestion-meta small { font-size: 12px; color: var(--secondary); }
+.album-suggestion-card .compact-action { min-height: 36px; align-self: flex-start; }
+.memories-empty, .albums-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; padding: 56px 28px; border-radius: 22px; background: linear-gradient(150deg, var(--accent-vivid-weak), transparent 70%), var(--content-strong); box-shadow: var(--shadow); }
+.memories-empty svg, .albums-empty svg { color: #8b5cf6; }
+.memories-empty strong, .albums-empty strong { font-size: 19px; font-weight: 800; }
+.memories-empty span, .albums-empty span { color: var(--secondary); max-width: 460px; }
+.albums-empty-actions { display: flex; gap: 10px; margin-top: 8px; flex-wrap: wrap; justify-content: center; }
+.albums-empty-actions .primary, .albums-empty-actions .secondary { min-height: 44px; }
+@media (max-width: 880px) {
+  .memory-hero { grid-template-columns: 1fr; min-height: 0; }
+  .memory-hero-cover { aspect-ratio: 16 / 9; }
+}
+
+/* ===== Phase 4: People & Pets face-circle gallery ===== */
+.photos-people-gallery { max-width: 1120px; margin: 0 auto; padding: 4px 4px 48px; display: flex; flex-direction: column; gap: 26px; }
+.people-gallery-head { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.people-gallery-title { display: flex; flex-direction: column; gap: 2px; margin-right: auto; }
+.people-gallery-title > strong { font-size: 22px; font-weight: 800; }
+.people-gallery-summary { font-size: 13px; color: var(--secondary); }
+.people-gallery-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.people-review-btn { position: relative; }
+.people-review-badge { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 6px; margin-left: 2px; border-radius: 999px; font-size: 11px; font-weight: 700; background: var(--accent-vivid); color: #fff; }
+.people-section { display: flex; flex-direction: column; }
+.people-section-head { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+.people-section-head strong { font-size: 17px; font-weight: 700; }
+.people-section-head svg { color: #8b5cf6; }
+.people-circle-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(116px, 1fr)); gap: 20px 14px; }
+.people-circle-card { display: flex; flex-direction: column; align-items: center; gap: 8px; position: relative; }
+.people-circle-cover-btn { border: none; background: none; padding: 0; margin: 0; cursor: pointer; border-radius: 50%; transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+.people-circle-card:hover .people-circle-cover-btn { transform: translateY(-3px); }
+.people-circle-cover { display: grid; place-items: center; width: 100%; aspect-ratio: 1 / 1; border-radius: 50%; overflow: hidden; background: linear-gradient(160deg, var(--fill), var(--control-bg)); color: #8b5cf6; box-shadow: var(--shadow); }
+.people-circle-cover img { width: 100%; height: 100%; object-fit: cover; }
+.people-circle-cover.favorite { box-shadow: 0 0 0 3px #fff, 0 0 0 6px transparent; background-image: var(--accent-vivid); padding: 3px; }
+.people-circle-cover.favorite img { border-radius: 50%; }
+.people-circle-meta { display: flex; flex-direction: column; align-items: center; gap: 1px; text-align: center; max-width: 100%; }
+.people-circle-name, .people-circle-name-static { font-size: 13px; font-weight: 700; max-width: 116px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.people-circle-name { border: none; background: none; padding: 2px 4px; border-radius: 6px; cursor: pointer; color: var(--text); }
+.people-circle-name:hover { background: var(--control-bg); }
+.people-circle-meta small { font-size: 11px; color: var(--secondary); }
+.people-circle-rename { width: 116px; font-size: 13px; font-weight: 600; text-align: center; padding: 4px 6px; border-radius: 8px; border: 1px solid var(--accent); background: var(--content-strong); color: var(--text); }
+.people-circle-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 160ms ease; }
+.people-circle-card:hover .people-circle-actions, .people-circle-card:focus-within .people-circle-actions { opacity: 1; }
+.people-circle-actions .icon-action { min-width: 32px; min-height: 32px; }
+.people-to-name-band { background: linear-gradient(150deg, rgba(255, 176, 32, 0.1), transparent 60%); border-radius: 18px; padding: 16px; }
+.people-to-name-band .people-section-head svg { color: #d98a00; }
+.people-circle-card.to-name .people-circle-cover { box-shadow: 0 0 0 2px rgba(255, 176, 32, 0.5); }
+.people-gallery-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; padding: 56px 28px; border-radius: 22px; background: linear-gradient(150deg, var(--accent-vivid-weak), transparent 70%), var(--content-strong); box-shadow: var(--shadow); }
+.people-gallery-empty svg { color: #8b5cf6; }
+.people-gallery-empty strong { font-size: 19px; font-weight: 800; }
+.people-gallery-empty span { color: var(--secondary); max-width: 460px; }
+.people-gallery-empty .primary { min-height: 44px; margin-top: 6px; }
+
+/* Newly exposed backend capabilities: model license/distribution audit
+   (Tools › Models) and the raw photo-asset index inspector (Tools › Diagnostics). */
+.model-license-list {
+  display: grid;
+  gap: 8px;
+  margin: 4px 0 2px;
+}
+
+.model-license-row {
+  border: 1px solid var(--separator-soft);
+  border-radius: 10px;
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--fill);
+}
+
+.model-license-head {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.model-license-head strong {
+  font-size: 14px;
+  margin-inline-end: 4px;
+}
+
+.photo-asset-inspector .bands {
+  flex-wrap: wrap;
+}
+
+.photo-asset-inspector input[type="search"] {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.validation-history .benchmark-history {
+  margin-top: 6px;
+}
+
+/* ============================================================================
+   Library tab UX polish — vivid-accent integration + interaction feedback.
+   Pairs with the Filters disclosure + contextual bulk bar JSX. The signature
+   --accent-vivid gradient was absent from the most-used surface; bring it to
+   the active collection, selected tiles, the filters badge, and the docked
+   selection bar, and add buttery hover feedback to tiles.
+   ============================================================================ */
+.photo-filters-toggle-badge {
+  align-items: center;
+  background: var(--accent-vivid);
+  border-radius: 999px;
+  color: #fff;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 700;
+  height: 18px;
+  justify-content: center;
+  line-height: 1;
+  min-width: 18px;
+  padding: 0 5px;
+}
+
+.photo-filters-toggle.active {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px var(--accent-vivid-weak);
+}
+
+/* Contextual selection bar — only rendered when items are selected; reads as a
+   distinct 'selection mode' with the signature accent and docks to the bottom. */
+.photo-bulk-bar.active {
+  position: sticky;
+  bottom: 8px;
+  z-index: 6;
+  border-color: transparent;
+  background:
+    linear-gradient(0deg, var(--accent-vivid-weak), var(--accent-vivid-weak)),
+    var(--content);
+  box-shadow:
+    0 0 0 1px var(--accent-vivid-weak),
+    0 10px 28px rgba(124, 92, 255, 0.18);
+}
+
+.photo-bulk-bar.active > span {
+  color: #6b3df0;
+  font-weight: 700;
+}
+
+/* Active rail collection — vivid tint + left accent bar instead of the flat fill. */
+.photos-rail .photo-rail-row-main.active {
+  background: var(--accent-vivid-weak);
+  box-shadow: inset 3px 0 0 0 #7c5cff;
+}
+
+/* Selected tile — vivid outline + soft glow (was plain --accent). */
+.photo-tile-wrap.selected {
+  outline-color: #7c5cff;
+  box-shadow: 0 0 0 4px var(--accent-vivid-weak);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .photo-tile-wrap {
+    transition:
+      box-shadow 180ms ease,
+      transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .photo-tile-wrap:not(.dragging):hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 24px rgba(31, 35, 40, 0.18);
+  }
+  .photo-tile-wrap:not(.dragging):active {
+    transform: translateY(0);
+  }
+}
+
+/* Mode card "Manage engine" affordance — makes the otherwise-inert engine card
+   actionable (jumps to Settings › Engine) without turning the whole card into a
+   button. */
+.sidebar-card-manage {
+  -webkit-app-region: no-drag;
+  align-items: center;
+  align-self: stretch;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  color: var(--secondary);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 2px;
+  justify-content: space-between;
+  margin-top: 2px;
+  min-height: 36px;
+  padding: 4px 8px;
+  transition:
+    color 150ms ease,
+    background 150ms ease;
+}
+
+.sidebar-card-manage:hover {
+  background: var(--accent-vivid-weak);
+  color: #6b3df0;
+}
+
+/* ============================================================================
+   Memories tab polish — first-load shimmer skeletons, hover-revealed card
+   actions (matches the People cards), tab-signature focus ring, clamped hero.
+   ============================================================================ */
+@keyframes memory-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.memory-card-skeleton {
+  min-height: 210px;
+  border-radius: 16px;
+  background: linear-gradient(100deg, var(--fill) 30%, var(--control-bg) 50%, var(--fill) 70%);
+  background-size: 200% 100%;
+  animation: memory-shimmer 1.3s ease-in-out infinite;
+}
+
+.memory-card-actions {
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.memory-card:hover .memory-card-actions,
+.memory-card:focus-within .memory-card-actions {
   opacity: 1;
 }
 
-@media (prefers-color-scheme: dark) {
-  .topbar-actions .ghost:disabled,
-  .topbar-actions .workspace-lock-toggle:disabled,
-  .topbar-actions .consent.disabled,
-  .topbar-actions .consent:has(input:disabled),
-  .topbar-actions .consent.on:has(input:disabled) {
-    -webkit-text-fill-color: #f5f5f7 !important;
-    background: #1f2026 !important;
-    background-color: #1f2026 !important;
-    background-image: none !important;
-    border-color: rgba(235, 235, 245, 0.28) !important;
-    color: #f5f5f7 !important;
+@media (hover: none) {
+  .memory-card-actions {
+    opacity: 1;
   }
+}
+
+.memories-feed :focus-visible,
+.memories-empty :focus-visible {
+  outline-color: #7c5cff;
+}
+
+.memory-hero-meta strong {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+/* ============================================================================
+   Albums / Search / People & Pets polish — count summaries, multi-level
+   breadcrumb segments, vivid submit + result feedback, dark-mode badge
+   contrast, touch-reachable card actions, and a vivid section-head accent.
+   ============================================================================ */
+.albums-gallery-summary {
+  color: var(--secondary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.albums-breadcrumb-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .album-card-kind-badge {
+    background: rgba(124, 92, 255, 0.3);
+    color: #d7c9ff;
+  }
+  .album-card-kind-badge.manual {
+    background: rgba(20, 140, 90, 0.32);
+    color: #7df0b6;
+  }
+}
+
+.search-hero-submit {
+  background: var(--accent-vivid);
+  color: #fff;
+}
+
+.search-hero-submit:disabled {
+  opacity: 0.55;
+}
+
+.search-mode-help {
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.search-scope-hint.ai::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-inline-end: 6px;
+  border-radius: 999px;
+  background: var(--accent-vivid);
+  vertical-align: middle;
+}
+
+.search-result-name {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.search-result-card:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow), 0 0 0 3px var(--accent-vivid-weak);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .search-result-card {
+    transition:
+      transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
+      box-shadow 160ms ease;
+  }
+  .search-result-card:hover,
+  .search-result-card:focus-visible {
+    transform: translateY(-2px);
+  }
+}
+
+@media (hover: none) {
+  .people-circle-actions {
+    opacity: 1;
+  }
+}
+
+.people-section-head {
+  position: relative;
+  padding-inline-start: 12px;
+}
+
+.people-section-head::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--accent-vivid);
+}
+
+/* ============================================================================
+   Settings tab polish — give the warn/ok panel states real visual feedback
+   (they had no CSS, so a panel in a problem state looked identical to a healthy
+   one), and bring the signature vivid accent to selected preset/mode controls.
+   ============================================================================ */
+.settings-panel.warn {
+  border-color: rgba(191, 91, 0, 0.32);
+  box-shadow:
+    var(--inner-highlight),
+    inset 3px 0 0 0 var(--orange);
+}
+
+.settings-panel.ok {
+  box-shadow:
+    var(--inner-highlight),
+    inset 3px 0 0 0 var(--green);
+}
+
+.preset-button.selected {
+  background: var(--accent-vivid-weak);
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px rgba(124, 92, 255, 0.42);
+}
+
+.performance-mode.selected {
+  background: var(--accent-vivid-weak);
+  border-color: transparent;
+  box-shadow: inset 0 0 0 2px rgba(124, 92, 255, 0.4);
+}
+
+/* ============================================================================
+   Library › Photos settings sheet — comprehensive visual overhaul.
+   The in-Library import / sources / backup / repair management stack was a flat
+   wall of identical gray boxes with 12px heads and cramped padding, and it had
+   ZERO dark-mode tuning (every surface used --content/--separator, which collapse
+   together on the dark canvas). This gives it a real elevation ladder, breathing
+   room, section hierarchy, and the signature vivid accent — in both schemes and
+   without touching a single control (pure presentation → zero regression).
+
+   Elevation tokens (scheme-aware): --panel-surface = the sheet; --panel-card =
+   nested wells/cards that lift off the sheet; --panel-hair = crisp hairline.
+   ============================================================================ */
+.photo-settings-panel,
+.photo-backup-check-panel,
+.photo-repair-center {
+  --panel-surface: var(--content-strong);
+  --panel-card: var(--fill);
+  --panel-hair: var(--separator);
+  gap: 14px;
+  margin: 0 0 14px;
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid var(--panel-hair);
+  background: var(--panel-surface);
+  box-shadow:
+    var(--inner-highlight),
+    0 14px 36px rgba(15, 18, 40, 0.10);
+}
+
+@media (prefers-color-scheme: dark) {
+  .photo-settings-panel,
+  .photo-backup-check-panel,
+  .photo-repair-center {
+    --panel-surface: #23262f;
+    --panel-card: #2c303b;
+    --panel-hair: rgba(235, 235, 245, 0.12);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.05),
+      0 16px 40px rgba(0, 0, 0, 0.38);
+  }
+}
+
+/* Section headers — readable weight + a single vivid accent tick per section. */
+.photo-settings-head strong,
+.photo-backup-check-head strong,
+.photo-repair-center-head strong,
+.photo-managed-root-profiles-head strong {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.photo-settings-head,
+.photo-backup-check-head,
+.photo-repair-center-head {
+  position: relative;
+  padding-inline-start: 11px;
+}
+
+.photo-settings-head::before,
+.photo-backup-check-head::before,
+.photo-repair-center-head::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--accent-vivid);
+  pointer-events: none;
+}
+
+/* Nested cards / wells lift off the sheet and gain breathing room. */
+.photo-settings-panel .photo-source-card,
+.photo-settings-panel .photo-managed-root-profiles,
+.photo-backup-check-summary,
+.photo-repair-center-summary,
+.photo-settings-library-media,
+.photo-curation-preferences,
+.photo-import-review-panel,
+.photo-indexing-job-list {
+  background: var(--panel-card);
+  border: 1px solid var(--panel-hair);
+  border-radius: 12px;
+}
+
+.photo-settings-panel .photo-managed-root-profiles {
+  padding: 12px;
+  border-top: 1px solid var(--panel-hair);
+}
+
+.photo-backup-check-summary,
+.photo-repair-center-summary {
+  padding: 12px;
+}
+
+/* Source cards — clearer, tappable, with a soft hover lift. */
+.photo-source-card {
+  padding: 14px;
+  border-radius: 12px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .photo-source-card {
+    transition:
+      transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
+      box-shadow 160ms ease,
+      border-color 160ms ease;
+  }
+  .photo-source-card:not(.unavailable):hover {
+    transform: translateY(-1px);
+    border-color: var(--accent);
+    box-shadow: 0 8px 20px rgba(15, 18, 40, 0.12);
+  }
+}
+
+/* Import-storage eyebrow + segmented control: bigger label, vivid active tab. */
+.photo-import-controls > span,
+.photo-managed-root-profiles-head strong {
+  font-size: 12px;
+}
+
+.photo-import-storage-control button.active,
+.photo-segmented-control button.active {
+  background: var(--accent-vivid);
+  color: #fff;
+  border-color: transparent;
+}
+
+/* Active library root — vivid wash instead of a lone colored word. */
+.photo-managed-root-profile-row.active {
+  background: var(--accent-vivid-weak);
+  border-radius: 10px;
+  box-shadow: inset 3px 0 0 0 #7c5cff;
+  padding-inline: 8px;
+}
+
+.photo-managed-root-profile-row.active .photo-managed-root-profile-meta strong {
+  color: inherit;
+}
+
+/* Category display chips (Utilities / Sensitive / Screenshots / Shared /
+   Low-value / Locked) — give the row breathing room and a checked accent. */
+.photo-rail-display-controls {
+  gap: 8px;
+}
+
+.photo-rail-display-controls label {
+  min-height: 40px;
+}
+
+.photo-rail-display-controls label:has(input:checked) {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px rgba(124, 92, 255, 0.5);
+  background: var(--accent-vivid-weak);
+}
+
+/* Backup / repair status wells: tint by tone so state reads at a glance. */
+.photo-backup-check-panel > .warn,
+.photo-repair-center .warn {
+  border-radius: 10px;
+}
+
+/* ============================================================================
+   "Index all photos on this computer" — scope-consent sheet.
+   ============================================================================ */
+.index-everything-sheet {
+  max-width: min(520px, calc(100vw - 48px));
+  text-align: start;
+  gap: 12px;
+}
+
+.index-everything-hero {
+  align-items: center;
+  align-self: start;
+  background: var(--accent-vivid);
+  border-radius: 16px;
+  box-shadow:
+    0 10px 26px var(--accent-vivid-weak),
+    inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  color: #fff;
+  display: inline-flex;
+  height: 52px;
+  justify-content: center;
+  width: 52px;
+}
+
+.index-everything-sheet > strong {
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -0.015em;
+}
+
+.index-everything-points {
+  display: grid;
+  gap: 9px;
+  margin: 2px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.index-everything-points li {
+  align-items: start;
+  color: var(--text);
+  display: grid;
+  font-size: 13px;
+  gap: 9px;
+  grid-template-columns: 18px minmax(0, 1fr);
+}
+
+.index-everything-points li svg {
+  color: #7c5cff;
+  margin-top: 1px;
+}
+
+.index-everything-path {
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.index-everything-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.index-everything-actions .primary {
+  background: var(--accent-vivid);
+  color: #fff;
+}
+
+.photo-empty-index-all {
+  background: var(--accent-vivid);
+  color: #fff;
+  min-height: 44px;
+  padding: 0 20px;
+  margin: 4px 0 8px;
+  box-shadow: 0 8px 20px var(--accent-vivid-weak);
+}
+
+/* Scope selector inside the consent sheet (Home + added folders/drives). */
+.index-everything-scope {
+  display: grid;
+  gap: 6px;
+}
+
+.index-everything-scope-label {
+  color: var(--secondary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.index-everything-scope-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.index-everything-scope-chip {
+  align-items: center;
+  background: var(--fill);
+  border: 1px solid var(--separator-soft);
+  border-radius: 999px;
+  color: var(--text);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 5px;
+  max-width: 240px;
+  min-height: 28px;
+  padding: 0 6px 0 10px;
+}
+
+.index-everything-scope-chip.base {
+  background: var(--accent-vivid-weak);
+  border-color: transparent;
+  color: #6b3df0;
+  padding-inline-end: 10px;
+}
+
+.index-everything-scope-chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.index-everything-scope-remove {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  color: var(--secondary);
+  cursor: pointer;
+  display: inline-flex;
+  height: 18px;
+  justify-content: center;
+  width: 18px;
+}
+
+.index-everything-scope-remove:hover {
+  background: var(--fill-strong);
+  color: var(--text);
+}
+
+.index-everything-add {
+  align-items: center;
+  background: transparent;
+  border: 1px dashed var(--control-border);
+  border-radius: 999px;
+  color: var(--accent);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 5px;
+  min-height: 28px;
+  padding: 0 12px;
+}
+
+.index-everything-add:hover {
+  border-color: var(--accent);
+  border-style: solid;
+}
+
+/* Detected-drive quick-add chips. */
+.index-everything-drive {
+  align-items: center;
+  background: var(--fill);
+  border: 1px solid var(--separator-soft);
+  border-radius: 999px;
+  color: var(--text);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 5px;
+  max-width: 200px;
+  min-height: 28px;
+  padding: 0 12px;
+}
+
+.index-everything-drive svg {
+  color: var(--secondary);
+}
+
+.index-everything-drive:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.index-everything-drive:hover svg {
+  color: var(--accent);
+}
+
+.index-everything-drive > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Hide-noise option row. */
+.index-everything-hide {
+  align-items: center;
+  background: var(--fill);
+  border: 1px solid var(--separator-soft);
+  border-radius: 12px;
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.index-everything-hide input {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+}
+
+.index-everything-hide span {
+  display: grid;
+  gap: 2px;
+}
+
+.index-everything-hide small {
+  color: var(--secondary);
 }

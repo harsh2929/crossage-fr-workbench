@@ -2214,6 +2214,16 @@ export interface SemanticSearchPhotoResult {
   score: number;
 }
 
+export interface SemanticSearchPhotoItem {
+  sourcePath: string;
+  score: number;
+  previewPath?: string;
+  previewUrl?: string;
+  sourceUrl?: string;
+  mediaKind?: string;
+  name?: string;
+}
+
 export interface SemanticSearchPhotosValue {
   available: boolean;
   engine?: string;
@@ -2222,6 +2232,7 @@ export interface SemanticSearchPhotosValue {
   dropped?: number;
   reason?: string;
   results: SemanticSearchPhotoResult[];
+  items?: SemanticSearchPhotoItem[];
 }
 
 export interface PhotoLiveKeyPhotoValue {
@@ -3731,6 +3742,41 @@ export interface ModelDistributionAudit {
   items: ModelDistributionItem[];
   blockers: ModelDistributionItem[];
   recommendations: string[];
+}
+
+export interface Jurisdiction {
+  id: string;
+  label: string;
+  retentionReviewedDays: number;
+  requireExplicitConsent: boolean;
+  perSubjectConsent: boolean;
+  dataMinimization: boolean;
+  auditRetentionDays: number;
+  notes: string;
+}
+
+export interface JurisdictionCatalog {
+  jurisdictions: Jurisdiction[];
+  disclaimer: string;
+}
+
+export interface AuditChainStatus {
+  verified: boolean;
+  length: number;
+  chained: number;
+  legacy: number;
+  head: string;
+  tail: string;
+  firstBreak: null | { index: number; reason: string; seq?: number };
+}
+
+export interface PhotoAssetIndexPage {
+  total: number;
+  offset: number;
+  limit: number;
+  returned: number;
+  items: PhotoAsset[];
+  searchIndex: Record<string, unknown>;
 }
 
 export interface ReferenceSuggestion {
