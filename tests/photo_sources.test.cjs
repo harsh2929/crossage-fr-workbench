@@ -9,8 +9,26 @@ const {
   buildSystemPhotoSources,
   defaultMountRoots,
   mountedCameraPhotoSources,
+  mountedDrivePhotoSources,
   uniquePhotoSources,
 } = require("../desktop/main/photo-sources.cjs");
+
+function testMountedDrivePhotoSourcesEnumeratesVolumes() {
+  const root = makeTempDir();
+  for (const volume of ["MyUSB", "SD Card", "Backup Drive"]) {
+    fs.mkdirSync(path.join(root, volume, "Photos"), { recursive: true });
+  }
+  fs.writeFileSync(path.join(root, "loose-file.txt"), "x");
+  const drives = mountedDrivePhotoSources({ platform: "darwin", mountRoots: [root] });
+  assert.deepStrictEqual(
+    drives.map((source) => source.label).sort(),
+    ["Backup Drive", "MyUSB", "SD Card"],
+    drives
+  );
+  assert.ok(drives.every((source) => source.kind === "drive"), "drives should have kind 'drive'");
+  assert.ok(drives.every((source) => source.available), "existing drives should be available");
+  fs.rmSync(root, { recursive: true, force: true });
+}
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "vintrace-photo-sources-"));
@@ -167,6 +185,7 @@ testMountedPhoneNestedDcimSources();
 testMountedVolumeMultipleMediaRootsHaveUniqueIds();
 testNonMediaMountedVolumeIgnored();
 testBuildSystemPhotoSourcesIncludesMountedOverride();
+testMountedDrivePhotoSourcesEnumeratesVolumes();
 testDefaultMountRoots();
 testUniquePhotoSourcesDedupesResolvedPaths();
 console.log("photo sources ok");

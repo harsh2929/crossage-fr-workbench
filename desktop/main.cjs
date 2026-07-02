@@ -30,6 +30,59 @@ try {
 }
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+
+// Test isolation: when launched under the e2e harness (multi-instance flag set by
+// every Playwright spec) with a per-test registry home, relocate Electron's
+// userData — and therefore localStorage — into that unique temp dir. Without this
+// the default "Electron"/"Vintrace" userData is shared across every test run, so
+// localStorage (saved filters, onboarding flags, display toggles) leaks between
+// tests and accumulates. Gated strictly to test mode; production never sets the
+// multi-instance flag, so its userData location is unchanged. Must run before the
+// app is ready / any app.getPath("userData") call.
+if (process.env.CROSSAGE_ALLOW_MULTI_INSTANCE === "1") {
+  const testRegistryHome = (
+    process.env.CROSSAGE_USER_DATA_DIR
+    || process.env.VINTRACE_REGISTRY_HOME
+    || process.env.CROSSAGE_REGISTRY_HOME
+    || ""
+  ).trim();
+  if (testRegistryHome) {
+    try {
+      const isolatedUserData = process.env.CROSSAGE_USER_DATA_DIR
+        ? testRegistryHome
+        : path.join(testRegistryHome, "electron-user-data");
+      fs.mkdirSync(isolatedUserData, { recursive: true });
+      app.setPath("userData", isolatedUserData);
+    } catch (error) {
+      console.error("Failed to isolate test userData:", error && error.message ? error.message : error);
+    }
+  }
+}
+
+// Under the e2e harness, suppress native shell reveal/open so tests don't spawn
+// real Finder/Explorer windows that pile up across runs. The IPC contract (return
+// shape + audit) is preserved so assertions still pass. Production never sets the
+// multi-instance flag, so real reveals/opens behave normally; an explicit
+// CROSSAGE_ALLOW_SHELL_OPEN=1 re-enables them if a test ever needs the real thing.
+const suppressNativeShellOpen = process.env.CROSSAGE_ALLOW_MULTI_INSTANCE === "1"
+  && process.env.CROSSAGE_ALLOW_SHELL_OPEN !== "1";
+
+// Under the e2e harness, keep the app window hidden and never focus it so a test
+// run doesn't steal focus or cover the developer's screen. Playwright drives the
+// renderer over the DevTools protocol, so a hidden window stays fully
+// interactive; background throttling is disabled so a hidden window still runs at
+// full speed. Set CROSSAGE_SHOW_WINDOW=1 to show the window (visual QA / debug).
+const hiddenTestWindow = process.env.CROSSAGE_ALLOW_MULTI_INSTANCE === "1"
+  && process.env.CROSSAGE_SHOW_WINDOW !== "1";
+function revealItemInFolder(target) {
+  if (suppressNativeShellOpen) return;
+  shell.showItemInFolder(target);
+}
+async function openShellPath(target) {
+  if (suppressNativeShellOpen) return "";
+  return shell.openPath(target);
+}
+
 let mainWindow = null;
 let backend = null;
 let folderWatch = null;
@@ -1735,6 +1788,9 @@ function showMainWindow() {
   if (mainWindow.isMinimized()) {
     mainWindow.restore();
   }
+  if (hiddenTestWindow) {
+    return;
+  }
   mainWindow.show();
   mainWindow.focus();
 }
@@ -3022,7 +3078,7 @@ function buildApplicationMenu() {
             try {
               const result = await exportDiagnosticsReport({ includePaths: false });
               if (result.path) {
-                shell.showItemInFolder(result.path);
+                revealItemInFolder(result.path);
               }
             } catch (error) {
               appendDiagnosticEvent({
@@ -3585,14 +3641,20 @@ async function createWindow() {
         webviewTag: false,
         nodeIntegrationInWorker: false,
         nodeIntegrationInSubFrames: false,
+        // Keep a hidden test window running at full speed (no background throttle)
+        // so headless e2e stays deterministic.
+        backgroundThrottling: !hiddenTestWindow,
         devTools: isDev || process.env.CROSSAGE_ENABLE_DEVTOOLS === "1"
       }
     });
+    if (hiddenTestWindow && process.platform === "darwin" && app.dock) {
+      try { app.dock.hide(); } catch { /* dock hide is best-effort */ }
+    }
     mainWindow = window;
     hardenWebContents(window);
     let fallbackLoaded = false;
     const revealTimer = setTimeout(() => {
-      if (!window.isDestroyed() && !window.isVisible()) {
+      if (!hiddenTestWindow && !window.isDestroyed() && !window.isVisible()) {
         window.show();
       }
     }, 4000);
@@ -3612,7 +3674,7 @@ async function createWindow() {
           stack: diagnosticStack(error)
         });
       }
-      if (!window.isDestroyed() && !window.isVisible()) {
+      if (!hiddenTestWindow && !window.isDestroyed() && !window.isVisible()) {
         window.show();
       }
     }
@@ -3646,7 +3708,7 @@ async function createWindow() {
     });
     window.once("ready-to-show", () => {
       clearTimeout(revealTimer);
-      if (!window.isDestroyed()) {
+      if (!window.isDestroyed() && !hiddenTestWindow) {
         window.show();
         window.focus();
       }
@@ -3911,7 +3973,7 @@ ipcMain.handle("shell:reveal-path", async (event, payload = {}) => {
   const target = path.resolve(String(payload.path || ""));
   // EIPC-02: don't reveal files while the workspace is locked.
   if (isTrustedShellPath(target) && fs.existsSync(target) && !isWorkspaceLocked()) {
-    shell.showItemInFolder(target);
+    revealItemInFolder(target);
     auditDesktopAction({ action: "shell_reveal", path: target });
     return true;
   }
@@ -3926,7 +3988,7 @@ ipcMain.handle("shell:open-path", async (event, payload = {}) => {
   if (!isTrustedShellPath(target) || !fs.existsSync(target) || isWorkspaceLocked()) {
     return { ok: false, error: "Path does not exist." };
   }
-  const error = await shell.openPath(target);
+  const error = await openShellPath(target);
   if (!error) {
     auditDesktopAction({ action: "shell_open", path: target });
   }
@@ -4043,7 +4105,7 @@ ipcMain.handle("shell:share-paths", async (event, payload = {}) => {
   if (process.platform !== "darwin" || typeof ShareMenu !== "function") {
     const fallbackPath = targets[0];
     try {
-      shell.showItemInFolder(fallbackPath);
+      revealItemInFolder(fallbackPath);
       auditDesktopAction({ action: "shell_share_fallback_reveal", path: fallbackPath, count: targets.length, platform: process.platform });
       return {
         ok: true,

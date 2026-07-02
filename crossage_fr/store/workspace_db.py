@@ -1302,6 +1302,34 @@ class WorkspaceDb:
         "edit_sidecar",
     }
     _PHOTO_IMPORT_EXTENSIONS = _IMAGE_ASSET_EXTENSIONS | _RAW_ASSET_EXTENSIONS | _VIDEO_ASSET_EXTENSIONS
+    # Directory basenames pruned during a broad "index everything on this computer"
+    # crawl so it collects real photos, not caches / build output / app internals.
+    # (Apple Photos and iCloud Drive live under Library and are offered as their
+    # own explicit sources, so excluding Library here does not lose them.)
+    _BROAD_SCAN_EXCLUDE_NAMES = {
+        "__MACOSX", ".Spotlight-V100", ".Trashes", ".Trash", ".TemporaryItems",
+        "node_modules", "bower_components", "vendor", "site-packages",
+        ".git", ".hg", ".svn", "__pycache__", ".pytest_cache", ".mypy_cache", ".tox",
+        ".venv", "venv", "env", ".env", ".cache", "Caches", ".npm", ".yarn", ".pnpm-store",
+        ".gradle", ".m2", ".cargo", ".rustup", ".cocoapods", "DerivedData", ".ccache",
+        ".vscode", ".idea", ".vs", ".Xcode", ".android", ".docker", ".terraform",
+        ".thumbnails", ".dtrash", "lost+found",
+        "Library", "AppData", "Application Support",
+        # System / OS directories — pruned so a drive-root crawl (a user-added
+        # drive or /) collects real photos rather than the operating system.
+        "System", "Applications", "usr", "bin", "sbin", "opt", "cores", "private",
+        "dev", "Network", "Volumes", ".vol", ".fseventsd", ".DocumentRevisions-V100",
+        ".MobileBackups", ".PKInstallSandboxManager", ".PKInstallSandboxManager-SystemSoftware",
+        "Windows", "Windows.old", "Program Files", "Program Files (x86)", "ProgramData",
+        "$Recycle.Bin", "System Volume Information", "$WinREAgent", "Recovery",
+        "PerfLogs", "Config.Msi", "MSOCache", "$SysReset", "$GetCurrent",
+    }
+    # Directory suffixes pruned during a broad crawl (macOS/Windows bundles).
+    _BROAD_SCAN_EXCLUDE_SUFFIXES = (
+        ".app", ".framework", ".bundle", ".xcarchive", ".photoslibrary",
+        ".aplibrary", ".migratedphotolibrary", ".pkg", ".plugin", ".kext",
+        ".lproj", ".dSYM",
+    )
     _PHOTO_MEDIA_KINDS = {
         "image",
         "video",
@@ -2151,10 +2179,46 @@ class WorkspaceDb:
         except ValueError:
             return roots[0]
 
-    def _expand_photo_import_sources(self, source_paths: Iterable[str]) -> tuple[list[Path], list[tuple[str, str]], int]:
+    def _photo_import_dir_pruned(self, child: Path, excluded_resolved: set[str], apply_broad_excludes: bool) -> bool:
+        """Whether a directory should be skipped while expanding import sources."""
+        name = child.name
+        if name in {"__MACOSX", ".Spotlight-V100", ".Trashes"}:
+            return True
+        try:
+            resolved = str(child.resolve())
+        except OSError:
+            resolved = str(child)
+        if resolved in excluded_resolved:
+            return True
+        if apply_broad_excludes:
+            if name in self._BROAD_SCAN_EXCLUDE_NAMES:
+                return True
+            if name.startswith(".") and name not in {".", ".."}:
+                return True
+            lowered = name.lower()
+            if any(lowered.endswith(suffix) for suffix in self._BROAD_SCAN_EXCLUDE_SUFFIXES):
+                return True
+        return False
+
+    def _expand_photo_import_sources(
+        self,
+        source_paths: Iterable[str],
+        *,
+        excluded_dirs: Iterable[str] | None = None,
+        apply_broad_excludes: bool = False,
+    ) -> tuple[list[Path], list[tuple[str, str]], int]:
         files: list[Path] = []
         failures: list[tuple[str, str]] = []
         seen: set[str] = set()
+        excluded_resolved: set[str] = set()
+        for raw_excluded in excluded_dirs or []:
+            text = str(raw_excluded or "").strip()
+            if not text:
+                continue
+            try:
+                excluded_resolved.add(str(Path(text).expanduser().resolve()))
+            except OSError:
+                excluded_resolved.add(text)
         duplicate_inputs = 0
         for raw in source_paths:
             text = str(raw or "").strip()
@@ -2171,7 +2235,10 @@ class WorkspaceDb:
             if resolved.is_dir():
                 matched = 0
                 for current, dirnames, filenames in os.walk(resolved):
-                    dirnames[:] = sorted(name for name in dirnames if name not in {"__MACOSX", ".Spotlight-V100", ".Trashes"})
+                    dirnames[:] = sorted(
+                        name for name in dirnames
+                        if not self._photo_import_dir_pruned(Path(current) / name, excluded_resolved, apply_broad_excludes)
+                    )
                     for filename in sorted(filenames):
                         candidate = Path(current) / filename
                         if candidate.suffix.lower() not in self._PHOTO_IMPORT_EXTENSIONS:
@@ -8290,6 +8357,8 @@ class WorkspaceDb:
         source_label: str = "",
         source_detail: str = "",
         keep_folder_organization: bool = False,
+        excluded_dirs: Iterable[str] | None = None,
+        apply_broad_excludes: bool = False,
     ) -> dict[str, Any]:
         raw_sources = [str(path or "").strip() for path in source_paths if str(path or "").strip()]
         if not raw_sources:
@@ -8299,7 +8368,11 @@ class WorkspaceDb:
         if mode not in {"referenced", "managed"}:
             raise ValueError("Photo import storageMode must be referenced or managed.")
         import_id = self._photo_import_id(raw_sources, mode, timestamp)
-        files, preflight_failures, duplicate_inputs = self._expand_photo_import_sources(raw_sources)
+        files, preflight_failures, duplicate_inputs = self._expand_photo_import_sources(
+            raw_sources,
+            excluded_dirs=excluded_dirs,
+            apply_broad_excludes=apply_broad_excludes,
+        )
         common_root = self._photo_import_common_root(raw_sources, files)
         managed_root_path: Path | None = None
         import_managed_root = ""

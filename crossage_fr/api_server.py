@@ -1215,7 +1215,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return self.search_photo_library(params)
 
     def _cmd_semantic_search_photos(self, params, progress=None):
-        return {"value": self.semantic_search_photos(params)}
+        # Returned unwrapped so the main process media-decorator converts each
+        # item's previewPath into a vintrace-media:// previewUrl (thumbnails).
+        return self.semantic_search_photos(params)
 
     def _cmd_list_photo_assets(self, params, progress=None):
         return self.list_photo_assets(params)
@@ -25605,6 +25607,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             keep_folder_organization = False
             keep_folder_source = "off"
         delete_from_source_requested = bool(params.get("deleteFromSourceAfterImport", params.get("deleteFromDeviceAfterImport", False)))
+        # Broad "index everything on this computer" crawls prune caches / build
+        # output / app bundles; always exclude our own app folder so we never
+        # re-index generated previews or managed copies.
+        apply_broad_excludes = bool(params.get("applyBroadExcludes", params.get("broadScan", False)))
+        raw_excluded = params.get("excludedDirs", params.get("excluded_dirs", []))
+        excluded_dirs = [str(item) for item in raw_excluded if str(item or "").strip()] if isinstance(raw_excluded, list) else []
+        try:
+            excluded_dirs.append(str(self.project.root))
+        except Exception:
+            pass
         result = self.project.db.import_photo_files(
             [str(path) for path in source_paths],
             storage_mode=storage_mode,
@@ -25613,6 +25625,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             source_label=str(params.get("sourceLabel", "") or ""),
             source_detail=str(params.get("sourceDetail", params.get("source_detail", "")) or ""),
             keep_folder_organization=keep_folder_organization,
+            excluded_dirs=excluded_dirs,
+            apply_broad_excludes=apply_broad_excludes,
         )
         result["keepFolderOrganizationSource"] = keep_folder_source
         if storage_mode == "managed":
@@ -28998,7 +29012,23 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 continue
             scored.append((float(np.dot(query_vector, vector)), str(path)))
         scored.sort(key=lambda item: item[0], reverse=True)
-        results = [{"sourcePath": path, "score": round(score, 4)} for score, path in scored[:limit]]
+        top = scored[:limit]
+        results = [{"sourcePath": path, "score": round(score, 4)} for score, path in top]
+        # `items` carries a previewPath so the main process decorates it into a
+        # vintrace-media:// previewUrl (thumbnails) — same path the photo grid uses.
+        items: list[dict[str, Any]] = []
+        for score, path in top:
+            try:
+                preview_path = self.project.preview_path_for(path, create=True) or ""
+            except Exception:
+                preview_path = ""
+            items.append({
+                "sourcePath": path,
+                "score": round(score, 4),
+                "previewPath": preview_path,
+                "mediaKind": self._media_kind_for_source(path),
+                "name": Path(path).name,
+            })
         return {
             "available": True,
             "engine": report.get("modelName", "SigLIP2"),
@@ -29006,6 +29036,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "scored": len(scored),
             "dropped": dropped,
             "results": results,
+            "items": items,
         }
 
     def list_photo_assets(self, params: dict[str, Any]) -> dict[str, Any]:

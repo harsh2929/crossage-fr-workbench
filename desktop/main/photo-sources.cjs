@@ -178,6 +178,47 @@ function mountedCameraPhotoSources({
   return uniquePhotoSources(sources);
 }
 
+// Every mounted external drive / volume (not just camera cards) so the
+// "index everything" consent sheet can offer them as one-tap scope chips. The
+// boot/system volume is skipped (it's already covered by the Home folder scope).
+function mountedDrivePhotoSources({
+  platform = process.platform,
+  home = os.homedir(),
+  env = process.env,
+  mountRoots = defaultMountRoots(platform, home, env),
+  maxVolumes = 40,
+} = {}) {
+  const sources = [];
+  const seen = new Set();
+  const addVolume = (volumePath) => {
+    if (!pathIsDirectory(volumePath)) return;
+    const resolved = path.resolve(volumePath);
+    if (seen.has(resolved)) return;
+    let real = resolved;
+    try {
+      real = fs.realpathSync(resolved);
+    } catch {
+      /* keep resolved */
+    }
+    if (real === "/" || real.startsWith("/System/Volumes/")) return;
+    seen.add(resolved);
+    const name = path.basename(resolved) || resolved;
+    sources.push(photoSource(`drive-${sourceSlug(resolved)}`, name, "Mounted drive — index its photos in place.", resolved, "drive", platform));
+  };
+  for (const root of mountRoots) {
+    if (!pathIsDirectory(root)) continue;
+    if (platform === "win32") {
+      addVolume(root);
+    } else {
+      for (const entry of safeReadDir(root, maxVolumes)) {
+        if (!entry.isDirectory()) continue;
+        addVolume(path.join(root, entry.name));
+      }
+    }
+  }
+  return uniquePhotoSources(sources);
+}
+
 function buildSystemPhotoSources({
   platform = process.platform,
   home = os.homedir(),
@@ -186,6 +227,14 @@ function buildSystemPhotoSources({
   mountRoots,
 } = {}) {
   const sources = [
+    photoSource(
+      "this-computer",
+      "This computer",
+      "Index every photo across your Home folder in one library. Skips caches, app data, and system files; originals stay where they are.",
+      home,
+      "this-computer",
+      platform
+    ),
     photoSource("pictures", "Pictures folder", "Default photo folder on this computer.", pictures, "folder", platform)
   ];
   if (platform === "darwin") {
@@ -206,12 +255,14 @@ function buildSystemPhotoSources({
   return uniquePhotoSources([
     ...sources,
     ...mountedCameraPhotoSources({ platform, home, env, mountRoots }),
+    ...mountedDrivePhotoSources({ platform, home, env, mountRoots }),
   ]);
 }
 
 module.exports = {
   buildSystemPhotoSources,
   mountedCameraPhotoSources,
+  mountedDrivePhotoSources,
   defaultMountRoots,
   photoSource,
   uniquePhotoSources,
