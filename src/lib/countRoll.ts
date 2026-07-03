@@ -15,3 +15,19 @@ export function countChangeDirection(prev: number | undefined, next: number): Co
   if (prev === undefined || prev === next) return "none";
   return next > prev ? "up" : "down";
 }
+
+/**
+ * Bump decision for a rapidly-updating counter (e.g. a live scan counter that
+ * changes every animation frame): animate only on a real change AND once at
+ * most per intervalMs, so the value can stream smoothly while the capsule pops
+ * at a readable cadence instead of on every frame.
+ */
+export function shouldThrottledBump(
+  prev: number | undefined,
+  next: number,
+  lastBumpMs: number,
+  nowMs: number,
+  intervalMs: number
+): boolean {
+  return shouldAnimateCount(prev, next) && nowMs - lastBumpMs >= intervalMs;
+}

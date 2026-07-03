@@ -49,4 +49,16 @@ run("direction reflects increase/decrease", () => {
   assert.strictEqual(mod.countChangeDirection(4, 1), "down");
 });
 
+run("throttled bump: only when changed AND interval elapsed AND not initial", () => {
+  // changed but too soon since last bump → no bump
+  assert.strictEqual(mod.shouldThrottledBump(5, 6, 0, 100, 300), false);
+  // changed and interval elapsed → bump
+  assert.strictEqual(mod.shouldThrottledBump(5, 6, 0, 300, 300), true);
+  assert.strictEqual(mod.shouldThrottledBump(5, 6, 0, 999, 300), true);
+  // no change → never bump, even after a long time
+  assert.strictEqual(mod.shouldThrottledBump(5, 5, 0, 999, 300), false);
+  // initial (prev undefined) → no bump
+  assert.strictEqual(mod.shouldThrottledBump(undefined, 6, 0, 999, 300), false);
+});
+
 console.log("\nall count-roll tests passed");

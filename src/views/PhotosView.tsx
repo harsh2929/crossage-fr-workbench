@@ -15609,6 +15609,10 @@ export function PhotosView(props: {
       setLastPhotoSelectionExport(result);
       if (folder) rememberPhotoExportDestination(folder);
       await loadFolders();
+      // P1 toast-notice: a transient confirmation for a completed export (the
+      // lastPhotoSelectionExport panel is the persistent detail summary).
+      const exportedCount = result.items?.length ?? 0;
+      notifyToast({ tone: "ok", message: `${uiText("Exported photos")}: ${formatCount(exportedCount)}.` });
     }
   }
 

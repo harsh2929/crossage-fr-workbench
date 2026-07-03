@@ -243,6 +243,7 @@ import {
 import { SearchView } from "./shell/SearchView";
 import { SectionTabs } from "./shell/SectionTabs";
 import { useSaveSettle } from "./shell/useSaveSettle";
+import { useThrottledCountRoll } from "./shell/useCountRoll";
 import { photoReviewMoreCandidateReasons } from "./views/photoGroupReview";
 import {
   normalizeReviewFocusHistory,
@@ -10261,6 +10262,12 @@ function ScanActivity({
   const [clock, setClock] = useState(Date.now());
   const total = progress?.total ?? 0;
   const processed = progress?.processed ?? 0;
+  // P1 count-roll: the live scan counter streams smoothly but the capsule pops
+  // at a readable cadence (throttled), not on every rAF-flushed frame.
+  const scanCountRoll = useThrottledCountRoll(processed);
+  const processedCount = (
+    <span key={scanCountRoll.bumpKey} className={scanCountRoll.bumpKey > 0 ? "count-roll bump" : "count-roll"}>{processed}</span>
+  );
   const completion = total ? Math.min(1, processed / total) : 0;
   const current = progress?.currentPath ? basename(progress.currentPath) : watchStatus.active ? basename(watchStatus.folder) : "Idle";
   const phase = watchStatus.scanning
@@ -10344,7 +10351,7 @@ function ScanActivity({
             </button>
             </>
           )}
-          <strong>{total ? `${processed}/${total}` : scanActive ? `${processed} processed` : watchStatus.active ? `${watchStatus.queued} waiting` : "No active scan"}</strong>
+          <strong>{total ? <>{processedCount}/{total}</> : scanActive ? <>{processedCount} processed</> : watchStatus.active ? `${watchStatus.queued} waiting` : "No active scan"}</strong>
         </div>
       </div>
       <progress max={1} value={completion} />
