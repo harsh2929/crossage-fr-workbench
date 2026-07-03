@@ -4747,13 +4747,6 @@ export function PhotosView(props: {
     updatePhotoRailPreferences({ [key]: value } as Partial<PhotoRailPreferences>);
   }
 
-  // User-facing collection toggle: persists the preference and plays the
-  // save-settle confirmation beat on the toggled row.
-  function toggleRailDisplay(key: PhotoRailDisplayPreferenceKey, value: boolean) {
-    setPhotoRailDisplayPreference(key, value);
-    settleControl(`rail:${key}`);
-  }
-
   function updatePhotoLibraryMediaSettings(patch: PhotoLibraryMediaSettingsOverride) {
     const root = activeLibraryRootRef.current;
     if (!root) return;
@@ -20855,28 +20848,28 @@ export function PhotosView(props: {
           </div>
         )}
         <div className="photo-rail-display-controls" aria-label={uiText("Collection display")}>
-          <label className={isControlSettling("rail:showUtilityCollections") ? "save-settle" : undefined}>
-            <input type="checkbox" checked={showUtilityCollections} onChange={(event) => toggleRailDisplay("showUtilityCollections", event.currentTarget.checked)} />
+          <label>
+            <input type="checkbox" checked={showUtilityCollections} onChange={(event) => setPhotoRailDisplayPreference("showUtilityCollections", event.currentTarget.checked)} />
             <Archive size={14} />
             <span>{uiText("Utilities")}</span>
           </label>
-          <label className={isControlSettling("rail:showSensitiveCollections") ? "save-settle" : undefined}>
-            <input type="checkbox" checked={showSensitiveCollections} onChange={(event) => toggleRailDisplay("showSensitiveCollections", event.currentTarget.checked)} />
+          <label>
+            <input type="checkbox" checked={showSensitiveCollections} onChange={(event) => setPhotoRailDisplayPreference("showSensitiveCollections", event.currentTarget.checked)} />
             <EyeOff size={14} />
             <span>{uiText("Sensitive")}</span>
           </label>
-          <label className={isControlSettling("rail:showScreenshotCollections") ? "save-settle" : undefined}>
-            <input type="checkbox" checked={showScreenshotCollections} onChange={(event) => toggleRailDisplay("showScreenshotCollections", event.currentTarget.checked)} />
+          <label>
+            <input type="checkbox" checked={showScreenshotCollections} onChange={(event) => setPhotoRailDisplayPreference("showScreenshotCollections", event.currentTarget.checked)} />
             <ImageIcon size={14} />
             <span>{uiText("Screenshots")}</span>
           </label>
-          <label className={isControlSettling("rail:showSharedCollections") ? "save-settle" : undefined}>
-            <input type="checkbox" checked={showSharedCollections} onChange={(event) => toggleRailDisplay("showSharedCollections", event.currentTarget.checked)} />
+          <label>
+            <input type="checkbox" checked={showSharedCollections} onChange={(event) => setPhotoRailDisplayPreference("showSharedCollections", event.currentTarget.checked)} />
             <Send size={14} />
             <span>{uiText("Shared")}</span>
           </label>
-          <label className={isControlSettling("rail:showLowValueCollections") ? "save-settle" : undefined}>
-            <input type="checkbox" checked={showLowValueCollections} onChange={(event) => toggleRailDisplay("showLowValueCollections", event.currentTarget.checked)} />
+          <label>
+            <input type="checkbox" checked={showLowValueCollections} onChange={(event) => setPhotoRailDisplayPreference("showLowValueCollections", event.currentTarget.checked)} />
             <MinusCircle size={14} />
             <span>{uiText("Low-value")}</span>
           </label>
