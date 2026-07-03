@@ -18858,7 +18858,7 @@ export function PhotosView(props: {
         {onThisDayMemories.length > 0 && (
           <section className="memories-onthisday" aria-label={uiText("On this day")}>
             <div className="memories-section-head"><CalendarDays size={16} /><strong>{uiText("On this day")}</strong></div>
-            <div className="memory-strip">
+            <div className="memory-strip reveal-stagger">
               {onThisDayMemories.map((folder) => (
                 <button type="button" className="memory-strip-card" key={folder.id} onClick={() => setActiveId(folder.id)}>
                   <span className="memory-strip-cover">{folder.coverPreviewUrl ? <img src={folder.coverPreviewUrl} alt="" loading="lazy" decoding="async" style={photoCoverCropStyle(folder.coverCrop)} /> : <Sparkles size={18} />}</span>
@@ -18877,7 +18877,7 @@ export function PhotosView(props: {
           </div>
           {userMemoryError && <small className="photo-metadata-error" role="alert">{userMemoryError}</small>}
           {gridMemories.length > 0 && (
-          <div className="memories-grid">
+          <div className="memories-grid reveal-stagger">
             {gridMemories.map((folder) => (
               <div className="memory-card" key={folder.id}>
                 <button type="button" className="memory-card-open" onClick={() => setActiveId(folder.id)} aria-label={`${uiText("Open memory")} ${folder.name}`}>
@@ -18894,7 +18894,7 @@ export function PhotosView(props: {
                 <div className="memory-card-actions">
                   <button type="button" className="ghost icon-action" title={uiText("Play the movie")} aria-label={`${uiText("Play the movie")} ${folder.name}`} onClick={() => playMemory(folder)} disabled={Boolean(pendingMemoryPlayId)}><Play size={15} /></button>
                   <button type="button" className="ghost icon-action" title={uiText("Export movie")} aria-label={`${uiText("Export movie")} ${folder.name}`} onClick={() => void exportActiveMemoryMovie(folder)} disabled={props.busy || memoryMovieExporting}><Video size={15} /></button>
-                  <button type="button" className={folder.memory?.favorite ? "ghost icon-action active" : "ghost icon-action"} aria-pressed={Boolean(folder.memory?.favorite)} title={folder.memory?.favorite ? uiText("Unfavorite") : uiText("Favorite")} aria-label={`${folder.memory?.favorite ? uiText("Unfavorite") : uiText("Favorite")} ${folder.name}`} onClick={() => void toggleMemoryFavorite(folder)}><Star size={15} fill={folder.memory?.favorite ? "currentColor" : "none"} /></button>
+                  <button type="button" className={`ghost icon-action${folder.memory?.favorite ? " active" : ""}${isControlSettling(`memfav:${folder.id}`) ? " save-settle" : ""}`} aria-pressed={Boolean(folder.memory?.favorite)} title={folder.memory?.favorite ? uiText("Unfavorite") : uiText("Favorite")} aria-label={`${folder.memory?.favorite ? uiText("Unfavorite") : uiText("Favorite")} ${folder.name}`} onClick={() => { void toggleMemoryFavorite(folder); settleControl(`memfav:${folder.id}`); }}><Star size={15} fill={folder.memory?.favorite ? "currentColor" : "none"} /></button>
                   <button type="button" className="ghost icon-action" title={uiText("Feature less")} aria-label={`${uiText("Feature less")} ${folder.name}`} onClick={() => void featureLessMemory(folder)}><EyeOff size={15} /></button>
                 </div>
               </div>
@@ -18940,7 +18940,7 @@ export function PhotosView(props: {
           </div>
         )}
         {hasAny ? (
-          <div className="albums-grid">
+          <div className="albums-grid reveal-stagger">
             {visibleAlbumFolderCards.map((folder) => {
               const folderKey = albumTreeItemId(folder);
               const childCount = albumFolders.filter((item) => albumTreeParentId(item) === folderKey).length
@@ -18986,7 +18986,7 @@ export function PhotosView(props: {
         {suggestions.length > 0 && (
           <section className="albums-suggested" aria-label={uiText("Suggested albums")}>
             <div className="memories-section-head"><Sparkles size={16} /><strong>{uiText("Suggested albums")}</strong></div>
-            <div className="albums-grid">
+            <div className="albums-grid reveal-stagger">
               {suggestions.slice(0, 12).map((suggestion) => (
                 <div className="album-suggestion-card" key={suggestion.id || suggestion.name}>
                   <span className="album-suggestion-meta">
