@@ -19195,3 +19195,23 @@ input[type="range"] {
   position: relative;
   z-index: 1;
 }
+
+/* undo-strip (Wave P1): the reversibility affordance slides up + fades in from
+   the bottom edge when a reversible action completes, so "you can undo this"
+   arrives with a gentle motion instead of popping in. The strips mount only when
+   there's something to undo, so the entrance plays exactly once. Reduced-motion
+   collapses it to a plain fade via the master block. */
+.undo-strip,
+.photo-operation-undo {
+  animation: undoStripIn var(--dur-moderate) var(--ease-decelerate);
+}
+@keyframes undoStripIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
