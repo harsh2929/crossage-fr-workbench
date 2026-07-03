@@ -16058,18 +16058,44 @@ input[type="range"] {
 }
 
 .empty {
+  position: relative;
+  overflow: hidden;
   align-items: center;
-  background: rgba(247, 248, 251, 0.68);
-  border: 1px dashed rgba(60, 60, 67, 0.22);
-  border-radius: 8px;
+  background: rgba(247, 248, 251, 0.55);
+  border: 1px solid var(--separator-soft);
+  border-radius: 14px;
   color: var(--secondary);
   display: grid;
   gap: 8px;
   justify-content: center;
   justify-items: center;
   min-height: 150px;
-  padding: 18px;
+  padding: 26px 18px;
   text-align: center;
+}
+
+/* empty-charm (Wave P1): a low-intensity breathing accent orb behind the copy,
+   replacing the dashed gray box — "never a gray box". Reduced-motion holds the
+   orb on a static frame via the master @media block. */
+.empty::before {
+  content: "";
+  position: absolute;
+  top: 20px;
+  left: calc(50% - 48px);
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  background: var(--accent-vivid);
+  opacity: 0.14;
+  filter: blur(8px);
+  transform-origin: center;
+  animation: orbBreathe var(--dur-ambient) var(--ease-standard) infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+.empty > * {
+  position: relative;
+  z-index: 1;
 }
 
 .empty strong {
@@ -19142,4 +19168,30 @@ input[type="range"] {
   to {
     opacity: 1;
   }
+}
+
+/* empty-charm on the Search seeds ("Try searching for") — a breathing accent
+   orb behind the prompt so the empty search never reads as a blank slate. */
+.search-suggestions {
+  position: relative;
+}
+.search-suggestions::before {
+  content: "";
+  position: absolute;
+  top: -8px;
+  left: calc(50% - 60px);
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  background: var(--accent-vivid);
+  opacity: 0.12;
+  filter: blur(10px);
+  transform-origin: center;
+  animation: orbBreathe var(--dur-ambient) var(--ease-standard) infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+.search-suggestions > * {
+  position: relative;
+  z-index: 1;
 }
