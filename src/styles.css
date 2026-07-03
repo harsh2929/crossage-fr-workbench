@@ -19215,3 +19215,28 @@ input[type="range"] {
     transform: translateY(0);
   }
 }
+
+/* select-morph (Wave P1): when a photo tile enters the selected state its
+   selection box pops with a spring and fills accent (white check for contrast),
+   making selection feel real. The accent ring already comes from
+   .photo-tile-wrap.selected. CSS-only off the .selected class — no JS timer, so
+   rapid select/deselect can't race (unlike a save-settle). Transform-only pop. */
+.photo-tile-wrap.selected .photo-select-box {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.5);
+  animation: selectMorph var(--dur-base) var(--ease-spring);
+}
+.photo-tile-wrap.selected .photo-select-box input {
+  accent-color: #fff;
+}
+@keyframes selectMorph {
+  0% {
+    transform: scale(0.72);
+  }
+  60% {
+    transform: scale(1.16);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
