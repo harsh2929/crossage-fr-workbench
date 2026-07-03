@@ -7948,7 +7948,7 @@ function Dashboard({
       )}
 
       {(section === "overview" || section === "diagnostics") && (
-      <div className="metrics dashboard-metrics">
+      <div className="metrics dashboard-metrics reveal-stagger">
         {(section === "overview" ? overviewMetrics : metrics).map((metric) => (
           <div className="metric" key={metric.label}>
             <span>{metric.label}</span>
@@ -12381,6 +12381,8 @@ function SettingsView(props: {
   const [personToDelete, setPersonToDelete] = useState("");
   const [personToRename, setPersonToRename] = useState("");
   const [renameTarget, setRenameTarget] = useState("");
+  // Wave P0: the Save-settings button flashes a success settle when a save fires.
+  const { settle: settleSave, settling: isSaveSettling } = useSaveSettle();
   const [retentionDays, setRetentionDays] = useState(90);
   const safeModel = props.state.safeModeModel;
   const modelCompatibility = props.state.modelCompatibility;
@@ -12452,6 +12454,7 @@ function SettingsView(props: {
       if (!proceed) return;
     }
     props.saveSettings();
+    settleSave("settings");
   }
   function setModelPack(value: string) {
     const selectedPack = modelPackages.find((item) => item.pack === value);
@@ -12663,7 +12666,7 @@ function SettingsView(props: {
             <span>Safe Mode protection is being relaxed and will require confirmation.</span>
           </div>
         )}
-        <button className="primary" onClick={requestSaveSettings} disabled={props.busy || validationMessages.length > 0}>
+        <button className={`primary${isSaveSettling("settings") ? " save-settle" : ""}`} onClick={requestSaveSettings} disabled={props.busy || validationMessages.length > 0}>
           <Save size={17} />
           <span>Save settings</span>
         </button>

@@ -27202,7 +27202,7 @@ export function PhotosView(props: {
           )
         ) : (
           <div
-            className="photos-grid virtualized"
+            className="photos-grid virtualized content-crossfade"
             ref={photoGridRef}
             style={{ ...thumbnailGridStyle, height: `${Math.ceil(photoVirtualWindow.totalHeight)}px` }}
           >

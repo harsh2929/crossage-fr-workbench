@@ -19126,3 +19126,20 @@ input[type="range"] {
 .search-ai-toggle.active > svg {
   animation: navIconTwinkle var(--dur-slow) var(--ease-decelerate);
 }
+
+/* ── Library grid reveal (Wave P0) ──────────────────────────────────────────
+   The virtualized photo grid fades in when its content commits. OPACITY-ONLY
+   (overrides the generic content-crossfade's translate via specificity): a
+   transform here would shift the scroll geometry and make Playwright wait on
+   bounding-box stability. Reduced-motion collapses it via the master block. */
+.photos-grid.virtualized.content-crossfade {
+  animation: contentFade var(--dur-moderate) var(--ease-decelerate);
+}
+@keyframes contentFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
