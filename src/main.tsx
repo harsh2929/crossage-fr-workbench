@@ -1,6 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { ToastProvider, ToastHost } from "./shell/ToastHost";
 import appIconUrl from "../desktop/assets/icon-192.webp";
 import { normalizeLanguage, translate } from "./i18n";
 import type { LanguageCode, TranslationKey } from "./i18n";
@@ -235,11 +236,14 @@ if (!rootElement) {
 } else {
   createRoot(rootElement).render(
   <React.StrictMode>
-      <RendererBoundary>
-        <StartupRecoveryGate>
-          <App />
-        </StartupRecoveryGate>
-      </RendererBoundary>
+      <ToastProvider>
+        <RendererBoundary>
+          <StartupRecoveryGate>
+            <App />
+          </StartupRecoveryGate>
+        </RendererBoundary>
+        <ToastHost />
+      </ToastProvider>
   </React.StrictMode>
   );
 }

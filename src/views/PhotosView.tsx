@@ -160,6 +160,9 @@ import type {
   MediaRef,
   SystemPhotoSource
 } from "../types";
+import { useToast } from "../shell/ToastHost";
+import { useSaveSettle } from "../shell/useSaveSettle";
+import { useCountRoll } from "../shell/useCountRoll";
 import { emptyPhotoAlbumDraft, type PhotoAlbumKind } from "./photoAlbumEditorState";
 import { applyPhotoTimezoneCorrection, composePhotoDateTimeOverride, normalizePhotoDateTimeOverride, normalizePhotoTimezoneOffset, parsePhotoDateOffsetDays, shiftPhotoDateByDays, splitPhotoDateTimeOverride } from "./photoDateAdjustments";
 import { buildPhotoDateBucketSummaryBadges, buildPhotoDateBuckets, photoDateBucketCoverReason, type PhotoDateViewMode } from "./photoDateViews";
@@ -1957,6 +1960,9 @@ export function PhotosView(props: {
   const [albumItemError, setAlbumItemError] = useState("");
   const [albumOrderNotice, setAlbumOrderNotice] = useState("");
   const [importError, setImportError] = useState("");
+  // Product-love (Wave 0): global toast + save-settle confirmation beats.
+  const { notify: notifyToast } = useToast();
+  const { settle: settleControl, settling: isControlSettling } = useSaveSettle();
   const [importWarnings, setImportWarnings] = useState<NonNullable<PhotoImportResult["warnings"]>>([]);
   const [importFailureDetails, setImportFailureDetails] = useState<PhotoImportFailure[]>([]);
   const [importStorageMode, setImportStorageMode] = useState<PhotoImportStorageMode>("referenced");
@@ -2173,6 +2179,8 @@ export function PhotosView(props: {
   const [recentlyDeletedRetentionDays, setRecentlyDeletedRetentionDays] = useState("30");
   const [recentlyDeletedCleanupResult, setRecentlyDeletedCleanupResult] = useState("");
   const [selectedSources, setSelectedSources] = useState<Set<string>>(new Set());
+  // Wave P0: the selected-count capsule bumps as the selection changes.
+  const selectionCountRoll = useCountRoll(selectedSources.size);
   const recentPhotoShortcutRef = useRef<{ shortcut: string; at: number }>({ shortcut: "", at: 0 });
   const photoShortcutKeyHandlerRef = useRef<((event: KeyboardEvent) => void) | null>(null);
   const [lightbox, setLightbox] = useState<number | null>(null);
@@ -4737,6 +4745,13 @@ export function PhotosView(props: {
     if (key === "showSharedCollections") setShowSharedCollections(value);
     if (key === "showLowValueCollections") setShowLowValueCollections(value);
     updatePhotoRailPreferences({ [key]: value } as Partial<PhotoRailPreferences>);
+  }
+
+  // User-facing collection toggle: persists the preference and plays the
+  // save-settle confirmation beat on the toggled row.
+  function toggleRailDisplay(key: PhotoRailDisplayPreferenceKey, value: boolean) {
+    setPhotoRailDisplayPreference(key, value);
+    settleControl(`rail:${key}`);
   }
 
   function updatePhotoLibraryMediaSettings(patch: PhotoLibraryMediaSettingsOverride) {
@@ -15454,8 +15469,18 @@ export function PhotosView(props: {
       setIndexEverythingSource(null);
       setIndexEverythingExtraPaths([]);
       await finishImport(result);
+      if (result) {
+        const added = result.importedCount;
+        notifyToast(
+          added > 0
+            ? { tone: "ok", message: `${uiText("Added photos from this computer")}: ${formatCount(added)}.` }
+            : { tone: "ok", message: uiText("No new photos found on this computer.") }
+        );
+      }
     } catch (error) {
-      setImportError(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setImportError(message);
+      notifyToast({ tone: "error", message: `${uiText("Couldn’t index this computer")}: ${message}` });
     } finally {
       setIndexEverythingRunning(false);
     }
@@ -19082,25 +19107,25 @@ export function PhotosView(props: {
         {favoritePeople.length + favoritePets.length > 0 && (
           <section className="people-section" aria-label={uiText("Favorites")}>
             <div className="people-section-head"><Star size={16} /><strong>{uiText("Favorites")}</strong></div>
-            <div className="people-circle-grid">{favoritePeople.map((folder) => circle(folder, "person"))}{favoritePets.map((folder) => circle(folder, "pet"))}</div>
+            <div className="people-circle-grid reveal-stagger">{favoritePeople.map((folder) => circle(folder, "person"))}{favoritePets.map((folder) => circle(folder, "pet"))}</div>
           </section>
         )}
         {namedPeople.length > 0 && (
           <section className="people-section" aria-label={uiText("People")}>
             <div className="people-section-head"><Users size={16} /><strong>{uiText("People")}</strong></div>
-            <div className="people-circle-grid">{namedPeople.map((folder) => circle(folder, "person"))}</div>
+            <div className="people-circle-grid reveal-stagger">{namedPeople.map((folder) => circle(folder, "person"))}</div>
           </section>
         )}
         {pets.length > 0 && (
           <section className="people-section" aria-label={uiText("Pets")}>
             <div className="people-section-head"><Tag size={16} /><strong>{uiText("Pets")}</strong></div>
-            <div className="people-circle-grid">{pets.map((folder) => circle(folder, "pet"))}</div>
+            <div className="people-circle-grid reveal-stagger">{pets.map((folder) => circle(folder, "pet"))}</div>
           </section>
         )}
         {(unknownClusters.length > 0 || Boolean(petReviewFolder && petReviewFolder.count > 0)) && (
           <section className="people-section people-to-name-band" aria-label={uiText("More people to name")}>
             <div className="people-section-head"><UserPlus size={16} /><strong>{uiText("More people to name")}</strong></div>
-            <div className="people-circle-grid">
+            <div className="people-circle-grid reveal-stagger">
               {petReviewFolder && petReviewFolder.count > 0 ? (
                 <div className="people-circle-card to-name" key="petReview">
                   <button type="button" className="people-circle-cover-btn" onClick={() => setActiveId(petReviewFolder.id)} aria-label={uiText("Review pets")}>
@@ -19127,7 +19152,7 @@ export function PhotosView(props: {
         {groups.length > 0 && (
           <section className="people-section" aria-label={uiText("People Together")}>
             <div className="people-section-head"><Users size={16} /><strong>{uiText("People Together")}</strong></div>
-            <div className="people-circle-grid">{groups.map((folder) => circle(folder, "group"))}</div>
+            <div className="people-circle-grid reveal-stagger">{groups.map((folder) => circle(folder, "group"))}</div>
           </section>
         )}
       </div>
@@ -20830,28 +20855,28 @@ export function PhotosView(props: {
           </div>
         )}
         <div className="photo-rail-display-controls" aria-label={uiText("Collection display")}>
-          <label>
-            <input type="checkbox" checked={showUtilityCollections} onChange={(event) => setPhotoRailDisplayPreference("showUtilityCollections", event.currentTarget.checked)} />
+          <label className={isControlSettling("rail:showUtilityCollections") ? "save-settle" : undefined}>
+            <input type="checkbox" checked={showUtilityCollections} onChange={(event) => toggleRailDisplay("showUtilityCollections", event.currentTarget.checked)} />
             <Archive size={14} />
             <span>{uiText("Utilities")}</span>
           </label>
-          <label>
-            <input type="checkbox" checked={showSensitiveCollections} onChange={(event) => setPhotoRailDisplayPreference("showSensitiveCollections", event.currentTarget.checked)} />
+          <label className={isControlSettling("rail:showSensitiveCollections") ? "save-settle" : undefined}>
+            <input type="checkbox" checked={showSensitiveCollections} onChange={(event) => toggleRailDisplay("showSensitiveCollections", event.currentTarget.checked)} />
             <EyeOff size={14} />
             <span>{uiText("Sensitive")}</span>
           </label>
-          <label>
-            <input type="checkbox" checked={showScreenshotCollections} onChange={(event) => setPhotoRailDisplayPreference("showScreenshotCollections", event.currentTarget.checked)} />
+          <label className={isControlSettling("rail:showScreenshotCollections") ? "save-settle" : undefined}>
+            <input type="checkbox" checked={showScreenshotCollections} onChange={(event) => toggleRailDisplay("showScreenshotCollections", event.currentTarget.checked)} />
             <ImageIcon size={14} />
             <span>{uiText("Screenshots")}</span>
           </label>
-          <label>
-            <input type="checkbox" checked={showSharedCollections} onChange={(event) => setPhotoRailDisplayPreference("showSharedCollections", event.currentTarget.checked)} />
+          <label className={isControlSettling("rail:showSharedCollections") ? "save-settle" : undefined}>
+            <input type="checkbox" checked={showSharedCollections} onChange={(event) => toggleRailDisplay("showSharedCollections", event.currentTarget.checked)} />
             <Send size={14} />
             <span>{uiText("Shared")}</span>
           </label>
-          <label>
-            <input type="checkbox" checked={showLowValueCollections} onChange={(event) => setPhotoRailDisplayPreference("showLowValueCollections", event.currentTarget.checked)} />
+          <label className={isControlSettling("rail:showLowValueCollections") ? "save-settle" : undefined}>
+            <input type="checkbox" checked={showLowValueCollections} onChange={(event) => toggleRailDisplay("showLowValueCollections", event.currentTarget.checked)} />
             <MinusCircle size={14} />
             <span>{uiText("Low-value")}</span>
           </label>
@@ -24445,7 +24470,7 @@ export function PhotosView(props: {
             <Check size={14} />
             <span>{allPageSelected ? uiText("Clear page") : uiText("Select page")}</span>
           </button>
-          <span>{formatCount(selectedSources.size)} {uiText("selected")}</span>
+          <span><span key={selectionCountRoll.bumpKey} className={selectionCountRoll.bumpKey > 0 ? "count-roll bump" : "count-roll"}>{formatCount(selectedSources.size)}</span> {uiText("selected")}</span>
           {(
           <>
           <button type="button" className="secondary compact-action" onClick={() => void exportSelected()} disabled={!selectedSources.size || props.busy}>

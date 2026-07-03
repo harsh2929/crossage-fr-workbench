@@ -5,6 +5,7 @@ import { useState } from "react";
 import { AlertTriangle, ExternalLink, ImageIcon, Loader2, Search, Sparkles, X } from "lucide-react";
 import type { TranslationKey } from "../i18n";
 import type { PhotoLibrarySearchResult, SemanticSearchPhotosValue } from "../types";
+import { revealDelayStyle } from "../lib/revealStagger";
 
 interface SearchViewProps {
   searchPhotoLibrary: (params: Record<string, unknown>) => Promise<PhotoLibrarySearchResult>;
@@ -167,16 +168,16 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
       )}
 
       {semanticResult && (semanticResult.items?.length || semanticResult.results.length) > 0 && (
-        <section className="search-results" aria-label={uiText("Semantic search results")}>
+        <section className="search-results content-crossfade" aria-label={uiText("Semantic search results")}>
           <header className="search-results-head">
             <strong>{uiText("Best matches")}</strong>
             <span>{semanticResult.scored} {uiText("ranked")}</span>
           </header>
-          <div className="search-results-grid">
+          <div className="search-results-grid reveal-stagger">
             {(semanticResult.items && semanticResult.items.length
               ? semanticResult.items
               : semanticResult.results.map((r) => ({ ...r }))
-            ).map((item) => {
+            ).map((item, index) => {
               const pct = semanticBest > 0 ? Math.max(1, Math.round((item.score / semanticBest) * 100)) : 0;
               const url = "previewUrl" in item ? (item as { previewUrl?: string }).previewUrl || "" : "";
               return (
@@ -184,6 +185,7 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
                   key={item.sourcePath}
                   type="button"
                   className="search-result-card"
+                  style={revealDelayStyle(index)}
                   onClick={() => reveal(item.sourcePath)}
                   title={`${basename(item.sourcePath)} · ${pct}%`}
                   aria-label={`${basename(item.sourcePath)}, ${pct}% ${uiText("match")}`}
@@ -201,19 +203,20 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
       )}
 
       {textResult?.groups.map((group) => (
-        <section key={group.id} className="search-results" aria-label={group.label}>
+        <section key={group.id} className="search-results content-crossfade" aria-label={group.label}>
           <header className="search-results-head">
             <strong>{group.label}</strong>
             <span>{group.total}</span>
           </header>
-          <div className="search-results-grid">
-            {group.items.map((item) => {
+          <div className="search-results-grid reveal-stagger">
+            {group.items.map((item, index) => {
               const url = item.previewUrl || item.coverPreviewUrl || "";
               return (
                 <button
                   key={item.id}
                   type="button"
                   className="search-result-card"
+                  style={revealDelayStyle(index)}
                   onClick={() => item.sourcePath && reveal(item.sourcePath)}
                   title={item.title}
                 >

@@ -41,6 +41,19 @@
   --success-control-bg: #eaf7ee;
   --success-control-border: #b8e4c4;
   --success-control-text: #176b2c;
+  /* Motion tokens (Wave 0 substrate). All product-love primitives compose from
+     these — no ad-hoc ms literals or inline cubic-bezier(). Theme-agnostic. */
+  --ease-decelerate: cubic-bezier(0.22, 1, 0.36, 1); /* house "settle" curve */
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);     /* symmetric loops/tweens */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);  /* delight overshoot */
+  --ease-emphasized: cubic-bezier(0.2, 0, 0, 1);     /* hero/large transitions */
+  --dur-instant: 90ms;
+  --dur-quick: 140ms;
+  --dur-base: 200ms;
+  --dur-moderate: 280ms;
+  --dur-slow: 500ms;
+  --dur-deliberate: 800ms;
+  --dur-ambient: 4600ms;
 }
 
 * {
@@ -18862,4 +18875,254 @@ input[type="range"] {
 
 .index-everything-hide small {
   color: var(--secondary);
+}
+
+/* ── Toast-host (Wave 0 substrate) ─────────────────────────────────────────
+   One global bottom-right stack of transient notices. Entrance composes from
+   the motion tokens; reduced-motion is neutralised by the master block. */
+.toast-host {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 9000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(380px, calc(100vw - 40px));
+  pointer-events: none; /* container ignores clicks; each toast re-enables */
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 6px 14px;
+  border-radius: 14px;
+  background: var(--glass-strong);
+  border: 1px solid var(--control-border);
+  box-shadow: var(--shadow), var(--inner-highlight);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
+  animation: toastIn var(--dur-moderate) var(--ease-decelerate);
+}
+
+@keyframes toastIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.toast > svg {
+  flex: 0 0 auto;
+}
+.toast.ok > svg {
+  color: var(--green);
+}
+.toast.warn > svg {
+  color: var(--orange);
+}
+.toast.error > svg {
+  color: var(--red);
+}
+.toast.busy > svg {
+  color: var(--accent);
+}
+
+.toast-message {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.toast-dismiss {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px; /* meets the workbench min-tap-target invariant */
+  height: 36px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--secondary);
+  cursor: pointer;
+  transition:
+    background var(--dur-quick) var(--ease-decelerate),
+    color var(--dur-quick) var(--ease-decelerate);
+}
+.toast-dismiss:hover {
+  background: var(--fill-strong);
+  color: var(--text);
+}
+
+/* ── save-settle (Wave 0 primitive) ────────────────────────────────────────
+   Optimistic-write confirmation: the control flashes the success tint and an
+   optional checkmark pops, then drains back to rest. First animated use of the
+   --success-control-* tokens. Paint-only (background/box-shadow/transform) — no
+   layout. Reduced-motion collapses the animation via the master @media block;
+   the actual state change + any toast still carry the confirmation. */
+.save-settle {
+  animation: saveSettle var(--dur-slow) var(--ease-decelerate);
+}
+
+@keyframes saveSettle {
+  0% {
+    background-color: transparent;
+    box-shadow: inset 0 0 0 0 transparent;
+  }
+  30% {
+    background-color: var(--success-control-bg);
+    box-shadow: inset 0 0 0 1px var(--success-control-border);
+  }
+  70% {
+    background-color: var(--success-control-bg);
+    box-shadow: inset 0 0 0 1px var(--success-control-border);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: inset 0 0 0 0 transparent;
+  }
+}
+
+/* Optional checkmark a consumer may render inside a settling control. */
+.save-settle-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--success-control-text);
+  transform-origin: center;
+  animation: saveSettleCheck var(--dur-slow) var(--ease-spring);
+}
+
+@keyframes saveSettleCheck {
+  0% {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  75% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1);
+  }
+}
+
+/* ── count-roll (Wave P0) ───────────────────────────────────────────────────
+   A changing count capsule bumps. The consumer remounts the value span via a
+   changing key so the bump replays; `.bump` is added only on real changes so
+   the initial value doesn't animate. Transform-only. */
+.count-roll {
+  display: inline-block;
+  font-variant-numeric: tabular-nums;
+}
+.count-roll.bump {
+  animation: countRollBump var(--dur-quick) var(--ease-spring);
+}
+@keyframes countRollBump {
+  0% {
+    transform: scale(1);
+  }
+  45% {
+    transform: scale(1.14);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* ── action-bar-spring (Wave P0) ────────────────────────────────────────────
+   The always-mounted bulk bar springs a hair when a selection begins (gains
+   `.active`). Transform-only lift + settle; reduced-motion collapses to the
+   resting state (no translate) via the master block. */
+.photo-bulk-bar.active {
+  animation: actionBarSpring var(--dur-base) var(--ease-spring);
+}
+@keyframes actionBarSpring {
+  0% {
+    transform: translateY(6px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+/* ── reveal-stagger + content-crossfade (Wave P0) ───────────────────────────
+   Load→content handoff with no pop: items fade + rise, staggered by a per-item
+   --reveal-delay (capped by the hook). Transform/opacity only; reduced-motion
+   collapses to a plain fade. */
+.reveal-stagger > * {
+  animation: revealStagger var(--dur-moderate) var(--ease-decelerate) both;
+  animation-delay: var(--reveal-delay, 0ms);
+}
+/* Default per-item delay via position, so a container only needs the class
+   (an inline --reveal-delay, e.g. from revealDelayStyle, still overrides). */
+.reveal-stagger > *:nth-child(1) {
+  --reveal-delay: 0ms;
+}
+.reveal-stagger > *:nth-child(2) {
+  --reveal-delay: 24ms;
+}
+.reveal-stagger > *:nth-child(3) {
+  --reveal-delay: 48ms;
+}
+.reveal-stagger > *:nth-child(4) {
+  --reveal-delay: 72ms;
+}
+.reveal-stagger > *:nth-child(5) {
+  --reveal-delay: 96ms;
+}
+.reveal-stagger > *:nth-child(6) {
+  --reveal-delay: 120ms;
+}
+.reveal-stagger > *:nth-child(7) {
+  --reveal-delay: 144ms;
+}
+.reveal-stagger > *:nth-child(n + 8) {
+  --reveal-delay: 168ms;
+}
+@keyframes revealStagger {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.content-crossfade {
+  animation: contentCrossfade var(--dur-moderate) var(--ease-decelerate);
+}
+@keyframes contentCrossfade {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── dynamic-icon (Wave P0) ─────────────────────────────────────────────────
+   A signature control's icon performs its verb once when it becomes active.
+   Search's Sparkles twinkles when on-device AI ranking engages, reusing the
+   canonical navIconTwinkle gesture. Reduced-motion is neutralised by the master
+   block. Transform/opacity only. */
+.search-ai-toggle.active > svg {
+  animation: navIconTwinkle var(--dur-slow) var(--ease-decelerate);
 }

@@ -242,6 +242,7 @@ import {
 } from "./shell/navModel";
 import { SearchView } from "./shell/SearchView";
 import { SectionTabs } from "./shell/SectionTabs";
+import { useSaveSettle } from "./shell/useSaveSettle";
 import { photoReviewMoreCandidateReasons } from "./views/photoGroupReview";
 import {
   normalizeReviewFocusHistory,
@@ -10647,6 +10648,8 @@ function ReviewView(props: {
   const [peopleFilter, setPeopleFilter] = useState("");
   const [noteDraft, setNoteDraft] = useState("");
   const [identityTarget, setIdentityTarget] = useState("");
+  // Wave P0: the just-decided candidate row flashes a success settle as it turns over.
+  const { settle: settleCandidate, settling: isCandidateSettling } = useSaveSettle();
   // M4: persist the filter context whenever it changes so it survives unmount.
   useEffect(() => {
     writeReviewPref({ statusFilter, search, sort, lane: reviewLane, people: [...selectedPeople] });
@@ -11033,6 +11036,8 @@ function ReviewView(props: {
     setPagedCandidates((current) => current.map((candidate) => (
       candidate.candidateId === target.candidateId ? { ...candidate, status } : candidate
     )));
+    // Confirm the decision on the outgoing row (optimistic, like the turn-over above).
+    settleCandidate(`candidate:${target.candidateId}`);
     if (advanced) {
       props.setSelectedCandidateId(nextCandidate!.candidateId);
     } else if (statusFilter === "pending" && status !== "pending") {
@@ -11784,7 +11789,8 @@ function ReviewView(props: {
                     "row review-candidate-row",
                     props.selectedCandidateId === candidate.candidateId ? "selected" : "",
                     hasCloseRunnerRisk(candidate) ? "risk-close-runner" : "",
-                    hasSingleReferenceRisk(candidate) ? "risk-single-reference" : ""
+                    hasSingleReferenceRisk(candidate) ? "risk-single-reference" : "",
+                    isCandidateSettling(`candidate:${candidate.candidateId}`) ? "save-settle" : ""
                   ].filter(Boolean).join(" ")}
                   role="button"
                   tabIndex={0}
