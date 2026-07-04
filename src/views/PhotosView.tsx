@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from "react";
 import {
   AlertTriangle,
   Archive,
@@ -163,6 +163,7 @@ import type {
 import { useToast } from "../shell/ToastHost";
 import { useSaveSettle } from "../shell/useSaveSettle";
 import { useCountRoll } from "../shell/useCountRoll";
+import { useFlipZoom } from "../shell/useFlipZoom";
 import { emptyPhotoAlbumDraft, type PhotoAlbumKind } from "./photoAlbumEditorState";
 import { applyPhotoTimezoneCorrection, composePhotoDateTimeOverride, normalizePhotoDateTimeOverride, normalizePhotoTimezoneOffset, parsePhotoDateOffsetDays, shiftPhotoDateByDays, splitPhotoDateTimeOverride } from "./photoDateAdjustments";
 import { buildPhotoDateBucketSummaryBadges, buildPhotoDateBuckets, photoDateBucketCoverReason, type PhotoDateViewMode } from "./photoDateViews";
@@ -2184,6 +2185,8 @@ export function PhotosView(props: {
   const recentPhotoShortcutRef = useRef<{ shortcut: string; at: number }>({ shortcut: "", at: 0 });
   const photoShortcutKeyHandlerRef = useRef<((event: KeyboardEvent) => void) | null>(null);
   const [lightbox, setLightbox] = useState<number | null>(null);
+  // Wave P2 detail-open: zoom the lightbox image out of the tapped tile on open.
+  const { playZoom: playFlipZoom } = useFlipZoom();
   const [lightboxZoom, setLightboxZoom] = useState(() => readSessionNumber(PHOTO_LIGHTBOX_ZOOM_KEY, 1));
   const [lightboxFitMode, setLightboxFitMode] = useState<LightboxFitMode>(() => readSessionLightboxFitMode(PHOTO_LIGHTBOX_FIT_KEY, "fit"));
   const [lightboxPan, setLightboxPan] = useState({ x: 0, y: 0 });
@@ -2301,6 +2304,14 @@ export function PhotosView(props: {
   const lightboxCloseRef = useRef<HTMLButtonElement | null>(null);
   const lightboxInfoRef = useRef<HTMLDivElement | null>(null);
   const lightboxTriggerRef = useRef<HTMLButtonElement | null>(null);
+  // Play the detail-open zoom only on a true open (null → index), never on
+  // next/prev navigation or close; reuse the existing trigger + image refs.
+  const lightboxWasOpenRef = useRef(false);
+  useLayoutEffect(() => {
+    const justOpened = lightbox !== null && !lightboxWasOpenRef.current;
+    lightboxWasOpenRef.current = lightbox !== null;
+    if (justOpened) playFlipZoom(lightboxTriggerRef.current, lightboxImageRef.current);
+  }, [lightbox, playFlipZoom]);
   const imageManualCropDragRef = useRef<ImageManualCropDragState | null>(null);
   const imageManualCurveGraphRef = useRef<SVGSVGElement | null>(null);
   const imageMarkupDragRef = useRef<ImageMarkupDragState | null>(null);

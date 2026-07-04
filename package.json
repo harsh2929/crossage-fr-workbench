@@ -58,6 +58,7 @@
     "test:save-settle": "node tests/save_settle_units.test.mjs",
     "test:count-roll": "node tests/count_roll_units.test.mjs",
     "test:reveal-stagger": "node tests/reveal_stagger_units.test.mjs",
+    "test:flip-zoom": "node tests/flip_zoom_units.test.mjs",
     "test:model-validation": "node desktop/scripts/run-python.cjs tests/model_validation_units.py",
     "test:mcp": "node desktop/scripts/run-python.cjs tests/mcp_smoke.py",
     "test:mcp-redaction": "node desktop/scripts/run-python.cjs tests/mcp_redaction.py",
