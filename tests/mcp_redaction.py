@@ -78,6 +78,23 @@ def test_embedded_path_redacted_in_tool_output() -> None:
     assert LEAK_PATH not in out
 
 
+def test_hash_fields_redacted_in_tool_output() -> None:
+    # MCP-04 regression: image hashes are biometric fingerprints and must be
+    # hidden in tool output, matching resource redaction. A raw SHA-256 in a
+    # candidate row (query_candidates) previously leaked to agents.
+    leak_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    payload = {
+        "items": [
+            {"candidateId": "x", "sourceHash": leak_hash, "sha256": leak_hash, "phash": "ff00ff00", "customHash": leak_hash},
+        ]
+    }
+    out = json.dumps(mcp._redact_tool_output(payload))
+    assert leak_hash not in out, "biometric hash leaked in tool output"
+    assert "ff00ff00" not in out, "perceptual hash leaked in tool output"
+    # And resources must stay redacted too.
+    assert leak_hash not in json.dumps(mcp._agent_safe_value(payload, keep_path_names=False))
+
+
 def test_rate_limiter_token_bucket() -> None:
     # Burst of 3, refilling 1 token/sec, with a deterministic injected clock.
     limiter = mcp._RateLimiter(capacity=3, refill_per_sec=1.0)
@@ -100,6 +117,7 @@ def main() -> None:
     test_embedded_path_redacted_in_resource_freetext()
     test_embedded_path_redacted_in_audit_message()
     test_embedded_path_redacted_in_tool_output()
+    test_hash_fields_redacted_in_tool_output()
     test_rate_limiter_token_bucket()
     print("mcp redaction + model integrity ok")
 

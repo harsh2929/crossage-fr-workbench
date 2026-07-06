@@ -33,12 +33,13 @@ from urllib.request import Request, urlopen
 
 from crossage_fr import __version__
 from crossage_fr.benchmark_quality import calibrate_public_labels
-from crossage_fr.config import LEARNING_MODES, MAX_CLUSTER_MIN_SIZE, MAX_FACE_DETECTOR_SIZE, MIN_FACE_DETECTOR_SIZE, PERFORMANCE_MODES
+from crossage_fr.config import LEARNING_MODES, MAX_CLUSTER_MIN_SIZE, MAX_FACE_DETECTOR_SIZE, MIN_FACE_DETECTOR_SIZE, PERFORMANCE_MODES, SAFE_MODE_PROFILES, normalize_safe_mode_profile, safe_mode_threshold_for_profile
 from crossage_fr.dataset_benchmarks import identity_media_index, inspect_identity_dataset, materialize_file, prepare_cfp_dataset, prepare_lfw_subset, public_dataset_catalog
 from crossage_fr.embed import EmbeddingEngine, create_embedding_engine
 from crossage_fr.enroll import ProjectState
 from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, RAW_IMAGE_EXTENSIONS, image_decoder_report, image_record_for_path, iter_image_paths, load_image, sha256_file
 from crossage_fr.ingest.safety import safety_model_report
+from crossage_fr.ingest.safety_explain import explain_model_report
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, VideoLoadError, probe_video, sample_video_frames, video_decoder_report
 from crossage_fr.model_manager import MODEL_PACKAGES, download_model_pack, model_governance, model_pack_ready, model_root_for_config, model_roots_for_engine, model_status, set_model_root
 from crossage_fr.models import ReferenceFace, ReviewCandidate, new_id, normalize_risk_flags
@@ -919,6 +920,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "add_workspace": "_cmd_add_workspace",
         "record_audit": "_cmd_record_audit",
         "save_settings": "_cmd_save_settings",
+        "calibrate_safe_mode": "_cmd_calibrate_safe_mode",
+        "explain_safety": "_cmd_explain_safety",
+        "install_safety_explainer": "_cmd_install_safety_explainer",
     }
 
     def _cmd_ping(self, params, progress=None):
@@ -1163,6 +1167,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return self.state()
 
     def _cmd_bulk_set_status(self, params, progress=None):
+        if "candidateIds" not in params:
+            raise ValueError("candidateIds is required.")
         candidate_ids = params.get("candidateIds", [])
         if not isinstance(candidate_ids, list):
             raise ValueError("candidateIds must be a list.")
@@ -2279,6 +2285,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         safe_mode_threshold = float(params.get("safeModeThreshold", self.project.config.safe_mode_threshold))
         if not math.isfinite(safe_mode_threshold) or safe_mode_threshold < 0.0 or safe_mode_threshold > 1.0:
             raise ValueError("Safe Mode threshold must be between 0 and 1.")
+        # Stage 1a: a named threshold profile (privacy/balanced/permissive) is
+        # authoritative for the effective threshold; "custom" keeps the explicit value.
+        safe_mode_profile = normalize_safe_mode_profile(
+            params.get("safeModeProfile", self.project.config.safe_mode_profile)
+        )
+        if safe_mode_profile != "custom":
+            safe_mode_threshold = safe_mode_threshold_for_profile(safe_mode_profile)
         thresholds.confident = confident
         thresholds.likely = likely
         thresholds.relaxed_child = relaxed_child
@@ -2309,6 +2322,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             params.get("safeModeZeroAdmittance", self.project.config.safe_mode_zero_admittance)
         )
         self.project.config.safe_mode_threshold = safe_mode_threshold
+        self.project.config.safe_mode_profile = safe_mode_profile
         self.project.apply_video_decoder_config()
         self.project._append_audit(
             {
@@ -2346,6 +2360,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "safe_mode": self.project.config.safe_mode,
                 "safe_mode_zero_admittance": self.project.config.safe_mode_zero_admittance,
                 "safe_mode_threshold": safe_mode_threshold,
+                "safe_mode_profile": safe_mode_profile,
                 "source": str(params.get("source", "desktop")),
                 "reason": str(params.get("reason", ""))[:800],
             }
@@ -2353,6 +2368,103 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         self.project.save()
         self._reset_engine()
         return self.state()
+
+    def _cmd_calibrate_safe_mode(self, params, progress=None):
+        """Fit the Safe Mode temperature from user-labeled local images (Stage 1b).
+
+        params: {examples: [{path, sensitive|label}], reset?: bool}. With reset,
+        clears calibration back to T=1.0 (the raw model)."""
+        from crossage_fr.ingest.safety import calibrate_safety_temperature
+
+        if bool(params.get("reset")):
+            self.project.config.safe_mode_temperature = 1.0
+            self.project.save()
+            self.project._append_audit({"action": "calibrate_safe_mode", "reset": True, "temperature": 1.0})
+            return {"ok": True, "reset": True, "temperature": 1.0}
+        labeled: list[tuple[str, bool]] = []
+        raw = params.get("examples", [])
+        for item in raw if isinstance(raw, list) else []:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path", "")).strip()
+            if not path:
+                continue
+            labeled.append((path, bool(item.get("sensitive", item.get("label", False)))))
+        # Folder form: pick a "sensitive examples" folder + a "safe examples"
+        # folder; enumerate images server-side (capped so a huge tree can't hang).
+        cap = 4000
+        for folder in params.get("folders", []) if isinstance(params.get("folders"), list) else []:
+            if not isinstance(folder, dict):
+                continue
+            folder_path = str(folder.get("path", "")).strip()
+            if not folder_path:
+                continue
+            label = bool(folder.get("sensitive", folder.get("label", False)))
+            try:
+                for image_path in iter_image_paths(Path(folder_path), recursive=True):
+                    labeled.append((str(image_path), label))
+                    if len(labeled) >= cap:
+                        break
+            except Exception:
+                continue
+            if len(labeled) >= cap:
+                break
+        result = calibrate_safety_temperature(labeled)
+        if result.get("ok"):
+            self.project.config.safe_mode_temperature = float(result["temperature"])
+            self.project.save()
+            self.project._append_audit({
+                "action": "calibrate_safe_mode",
+                "temperature": result["temperature"],
+                "sample_count": result.get("sampleCount", 0),
+                "positives": result.get("positives", 0),
+                "negatives": result.get("negatives", 0),
+                "nll_before": result.get("nllBefore"),
+                "nll_after": result.get("nllAfter"),
+            })
+        return result
+
+    def _cmd_explain_safety(self, params, progress=None):
+        """Localize sensitive regions in a flagged image (Stage 2, optional model).
+
+        params: {path}. Returns {available, detections:[{label, score, box}], reason}.
+        Safe to call with no explainer model installed — returns available=False."""
+        from crossage_fr.ingest.safety_explain import explain_sensitivity
+
+        path = str(params.get("path", "")).strip()
+        if not path:
+            return {"available": False, "detections": [], "reason": "No image path provided."}
+        try:
+            image = load_image(Path(path))
+        except Exception as exc:
+            return {"available": False, "detections": [], "reason": f"Could not read image ({type(exc).__name__})."}
+        return explain_sensitivity(image)
+
+    def _cmd_install_safety_explainer(self, params, progress=None):
+        """Install the optional Stage-2 explainer model (Stage 2). params:
+        {sourcePath | url, modelName?, inputSize?, license?, classes?, expectedSha256?,
+        confirmAgpl?, format?}. NudeNet is AGPL — confirmAgpl must be true."""
+        from crossage_fr.ingest.safety_explain import install_explainer_model
+
+        result = install_explainer_model(
+            source_path=(str(params.get("sourcePath", "")).strip() or None),
+            url=(str(params.get("url", "")).strip() or None),
+            model_name=str(params.get("modelName", "nudenet-explainer")).strip() or "nudenet-explainer",
+            input_size=int(params.get("inputSize", 640) or 640),
+            license=str(params.get("license", "")),
+            classes=params.get("classes"),
+            expected_sha256=str(params.get("expectedSha256", "")),
+            confirm_agpl=bool(params.get("confirmAgpl")),
+            fmt=str(params.get("format", "nudenet")),
+        )
+        if result.get("ok"):
+            self.project._append_audit({
+                "action": "install_safety_explainer",
+                "model_name": result.get("modelName"),
+                "license": params.get("license", ""),
+                "source": "url" if params.get("url") else "local-file",
+            })
+        return result
 
     def _verification_engine(self) -> Any | None:
         config = self._effective_engine_config()
@@ -2565,7 +2677,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 result["walkErrorCount"] += 1
                 result["transientErrorCount"] += 1
                 if len(result["unreadableSamples"]) < 8:
-                    result["unreadableSamples"].append({"path": str(current), "error": str(exc)})
+                    result["unreadableSamples"].append({"path": _mask_absolute_paths(str(current)), "error": _mask_absolute_paths(str(exc))})
                 continue
             with entries_context as entries:
                 for entry in entries:
@@ -2581,7 +2693,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                         result["walkErrorCount"] += 1
                         result["transientErrorCount"] += 1
                         if len(result["unreadableSamples"]) < 8:
-                            result["unreadableSamples"].append({"path": str(path), "error": str(exc)})
+                            result["unreadableSamples"].append({"path": _mask_absolute_paths(str(path)), "error": _mask_absolute_paths(str(exc))})
                         continue
                     if is_dir:
                         reason = self.project.scan_exclusion_reason(path, is_dir=True)
@@ -2643,7 +2755,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 load_image(path)
             except Exception as exc:
                 if len(result["unreadableSamples"]) < 8:
-                    result["unreadableSamples"].append({"path": str(path), "error": str(exc)})
+                    result["unreadableSamples"].append({"path": _mask_absolute_paths(str(path)), "error": _mask_absolute_paths(str(exc))})
         for path in video_samples_for_decode:
             if monotonic() >= deadline:
                 decode_budget_exhausted = True
@@ -2653,7 +2765,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 probe_video(path)
             except Exception as exc:
                 if len(result["unreadableVideoSamples"]) < 8:
-                    result["unreadableVideoSamples"].append({"path": str(path), "error": str(exc)})
+                    result["unreadableVideoSamples"].append({"path": _mask_absolute_paths(str(path)), "error": _mask_absolute_paths(str(exc))})
         if result["imageCount"] == 0 and result["videoCount"] == 0:
             result["recommendations"].append("No supported image or video files were found in this folder.")
         extension_counts = result["extensionCounts"]
@@ -3660,7 +3772,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return digest.hexdigest()
 
     def _onnx_integrity_check(self, path: Path) -> dict[str, Any]:
-        result: dict[str, Any] = {"path": str(path), "ok": False, "bytes": 0, "checkedWith": "filesystem", "error": ""}
+        # PC-02: model_integrity() results are returned to the client directly
+        # (not only via the already-redacted support bundle), so mask the
+        # absolute directory here — the basename (e.g. glintr100.onnx) is public,
+        # the containing path (home dir / external drive) is not.
+        result: dict[str, Any] = {"path": _mask_absolute_paths(str(path)), "ok": False, "bytes": 0, "checkedWith": "filesystem", "error": ""}
         try:
             stat = path.stat()
             result["bytes"] = int(stat.st_size)
@@ -3668,7 +3784,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 result["error"] = "Model file is missing or empty."
                 return result
         except OSError as exc:
-            result["error"] = str(exc)
+            result["error"] = _mask_absolute_paths(str(exc))
             return result
         try:
             import onnxruntime as ort  # type: ignore
@@ -3681,7 +3797,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             result["checkedWith"] = "filesystem"
         except Exception as exc:
             result["checkedWith"] = "onnxruntime"
-            result["error"] = str(exc)
+            result["error"] = _mask_absolute_paths(str(exc))
             return result
         result["ok"] = True
         return result
@@ -8271,9 +8387,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
         with self.project.db.connect() as conn:
             self.project.db.backfill_photo_import_sessions_from_scan_runs(conn)
+            # Iterate the cursor lazily (no .fetchall()) so we don't materialise
+            # the full row list on top of the membership set at 100k+ assets.
             indexed_paths = {
                 norm_path(row["source_path"])
-                for row in conn.execute("SELECT source_path FROM photo_assets").fetchall()
+                for row in conn.execute("SELECT source_path FROM photo_assets")
                 if norm_path(row["source_path"]) and in_cleanup_scope(row["source_path"])
             }
             rows = conn.execute(
@@ -29054,13 +29172,20 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             search_index = {}
         if query:
             search_result = self.project.db.search_photo_assets(query, offset=offset, limit=limit, media_kind=media_kind)
+            asset_ids = search_result["assetIds"]
             assets = [
                 asset
-                for asset_id in search_result["assetIds"]
+                for asset_id in asset_ids
                 for asset in [self.project.db.photo_asset_by_id(asset_id)]
                 if asset
             ]
-            total = int(search_result["total"])
+            # PC: a search-indexed id can fail to hydrate only if the asset was
+            # deleted between the FTS query and hydration. Discount those from
+            # total so the client's offset/total pagination math stays
+            # consistent (otherwise total counts rows that can never be reached,
+            # and a fixed offset+=limit pager loops forever on the last page).
+            missing = len(asset_ids) - len(assets)
+            total = max(offset + len(assets), int(search_result["total"]) - missing)
         else:
             assets = self.project.db.list_photo_assets(offset=offset, limit=limit, media_kind=media_kind)
             total = self.project.db.count_photo_assets(media_kind=media_kind)
@@ -33681,6 +33806,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "safeMode": self.project.config.safe_mode,
                 "safeModeZeroAdmittance": self.project.config.safe_mode_zero_admittance,
                 "safeModeThreshold": self.project.config.safe_mode_threshold,
+                "safeModeProfile": self.project.config.safe_mode_profile,
+                "safeModeProfiles": dict(SAFE_MODE_PROFILES),
+                "safeModeTemperature": self.project.config.safe_mode_temperature,
                 "storageBudgetBytes": self.project.config.storage_budget_bytes,
                 "maxMediaFileBytes": self.project.config.max_media_file_bytes,
                 "videoDecoder": {
@@ -33702,6 +33830,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "requireConsent": self.project.config.require_consent,
             },
             "safeModeModel": safety_model_report(),
+            "safeModeExplain": explain_model_report(),
             "modelSetup": model_status(self.project.config, self.engine_name),
             "modelCompatibility": self.project.model_compatibility_report(self.engine_name),
             "videoDecoder": video_decoder_report(),
@@ -33904,8 +34033,12 @@ def structured_error(exc: Exception, command: str = "") -> dict[str, Any]:
         "severity": severity,
         "recoverable": recoverable,
         "command": command,
-        "message": str(exc),
-        "traceback": traceback.format_exc(limit=8) if os.environ.get("CROSSAGE_DEBUG") else "",
+        # PC-02: the client-facing message/traceback must be path-redacted too.
+        # record_backend_error() already redacts the persisted log; without this
+        # the live IPC response leaked absolute paths (OSError carries the failing
+        # path) while the on-disk log did not — a redaction split-brain.
+        "message": _mask_absolute_paths(str(exc)),
+        "traceback": _mask_absolute_paths(traceback.format_exc(limit=8)) if os.environ.get("CROSSAGE_DEBUG") else "",
     }
 
 

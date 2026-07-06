@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 import hashlib
 import importlib.util
+import logging
 import os
 import warnings
 from typing import Any, Callable, Iterable
@@ -116,8 +117,10 @@ def register_image_openers() -> None:
         register_avif_opener = getattr(pillow_heif, "register_avif_opener", None)
         if register_avif_opener:
             register_avif_opener()
-    except Exception:
-        pass
+    except Exception as exc:
+        # Surface why HEIC/AVIF support is unavailable instead of failing later
+        # with a cryptic "could not load image" for those formats.
+        logging.getLogger(__name__).warning("HEIF/AVIF opener registration failed (%s); HEIC/AVIF may not load.", exc)
     Image.init()
     _IMAGE_OPENERS_REGISTERED = True
 
@@ -201,6 +204,7 @@ def _representative_frame(image: Image.Image) -> Image.Image:
     try:
         image.seek(target)
     except Exception:
+        logging.getLogger(__name__).info("Frame seek to %d failed (n_frames=%d); falling back to frame 0.", target, frame_count)
         try:
             image.seek(0)
         except Exception:
@@ -253,6 +257,13 @@ def _load_raw_image(path: Path) -> Image.Image:
                 int(getattr(sizes, "width", 0)) * int(getattr(sizes, "height", 0)),
             )
             limit = int(getattr(Image, "MAX_IMAGE_PIXELS", 0) or 0)
+            if limit and pixels <= 0:
+                # A crafted RAW can report 0/missing dimensions to slip past the
+                # pixel ceiling and then OOM in postprocess(). If we can't verify
+                # the size, refuse to decode rather than trust it.
+                raise ImageLoadError(
+                    f"RAW/DNG image reports no decodable dimensions; refusing to decode: {path}"
+                )
             if limit and pixels > limit:
                 raise ImageLoadError(
                     f"RAW/DNG image exceeds the maximum allowed pixels ({pixels} > {limit}): {path}"

@@ -41,6 +41,13 @@ class EmbeddingEngine(ABC):
 
 
 def _l2_normalize(vector: np.ndarray) -> np.ndarray:
+    # Zero/NaN norm -> returned unchanged (a zero vector stays zero). This is the
+    # degenerate-input case only: such embeddings are rejected upstream by the
+    # quality gate (quality_from_norm==0) and finitude checks in vector_store, and
+    # every cosine consumer guards zero norms, so this never reaches matching.
+    # NOTE: siglip_engine._l2_normalize (epsilon-clip) and match/pooling
+    # (zero->1.0) are separate copies with the same effective result for all
+    # non-degenerate inputs; keep the guards in sync if this convention changes.
     vector = vector.astype("float32", copy=False)
     norm = float(np.linalg.norm(vector))
     if norm == 0.0 or math.isnan(norm):
@@ -497,6 +504,12 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
                     continue
                 seen.add(fingerprint)
                 bbox_values = tuple(int(round(v)) for v in face.bbox.tolist())
+                # quality_from_norm() is calibrated against the raw single-crop
+                # recognizer-embedding norm, so raw_norm is intentionally taken
+                # from face.embedding even on the flip-TTA path (where `vector`
+                # is the flip-averaged, re-normalized template). Do not switch
+                # this to the averaged vector without re-fitting the quality
+                # calibration — its norm is ~1.0 and would flatten quality.
                 raw_norm = float(np.linalg.norm(face.embedding))
                 fiqa_score = self._fiqa_score(source_bgr, kps_for_index)
                 quality = effective_quality(quality_from_norm(raw_norm, self.model_name), fiqa_score)

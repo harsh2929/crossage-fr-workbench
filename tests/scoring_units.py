@@ -245,7 +245,27 @@ def test_valid_reference_and_candidate() -> None:
     assert valid_candidate(bad_cand) is False
 
 
+def test_multi_reference_support_bonus_uses_support_count() -> None:
+    # Regression (H7): the multi-reference support bonus must divide by the
+    # number of SUPPORTING scores (evidence_count - 1), NOT by len(raw_scores)
+    # (capped at 3). The buggy denominator under-rewarded multi-reference
+    # matches ~33-67% and silently weakened recall.
+    th = Thresholds()
+    refs = {"r1": _ref("r1", "Alice"), "r2": _ref("r2", "Alice")}
+    hits = [SearchHit(item_id="r1", score=0.30), SearchHit(item_id="r2", score=0.29)]
+    decision = group_hits(hits, refs, th)
+    assert decision is not None
+    # top=0.30; support_scores=[0.29] (>= relaxed_child and within 0.08 of top).
+    correct_margin = (0.29 - th.relaxed_child) / 1  # divide by len(support_scores)=1
+    correct = 0.30 + min(0.03, max(0.0, correct_margin) * 0.08)
+    buggy = 0.30 + min(0.03, max(0.0, (0.29 - th.relaxed_child) / 2) * 0.08)  # old /len(raw_scores)=2
+    assert abs(decision.score - correct) < 1e-6, (decision.score, correct)
+    assert decision.score > buggy, (decision.score, buggy)
+    assert decision.evidence_count == 2  # 1 + len(support_scores)
+
+
 def main() -> None:
+    test_multi_reference_support_bonus_uses_support_count()
     test_review_lane_abstains_information_limited_faces()
     test_review_priority_orders_surface_then_review_then_low_info()
     test_accuracy_from_label_rows()

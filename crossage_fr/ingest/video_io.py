@@ -554,7 +554,12 @@ def _sample_video_frames_ffmpeg(
             str(quality_scale),
             str(pattern),
         ]
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=max(30, max_frames * 2), check=False)
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, timeout=max(30, max_frames * 2), check=False)
+        except subprocess.TimeoutExpired as exc:
+            # A slow/huge decode must degrade to a clean VideoLoadError, not an
+            # uncaught TimeoutExpired that crashes the ingest pipeline.
+            raise VideoLoadError(f"Timed out decoding video {resolved} after {getattr(exc, 'timeout', '?')}s.") from exc
         if completed.returncode != 0:
             raise VideoLoadError((completed.stderr or completed.stdout or f"Could not decode video {resolved}").strip()[:400])
         frames = sorted(temp_dir.glob("frame-*.jpg"))

@@ -86,4 +86,23 @@ const result = spawnSync(python, args, {
   }
 });
 
-process.exit(result.status ?? 1);
+if ((result.status ?? 1) !== 0) {
+  process.exit(result.status ?? 1);
+}
+
+// Verify PyInstaller actually produced a non-empty backend executable. A silent
+// failure or corrupt output would otherwise exit 0 here and only surface later
+// during electron-builder packaging or at first launch.
+const exeName = process.platform === "win32" ? "crossage-backend.exe" : "crossage-backend";
+const exePath = path.join(outputDir, "crossage-backend", exeName);
+try {
+  const stat = fs.statSync(exePath);
+  if (!stat.isFile() || stat.size <= 0) {
+    console.error(`[build-backend] PyInstaller output missing or empty: ${exePath}`);
+    process.exit(1);
+  }
+} catch (error) {
+  console.error(`[build-backend] PyInstaller did not produce ${exePath}: ${error.message}`);
+  process.exit(1);
+}
+process.exit(0);

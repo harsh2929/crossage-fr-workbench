@@ -336,7 +336,13 @@ def assert_static_app_contracts() -> None:
     util_cjs = (root / "desktop" / "main" / "util.cjs").read_text(encoding="utf-8")
     assert "function safeRealpath" in util_cjs
     assert "previewsReal" in desktop_main
-    assert "!fs.existsSync(target) || !isTrustedMediaPath(target)" in desktop_main
+    # EIPC/TOCTOU: the media handler resolves the request to a single canonical
+    # real path and fetches THAT path (not the original), so a symlink swapped
+    # between the trust check and the fetch cannot escape the trust boundary.
+    assert "function resolveTrustedMediaPath" in desktop_main
+    assert "resolveTrustedMediaPath(target)" in desktop_main
+    assert "!realTarget || !fs.existsSync(realTarget)" in desktop_main
+    assert "pathToFileURL(realTarget)" in desktop_main
 
     release_workflow = (root / ".github" / "workflows" / "windows-release.yml").read_text(encoding="utf-8")
     assert "release_tag" in release_workflow

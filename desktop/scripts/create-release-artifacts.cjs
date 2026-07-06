@@ -140,14 +140,30 @@ function main() {
   writeJson(path.join(dist, sbomName), sbom);
   writeJson(path.join(dist, provenanceName), provenance);
 
+  const signatureName = `${checksumName}.sig`;
   const hashable = walk(dist)
-    .filter((file) => path.basename(file) !== checksumName)
+    .filter((file) => ![checksumName, signatureName].includes(path.basename(file)))
     .map((file) => {
       const relative = path.relative(dist, file).replace(/\\/g, "/");
       return `${sha256(file)}  ${relative}`;
     })
     .sort();
-  fs.writeFileSync(path.join(dist, checksumName), `${hashable.join("\n")}\n`, "utf8");
+  const checksumBytes = Buffer.from(`${hashable.join("\n")}\n`, "utf8");
+  fs.writeFileSync(path.join(dist, checksumName), checksumBytes);
+
+  // Origin proof (optional): if an Ed25519 release private key is configured,
+  // emit a detached SHA256SUMS.txt.sig so verify-release-assets.cjs (given the
+  // matching public key) can prove the checksums came from the official
+  // builder — closing the "attacker who owns the release can swap binary +
+  // checksums together" gap. Without a key, the .sig is simply not produced.
+  let signed = false;
+  const privKeyPath = process.env.VINTRACE_RELEASE_PRIVKEY || "";
+  if (privKeyPath) {
+    const privateKey = crypto.createPrivateKey(fs.readFileSync(privKeyPath, "utf8"));
+    const signature = crypto.sign(null, checksumBytes, privateKey);
+    fs.writeFileSync(path.join(dist, signatureName), signature);
+    signed = true;
+  }
 
   console.log(JSON.stringify({
     generatedAt,
@@ -155,6 +171,7 @@ function main() {
     dist,
     files: hashable.length,
     checksums: checksumName,
+    signature: signed ? signatureName : null,
     sbom: sbomName,
     provenance: provenanceName
   }, null, 2));

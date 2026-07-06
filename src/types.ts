@@ -10,7 +10,7 @@ export interface PlatformReport {
   rosetta_translated: boolean;
   onnxruntime_available: boolean;
   available_providers: string[];
-  selected_providers: unknown[];
+  selected_providers: string[];
   primary_provider: string;
   accelerator_status: string;
   precision: string;
@@ -113,6 +113,9 @@ export interface AppConfig {
   safeMode: boolean;
   safeModeZeroAdmittance?: boolean;
   safeModeThreshold: number;
+  safeModeProfile?: string;
+  safeModeProfiles?: Record<string, number>;
+  safeModeTemperature?: number;
   storageBudgetBytes: number;
   maxMediaFileBytes: number;
   videoDecoder?: VideoDecoderConfig;
@@ -4054,6 +4057,56 @@ export interface MediaRef {
   sourceDetail?: string;
 }
 
+export interface McpHttpStatus {
+  running: boolean;
+  url: string;
+  host: string;
+  port: number;
+  token: string;
+  error: string;
+}
+
+export interface McpConnectionInfo {
+  mode: "packaged" | "source";
+  workspace: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  httpUrl: string;
+  httpHost: string;
+  httpPort: number;
+  configs: {
+    claudeCode: string;
+    claudeDesktop: string;
+    codex: string;
+  };
+  packaged: boolean;
+  http: McpHttpStatus;
+  bundlePath: string;
+  canBuildBundle: boolean;
+  codexConfigPath: string;
+}
+
+export interface McpCodexResult {
+  ok: boolean;
+  cancelled?: boolean;
+  path?: string;
+  backupPath?: string;
+}
+
+export interface McpBundleResult {
+  ok: boolean;
+  action?: "revealed" | "built" | "build-failed" | "unavailable";
+  path?: string;
+  message?: string;
+}
+
+export interface McpActionResult {
+  ok: boolean;
+  path?: string;
+  error?: string;
+}
+
 export interface CrossAgeApi {
   invoke<T = unknown>(command: string, params?: Record<string, unknown>): Promise<T>;
   chooseFolder(): Promise<string | null>;
@@ -4063,6 +4116,7 @@ export interface CrossAgeApi {
   chooseAudioFile(): Promise<MediaRef | null>;
   /** Single JSON picker; returns a granted local file path. */
   chooseJsonFile(): Promise<Pick<MediaRef, "path" | "isDir"> | null>;
+  chooseModelFile(): Promise<Pick<MediaRef, "path" | "isDir"> | null>;
   /** Single ICC/ICM picker; returns a granted local color-profile path. */
   chooseColorProfileFile(): Promise<Pick<MediaRef, "path" | "isDir"> | null>;
   /** Resolve a dropped File to its absolute path (Electron webUtils). */
@@ -4108,6 +4162,14 @@ export interface CrossAgeApi {
   getInitialState(): Promise<AppState>;
   rendererReady(): Promise<boolean>;
   setAppLanguage(language: string): Promise<boolean>;
+  getMcpConnectionInfo(): Promise<McpConnectionInfo>;
+  addMcpToCodex(): Promise<McpCodexResult>;
+  revealMcpConfigs(): Promise<McpActionResult>;
+  revealOrBuildMcpBundle(): Promise<McpBundleResult>;
+  startMcpHttpServer(): Promise<McpHttpStatus>;
+  stopMcpHttpServer(): Promise<McpHttpStatus>;
+  getMcpHttpStatus(): Promise<McpHttpStatus>;
+  onMcpHttpStatus(callback: (status: McpHttpStatus) => void): () => void;
   onAppCommand(callback: (command: AppCommand) => void): () => void;
   onExternalOpen(callback: (payload: ExternalOpenPayload) => void): () => void;
   onScanProgress(callback: (event: ScanProgressEvent | ModelDownloadProgressEvent | MediaActionProgressEvent) => void): () => void;

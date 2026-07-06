@@ -157,6 +157,8 @@ import type {
   WorkspaceRelinkResult,
   CandidateQueryResult,
   DiagnosticsReport,
+  McpConnectionInfo,
+  McpHttpStatus,
   PhotoAlbumPreviewValue,
   PhotoSmartAlbumMigrationValue,
   PhotoAlbumSuggestionResult,
@@ -483,6 +485,13 @@ function performanceTierLabel(value?: string) {
   return "Standard";
 }
 
+// Safe Mode threshold profiles (res.md Stage 1a) — mirrors crossage_fr/config.py.
+const SAFE_MODE_PROFILE_THRESHOLDS: Record<string, number> = {
+  privacy: 0.3,
+  balanced: 0.5,
+  permissive: 0.85,
+};
+
 type SettingsDraft = {
   modelPack: string;
   thresholds: Thresholds;
@@ -494,6 +503,7 @@ type SettingsDraft = {
   safeMode: boolean;
   safeModeZeroAdmittance?: boolean;
   safeModeThreshold: number;
+  safeModeProfile?: string;
   storageBudgetBytes: number;
   maxMediaFileBytes: number;
   videoDecoder: VideoDecoderConfig;
@@ -1124,6 +1134,7 @@ function coerceSettingsProfile(incoming: unknown, current: SettingsDraft): Setti
     learningMode: normalizeLearningMode(profile.learningMode ?? current.learningMode),
     safeMode: booleanSetting(profile.safeMode, current.safeMode),
     safeModeThreshold: finiteNumber(profile.safeModeThreshold, current.safeModeThreshold, 0, 1),
+    safeModeProfile: safeText(profile.safeModeProfile, current.safeModeProfile ?? "custom"),
     storageBudgetBytes: finiteInteger(profile.storageBudgetBytes, current.storageBudgetBytes, 0, 10 * 1024 * 1024 * 1024 * 1024),
     maxMediaFileBytes: finiteInteger(profile.maxMediaFileBytes, current.maxMediaFileBytes, 0, 1024 * 1024 * 1024 * 1024),
     videoDecoder: {
@@ -1264,7 +1275,12 @@ function writeSavedReviewViews(workspace: string | null | undefined, views: Save
 
 function readReviewFocusHistory(workspace: string | null | undefined): ReviewFocusHistoryRecord[] {
   try {
-    return normalizeReviewFocusHistory(JSON.parse(window.localStorage.getItem(reviewFocusHistoryStorageKey(workspace)) || "[]"));
+    const raw = window.localStorage.getItem(reviewFocusHistoryStorageKey(workspace)) || "[]";
+    // Guard against a pathologically large payload freezing the main thread in
+    // JSON.parse (localStorage is user-writable in Electron). Legitimate values
+    // are capped to a handful of small records on write.
+    if (raw.length > 262144) return [];
+    return normalizeReviewFocusHistory(JSON.parse(raw));
   } catch {
     return [];
   }
@@ -1292,6 +1308,7 @@ function settingsValuesEqual(left: SettingsValues, right: SettingsValues) {
     left.safeMode === right.safeMode &&
     (left.safeModeZeroAdmittance ?? false) === (right.safeModeZeroAdmittance ?? false) &&
     sameSettingValue(left.safeModeThreshold, right.safeModeThreshold) &&
+    (left.safeModeProfile ?? "custom") === (right.safeModeProfile ?? "custom") &&
     left.storageBudgetBytes === right.storageBudgetBytes &&
     left.maxMediaFileBytes === right.maxMediaFileBytes &&
     left.videoDecoder.ffmpegPath === right.videoDecoder.ffmpegPath &&
@@ -1662,6 +1679,7 @@ function normalizeAppState(incoming: AppState, previous: AppState | null): AppSt
     effectiveVerificationDetectorSize: finiteInteger(rawConfig.effectiveVerificationDetectorSize, previousConfig?.effectiveVerificationDetectorSize ?? preset.verificationDetectorSize, 320, 1024),
     safeMode: booleanSetting(rawConfig.safeMode, previousConfig?.safeMode ?? preset.safeMode),
     safeModeThreshold: finiteNumber(rawConfig.safeModeThreshold, previousConfig?.safeModeThreshold ?? preset.safeModeThreshold, 0, 1),
+    safeModeProfile: (typeof rawConfig.safeModeProfile === "string" ? rawConfig.safeModeProfile : undefined) ?? previousConfig?.safeModeProfile ?? "custom",
     storageBudgetBytes: finiteNumber(rawConfig.storageBudgetBytes, previousConfig?.storageBudgetBytes ?? 0, 0),
     maxMediaFileBytes: finiteNumber(rawConfig.maxMediaFileBytes, previousConfig?.maxMediaFileBytes ?? 0, 0),
     videoDecoder: {
@@ -1918,6 +1936,17 @@ export default function App() {
   const folderAnalysisRequestId = useRef(0);
   const stateReadyRef = useRef(false);
   const settingsDirtyRef = useRef(false);
+  // Monotonic guards so an out-of-order backend reply can't overwrite newer
+  // state. Commands are sent (and processed by the single-threaded backend) in
+  // send order, so a higher-seq response's state is always a superset of a
+  // lower one; we never apply a state whose send-seq is older than the last
+  // applied. ipcSendSeqRef stamps each send; ipcAppliedSeqRef tracks the newest applied.
+  const ipcSendSeqRef = useRef(0);
+  const ipcAppliedSeqRef = useRef(0);
+  // Tracks the last-applied workspace so the "workspace changed -> reset
+  // calibration" check compares against the committed value, not a possibly
+  // stale render-closure of `state` (which two rapid applyState calls could read).
+  const lastAppliedWorkspaceRef = useRef<string | null>(null);
   const rendererReadySentRef = useRef(false);
   const memoryPressureNoticeRef = useRef("");
   const appCommandHandlerRef = useRef<(command: AppCommand) => void | Promise<void>>(() => undefined);
@@ -2405,8 +2434,12 @@ export default function App() {
 
   function applyState(rawNext: AppState) {
     const next = normalizeAppState(rawNext, state);
-    if (state?.workspace && next.workspace && next.workspace !== state.workspace) {
+    const previousWorkspace = lastAppliedWorkspaceRef.current;
+    if (previousWorkspace && next.workspace && next.workspace !== previousWorkspace) {
       setCalibrationLearning(null);
+    }
+    if (next.workspace) {
+      lastAppliedWorkspaceRef.current = next.workspace;
     }
     stateReadyRef.current = true;
     setState(next);
@@ -2421,6 +2454,7 @@ export default function App() {
       safeMode: next.config.safeMode,
       safeModeZeroAdmittance: next.config.safeModeZeroAdmittance ?? false,
       safeModeThreshold: next.config.safeModeThreshold,
+      safeModeProfile: next.config.safeModeProfile,
       storageBudgetBytes: next.config.storageBudgetBytes ?? 0,
       maxMediaFileBytes: next.config.maxMediaFileBytes ?? 0,
       videoDecoder: next.config.videoDecoder ?? defaultVideoDecoder,
@@ -2451,6 +2485,9 @@ export default function App() {
 
   async function invoke<T = unknown>(label: string, command: string, params: Record<string, unknown> = {}, options: { quiet?: boolean } = {}) {
     const startedAt = performance.now();
+    // H8: stamp this send with a monotonic sequence so a slower, older reply
+    // can't clobber the state from a newer command that already resolved.
+    const sendSeq = ++ipcSendSeqRef.current;
     // H4: a "quiet" invoke skips the global busy spinner and keyboard-block so
     // the rapid review-triage loop stays responsive while the write is in flight.
     if (!options.quiet) setBusy(label);
@@ -2459,10 +2496,11 @@ export default function App() {
       const result = await window.crossAge.invoke<T>(command, params);
       const maybeCommand = result as CommandResult;
       const maybeState = result as AppState;
-      if (maybeCommand.state) {
-        applyState(maybeCommand.state as AppState);
-      } else if (maybeState.counts) {
-        applyState(maybeState);
+      const nextState = maybeCommand.state ? (maybeCommand.state as AppState) : maybeState.counts ? maybeState : null;
+      // Only apply if this reply is at least as new as the last applied one.
+      if (nextState && sendSeq >= ipcAppliedSeqRef.current) {
+        ipcAppliedSeqRef.current = sendSeq;
+        applyState(nextState);
       }
       return result;
     } catch (error) {
@@ -6178,6 +6216,7 @@ export default function App() {
       safeMode: draft.safeMode,
       safeModeZeroAdmittance: draft.safeModeZeroAdmittance ?? false,
       safeModeThreshold: draft.safeModeThreshold,
+      safeModeProfile: draft.safeModeProfile ?? "custom",
       storageBudgetBytes: draft.storageBudgetBytes,
       maxMediaFileBytes: draft.maxMediaFileBytes,
       videoDecoder: draft.videoDecoder,
@@ -6543,6 +6582,7 @@ export default function App() {
               { key: "engine", label: uiText("Engine & Models") },
               { key: "privacy", label: uiText("Privacy & Safety") },
               { key: "storage", label: uiText("Storage & Data") },
+              { key: "agents", label: uiText("AI Agents") },
               { key: "advanced", label: uiText("Advanced") },
             ]}
             active={settingsSection}
@@ -12219,6 +12259,193 @@ function CandidateReferenceStrength({ candidate, state }: { candidate: ReviewCan
   );
 }
 
+function McpAgentsPanel({ copyText }: { copyText(text: string, label?: string): void }) {
+  const [info, setInfo] = useState<McpConnectionInfo | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const [busyAction, setBusyAction] = useState("");
+  const [actionNote, setActionNote] = useState<{ tone: "ok" | "danger-text"; text: string } | null>(null);
+  const [httpStatus, setHttpStatus] = useState<McpHttpStatus | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    window.crossAge.getMcpConnectionInfo()
+      .then((next) => {
+        if (cancelled) return;
+        setInfo(next);
+        setHttpStatus(next.http);
+      })
+      .catch((error) => {
+        if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error));
+      });
+    const unsubscribe = window.crossAge.onMcpHttpStatus((status) => setHttpStatus(status));
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
+  const running = Boolean(httpStatus?.running);
+
+  async function runAction(
+    key: string,
+    fn: () => Promise<{ ok?: boolean; cancelled?: boolean; message?: string; error?: string; backupPath?: string }>,
+    okText: string
+  ) {
+    setBusyAction(key);
+    setActionNote(null);
+    try {
+      const result = await fn();
+      if (result?.cancelled) {
+        // User dismissed the confirmation; leave the panel quiet.
+      } else if (result?.ok) {
+        setActionNote({ tone: "ok", text: result.backupPath ? `${okText} — previous file backed up to ${result.backupPath}` : okText });
+      } else {
+        setActionNote({ tone: "danger-text", text: result?.message || result?.error || "Action failed." });
+      }
+    } catch (error) {
+      setActionNote({ tone: "danger-text", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusyAction("");
+    }
+  }
+
+  async function toggleHttp() {
+    setBusyAction("http");
+    setActionNote(null);
+    try {
+      const status = running ? await window.crossAge.stopMcpHttpServer() : await window.crossAge.startMcpHttpServer();
+      setHttpStatus(status);
+      if (status.error) setActionNote({ tone: "danger-text", text: status.error });
+    } catch (error) {
+      setActionNote({ tone: "danger-text", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusyAction("");
+    }
+  }
+
+  if (loadError) {
+    return (
+      <div className="panel settings-panel">
+        <div className="panel-title"><Users size={18} /> AI Agents (MCP)</div>
+        <p className="compact danger-text">Could not load connection details: {loadError}</p>
+      </div>
+    );
+  }
+  if (!info) {
+    return (
+      <div className="panel settings-panel">
+        <div className="panel-title"><Users size={18} /> AI Agents (MCP)</div>
+        <p className="compact"><Loader2 className="spin" size={14} /> Loading connection details…</p>
+      </div>
+    );
+  }
+
+  const preStyle: CSSProperties = {
+    margin: "0.5rem 0 0",
+    padding: "0.75rem",
+    borderRadius: "10px",
+    background: "rgba(0,0,0,0.28)",
+    border: "1px solid rgba(255,255,255,0.12)",
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+    fontSize: "12px",
+    lineHeight: 1.5,
+    whiteSpace: "pre",
+    overflowX: "auto",
+    maxWidth: "100%"
+  };
+
+  const cards = [
+    { key: "claudeCode", title: "Claude Code", hint: "Save as .mcp.json in your project, or run: claude mcp add.", config: info.configs.claudeCode },
+    { key: "claudeDesktop", title: "Claude Desktop", hint: "Paste under Developer settings, or use the one-click bundle below.", config: info.configs.claudeDesktop },
+    { key: "codex", title: "Codex", hint: "Add to ~/.codex/config.toml, or use “Add to Codex” below.", config: info.configs.codex }
+  ];
+
+  return (
+    <>
+      <div className="panel settings-panel">
+        <div className="panel-title"><Users size={18} /> AI Agents (MCP)</div>
+        <p className="compact">
+          Connect Claude Code, Claude Desktop, Codex, or any MCP-compatible agent to this workspace. Agents can
+          enroll references, scan, and review — every action is consent-gated and review-first, and destructive
+          operations require an explicit confirmation. Nothing runs until you add one of these configs to your agent.
+        </p>
+        <dl className="mini-list">
+          <dt>Workspace</dt><dd title={info.workspace}>{info.workspace}</dd>
+          <dt>Backend</dt><dd>{info.mode === "packaged" ? "Bundled app sidecar" : "Source checkout (.venv)"}</dd>
+        </dl>
+        <div className="button-row wrap">
+          <button className="ghost compact-action" onClick={() => void runAction("codex", () => window.crossAge.addMcpToCodex(), "Added Vintrace to Codex")} disabled={busyAction !== ""}>
+            {busyAction === "codex" ? <Loader2 className="spin" size={14} /> : <Check size={14} />} Add to Codex
+          </button>
+          <button className="ghost compact-action" onClick={() => void runAction("bundle", () => window.crossAge.revealOrBuildMcpBundle(), "Claude Desktop bundle ready")} disabled={busyAction !== ""}>
+            {busyAction === "bundle" ? <Loader2 className="spin" size={14} /> : <Download size={14} />} {info.bundlePath ? "Reveal Claude Desktop bundle" : "Build Claude Desktop bundle"}
+          </button>
+          <button className="ghost compact-action" onClick={() => void runAction("configs", () => window.crossAge.revealMcpConfigs(), "Opened the example configs")} disabled={busyAction !== ""}>
+            <FolderOpen size={14} /> Reveal example configs
+          </button>
+        </div>
+        {actionNote && <p className={`compact ${actionNote.tone === "danger-text" ? "danger-text" : "ok"}`}>{actionNote.text}</p>}
+      </div>
+
+      {cards.map((card) => (
+        <div className="panel settings-panel" key={card.key}>
+          <div className="panel-title">{card.title}</div>
+          <p className="compact">{card.hint}</p>
+          <pre style={preStyle} aria-label={`${card.title} MCP config`}>{card.config}</pre>
+          <div className="button-row">
+            <button className="ghost compact-action" onClick={() => copyText(card.config, `${card.title} config`)}>
+              <CopyIcon size={14} /> Copy config
+            </button>
+          </div>
+        </div>
+      ))}
+
+      <div className="panel settings-panel">
+        <div className="panel-title"><Play size={18} /> Local HTTP server</div>
+        <p className="compact">
+          Optional — for agent-SDK / HTTP clients. Runs the MCP server over localhost HTTP, bound to 127.0.0.1 and
+          never exposed off this machine. It requires a per-session Bearer token (shown below when running); most
+          desktop agents use the stdio configs above instead.
+        </p>
+        <div className="button-row wrap center">
+          <button className="ghost compact-action" onClick={() => void toggleHttp()} disabled={busyAction === "http"}>
+            {busyAction === "http" ? <Loader2 className="spin" size={14} /> : running ? <Pause size={14} /> : <Play size={14} />} {running ? "Stop server" : "Start server"}
+          </button>
+          <span className={`status-pill ${running ? "strong" : "weak"}`}>{running ? "Running" : "Stopped"}</span>
+          {running && httpStatus?.url && (
+            <button className="ghost compact-action" onClick={() => copyText(httpStatus.url, "MCP HTTP URL")}>
+              <CopyIcon size={14} /> Copy {httpStatus.url}
+            </button>
+          )}
+        </div>
+        {running && httpStatus?.token && (
+          <dl className="mini-list">
+            <dt>URL</dt><dd>{httpStatus.url}</dd>
+            <dt>Auth</dt>
+            <dd>
+              Bearer token —{" "}
+              <button className="ghost compact-action" onClick={() => copyText(httpStatus.token, "MCP auth token")}>
+                <CopyIcon size={14} /> Copy token
+              </button>
+              <span className="compact muted"> Send header: Authorization: Bearer &lt;token&gt;</span>
+            </dd>
+          </dl>
+        )}
+        {httpStatus?.error && <p className="compact danger-text">{httpStatus.error}</p>}
+      </div>
+
+      <div className="panel settings-panel">
+        <div className="panel-title"><ShieldCheck size={18} /> Safety</div>
+        <p className="compact">
+          Enrollment and scanning stay consent-gated, protected media is excluded from agent responses, and
+          destructive review or delete actions require the agent to pass an explicit confirmation. See the agent
+          guide resource (vintrace://agent-guide) for the full policy.
+        </p>
+      </div>
+    </>
+  );
+}
+
 function SettingsView(props: {
   section: SettingsSection;
   state: AppState;
@@ -12390,6 +12617,86 @@ function SettingsView(props: {
   const [renameTarget, setRenameTarget] = useState("");
   // Wave P0: the Save-settings button flashes a success settle when a save fires.
   const { settle: settleSave, settling: isSaveSettling } = useSaveSettle();
+  // Stage 1c/1b: calibrate Safe Mode to the user's own library from example folders.
+  const [safeCalibBusy, setSafeCalibBusy] = useState(false);
+  const [safeCalibResult, setSafeCalibResult] = useState("");
+  async function calibrateSafeModeFromFolders() {
+    const bridge = window.crossAge;
+    if (!bridge?.chooseFolder || !bridge?.invoke) return;
+    setSafeCalibResult("");
+    const sensitivePick = await bridge.chooseFolder();
+    const sensitivePath = typeof sensitivePick === "string" ? sensitivePick : (sensitivePick as { path?: string } | null)?.path;
+    if (!sensitivePath) return;
+    const safePick = await bridge.chooseFolder();
+    const safePath = typeof safePick === "string" ? safePick : (safePick as { path?: string } | null)?.path;
+    if (!safePath) return;
+    setSafeCalibBusy(true);
+    try {
+      const res = (await bridge.invoke("calibrate_safe_mode", {
+        folders: [
+          { path: sensitivePath, sensitive: true },
+          { path: safePath, sensitive: false },
+        ],
+      })) as { ok?: boolean; temperature?: number; sampleCount?: number; reason?: string; nllBefore?: number; nllAfter?: number };
+      setSafeCalibResult(
+        res?.ok
+          ? `Calibrated on ${res.sampleCount ?? 0} images — temperature ${Number(res.temperature ?? 1).toFixed(2)} (error ${Number(res.nllBefore ?? 0).toFixed(3)} → ${Number(res.nllAfter ?? 0).toFixed(3)}).`
+          : res?.reason || "Calibration needs more labeled examples."
+      );
+    } catch (error) {
+      setSafeCalibResult(error instanceof Error ? error.message : "Calibration failed.");
+    } finally {
+      setSafeCalibBusy(false);
+    }
+  }
+  async function resetSafeModeCalibration() {
+    const bridge = window.crossAge;
+    if (!bridge?.invoke) return;
+    setSafeCalibBusy(true);
+    try {
+      await bridge.invoke("calibrate_safe_mode", { reset: true });
+      setSafeCalibResult("Calibration reset to the raw model (temperature 1.0).");
+    } catch (error) {
+      setSafeCalibResult(error instanceof Error ? error.message : "Reset failed.");
+    } finally {
+      setSafeCalibBusy(false);
+    }
+  }
+  // Stage 2: install the optional "explain why flagged" detector (NudeNet, AGPL —
+  // a model the user downloads themselves; nothing is bundled or sent anywhere).
+  const [explainBusy, setExplainBusy] = useState(false);
+  const [explainStatus, setExplainStatus] = useState("");
+  async function installExplainerFromFile() {
+    const bridge = window.crossAge;
+    if (!bridge?.chooseModelFile || !bridge?.invoke) return;
+    const acknowledged = window.confirm(
+      "NudeNet is licensed AGPL-3.0. This installs a model you downloaded yourself (nothing is bundled or redistributed), and you must comply with the AGPL, including its source-offer obligation. Continue?"
+    );
+    if (!acknowledged) return;
+    const pick = await bridge.chooseModelFile();
+    const modelPath = typeof pick === "string" ? pick : (pick as { path?: string } | null)?.path;
+    if (!modelPath) return;
+    setExplainBusy(true);
+    try {
+      const res = (await bridge.invoke("install_safety_explainer", {
+        sourcePath: modelPath,
+        modelName: "nudenet-explainer",
+        license: "AGPL-3.0",
+        confirmAgpl: true,
+        format: "nudenet",
+        inputSize: 640,
+      })) as { ok?: boolean; modelName?: string; reason?: string };
+      setExplainStatus(
+        res?.ok
+          ? `Explainer installed (${res.modelName ?? "model"}). Flagged photos can now show which regions triggered Safe Mode.`
+          : res?.reason || "Install failed."
+      );
+    } catch (error) {
+      setExplainStatus(error instanceof Error ? error.message : "Install failed.");
+    } finally {
+      setExplainBusy(false);
+    }
+  }
   const [retentionDays, setRetentionDays] = useState(90);
   const safeModel = props.state.safeModeModel;
   const modelCompatibility = props.state.modelCompatibility;
@@ -12506,6 +12813,7 @@ function SettingsView(props: {
     Boolean(props.state.candidateWindow?.truncated && props.state.counts.reviewed > 0);
   return (
     <section className="page-grid">
+      {props.section === "agents" && <McpAgentsPanel copyText={props.copyText} />}
       {props.section === "general" && (<>
       <div className="panel settings-panel primary-settings">
         <div className="panel-title"><SlidersHorizontal size={18} /> Matching choices</div>
@@ -12592,11 +12900,60 @@ function SettingsView(props: {
                 aria-label="Safe Mode"
               />
             </label>
+            <label className="switch-row">
+              <span>
+                <strong>Safe Mode profile</strong>
+                <small>Privacy-first catches more sensitive content (more false positives on swimwear/medical); Permissive minimizes them. Custom uses the slider below.</small>
+              </span>
+              <select
+                value={props.settings.safeModeProfile ?? "custom"}
+                disabled={!props.settings.safeMode}
+                aria-label="Safe Mode profile"
+                onChange={(event) => {
+                  const profile = event.currentTarget.value;
+                  setCustomSettings(
+                    profile in SAFE_MODE_PROFILE_THRESHOLDS
+                      ? { safeModeProfile: profile, safeModeThreshold: SAFE_MODE_PROFILE_THRESHOLDS[profile] }
+                      : { safeModeProfile: "custom" }
+                  );
+                }}
+              >
+                <option value="privacy">Privacy-first (aggressive)</option>
+                <option value="balanced">Balanced</option>
+                <option value="permissive">Permissive (fewer false positives)</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
             <Slider
               label="Safe Mode sensitivity"
               value={props.settings.safeModeThreshold}
-              onChange={(value) => setCustomSettings({ safeModeThreshold: value })}
+              onChange={(value) => setCustomSettings({ safeModeThreshold: value, safeModeProfile: "custom" })}
             />
+            <label className="switch-row">
+              <span>
+                <strong>Calibrate to your library</strong>
+                <small>Vendor accuracy claims don't transfer — fit Safe Mode to your own photos. Pick a folder of sensitive examples, then a folder of safe examples; everything stays on this device.</small>
+              </span>
+              <span className="settings-inline-actions">
+                <button type="button" className="secondary compact-action" disabled={!props.settings.safeMode || safeCalibBusy} onClick={() => void calibrateSafeModeFromFolders()}>
+                  {safeCalibBusy ? "Calibrating…" : "Calibrate…"}
+                </button>
+                <button type="button" className="ghost compact-action" disabled={safeCalibBusy} onClick={() => void resetSafeModeCalibration()}>
+                  Reset
+                </button>
+              </span>
+            </label>
+            {safeCalibResult && <p className="muted safe-calib-result" role="status" aria-live="polite">{safeCalibResult}</p>}
+            <label className="switch-row">
+              <span>
+                <strong>Explain why flagged (optional)</strong>
+                <small>Install an on-device body-part detector to see which regions triggered Safe Mode. NudeNet is AGPL-3.0 — download it yourself, then install the .onnx here. Nothing is bundled or sent anywhere.</small>
+              </span>
+              <button type="button" className="secondary compact-action" disabled={explainBusy} onClick={() => void installExplainerFromFile()}>
+                {explainBusy ? "Installing…" : "Install explainer…"}
+              </button>
+            </label>
+            {explainStatus && <p className="muted safe-calib-result" role="status" aria-live="polite">{explainStatus}</p>}
             <label className="switch-row">
               <span>
                 <strong>Zero-admittance (strict)</strong>

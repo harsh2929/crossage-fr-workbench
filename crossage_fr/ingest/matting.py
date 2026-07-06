@@ -165,6 +165,12 @@ class _OnnxMattingModel:
     def infer(self, rgb: Image.Image) -> np.ndarray:
         tensor = self._preprocess(rgb)
         logits = np.asarray(self.session.run(None, {self.input_name: tensor})[0], dtype=np.float32)
+        # Guard the shape before indexing shape[-2]/[-1]: a model that returns a
+        # 0-D/1-D tensor (a swapped or corrupt model) would raise IndexError here.
+        # Squeeze away batch/channel dims and require at least a 2-D matte.
+        logits = np.squeeze(logits)
+        if logits.ndim < 2:
+            raise ValueError(f"Matting model produced an unexpected output shape: {logits.shape}")
         logits = logits.reshape(logits.shape[-2], logits.shape[-1])
         alpha = 1.0 / (1.0 + np.exp(-logits))  # sigmoid -> [0,1]
         # Resize the matte back to the source resolution.

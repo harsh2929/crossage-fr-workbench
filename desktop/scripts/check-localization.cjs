@@ -29,7 +29,10 @@ function extractUnionKeys(typeName) {
 }
 
 function loadI18n() {
-  const compiled = ts.transpileModule(source, {
+  // i18n.ts uses Vite's `import.meta.env` (a dev-only warning); that syntax is
+  // invalid in this CommonJS VM eval, so neutralize it before transpiling.
+  const sanitized = source.replace(/import\.meta\.env\??\.[A-Za-z0-9_]+/g, "false");
+  const compiled = ts.transpileModule(sanitized, {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
       target: ts.ScriptTarget.ES2022,

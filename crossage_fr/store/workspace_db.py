@@ -1100,6 +1100,11 @@ class WorkspaceDb:
                 where_parts.append(f"{updated_column} = ''")
             if not assignments:
                 continue
+            # SAFE: table, created_column and updated_column come only from the
+            # hardcoded tuple above — never user input — so this f-string SQL is
+            # not injectable. Values (the timestamps) are still bound as params.
+            # Do NOT extend this loop to accept caller-supplied identifiers
+            # without an allow-list check.
             conn.execute(
                 f"UPDATE {table} SET {', '.join(assignments)} WHERE {' OR '.join(where_parts)}",
                 tuple(args),
@@ -6974,17 +6979,22 @@ class WorkspaceDb:
             where.append("(single_reference_match = 1 OR LOWER(note) LIKE '%only one saved photo%' OR LOWER(note) LIKE '%only one hard-angle signal%')")
         query_text = query.strip().lower()
         if query_text:
-            like = f"%{query_text}%"
+            # Escape LIKE wildcards so a query containing % or _ matches those
+            # characters literally (e.g. searching "disk_image.dmg" must not
+            # also match "disk-image.dmg"). The backslash is declared as the
+            # escape character via ESCAPE below.
+            escaped = query_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            like = f"%{escaped}%"
             where.append(
                 """
                 (
-                    LOWER(person_name) LIKE ?
-                    OR LOWER(band) LIKE ?
-                    OR LOWER(source_path) LIKE ?
-                    OR LOWER(media_source_path) LIKE ?
-                    OR LOWER(note) LIKE ?
-                    OR LOWER(risk_flags) LIKE ?
-                    OR LOWER(source_hash) LIKE ?
+                    LOWER(person_name) LIKE ? ESCAPE '\\'
+                    OR LOWER(band) LIKE ? ESCAPE '\\'
+                    OR LOWER(source_path) LIKE ? ESCAPE '\\'
+                    OR LOWER(media_source_path) LIKE ? ESCAPE '\\'
+                    OR LOWER(note) LIKE ? ESCAPE '\\'
+                    OR LOWER(risk_flags) LIKE ? ESCAPE '\\'
+                    OR LOWER(source_hash) LIKE ? ESCAPE '\\'
                 )
                 """
             )
@@ -8192,8 +8202,12 @@ class WorkspaceDb:
             clean_roots.append(resolved_root)
             root_paths.append(str(resolved_root))
 
-        asset_rows = conn.execute("SELECT source_path FROM photo_assets").fetchall()
-        indexed_paths = {norm_path(str(row["source_path"] or "")) for row in asset_rows}
+        # Stream the cursor (no .fetchall()) so we don't materialise the full
+        # row list on top of the membership set at 100k+ assets.
+        indexed_paths = {
+            norm_path(str(row["source_path"] or ""))
+            for row in conn.execute("SELECT source_path FROM photo_assets")
+        }
         failure_rows = conn.execute(
             """
             SELECT source_path, recovered_path
@@ -13595,12 +13609,19 @@ class WorkspaceDb:
             with self.connect() as local_conn:
                 return self.rebuild_photo_location_index(local_conn)
         conn.execute("DELETE FROM photo_asset_locations")
-        rows = conn.execute("SELECT * FROM photo_assets ORDER BY added_at ASC, asset_id ASC").fetchall()
-        asset_ids = [str(row["asset_id"] or "") for row in rows if str(row["asset_id"] or "")]
+        # Stream photo_assets instead of SELECT * fetchall(): collect ids first
+        # (cheap), then re-scan only the two columns actually used here
+        # (asset_id, metadata_json) one row at a time. At 100k+ assets this
+        # avoids a multi-hundred-MB spike that would block the JSON-RPC loop.
+        asset_ids = [
+            str(row["asset_id"] or "")
+            for row in conn.execute("SELECT asset_id FROM photo_assets ORDER BY added_at ASC, asset_id ASC")
+            if str(row["asset_id"] or "")
+        ]
         metadata_by_asset = self.photo_asset_metadata_by_ids(asset_ids, conn)
         indexed_at = now_iso()
         records: list[tuple[str, float, float, str, str, str]] = []
-        for row in rows:
+        for row in conn.execute("SELECT asset_id, metadata_json FROM photo_assets ORDER BY added_at ASC, asset_id ASC"):
             asset_id = str(row["asset_id"] or "")
             if not asset_id:
                 continue
@@ -13964,8 +13985,14 @@ class WorkspaceDb:
                 return self.rebuild_photo_search_index(local_conn)
         conn.execute("DELETE FROM photo_search_fts")
         conn.execute("DELETE FROM photo_asset_locations")
-        rows = conn.execute("SELECT * FROM photo_assets ORDER BY added_at ASC, asset_id ASC").fetchall()
-        asset_ids = [str(row["asset_id"] or "") for row in rows if str(row["asset_id"] or "")]
+        # Collect ids with a cheap id-only scan for the batch lookups below, then
+        # stream the full rows one at a time when building documents (below) —
+        # instead of holding every 17-column row in memory via SELECT * fetchall().
+        asset_ids = [
+            str(row["asset_id"] or "")
+            for row in conn.execute("SELECT asset_id FROM photo_assets ORDER BY added_at ASC, asset_id ASC")
+            if str(row["asset_id"] or "")
+        ]
         metadata_by_asset = self.photo_asset_metadata_by_ids(asset_ids, conn)
         ocr_blocks_by_asset = self._photo_ocr_blocks_text_by_asset_ids(asset_ids, conn)
         object_tags_by_asset = self._photo_object_tags_text_by_asset_ids(asset_ids, conn)
@@ -13992,7 +14019,7 @@ class WorkspaceDb:
         documents = []
         location_records: list[tuple[str, float, float, str, str, str]] = []
         indexed_at = now_iso()
-        for row in rows:
+        for row in conn.execute("SELECT * FROM photo_assets ORDER BY added_at ASC, asset_id ASC"):
             asset = self._photo_asset_row(row)
             asset_id = str(asset["assetId"])
             metadata = metadata_by_asset.get(asset_id, self._photo_asset_metadata_row(None))
@@ -14077,7 +14104,9 @@ class WorkspaceDb:
             "INSERT OR REPLACE INTO meta(key, value) VALUES('photoLocationIndexVersion', ?)",
             (PHOTO_LOCATION_INDEX_VERSION,),
         )
-        return len(rows)
+        # One document is produced per photo_assets row (the loop never skips),
+        # so the document count equals the old len(rows) return value.
+        return len(documents)
 
     def _photo_search_index_counts(self, conn: sqlite3.Connection) -> dict[str, Any]:
         asset_row = conn.execute("SELECT COUNT(*) AS n FROM photo_assets").fetchone()

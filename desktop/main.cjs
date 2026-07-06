@@ -21,6 +21,13 @@ const {
 } = require("./main/util.cjs");
 const { buildSystemPhotoSources } = require("./main/photo-sources.cjs");
 const { parseProtocolUrl } = require("./main/external-open.cjs");
+const {
+  buildMcpConnectionInfo,
+  mcpStdioInvocation,
+  upsertCodexConfig,
+  DEFAULT_HTTP_HOST: MCP_HTTP_HOST,
+  DEFAULT_HTTP_PORT: MCP_HTTP_PORT,
+} = require("./main/mcp-connection.cjs");
 
 let autoUpdater = null;
 try {
@@ -669,6 +676,9 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "add_calibration_label",
   "set_performance_mode",
   "save_settings",
+  "calibrate_safe_mode",
+  "explain_safety",
+  "install_safety_explainer",
   "audit_events",
   "audit_chain_status",
   "list_jurisdictions",
@@ -1706,24 +1716,34 @@ function currentTrustedPaths() {
   return { state, paths };
 }
 
-function isTrustedMediaPath(filePath) {
+// Resolve a media request to the canonical real path it is trusted to serve,
+// or "" if it is not trusted. Resolving symlinks here (once) and having the
+// caller fetch the RETURNED real path closes the symlink-TOCTOU: previously the
+// trust check resolved symlinks but the fetch used the unresolved path, so a
+// symlink swapped between check and fetch could serve a file outside the trust
+// boundary. Callers must fetch the returned path, never the original.
+function resolveTrustedMediaPath(filePath) {
   const target = path.resolve(String(filePath || ""));
   const targetReal = safeRealpath(target);
   if (!targetReal) {
-    return false;
+    return "";
   }
   const { state, paths } = currentTrustedPaths();
   if (!state || !paths.size) {
-    return false;
+    return "";
   }
   if (paths.has(target)) {
-    return true;
+    return targetReal;
   }
   const previewsReal = state.workspace ? safeRealpath(path.join(state.workspace, "previews")) : "";
   if (previewsReal && isSubpath(previewsReal, targetReal)) {
-    return true;
+    return targetReal;
   }
-  return false;
+  return "";
+}
+
+function isTrustedMediaPath(filePath) {
+  return Boolean(resolveTrustedMediaPath(filePath));
 }
 
 function isTrustedShellPath(filePath) {
@@ -2475,10 +2495,14 @@ function registerMediaProtocol() {
     const target = decodeMediaPath(url.pathname.replace(/^\/+/, "") || url.hostname);
     // EIPC-02: a locked workspace must not serve private media even for a URL
     // the renderer already holds.
-    if (!target || !fs.existsSync(target) || !isTrustedMediaPath(target) || isWorkspaceLocked()) {
+    // Resolve + validate to a single canonical real path, then fetch THAT path
+    // (not the original) so a symlink swapped between check and fetch can't
+    // redirect us outside the trust boundary.
+    const realTarget = target && !isWorkspaceLocked() ? resolveTrustedMediaPath(target) : "";
+    if (!realTarget || !fs.existsSync(realTarget)) {
       return new Response("Not found", { status: 404 });
     }
-    return net.fetch(pathToFileURL(target).toString());
+    return net.fetch(pathToFileURL(realTarget).toString());
   });
 }
 
@@ -3149,6 +3173,9 @@ class PythonBackend {
     // EIPC-05: consecutive failed/abnormal exits, for crash-loop backoff. Reset
     // to 0 once the backend reports ready.
     this.consecutiveFailures = 0;
+    // Set while intentionally tearing the backend down (app quit), so a
+    // deliberate kill is not counted as a crash toward the backoff.
+    this.stopping = false;
   }
 
   start() {
@@ -3296,8 +3323,11 @@ class PythonBackend {
       });
       child.on("exit", (code) => {
         clearTimeout(timer);
-        // EIPC-05: count abnormal exits toward the crash-loop backoff.
-        if (code !== 0) {
+        // EIPC-05: count abnormal exits toward the crash-loop backoff, but only
+        // for the CURRENT generation and only when this was not an intentional
+        // shutdown — otherwise a stale child's late exit (or an app-quit kill)
+        // pollutes the counter for a freshly spawned backend.
+        if (code !== 0 && this.child === child && !this.stopping) {
           this.consecutiveFailures += 1;
         }
         const error = createAppError("E-BACKEND-EXIT", `Python backend exited with code ${code}.`, { exitCode: code });
@@ -3419,6 +3449,7 @@ class PythonBackend {
   }
 
   stop() {
+    this.stopping = true;
     if (this.child && !this.child.killed) {
       this.child.kill();
     }
@@ -3937,6 +3968,231 @@ ipcMain.handle("workspace-lock:disable", async (event) => {
   return disableWorkspaceLock();
 });
 
+// ---------------------------------------------------------------------------
+// AI Agents (MCP) — powers Settings > AI Agents. Generates auto-filled connect
+// configs (from the app's own resolved paths), can add the server to Codex, can
+// reveal/build the Claude Desktop bundle, and can run a managed localhost-only
+// MCP HTTP server for agent-SDK/HTTP clients.
+// ---------------------------------------------------------------------------
+let mcpHttpChild = null;
+let mcpHttpStatus = { running: false, url: "", host: MCP_HTTP_HOST, port: MCP_HTTP_PORT, token: "", error: "" };
+
+function broadcastMcpHttpStatus() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("mcp:http-status", { ...mcpHttpStatus });
+  }
+}
+
+function findShippedMcpBundle() {
+  const candidates = [path.join(appRoot(), "dist"), process.resourcesPath ? path.join(process.resourcesPath, "mcp") : ""];
+  for (const dir of candidates) {
+    if (!dir) continue;
+    try {
+      if (!fs.existsSync(dir)) continue;
+      const hit = fs.readdirSync(dir).find((name) => name.toLowerCase().endsWith(".mcpb"));
+      if (hit) return path.join(dir, hit);
+    } catch {
+      // best effort
+    }
+  }
+  return "";
+}
+
+function runNodeScript(scriptPath) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [scriptPath], { cwd: appRoot(), stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (chunk) => { out = `${out}${chunk}`.slice(-8000); });
+    child.stderr.on("data", (chunk) => { err = `${err}${chunk}`.slice(-8000); });
+    child.on("error", (error) => resolve({ status: 1, stdout: out, stderr: error.message || String(error) }));
+    child.on("exit", (code) => resolve({ status: code ?? 1, stdout: out, stderr: err }));
+  });
+}
+
+function startMcpHttpServer() {
+  if (mcpHttpChild && !mcpHttpChild.killed) {
+    return { ...mcpHttpStatus };
+  }
+  const host = MCP_HTTP_HOST;
+  const port = MCP_HTTP_PORT;
+  const invocation = mcpStdioInvocation({
+    executable: findPythonExecutable(),
+    appRoot: appRoot(),
+    workspace: activeWorkspacePath(),
+    httpTransport: true,
+    host,
+    port,
+  });
+  // MCP-01: the streamable-HTTP transport fails closed unless an auth token is
+  // present; clients must present it as a Bearer token. Generate a fresh
+  // per-session token and surface it to the operator.
+  const token = crypto.randomBytes(24).toString("hex");
+  const env = { ...process.env, ...invocation.env, VINTRACE_MCP_TOKEN: token };
+  // MISS-01 parity: never let a local attacker's dynamic-loader vars into the
+  // (camera-capable) backend process.
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("DYLD_") || key.startsWith("LD_")) {
+      delete env[key];
+    }
+  }
+  try {
+    const child = spawn(invocation.command, invocation.args, { cwd: invocation.cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    mcpHttpChild = child;
+    mcpHttpStatus = { running: true, url: `http://${host}:${port}/mcp`, host, port, token, error: "" };
+    let stderrTail = "";
+    child.stderr.on("data", (chunk) => { stderrTail = `${stderrTail}${chunk}`.slice(-4000); });
+    child.on("error", (error) => {
+      if (mcpHttpChild === child) mcpHttpChild = null;
+      mcpHttpStatus = { running: false, url: "", host, port, token: "", error: error.message || "MCP HTTP server failed to start." };
+      broadcastMcpHttpStatus();
+    });
+    child.on("exit", (code) => {
+      if (mcpHttpChild === child) mcpHttpChild = null;
+      const failed = Boolean(code && code !== 0);
+      mcpHttpStatus = {
+        running: false,
+        url: "",
+        host,
+        port,
+        token: "",
+        error: failed ? (stderrTail.trim().slice(-400) || `MCP HTTP server exited with code ${code}.`) : "",
+      };
+      broadcastMcpHttpStatus();
+    });
+    broadcastMcpHttpStatus();
+  } catch (error) {
+    mcpHttpChild = null;
+    mcpHttpStatus = { running: false, url: "", host, port, token: "", error: error.message || String(error) };
+    broadcastMcpHttpStatus();
+  }
+  return { ...mcpHttpStatus };
+}
+
+function stopMcpHttpServer() {
+  if (mcpHttpChild && !mcpHttpChild.killed) {
+    try { mcpHttpChild.kill(); } catch { /* already gone */ }
+  }
+  mcpHttpChild = null;
+  mcpHttpStatus = { running: false, url: "", host: MCP_HTTP_HOST, port: MCP_HTTP_PORT, token: "", error: "" };
+  broadcastMcpHttpStatus();
+  return { ...mcpHttpStatus };
+}
+
+function codexConfigPath() {
+  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  return { codexHome, configPath: path.join(codexHome, "config.toml") };
+}
+
+async function addMcpServerToCodex() {
+  const { codexHome, configPath } = codexConfigPath();
+  const existed = fs.existsSync(configPath);
+  const parentWindow = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  const messageOptions = {
+    type: "question",
+    buttons: ["Add to Codex", "Cancel"],
+    defaultId: 0,
+    cancelId: 1,
+    message: "Add Vintrace to your Codex MCP configuration?",
+    detail: existed
+      ? `This updates ${configPath}. A timestamped backup of your current file is created first.`
+      : `This creates ${configPath} with the Vintrace MCP server entry.`,
+  };
+  const confirm = parentWindow
+    ? await dialog.showMessageBox(parentWindow, messageOptions)
+    : await dialog.showMessageBox(messageOptions);
+  if (confirm.response !== 0) {
+    return { ok: false, cancelled: true };
+  }
+  const invocation = mcpStdioInvocation({ executable: findPythonExecutable(), appRoot: appRoot(), workspace: activeWorkspacePath() });
+  fs.mkdirSync(codexHome, { recursive: true });
+  let existing = "";
+  let backupPath = "";
+  if (existed) {
+    existing = fs.readFileSync(configPath, "utf8");
+    backupPath = path.join(codexHome, `config.toml.vintrace-backup-${timestampSlug()}`);
+    fs.copyFileSync(configPath, backupPath);
+  }
+  fs.writeFileSync(configPath, upsertCodexConfig(existing, invocation), "utf8");
+  return { ok: true, path: configPath, backupPath };
+}
+
+ipcMain.handle("mcp:connection-info", async (event) => {
+  assertTrustedSender(event);
+  const info = buildMcpConnectionInfo({
+    executable: findPythonExecutable(),
+    appRoot: appRoot(),
+    workspace: activeWorkspacePath(),
+    host: MCP_HTTP_HOST,
+    port: MCP_HTTP_PORT,
+  });
+  return {
+    ...info,
+    packaged: app.isPackaged,
+    http: { ...mcpHttpStatus },
+    bundlePath: findShippedMcpBundle(),
+    canBuildBundle: !app.isPackaged,
+    codexConfigPath: codexConfigPath().configPath,
+  };
+});
+
+ipcMain.handle("mcp:add-to-codex", async (event) => {
+  assertTrustedSender(event);
+  return addMcpServerToCodex();
+});
+
+ipcMain.handle("mcp:reveal-configs", async (event) => {
+  assertTrustedSender(event);
+  const dir = path.join(appRoot(), "mcp");
+  const example = path.join(dir, "codex-config.example.toml");
+  const target = fs.existsSync(example) ? example : dir;
+  if (fs.existsSync(target)) {
+    shell.showItemInFolder(target);
+    return { ok: true, path: target };
+  }
+  return { ok: false, error: "The example MCP configs are only available in a source checkout." };
+});
+
+ipcMain.handle("mcp:reveal-or-build-bundle", async (event) => {
+  assertTrustedSender(event);
+  const existing = findShippedMcpBundle();
+  if (existing) {
+    shell.showItemInFolder(existing);
+    return { ok: true, action: "revealed", path: existing };
+  }
+  if (app.isPackaged) {
+    return { ok: false, action: "unavailable", message: "Build the Claude Desktop bundle from a source checkout with `npm run mcp:bundle`." };
+  }
+  const script = path.join(appRoot(), "desktop", "scripts", "build-mcp-bundle.cjs");
+  if (!fs.existsSync(script)) {
+    return { ok: false, action: "unavailable", message: "Bundle build script not found." };
+  }
+  const result = await runNodeScript(script);
+  if (result.status !== 0) {
+    return { ok: false, action: "build-failed", message: (result.stderr || result.stdout || "Bundle build failed.").trim().slice(-400) };
+  }
+  const built = findShippedMcpBundle();
+  if (built) {
+    shell.showItemInFolder(built);
+  }
+  return { ok: Boolean(built), action: "built", path: built };
+});
+
+ipcMain.handle("mcp:http-start", async (event) => {
+  assertTrustedSender(event);
+  return startMcpHttpServer();
+});
+
+ipcMain.handle("mcp:http-stop", async (event) => {
+  assertTrustedSender(event);
+  return stopMcpHttpServer();
+});
+
+ipcMain.handle("mcp:http-status", async (event) => {
+  assertTrustedSender(event);
+  return { ...mcpHttpStatus };
+});
+
 ipcMain.handle("system:get-integration", async (event) => {
   assertTrustedSender(event);
   return {
@@ -4339,6 +4595,31 @@ ipcMain.handle("dialog:choose-json", async (event) => {
     properties: ["openFile"],
     filters: [
       { name: "JSON", extensions: ["json"] },
+      { name: "All files", extensions: ["*"] }
+    ]
+  });
+  if (result.canceled || !result.filePaths.length) {
+    return null;
+  }
+  return toFile(result.filePaths[0]);
+});
+
+ipcMain.handle("dialog:choose-model", async (event) => {
+  assertTrustedSender(event);
+  const toFile = (filePath) => {
+    grantUserPath(filePath);
+    return { path: filePath, isDir: false };
+  };
+  if (process.env.CROSSAGE_TEST_DIALOG_PATHS) {
+    const paths = process.env.CROSSAGE_TEST_DIALOG_PATHS.split(path.delimiter).filter(Boolean);
+    const selected = paths.shift() || "";
+    process.env.CROSSAGE_TEST_DIALOG_PATHS = paths.join(path.delimiter);
+    return selected ? toFile(selected) : null;
+  }
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openFile"],
+    filters: [
+      { name: "ONNX model", extensions: ["onnx"] },
       { name: "All files", extensions: ["*"] }
     ]
   });
@@ -4835,6 +5116,7 @@ app.on("before-quit", () => {
   isQuitting = true;
   stopPhotoIndexingHeadlessScheduler();
   stopFolderWatch("App quitting.", { persist: false });
+  stopMcpHttpServer();
   if (backend) {
     backend.stop();
   }

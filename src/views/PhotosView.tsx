@@ -3906,7 +3906,10 @@ export function PhotosView(props: {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [lightbox, items, lightItem, imageRotateDegrees, imageStraightenDegrees, imageManualCropEnabled, imageManualCropBox, imageCropAspect, imageAdjustments, imageFilterPreset, imageFilterIntensity, imageMarkupOpen, imageMarkupAnnotationsDraft, imageRetouchOpen, imageRetouchSpotsDraft, imageFlipHorizontal, imageFlipVertical, photoEditStackSaving, videoRotateDegrees, videoCropAspect, videoTrimEndMs, videoTrimStartMs, lightboxVideoDurationMs, lightboxVideoCurrentMs]);
+    // `items` is intentionally omitted: the effect body reads `lightItem`
+    // (derived from items[lightbox]), which already triggers re-registration
+    // when the grid changes, so listing `items` too was redundant churn.
+  }, [lightbox, lightItem, imageRotateDegrees, imageStraightenDegrees, imageManualCropEnabled, imageManualCropBox, imageCropAspect, imageAdjustments, imageFilterPreset, imageFilterIntensity, imageMarkupOpen, imageMarkupAnnotationsDraft, imageRetouchOpen, imageRetouchSpotsDraft, imageFlipHorizontal, imageFlipVertical, photoEditStackSaving, videoRotateDegrees, videoCropAspect, videoTrimEndMs, videoTrimStartMs, lightboxVideoDurationMs, lightboxVideoCurrentMs]);
 
   useEffect(() => {
     if (lightbox === null || !pendingInfoFocusRef.current) return;

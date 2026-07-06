@@ -3,6 +3,14 @@
 These helpers do not grant legal approval. They make the required external
 approvals and runtime studies machine-readable so backbone fine-tuning cannot be
 mistaken for the already-implemented frozen-backbone learning loop.
+
+ENFORCEMENT BOUNDARY: these gates verify the STRUCTURE and PRESENCE of decision
+files; they do not and cannot verify that a real approval occurred — a file's
+`decision: "approved_for_r_and_d"` is trusted as-is. They are record-keeping, not
+an authorization boundary. Do NOT wire `backbone_finetuning_readiness()` into a
+pipeline as the sole gate for starting training. If these are ever used to gate a
+real operation, require an out-of-band signed attestation (a signature over the
+decision payload from a trusted key) before trusting the `ok` flag.
 """
 
 from __future__ import annotations
@@ -523,6 +531,11 @@ def backbone_finetuning_readiness(
         "status": "ready-for-r-and-d" if not blockers else "blocked",
         "scope": "true-backbone-finetuning-r-and-d",
         "notProductionAuthorization": True,
+        "enforcementNote": (
+            "Advisory record-keeping only: this verifies file structure/presence, "
+            "not that a real approval occurred. Require an out-of-band signed "
+            "attestation before treating 'ok' as authorization to start training."
+        ),
         "legal": legal,
         "runtime": runtime,
         "prerequisiteDocs": docs,

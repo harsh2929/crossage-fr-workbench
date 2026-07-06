@@ -84,6 +84,12 @@ function placeProjectionBounds(points: Pick<PhotoPlaceMapPoint, "latitude" | "lo
   minLongitude: number;
   maxLongitude: number;
 } {
+  // Guard the empty case explicitly: Math.min()/Math.max() with no args return
+  // +/-Infinity, which then leaks through projectCoordinate's finite-check as a
+  // silent fallback. Returning a zeroed box makes the no-points case explicit.
+  if (!points.length) {
+    return { minLatitude: 0, maxLatitude: 0, minLongitude: 0, maxLongitude: 0 };
+  }
   const latitudes = points.map((point) => point.latitude);
   const longitudes = points.map((point) => point.longitude);
   return {

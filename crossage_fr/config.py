@@ -12,6 +12,44 @@ MIN_FACE_DETECTOR_SIZE = 320
 MAX_FACE_DETECTOR_SIZE = 1024
 PERFORMANCE_MODES = {"auto", "fast", "balanced", "quality"}
 LEARNING_MODES = {"off", "manual", "auto_stage"}
+
+# Safe Mode threshold profiles (res.md Stage 1a). Three tunable operating points
+# plus a "custom" escape hatch, so users can move the Safe Mode gate instead of
+# being stuck at one threshold. privacy-first is the most aggressive (catches
+# more sensitive content, tolerates more false positives on beachwear/medical);
+# permissive minimizes false positives. Starting values — final operating points
+# come from per-user calibration (Stage 1b).
+SAFE_MODE_PROFILES: dict[str, float] = {
+    "privacy": 0.30,
+    "balanced": 0.50,
+    "permissive": 0.85,
+}
+SAFE_MODE_PROFILE_NAMES = ("privacy", "balanced", "permissive", "custom")
+
+
+def normalize_safe_mode_profile(value) -> str:
+    """Coerce any input to a valid profile name; unknown → 'balanced'."""
+    name = str(value or "").strip().lower()
+    if name in SAFE_MODE_PROFILES or name == "custom":
+        return name
+    return "balanced"
+
+
+def safe_mode_threshold_for_profile(profile, custom_threshold=None) -> float:
+    """Effective NSFW threshold for a profile. Named profiles ignore the custom
+    value; 'custom' uses it (clamped to [0,1]); missing custom → balanced."""
+    profile = normalize_safe_mode_profile(profile)
+    if profile in SAFE_MODE_PROFILES:
+        return SAFE_MODE_PROFILES[profile]
+    if custom_threshold is None:
+        return SAFE_MODE_PROFILES["balanced"]
+    try:
+        value = float(custom_threshold)
+    except (TypeError, ValueError):
+        return SAFE_MODE_PROFILES["balanced"]
+    if not math.isfinite(value):
+        return SAFE_MODE_PROFILES["balanced"]
+    return max(0.0, min(1.0, value))
 DEFAULT_EXCLUDED_DIR_NAMES = [
     ".git",
     ".hg",
@@ -52,6 +90,12 @@ class RuntimeConfig:
     retention_reviewed_days: int = 90
     safe_mode: bool = True
     safe_mode_threshold: float = 0.58
+    # "custom" by default so an existing/explicit safe_mode_threshold is preserved
+    # (a named profile — privacy/balanced/permissive — is authoritative when chosen).
+    safe_mode_profile: str = "custom"
+    # Stage 1b: per-user temperature-scaling calibration for the ML gate. 1.0 = raw
+    # model; >1 softens over-confident scores. Fit from local labeled images.
+    safe_mode_temperature: float = 1.0
     safe_mode_zero_admittance: bool = False
     face_detector_size: int = 512
     multi_scale_detect: bool = True
@@ -206,6 +250,17 @@ def _validate_config(config: RuntimeConfig) -> RuntimeConfig:
     config.safe_mode = _require_bool(config.safe_mode, "safe_mode")
     config.safe_mode_zero_admittance = _require_bool(config.safe_mode_zero_admittance, "safe_mode_zero_admittance")
     config.safe_mode_threshold = _require_unit_float(config.safe_mode_threshold, "safe_mode_threshold")
+    # A named profile is authoritative for the effective threshold; "custom"
+    # keeps the explicit safe_mode_threshold above.
+    config.safe_mode_profile = normalize_safe_mode_profile(config.safe_mode_profile)
+    if config.safe_mode_profile != "custom":
+        config.safe_mode_threshold = SAFE_MODE_PROFILES[config.safe_mode_profile]
+    try:
+        temperature = float(config.safe_mode_temperature)
+    except (TypeError, ValueError):
+        temperature = 1.0
+    config.safe_mode_temperature = temperature if (math.isfinite(temperature) and temperature > 0) else 1.0
+    config.safe_mode_temperature = max(0.1, min(10.0, config.safe_mode_temperature))
     config.face_detector_size = _require_detector_size(config.face_detector_size)
     config.multi_scale_detect = _require_bool(config.multi_scale_detect, "multi_scale_detect")
     config.flip_tta = _require_bool(config.flip_tta, "flip_tta")

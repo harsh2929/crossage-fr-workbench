@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+import logging
 import os
 from pathlib import Path
 import sys
@@ -227,6 +228,11 @@ def _load_semantic_model() -> _SemanticModel | None:
             return None
         if len(_SEMANTIC_MODEL_CACHE) >= 2:
             _SEMANTIC_MODEL_CACHE.clear()
+            # Also release the ONNX sessions cached by _session_for_model
+            # (@lru_cache): clearing only the model dict left orphaned sessions
+            # (vision + text per model) holding model weights in memory until
+            # process exit.
+            _session_for_model.cache_clear()
         model = _SemanticModel(spec)
         _SEMANTIC_MODEL_CACHE[cache_key] = model
     return model
@@ -285,5 +291,12 @@ def _session_for_model(model_path: str, cache_token: tuple[int, int] = (0, 0)):
         if provider_options is not None:
             return ort.InferenceSession(model_path, sess_options=sess_options, providers=providers, provider_options=provider_options)
         return ort.InferenceSession(model_path, sess_options=sess_options, providers=providers)
-    except Exception:
+    except Exception as exc:
+        # Surface why acceleration was declined instead of silently degrading to
+        # CPU — otherwise a driver/model-format/CUDA mismatch looks like the
+        # semantic engine is just "slow" with no diagnostic.
+        logging.getLogger(__name__).warning(
+            "SigLIP ONNX session for %s failed with providers %s (%s); falling back to CPU.",
+            model_path, providers, exc,
+        )
         return ort.InferenceSession(model_path, sess_options=sess_options, providers=["CPUExecutionProvider"])

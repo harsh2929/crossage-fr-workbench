@@ -929,7 +929,13 @@ export function normalizeLanguage(value: string | null | undefined): LanguageCod
 }
 
 export function translate(language: LanguageCode, key: TranslationKey, values: Record<string, string | number> = {}): string {
-  const template = (translations[language] || en)[key] || en[key] || key;
+  const resolved = (translations[language] || en)[key] ?? en[key];
+  if (resolved === undefined && import.meta.env?.DEV) {
+    // Surface missing/typo'd keys during development instead of silently
+    // rendering the raw key string (and its uninterpolated placeholders).
+    console.warn(`[i18n] missing translation key: ${key}`);
+  }
+  const template = resolved ?? key;
   return Object.entries(values).reduce((text, [name, value]) => text.replaceAll(`{${name}}`, String(value)), template);
 }
 

@@ -239,21 +239,26 @@ function withinRecentDays(date: string, anchor: string, days: number): boolean {
   const parsed = Date.parse(`${date}T00:00:00Z`);
   const anchorDate = Date.parse(`${anchor}T00:00:00Z`);
   if (!Number.isFinite(parsed) || !Number.isFinite(anchorDate)) return false;
-  return parsed >= anchorDate - days * 24 * 60 * 60 * 1000 && parsed <= anchorDate;
+  // Cap the window so the millisecond arithmetic can't overflow the safe
+  // integer range for an absurd `days` value (~104,857 days would).
+  const safeDays = Math.min(Math.max(0, days), 100000);
+  return parsed >= anchorDate - safeDays * 24 * 60 * 60 * 1000 && parsed <= anchorDate;
 }
 
 export function formatPhotoDateBucketLabel(key: string, mode: PhotoDateViewMode): string {
   if (mode === "years") return key;
   const monthMatch = key.match(/^(\d{4})-(\d{2})$/);
   if (mode === "months" && monthMatch) {
-    const monthIndex = Number(monthMatch[2]) - 1;
-    const month = MONTH_NAMES[monthIndex];
+    // Validate the month range explicitly (1-12) rather than relying on an
+    // out-of-bounds array read returning undefined for e.g. "2024-13".
+    const monthNum = Number(monthMatch[2]);
+    const month = monthNum >= 1 && monthNum <= 12 ? MONTH_NAMES[monthNum - 1] : undefined;
     return month ? `${month} ${monthMatch[1]}` : key;
   }
   const dayMatch = key.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if ((mode === "days" || mode === "recentDays") && dayMatch) {
-    const monthIndex = Number(dayMatch[2]) - 1;
-    const month = MONTH_SHORT_NAMES[monthIndex];
+    const monthNum = Number(dayMatch[2]);
+    const month = monthNum >= 1 && monthNum <= 12 ? MONTH_SHORT_NAMES[monthNum - 1] : undefined;
     const day = Number(dayMatch[3]);
     return month && day >= 1 && day <= 31 ? `${month} ${day}, ${dayMatch[1]}` : key;
   }

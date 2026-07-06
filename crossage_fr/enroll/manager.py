@@ -550,7 +550,7 @@ class ProjectState:
                 "workspaceId": self.workspace_metadata.get("workspaceId"),
                 "source": source,
                 "operator": operator[:120],
-                "scope": (scope or str(self.root))[:600],
+                "scope": (scope or str(self.workspace_metadata.get("workspaceId") or "workspace"))[:600],
                 "note": note[:800],
                 "confirmedAt": self.consent.get("confirmedAt") or timestamp,
                 "updatedAt": timestamp,
@@ -566,7 +566,7 @@ class ProjectState:
                 "active": False,
                 "source": source,
                 "operator": operator[:120],
-                "scope": (scope or str(self.root))[:600],
+                "scope": (scope or str(self.workspace_metadata.get("workspaceId") or "workspace"))[:600],
                 "note": note[:800],
                 "updatedAt": timestamp,
                 "subjects": subjects,
@@ -579,7 +579,7 @@ class ProjectState:
                 "previous": previous,
                 "source": source,
                 "operator": operator[:120],
-                "scope": (scope or str(self.root))[:600],
+                "scope": (scope or str(self.workspace_metadata.get("workspaceId") or "workspace"))[:600],
                 "note": note[:800],
                 **({"person": person, "lawfulBasis": str(lawful_basis)[:200]} if person else {}),
             }
@@ -850,7 +850,12 @@ class ProjectState:
                     continue
                 image = load_image(path)
                 source_hash = ref.source_hash or sha256_file(path)
-                key = (source_hash or self._path_key(path), ref.person_name.casefold(), target_model)
+                # Normalize target_model through the same model-family key the
+                # existing_keys set was built with (_reference_active_key ->
+                # _model_family_key). Comparing a raw model string here against
+                # normalized existing keys let the same source/person pair be
+                # re-added as a duplicate reference.
+                key = (source_hash or self._path_key(path), ref.person_name.casefold(), self._model_family_key(target_model))
                 if key in existing_keys:
                     skipped += 1
                     processed += 1
@@ -882,7 +887,10 @@ class ProjectState:
                     )
                     self.references[new_ref.ref_id] = new_ref
                     self.vector_store.add(new_ref.ref_id, new_ref.vector)
-                    existing_keys.add((record.sha256 or self._path_key(path), new_ref.person_name.casefold(), new_ref.model_name))
+                    # Normalize the model here too, so an intra-run duplicate is
+                    # caught by the (now normalized) lookup key at the top of the
+                    # loop — the initial set is built with _model_family_key.
+                    existing_keys.add((record.sha256 or self._path_key(path), new_ref.person_name.casefold(), self._model_family_key(new_ref.model_name)))
                     added += 1
                     accepted += 1
                 if not accepted:
@@ -2066,6 +2074,10 @@ class ProjectState:
         }
         if not unique_ids:
             return metrics
+        # M11: capture per-candidate identity reassignments (PII-safe refs) so
+        # the audit trail records WHICH candidates were moved between people, not
+        # just an aggregate count.
+        reassignments: list[dict[str, Any]] = []
         self._emit_scan_progress(on_progress, "verifying", metrics, message="Running high-detail recheck.")
         with self.db.connect() as conn:
             for candidate_id in unique_ids:
@@ -2114,6 +2126,17 @@ class ProjectState:
                             metrics["downgraded"] += 1
                             candidate.note = self._append_candidate_note(candidate.note, "High-detail recheck could not confirm this match.")
                             self._mark_candidate_dirty(candidate.candidate_id)
+                        elif (
+                            best_decision.person_name != candidate.person_name
+                            and self.config.require_consent
+                            and not self.consent_for_person(best_decision.person_name)
+                        ):
+                            # M10: re-verification must not reassign a candidate to a
+                            # person who lacks consent — that would bypass the same
+                            # consent gate enforced on approval.
+                            metrics["downgraded"] += 1
+                            candidate.note = self._append_candidate_note(candidate.note, "High-detail recheck matched a person without recorded consent; not reassigned.")
+                            self._mark_candidate_dirty(candidate.candidate_id)
                         else:
                             previous = (candidate.person_name, candidate.best_ref_id, round(candidate.score, 6), candidate.band)
                             candidate.person_name = best_decision.person_name
@@ -2127,6 +2150,13 @@ class ProjectState:
                             current = (candidate.person_name, candidate.best_ref_id, round(candidate.score, 6), candidate.band)
                             if current != previous:
                                 metrics["changed"] += 1
+                                if previous[0] != candidate.person_name and len(reassignments) < 100:
+                                    reassignments.append({
+                                        "candidateId": candidate.candidate_id,
+                                        "fromRef": self._audit_person_ref(previous[0]),
+                                        "toRef": self._audit_person_ref(candidate.person_name),
+                                        "band": candidate.band,
+                                    })
                             metrics["confirmed"] += 1
                     metrics["verified"] += 1
                 except (ImageLoadError, OSError, ValueError) as exc:
@@ -2137,7 +2167,13 @@ class ProjectState:
                 finally:
                     metrics["processed"] += 1
                     self._emit_scan_progress(on_progress, "verifying", metrics, candidate_id=candidate_id)
-        self._append_audit({"action": "verify_candidates", "count": metrics["verified"], "changed": metrics["changed"], "errors": metrics["errors"]})
+        self._append_audit({
+            "action": "verify_candidates",
+            "count": metrics["verified"],
+            "changed": metrics["changed"],
+            "errors": metrics["errors"],
+            "reassignments": reassignments,
+        })
         self.save()
         self._emit_scan_progress(on_progress, "verified", metrics, message="High-detail recheck complete.")
         return metrics
@@ -2472,7 +2508,7 @@ class ProjectState:
                 ),
                 content_hash,
             )
-        assessment = assess_image_safety(path, self.config.safe_mode_threshold, image=image)
+        assessment = assess_image_safety(path, self.config.safe_mode_threshold, image=image, temperature=self.config.safe_mode_temperature)
         if assessment.engine != "heuristic-fallback":
             self.db.safety_store(content_hash, model_version, self.config.safe_mode_threshold, assessment, conn)
         return assessment, content_hash
@@ -2709,7 +2745,7 @@ class ProjectState:
                 "action": "block_false_match",
                 "candidate_id": candidate_id,
                 "source_path": candidate.source_path,
-                "person_name": candidate.person_name,
+                "personRef": self._audit_person_ref(candidate.person_name),
                 "best_ref_id": best_ref_id,
                 "blocked_rows": blocked_count,
                 "label_id": learning.get("labelId", ""),
@@ -3343,7 +3379,7 @@ class ProjectState:
         if ref_ids:
             self._invalidate_reference_indexes()
         result = {"references": len(ref_ids), "candidates": len(candidate_ids), "suggestedReferenceArtifacts": deleted_suggestions}
-        self._append_audit({"action": "delete_person", "person_name": person_name.strip(), **result})
+        self._append_audit({"action": "delete_person", "personRef": self._audit_person_ref(person_name), **result})
         self.save()
         return result
 
@@ -3385,8 +3421,8 @@ class ProjectState:
         self._append_audit(
             {
                 "action": "rename_person",
-                "old_person_name": old_clean,
-                "new_person_name": new_clean,
+                "oldPersonRef": self._audit_person_ref(old_clean),
+                "newPersonRef": self._audit_person_ref(new_clean),
                 "references": references,
                 "candidates": candidates,
             }
@@ -5469,7 +5505,7 @@ class ProjectState:
             writer.writeheader()
             for row in rows:
                 action = str(row.get("action") or row.get("status") or "event")
-                summary = " • ".join(str(row.get(key)) for key in ("person_name", "source", "status", "count") if row.get(key) not in (None, ""))
+                summary = " • ".join(str(row.get(key)) for key in ("personRef", "source", "status", "count") if row.get(key) not in (None, ""))
                 writer.writerow({"at": row.get("at", ""), "action": action, "summary": summary, "json": json.dumps(row, separators=(",", ":"))})
         self._append_audit({"action": "export_audit_log", "json_path": str(json_path), "csv_path": str(csv_path), "events": len(rows)})
         return {"jsonPath": str(json_path), "csvPath": str(csv_path), "counts": payload["counts"]}
@@ -8744,6 +8780,17 @@ class ProjectState:
                 tip = (int(value.get("seq", 0) or 0), value["hash"])
         return tip
 
+    @staticmethod
+    def _audit_person_ref(name: str) -> str:
+        # PC/GDPR: store a stable, non-reversible reference to a person name in
+        # the tamper-evident audit log instead of the plaintext PII, so a
+        # delete_person (erasure) does not leave the name behind. An investigator
+        # can still confirm "was <name> affected?" by hashing the same name.
+        cleaned = str(name or "").strip().casefold()
+        if not cleaned:
+            return ""
+        return "sha256:" + hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:16]
+
     def _append_audit(self, row: dict[str, object]) -> None:
         with self._state_lock():
             last_seq, last_hash = self._audit_tail_tip()
@@ -8759,6 +8806,12 @@ class ProjectState:
             ).hexdigest()
             with self.audit_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(audit_row) + "\n")
+                # Durably flush the tamper-evident chain entry to disk. A plain
+                # close() only flushes to the kernel page cache; a crash/power
+                # loss in that window would drop the newest entry and break the
+                # SHA-256 hash chain the audit log promises.
+                handle.flush()
+                os.fsync(handle.fileno())
 
     def verify_audit_chain(self) -> dict[str, Any]:
         # Re-read the audit log and verify the SHA-256 hash chain. Entries that predate chaining

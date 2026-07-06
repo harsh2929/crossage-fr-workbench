@@ -265,12 +265,28 @@ def model_pack_quality_matrix(rows: list[dict[str, Any]], *, current_pack: str =
                 "score": round(max(0.0, score), 6),
             }
         )
+    # H11: a pack evaluated on only a few favourable datasets must not outrank a
+    # broadly-validated one. Record coverage and down-weight partial coverage so
+    # breadth of validation counts toward the recommendation (a pack with full
+    # coverage is unaffected: factor == 1.0).
+    max_datasets = max((int(p["datasets"]) for p in packs), default=0)
+    for p in packs:
+        coverage = (int(p["datasets"]) / max_datasets) if max_datasets else 1.0
+        p["coverage"] = round(coverage, 4)
+        p["datasetsEvaluated"] = int(p["datasets"])
+        p["maxDatasets"] = max_datasets
+        p["score"] = round(float(p["score"]) * (0.6 + 0.4 * coverage), 6)
     packs.sort(key=lambda row: float(row["score"]), reverse=True)
     recommended = packs[0] if packs else None
     recommendations: list[str] = []
     if recommended:
         status = "keep" if current_pack and recommended["pack"] == current_pack else "switch" if current_pack else "recommend"
         recommendations.append(f"{recommended['pack']} has the strongest aggregate benchmark score across completed datasets.")
+        if max_datasets and int(recommended["datasetsEvaluated"]) < max_datasets:
+            recommendations.append(
+                f"The recommended pack was evaluated on only {recommended['datasetsEvaluated']} of {max_datasets} benchmarked "
+                "dataset(s); broaden dataset coverage before promoting it, as another pack has wider validation."
+            )
         if recommended.get("hardNegativeFalsePositives"):
             recommendations.append("The recommended pack still has hard-negative false positives; keep manual review for lookalikes.")
         if recommended.get("profileRecall") is not None and float(recommended.get("profileRecall") or 0.0) < 0.85:

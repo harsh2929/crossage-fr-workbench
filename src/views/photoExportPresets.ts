@@ -217,7 +217,10 @@ function cleanErrorText(value: unknown): string {
 
 function cleanIsoDateText(value: unknown, fallback = ""): string {
   const text = String(value ?? "").trim();
-  const parsed = Date.parse(text);
+  // Force UTC for a bare YYYY-MM-DD so the parse -> toISOString round-trip can't
+  // shift the date by the local timezone offset (off-by-one-day).
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(text) ? `${text}T00:00:00Z` : text;
+  const parsed = Date.parse(normalized);
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : fallback;
 }
 
@@ -472,6 +475,9 @@ function creationPetSignals(item: PhotoCreationSuggestionItemInput, favoritePets
 
 function creationCropScore(dimensions: { width: number; height: number } | null, kind: PhotoCreationExportPresetKind): number {
   if (!dimensions) return 0.35;
+  // Reject zero/negative/NaN dimensions before dividing, so a malformed
+  // width/height can't produce Infinity/NaN ratios that skew crop scoring.
+  if (!(dimensions.width > 0) || !(dimensions.height > 0)) return 0.35;
   const ratio = dimensions.width / dimensions.height;
   if (kind === "wallpaper") {
     if (ratio < 1.2) return 0.08;

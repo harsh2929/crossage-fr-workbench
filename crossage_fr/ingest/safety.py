@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from functools import lru_cache
 import json
+import logging
+import math
 import os
 from pathlib import Path
 import sys
@@ -32,7 +34,7 @@ class SafetyAssessment:
     labels: dict[str, float] = field(default_factory=dict)
 
 
-def assess_image_safety(path: Path, threshold: float = 0.58, image: Image.Image | None = None) -> SafetyAssessment:
+def assess_image_safety(path: Path, threshold: float = 0.58, image: Image.Image | None = None, temperature: float = 1.0) -> SafetyAssessment:
     image = image or load_image(path)
     heuristic = _assess_image_safety_heuristic(image, threshold)
     if _safety_engine_mode() == "heuristic":
@@ -41,7 +43,7 @@ def assess_image_safety(path: Path, threshold: float = 0.58, image: Image.Image 
     if model is None:
         return heuristic
     try:
-        return model.assess(image, threshold, heuristic)
+        return model.assess(image, threshold, heuristic, temperature)
     except Exception as exc:
         return SafetyAssessment(
             sensitive=heuristic.sensitive,
@@ -78,6 +80,52 @@ def safety_model_report() -> dict[str, Any]:
             "reason": "No local ONNX safety model was found.",
         }
     return _spec_report(spec)
+
+
+def calibrate_safety_temperature(labeled: Any) -> dict[str, Any]:
+    """Fit the Safe Mode temperature from local labeled images (res.md Stage 1b).
+
+    ``labeled`` is an iterable of ``(path, label)`` where ``label`` is truthy for
+    sensitive/NSFW. Runs the ONNX model per image to get canonical [not, nsfw]
+    logit pairs, then fits a single T that minimizes NLL. Returns the fitted T +
+    before/after NLL and counts; nothing is persisted here (the caller stores
+    ``config.safe_mode_temperature``)."""
+    from crossage_fr.ingest.safety_calibration import fit_temperature, temperature_nll
+
+    model = _load_safety_model()
+    if model is None:
+        return {"ok": False, "reason": "No local ONNX safety model is available to calibrate.", "temperature": 1.0, "sampleCount": 0}
+    pairs: list[list[float]] = []
+    labels: list[int] = []
+    for entry in labeled:
+        try:
+            path, label = entry
+            image = load_image(Path(path))
+            pairs.append(model.nsfw_logit_pair(image))
+            labels.append(1 if bool(label) else 0)
+        except Exception:
+            continue
+    positives = sum(labels)
+    negatives = len(labels) - positives
+    if positives < 2 or negatives < 2:
+        return {
+            "ok": False,
+            "reason": "Label at least two sensitive and two non-sensitive images to calibrate.",
+            "temperature": 1.0,
+            "sampleCount": len(pairs),
+            "positives": positives,
+            "negatives": negatives,
+        }
+    temperature = fit_temperature(pairs, labels)
+    return {
+        "ok": True,
+        "temperature": float(temperature),
+        "sampleCount": len(pairs),
+        "positives": positives,
+        "negatives": negatives,
+        "nllBefore": temperature_nll(pairs, labels, 1.0),
+        "nllAfter": temperature_nll(pairs, labels, temperature),
+    }
 
 
 def _assess_image_safety_heuristic(image: Image.Image, threshold: float) -> SafetyAssessment:
@@ -238,13 +286,31 @@ class _OnnxSafetyModel:
         self.session = _session_for_model(str(spec.path), _model_stat_token(spec.path))
         self.input_name = self.session.get_inputs()[0].name
 
-    def assess(self, image: Image.Image, threshold: float, heuristic: SafetyAssessment) -> SafetyAssessment:
-        logits = np.asarray(self.session.run(None, {self.input_name: self._preprocess(image)})[0])
-        if logits.ndim > 1:
-            logits = logits[0]
-        logits = logits.astype(np.float32).reshape(-1)
+    def assess(self, image: Image.Image, threshold: float, heuristic: SafetyAssessment, temperature: float = 1.0) -> SafetyAssessment:
+        logits = self._logits(image)
+        # Stage 1b: temperature scaling (T fit per-user). T=1 leaves the raw model
+        # unchanged; T>1 softens over-confident scores before thresholding.
+        if temperature and math.isfinite(temperature) and temperature > 0 and temperature != 1.0:
+            logits = logits / np.float32(temperature)
         probabilities = _softmax(logits)
-        nsfw_score = float(probabilities[self.spec.nsfw_index])
+        # Bound the configured NSFW index against the model's ACTUAL output size.
+        # A mismatched/tampered manifest (more labels than the model has outputs)
+        # would otherwise IndexError (crash) or silently read the wrong class and
+        # bypass the gate. Clamp and warn so the gate stays functional and the
+        # mismatch is visible; the exposed-skin heuristic still contributes via
+        # the max() below.
+        n = int(probabilities.shape[0])
+        idx = int(self.spec.nsfw_index)
+        if n == 0:
+            nsfw_score = 0.0
+        else:
+            if not (0 <= idx < n):
+                logging.getLogger(__name__).warning(
+                    "Safety model %s: nsfw_index %d is out of range for %d output class(es); clamping.",
+                    self.spec.model_name, idx, n,
+                )
+                idx = min(max(idx, 0), n - 1)
+            nsfw_score = float(probabilities[idx])
         labels = {
             self.spec.labels[index] if index < len(self.spec.labels) else f"class_{index}": float(value)
             for index, value in enumerate(probabilities)
@@ -266,6 +332,24 @@ class _OnnxSafetyModel:
             threshold=threshold,
             labels=labels,
         )
+
+    def _logits(self, image: Image.Image) -> np.ndarray:
+        logits = np.asarray(self.session.run(None, {self.input_name: self._preprocess(image)})[0])
+        if logits.ndim > 1:
+            logits = logits[0]
+        return logits.astype(np.float32).reshape(-1)
+
+    def nsfw_logit_pair(self, image: Image.Image) -> list[float]:
+        # Canonical 2-vector [not_nsfw, nsfw] for calibration, so label 1 == nsfw
+        # regardless of the model's own class ordering (spec.nsfw_index).
+        logits = self._logits(image)
+        n = int(logits.shape[0])
+        if n == 0:
+            return [0.0, 0.0]
+        idx = min(max(int(self.spec.nsfw_index), 0), n - 1)
+        nsfw = float(logits[idx])
+        others = [float(logits[i]) for i in range(n) if i != idx]
+        return [max(others) if others else 0.0, nsfw]
 
     def report(self) -> dict[str, Any]:
         return _spec_report(self.spec)

@@ -14,6 +14,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from crossage_fr import __version__
 from crossage_fr.api_server import DesktopApi
+from crossage_fr.config import normalize_safe_mode_profile, safe_mode_threshold_for_profile
 from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS
 from crossage_fr.ingest.safety import assess_image_safety
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, probe_video
@@ -99,6 +100,7 @@ def _state_summary(state: dict[str, Any]) -> dict[str, Any]:
         "counts": state["counts"],
         "safeMode": state["config"]["safeMode"],
         "safeModeThreshold": state["config"]["safeModeThreshold"],
+        "safeModeProfile": state["config"].get("safeModeProfile", "balanced"),
         "safeModeModel": state.get("safeModeModel", {}),
         "scanTotals": state.get("scanTotals", {}),
     }
@@ -245,6 +247,13 @@ def _redact_tool_output(value: Any) -> Any:
                     result[key_text] = [_redacted_path(item, keep_name=False) for item in child[:50]]
                 else:
                     result[key_text] = _redacted_path(child, keep_name=False)
+            elif key_text in HASH_KEYS or key_lower.endswith("hash"):
+                # MCP-04: image hashes (sourceHash/sha256/phash) are biometric
+                # fingerprints — they enable reverse-image-search and cross-
+                # workspace linking. _agent_safe_value() (resources) already
+                # hid these; tool output must too, or query_candidates leaks
+                # them to the agent.
+                result[key_text] = "[hidden]"
             else:
                 result[key_text] = _redact_tool_output(child)
         return result
@@ -639,7 +648,7 @@ def assess_image(path: str) -> dict[str, Any]:
     extension_ok = resolved.suffix.lower() in IMAGE_EXTENSIONS
     if not extension_ok:
         return {"path": "[hidden]", "extensionOk": False, "sensitive": False, "score": 0.0}
-    assessment = assess_image_safety(resolved, _api().project.config.safe_mode_threshold)
+    assessment = assess_image_safety(resolved, _api().project.config.safe_mode_threshold, temperature=_api().project.config.safe_mode_temperature)
     return {
         "path": "[hidden]",
         "extensionOk": True,
@@ -902,6 +911,7 @@ def save_settings(
     verification_detector_size: int,
     safe_mode: bool,
     safe_mode_threshold: float,
+    safe_mode_profile: str | None = None,
     safe_mode_zero_admittance: bool | None = None,
     performance_mode: str | None = None,
     storage_budget_bytes: int = 0,
@@ -918,9 +928,13 @@ def save_settings(
     new_zero_admittance = (
         current.safe_mode_zero_admittance if safe_mode_zero_admittance is None else bool(safe_mode_zero_admittance)
     )
+    # A named profile is authoritative for the effective threshold; use it (not
+    # the raw arg) to decide whether protection is being relaxed and confirmed.
+    new_profile = normalize_safe_mode_profile(safe_mode_profile) if safe_mode_profile is not None else current.safe_mode_profile
+    effective_threshold = safe_mode_threshold if new_profile == "custom" else safe_mode_threshold_for_profile(new_profile)
     relaxes_safe_mode = (
         (current.safe_mode and not safe_mode)
-        or safe_mode_threshold > current.safe_mode_threshold
+        or effective_threshold > current.safe_mode_threshold
         or (current.safe_mode_zero_admittance and not new_zero_admittance)
     )
     relaxes_review_thresholds = (
@@ -950,6 +964,7 @@ def save_settings(
             "safeMode": safe_mode,
             "safeModeZeroAdmittance": new_zero_admittance,
             "safeModeThreshold": safe_mode_threshold,
+            "safeModeProfile": new_profile,
             "storageBudgetBytes": storage_budget_bytes,
             "maxMediaFileBytes": max_media_file_bytes if max_media_file_bytes is not None else current.max_media_file_bytes,
             "scanExclusions": {
@@ -1471,12 +1486,14 @@ def triage_pending(max_items: int = 20) -> str:
             "previewBudget": 0,
         },
     )
-    pending = _agent_safe_value(pending_result.get("items", []))
+    # MCP-04: hide basenames too (keep_path_names=False) — filenames frequently
+    # encode names/dates, so this prompt must match the resource redaction policy.
+    pending = _agent_safe_value(pending_result.get("items", []), keep_path_names=False)
     return (
         "You are assisting a human reviewer with Vintrace.\n"
         "Summarize pending candidates, call out low-confidence or clustered cases, "
         "and do not make autonomous identity claims.\n\n"
-        f"State summary:\n{_json(_agent_safe_value(_state_summary(state)))}\n\n"
+        f"State summary:\n{_json(_agent_safe_value(_state_summary(state), keep_path_names=False))}\n\n"
         f"Pending candidates:\n{_json(pending)}"
     )
 

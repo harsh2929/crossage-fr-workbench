@@ -9,7 +9,6 @@ import "./styles.css";
 
 const languageStorageKey = "vintrace:language";
 const startupIssueStorageKey = "vintrace:startup-recovery:v1";
-const startupSafeModeStorageKey = "vintrace:startup-safe-mode:v1";
 
 function readBootLanguage(): LanguageCode {
   try {
@@ -143,11 +142,6 @@ function StartupRecoveryGate({ children }: { children: React.ReactNode }) {
 
   function continueSafely() {
     resetLocalUiState();
-    try {
-      window.localStorage.setItem(startupSafeModeStorageKey, new Date().toISOString());
-    } catch {
-      // Best effort.
-    }
     clearStartupIssue();
     setIssue(null);
   }
@@ -226,7 +220,7 @@ if (!rootElement) {
   const language = readBootLanguage();
   applyBootLanguage(language);
   document.body.innerHTML = `<main class="boot-fallback" role="alert"><section><h1>${escapeHtml(translate(language, "boot.couldNotLoad"))}</h1><p>${escapeHtml(translate(language, "boot.rootMissing"))}</p></section></main>`;
-} else if (!(window as Window & { crossAge?: unknown }).crossAge) {
+} else if (typeof (window as { crossAge?: { invoke?: unknown } }).crossAge?.invoke !== "function") {
   createRoot(rootElement).render(
     <BootDiagnostic
       title={bootT("boot.bridgeUnavailable")}

@@ -10,7 +10,7 @@ export type TabKey = "library" | "memories" | "albums" | "search" | "people" | "
 export type LegacyTab = "dashboard" | "enroll" | "scan" | "review" | "photos" | "settings";
 export type ToolsSection = "overview" | "scan" | "models" | "diagnostics";
 export type PeopleSection = "browse" | "enroll" | "review";
-export type SettingsSection = "general" | "engine" | "privacy" | "storage" | "advanced";
+export type SettingsSection = "general" | "engine" | "privacy" | "storage" | "advanced" | "agents";
 
 export type NavTab = { key: TabKey; labelKey: TranslationKey; icon: typeof Images };
 export type NavMeta = Partial<Record<TabKey, { label: string; tone: "green" | "amber" | "blue" }>>;

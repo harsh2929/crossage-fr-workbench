@@ -80,9 +80,13 @@
     "release:check": "node desktop/scripts/run-python.cjs tests/release_check.py",
     "test:model-downloader": "node desktop/scripts/run-python.cjs tests/model_downloader_failures.py",
     "test:safety-model": "node desktop/scripts/run-python.cjs tests/safety_model_inference.py",
+    "test:safe-mode-profiles": "node desktop/scripts/run-python.cjs tests/safe_mode_profiles_units.py",
+    "test:safe-mode-calibration": "node desktop/scripts/run-python.cjs tests/safe_mode_calibration_units.py",
+    "test:safety-explain": "node desktop/scripts/run-python.cjs tests/safety_explain_units.py",
     "test:perf-budget": "node desktop/scripts/run-python.cjs tests/performance_budget.py",
     "test:localization": "node desktop/scripts/check-localization.cjs",
     "test:main-util": "node tests/main_util.test.cjs",
+    "test:mcp-connection": "node tests/mcp_connection.test.cjs",
     "test:crypto": "node desktop/scripts/run-python.cjs tests/crypto_roundtrip.py",
     "test:workspace-registry": "node desktop/scripts/run-python.cjs tests/workspace_registry_units.py",
     "test:command-contract": "node desktop/scripts/run-python.cjs tests/command_contract.py",
@@ -92,7 +96,7 @@
     "test:e2e:a11y": "cross-env VINTRACE_A11Y=1 playwright test tests/e2e/accessibility-keyboard.spec.ts",
     "test:e2e:packaged": "cross-env VINTRACE_PACKAGED_SMOKE=1 playwright test tests/e2e/packaged.spec.ts",
     "test:e2e:soak": "cross-env VINTRACE_SOAK=1 playwright test tests/e2e/memory-soak.spec.ts",
-    "test": "npm run build && npm run test:localization && npm run test:main-util && npm run test:pipeline && npm run test:age-gap && npm run test:scoring && npm run test:quality && npm run test:detection && npm run test:calibration && npm run test:learning-loop && npm run test:onnx-training-feasibility && npm run test:retraining-governance && npm run test:self-learning-audit && npm run test:self-learning-plan && npm run test:benchmark-units && npm run test:det-eval && npm run test:clustering && npm run test:fiqa && npm run test:validation && npm run test:pooling && npm run test:folder-tree && npm run test:enroll-paths && npm run test:folder-tree-selection && npm run test:people-grouping && npm run test:photo-sources && npm run test:photo-folders && npm run test:photo-scale && npm run test:photo-golden && npm run test:photos-view && npm run test:model-validation && npm run test:edge && npm run test:filesystem-chaos && npm run test:backup-roundtrip && npm run test:clean && npm run test:crypto && npm run test:workspace-registry && npm run test:command-contract && npm run test:dataset-benchmark && npm run test:dataset-gates && npm run test:model-downloader && npm run test:safety-model && npm run test:mcp && npm run test:mcp-redaction && npm run test:perf-budget && npm run test:e2e"
+    "test": "npm run build && npm run test:localization && npm run test:main-util && npm run test:mcp-connection && npm run test:pipeline && npm run test:age-gap && npm run test:scoring && npm run test:quality && npm run test:detection && npm run test:calibration && npm run test:learning-loop && npm run test:onnx-training-feasibility && npm run test:retraining-governance && npm run test:self-learning-audit && npm run test:self-learning-plan && npm run test:benchmark-units && npm run test:det-eval && npm run test:clustering && npm run test:fiqa && npm run test:validation && npm run test:pooling && npm run test:folder-tree && npm run test:enroll-paths && npm run test:folder-tree-selection && npm run test:people-grouping && npm run test:photo-sources && npm run test:photo-folders && npm run test:photo-scale && npm run test:photo-golden && npm run test:photos-view && npm run test:model-validation && npm run test:edge && npm run test:filesystem-chaos && npm run test:backup-roundtrip && npm run test:clean && npm run test:crypto && npm run test:workspace-registry && npm run test:command-contract && npm run test:dataset-benchmark && npm run test:dataset-gates && npm run test:model-downloader && npm run test:safety-model && npm run test:mcp && npm run test:mcp-redaction && npm run test:perf-budget && npm run test:e2e"
   },
   "dependencies": {
     "electron-updater": "^6.8.9",

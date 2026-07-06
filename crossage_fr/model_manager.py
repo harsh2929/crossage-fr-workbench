@@ -489,6 +489,14 @@ def verify_model_files(pack_dir: Path, pack: str) -> None:
     """
     manifest_path = Path(pack_dir) / MODEL_INTEGRITY_FILENAME
     if not manifest_path.exists():
+        # USC-04: in a packaged build every pack must carry a manifest (bundled
+        # packs ship one; downloaded packs write one). A missing manifest there
+        # means a manually-swapped/tampered model, so fail closed. Only a
+        # dev/source build may skip verification for manually-placed models.
+        if _is_packaged():
+            raise ModelIntegrityError(
+                f"Model integrity manifest for {pack} is required in packaged builds but is missing."
+            )
         return
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

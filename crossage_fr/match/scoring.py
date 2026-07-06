@@ -264,7 +264,12 @@ def group_hits(
         ]
         support_bonus = 0.0
         if support_scores:
-            support_margin = sum(score - thresholds.relaxed_child for score in support_scores) / len(raw_scores)
+            # Divide by the number of SUPPORTING scores, not len(raw_scores)
+            # (capped at 3). evidence_count below is 1 + len(support_scores),
+            # i.e. each supporting reference is meant to count equally; dividing
+            # by the top-3 count under-rewarded multi-reference matches by
+            # 33-67% and silently weakened recall.
+            support_margin = sum(score - thresholds.relaxed_child for score in support_scores) / max(1, len(support_scores))
             support_bonus = min(0.03, max(0.0, support_margin) * 0.08)
         flags: list[str] = []
         pose_bonus = 0.0

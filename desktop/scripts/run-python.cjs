@@ -40,6 +40,10 @@ function pythonPath() {
   if (!process.env.PYTHONPATH) {
     return repoRoot;
   }
+  // repoRoot is deliberately PREPENDED so first-party crossage_fr modules always
+  // resolve ahead of anything an inherited PYTHONPATH might try to shadow. This
+  // is a dev/CI helper; we keep the inherited entries (venv etc.) but never let
+  // them take precedence over the repo.
   return `${repoRoot}${path.delimiter}${process.env.PYTHONPATH}`;
 }
 
