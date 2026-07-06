@@ -83,6 +83,7 @@
     "test:safe-mode-profiles": "node desktop/scripts/run-python.cjs tests/safe_mode_profiles_units.py",
     "test:safe-mode-calibration": "node desktop/scripts/run-python.cjs tests/safe_mode_calibration_units.py",
     "test:safety-explain": "node desktop/scripts/run-python.cjs tests/safety_explain_units.py",
+    "test:safe-mode-levels": "node desktop/scripts/run-python.cjs tests/safe_mode_levels_units.py",
     "test:perf-budget": "node desktop/scripts/run-python.cjs tests/performance_budget.py",
     "test:localization": "node desktop/scripts/check-localization.cjs",
     "test:main-util": "node tests/main_util.test.cjs",

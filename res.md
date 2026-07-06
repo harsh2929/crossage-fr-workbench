@@ -57,6 +57,16 @@ integrity-pinned by an in-code SHA-256. The staged plan was completed as follows
   **Remaining UI increment:** overlaying the returned boxes on the revealed
   sensitive image in the review (the `explain_safety` command + normalized-box data
   are ready; the lightbox overlay is a straightforward follow-up).
+- **Stage 1d — Freepik multi-level first-stage: SHIPPED; ONNX export is the only
+  user step.** `crossage_fr/ingest/safety.py` supports a 4-level classifier
+  (neutral/low/medium/high) as a drop-in first-stage model: a manifest with `levels`
+  + `sensitiveMinLevel` makes `_OnnxSafetyModel.assess` derive the gate score from
+  the softmax mass at/above the sensitive level (`nsfw_probability_from_levels`) and
+  expose the argmax `dominant_level` on `SafetyAssessment.level` + in the `reason`;
+  `_model_preference` ranks a `freepik*` model above the bundled AdamCodd gate. The
+  threshold-profile + temperature machinery applies unchanged. Because Freepik is
+  **MIT**, an exported ONNX may be bundled/redistributed. Tests:
+  `tests/safe_mode_levels_units.py`. Provisioning: `models/safety/README-freepik.md`.
 
 ### Installing NudeNet (Stage 2 explainer)
 
@@ -69,23 +79,29 @@ integrity-pinned by an in-code SHA-256. The staged plan was completed as follows
    (Equivalent CLI/MCP: the `install_safety_explainer` command with
    `{sourcePath, license:"AGPL-3.0", confirmAgpl:true, format:"nudenet"}`.)
 
-### What's needed for Freepik (the MIT alternative)
+### Freepik (the MIT first-stage alternative) — INTEGRATED
 
 Freepik is a **classifier** (4 ordered levels neutral/low/medium/high), not a box
-detector — so integrating it is *different* from NudeNet and lands in **Stage 1**,
-not Stage 2:
+detector — so it lands in **Stage 1**, not Stage 2. The multi-level integration is
+now **shipped**; the only remaining step is the one-time ONNX export (its repo is
+gated and ships no ONNX). Provisioning doc: `models/safety/README-freepik.md`.
 
-1. **Export ONNX** from Freepik's safetensors (`eva02_base_patch14_448`, 448px) —
-   the repo ships no ONNX and is gated, so this is a one-time offline export
-   (`torch.onnx.export`, opset 14+, dynamic batch axis).
-2. **Add it as a first-stage model** in `crossage_fr/ingest/safety.py`'s discovery
-   (a `models/safety/` entry with a manifest: EVA-02 preprocessing — 448px, its
-   mean/std — and its label order). It replaces/augments the AdamCodd gate; pin its
-   SHA-256 in `_PINNED_SAFETY_MODEL_HASHES`.
-3. **Map the 4 levels to the gate:** treat medium/high (optionally low) as
-   sensitive; expose the level in the assessment so the UI can separate "suggestive"
-   from "explicit." The existing threshold-profile + temperature machinery still
-   applies to the derived NSFW probability.
+1. **Export ONNX** (the one manual step) from Freepik's safetensors
+   (`eva02_base_patch14_448`, 448px) — a one-time offline export
+   (`torch.onnx.export`, opset 14+, dynamic batch axis). Load the weights with
+   `safetensors.torch.load_file` (no pickle), not `torch.load`.
+2. **First-stage discovery — DONE.** `crossage_fr/ingest/safety.py` auto-discovers
+   any `models/safety/*.onnx` + sidecar manifest. A manifest with `levels` +
+   `sensitiveMinLevel` (see `README-freepik.md`) is enough; `_model_preference`
+   ranks a `freepik*` model **above** the bundled AdamCodd gate, and the loader
+   still verifies a manifest `sha256` when present.
+3. **Level→gate mapping — DONE.** `_OnnxSafetyModel.assess` branches on
+   `spec.levels`: `nsfw_probability_from_levels` sums the softmax mass at/above
+   `sensitiveMinLevel` (medium+high by default) as the gate score, and
+   `dominant_level` (argmax) is surfaced on `SafetyAssessment.level` + in the
+   `reason`, so the UI can separate "suggestive" from "explicit." The existing
+   threshold-profile + temperature machinery applies to the derived probability
+   unchanged. Covered by `tests/safe_mode_levels_units.py`.
 4. **License:** Freepik is MIT — it *may* be bundled/redistributed (unlike NudeNet),
    so once exported it can ship with the app rather than being a user download.
 
