@@ -42,6 +42,8 @@ import {
   ScanFace,
   Settings,
   ShieldCheck,
+  ShieldOff,
+  ShieldAlert,
   SlidersHorizontal,
   Scissors,
   Timer,
@@ -226,6 +228,7 @@ import type {
 import { computeScannedCounts, countExcludedBranches, excludeNode, includeNode } from "./lib/folderTreeSelection";
 import { filterPeople, groupReferencesByPerson, type Person } from "./lib/peopleGrouping";
 import { PhotosView } from "./views/PhotosView";
+import SafeModeReview from "./views/SafeModeReview";
 import { AppShell } from "./shell/AppShell";
 import { Sidebar } from "./shell/Sidebar";
 import { StatusRow } from "./shell/StatusRow";
@@ -12699,6 +12702,8 @@ function SettingsView(props: {
   }
   const [retentionDays, setRetentionDays] = useState(90);
   const safeModel = props.state.safeModeModel;
+  const safeExplain = props.state.safeModeExplain;
+  const [safeReviewOpen, setSafeReviewOpen] = useState(false);
   const modelCompatibility = props.state.modelCompatibility;
 
   useEffect(() => {
@@ -12950,10 +12955,36 @@ function SettingsView(props: {
                 <small>Install an on-device body-part detector to see which regions triggered Safe Mode. NudeNet is AGPL-3.0 — download it yourself, then install the .onnx here. Nothing is bundled or sent anywhere.</small>
               </span>
               <button type="button" className="secondary compact-action" disabled={explainBusy} onClick={() => void installExplainerFromFile()}>
-                {explainBusy ? "Installing…" : "Install explainer…"}
+                {explainBusy ? "Installing…" : safeExplain?.available ? "Replace explainer…" : "Install explainer…"}
               </button>
             </label>
+            <p className={`explainer-install-status ${safeExplain?.available ? "is-installed" : "is-absent"}`} role="status">
+              {safeExplain?.available ? (
+                <>
+                  <ShieldCheck size={14} aria-hidden="true" />
+                  <span>
+                    Installed: <strong>{safeExplain.modelName || "explainer model"}</strong>
+                    {safeExplain.license && safeExplain.license !== "unknown" ? ` (${safeExplain.license})` : ""}. “Why flagged?” is available on revealed sensitive photos.
+                  </span>
+                </>
+              ) : (
+                <>
+                  <ShieldOff size={14} aria-hidden="true" />
+                  <span>Not installed — the “Why flagged?” overlay stays hidden until you add a model.</span>
+                </>
+              )}
+            </p>
             {explainStatus && <p className="muted safe-calib-result" role="status" aria-live="polite">{explainStatus}</p>}
+            <label className="switch-row">
+              <span>
+                <strong>Review flagged photos</strong>
+                <small>See every photo Safe Mode marked sensitive and correct false positives. Your keep/allow choices override the classifier and stay on this device.</small>
+              </span>
+              <button type="button" className="secondary compact-action" onClick={() => setSafeReviewOpen(true)}>
+                <ShieldAlert size={16} /> Review…
+              </button>
+            </label>
+            <SafeModeReview open={safeReviewOpen} onClose={() => setSafeReviewOpen(false)} invoke={window.crossAge.invoke} />
             <label className="switch-row">
               <span>
                 <strong>Zero-admittance (strict)</strong>

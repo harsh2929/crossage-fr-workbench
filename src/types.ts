@@ -93,6 +93,29 @@ export interface VideoDecoderReport {
   recommendations?: string[];
 }
 
+// Safe Mode Stage-2 explainer ("why was this flagged?"). The optional NudeNet/
+// Freepik model returns body-part detections; `safeModeExplain` reports whether it
+// is installed. See crossage_fr/ingest/safety_explain.py.
+export interface ExplainDetection {
+  label: string;
+  score: number;
+  box: [number, number, number, number]; // normalized x, y, w, h in [0, 1]
+}
+export interface ExplainSafetyResult {
+  available: boolean;
+  detections: ExplainDetection[];
+  reason: string;
+}
+export interface SafeModeExplainReport {
+  available: boolean;
+  modelName?: string | null;
+  path?: string | null;
+  license?: string;
+  source?: string;
+  reason?: string;
+  classes?: string[];
+}
+
 export interface AppConfig {
   modelPack?: string;
   modelRoot?: string;
@@ -3829,6 +3852,7 @@ export interface AppState {
   reviewInsights?: ReviewInsights;
   config: AppConfig;
   safeModeModel?: SafeModeModelReport;
+  safeModeExplain?: SafeModeExplainReport;
   modelSetup?: ModelSetupReport;
   modelCompatibility?: ModelCompatibilityReport;
   videoDecoder?: VideoDecoderReport;

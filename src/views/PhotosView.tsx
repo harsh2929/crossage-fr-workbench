@@ -67,7 +67,8 @@ import {
   ZoomIn,
   ZoomOut,
   UserPlus,
-  ShieldCheck
+  ShieldCheck,
+  ShieldAlert
 } from "lucide-react";
 import type {
   CandidateStatus,
@@ -158,12 +159,15 @@ import type {
   ReviewCandidate,
   SharePathsResult,
   MediaRef,
-  SystemPhotoSource
+  SystemPhotoSource,
+  ExplainSafetyResult
 } from "../types";
 import { useToast } from "../shell/ToastHost";
 import { useSaveSettle } from "../shell/useSaveSettle";
 import { useCountRoll } from "../shell/useCountRoll";
 import { useFlipZoom } from "../shell/useFlipZoom";
+import { computeFlipTransform, flipTransformString, isDegenerateRect, type Rect } from "../lib/flipZoom";
+import { useReducedMotion } from "../shell/useReducedMotion";
 import { emptyPhotoAlbumDraft, type PhotoAlbumKind } from "./photoAlbumEditorState";
 import { applyPhotoTimezoneCorrection, composePhotoDateTimeOverride, normalizePhotoDateTimeOverride, normalizePhotoTimezoneOffset, parsePhotoDateOffsetDays, shiftPhotoDateByDays, splitPhotoDateTimeOverride } from "./photoDateAdjustments";
 import { buildPhotoDateBucketSummaryBadges, buildPhotoDateBuckets, photoDateBucketCoverReason, type PhotoDateViewMode } from "./photoDateViews";
@@ -268,6 +272,8 @@ import { buildPhotoPlaceMapClusters, buildPhotoPlaceMapDensityCells, buildPhotoP
 import { photoPeopleMatchCorrectionCandidateIds } from "./photoPeopleMatchSelection";
 import { buildPhotoQrActions, buildPhotoQrRegions, type PhotoQrAction, type PhotoQrRegion } from "./photoQrActions";
 import { buildPhotoRailSections, filterPhotoRailFolders, isSensitivePhotoScope, movePhotoRailItem, movePhotoRailItemToPosition, moveVisiblePhotoRailSection, moveVisiblePhotoRailSectionToPosition, normalizePhotoRailSectionOrder, photoRailAlbumTreeDepth, photoRailSectionSupportsItemOrder, planPhotoRailAlbumTreeDrop, type PhotoRailAlbumTreeDropPlacement, type PhotoRailItemOrder, type PhotoRailSectionId } from "./photoRailVisibility";
+import { containRenderRect, clampUnitBox, toUnitBox, formatDetectionLabel } from "./safetyOverlay";
+import { initialSensitiveUnlocked, sensitiveSessionLockTimeoutMs, shouldRelockOnLeave, sensitiveUnlockRequirements } from "./sensitiveCollections";
 import { buildPhotoConsolidationHistoryRows, buildPhotoRepairIssues, photoRepairHistoryEventDetails, photoRepairIssueActionLabel, type PhotoConsolidationHistoryRow, type PhotoRepairIssue } from "./photoRepairCenter";
 import { buildPhotoSearchHighlightParts } from "./photoSearchHighlights";
 import { buildPhotoSearchSuggestions } from "./photoSearchSuggestions";
@@ -1811,7 +1817,7 @@ export function PhotosView(props: {
   const [showScreenshotCollections, setShowScreenshotCollections] = useState(() => initialRailPreferences.showScreenshotCollections);
   const [showSharedCollections, setShowSharedCollections] = useState(() => initialRailPreferences.showSharedCollections);
   const [showLowValueCollections, setShowLowValueCollections] = useState(() => initialRailPreferences.showLowValueCollections);
-  const [sensitiveCollectionsUnlocked, setSensitiveCollectionsUnlocked] = useState(() => !photoSettings.lockSensitiveCollections);
+  const [sensitiveCollectionsUnlocked, setSensitiveCollectionsUnlocked] = useState(() => initialSensitiveUnlocked(photoSettings));
   const [pinnedRailIds, setPinnedRailIds] = useState<Set<string>>(() => new Set(initialRailPreferences.pinnedIds));
   const [collapsedRailSections, setCollapsedRailSections] = useState<Set<string>>(() => new Set(initialRailPreferences.collapsedSections));
   const [collapsedAlbumFolderIds, setCollapsedAlbumFolderIds] = useState<Set<string>>(() => readStoredStringSet(COLLAPSED_PHOTO_ALBUM_FOLDERS_KEY));
@@ -1896,6 +1902,11 @@ export function PhotosView(props: {
   const [browsedAlbumFolderId, setBrowsedAlbumFolderId] = useState<string>("");
   // Phase 3: a memory queued for in-app playback once its drill-down scope is active.
   const [pendingMemoryPlayId, setPendingMemoryPlayId] = useState<string>("");
+  // Wave P1 detail-open: zoom the tapped memory cover into the slideshow stage across
+  // the portal handoff. Cover rect captured on Play, replayed when the stage mounts.
+  const memoryZoomReducedMotion = useReducedMotion();
+  const pendingMemoryZoomRectRef = useRef<Rect | null>(null);
+  const slideshowStageRef = useRef<HTMLDivElement | null>(null);
   // Phase 4: which person circle in the People & Pets gallery is being inline-renamed.
   const [renamingPersonId, setRenamingPersonId] = useState<string>("");
   const [peopleRailDrag, setPeopleRailDrag] = useState<PhotoPeopleRailDragState | null>(null);
@@ -2203,6 +2214,11 @@ export function PhotosView(props: {
   const [lightboxBurstFrameError, setLightboxBurstFrameError] = useState("");
   const [lightboxBurstOverrideSource, setLightboxBurstOverrideSource] = useState("");
   const [videoFrameExporting, setVideoFrameExporting] = useState(false);
+  // Safe Mode Stage-2 explainer overlay ("Why flagged?"). Calls explain_safety on
+  // demand and overlays the returned body-part boxes on the revealed image.
+  const [explainOpen, setExplainOpen] = useState(false);
+  const [explainResult, setExplainResult] = useState<ExplainSafetyResult | null>(null);
+  const [explainLoading, setExplainLoading] = useState(false);
   const [videoTrimExporting, setVideoTrimExporting] = useState(false);
   const [videoTrimStartMs, setVideoTrimStartMs] = useState(0);
   const [videoTrimEndMs, setVideoTrimEndMs] = useState(0);
@@ -3319,8 +3335,7 @@ export function PhotosView(props: {
     if (
       wasSensitive &&
       !activeSensitiveCollection &&
-      photoSettings.lockSensitiveCollections &&
-      photoSettings.relockSensitiveCollectionsOnLeave
+      shouldRelockOnLeave(photoSettings)
     ) {
       setSensitiveCollectionsUnlocked(false);
       clearLockedSensitiveItems();
@@ -3723,6 +3738,14 @@ export function PhotosView(props: {
     observer.observe(node);
     return () => observer.disconnect();
   }, [lightbox !== null]);
+
+  // Reset the "Why flagged?" explainer overlay whenever the open photo changes or
+  // the lightbox closes, so boxes never linger over the wrong image.
+  useEffect(() => {
+    setExplainOpen(false);
+    setExplainResult(null);
+    setExplainLoading(false);
+  }, [lightbox, lightItem?.sourcePath]);
 
   useEffect(() => {
     setLightboxZoom(readSessionNumber(PHOTO_LIGHTBOX_ZOOM_KEY, 1));
@@ -4604,12 +4627,13 @@ export function PhotosView(props: {
 
   async function unlockSensitiveCollections(passcode = "") {
     const settings = photoSettingsRef.current;
+    const passcodeConfigured = photoSensitivePasscodeConfigured(settings);
     let verifiedWithDevice = false;
-    if (settings.lockSensitiveCollections && settings.sensitiveOsAuthEnabled && !passcode) {
+    if (sensitiveUnlockRequirements(settings, { passcodeProvided: Boolean(passcode), verifiedWithDevice, passcodeConfigured }).deviceAuthRequired) {
       verifiedWithDevice = await verifySensitiveDeviceAuth();
       if (!verifiedWithDevice) return false;
     }
-    if (settings.lockSensitiveCollections && photoSensitivePasscodeConfigured(settings) && !verifiedWithDevice) {
+    if (sensitiveUnlockRequirements(settings, { passcodeProvided: Boolean(passcode), verifiedWithDevice, passcodeConfigured }).passcodeRequired) {
       const candidate = passcode || sensitiveUnlockPasscode;
       if (!candidate) {
         setSensitiveUnlockError(uiText("Enter the sensitive collection passcode."));
@@ -4647,8 +4671,8 @@ export function PhotosView(props: {
       window.clearTimeout(sensitiveSessionTimerRef.current);
       sensitiveSessionTimerRef.current = null;
     }
-    if (!photoSettings.lockSensitiveCollections || !sensitiveCollectionsUnlocked || photoSettings.sensitiveSessionLockMinutes <= 0) return undefined;
-    const timeoutMs = Math.max(1, photoSettings.sensitiveSessionLockMinutes) * 60 * 1000;
+    const timeoutMs = sensitiveSessionLockTimeoutMs(photoSettings, sensitiveCollectionsUnlocked);
+    if (timeoutMs === null) return undefined;
     const refreshSensitiveSessionTimer = () => {
       if (sensitiveSessionTimerRef.current !== null) window.clearTimeout(sensitiveSessionTimerRef.current);
       sensitiveSessionTimerRef.current = window.setTimeout(() => {
@@ -5911,6 +5935,11 @@ export function PhotosView(props: {
     }).filter(Boolean) as Array<{ region: PhotoDescriptionRegion; box: { left: number; top: number; width: number; height: number }; active: boolean }>;
   }, [descriptionRegionSelectedIndex, lightItem, lightItemDescriptionRegions, lightItemMediaHeight, lightItemMediaWidth, lightItemUsesVideoControls, lightboxFitMode, lightboxShowingOriginal, lightboxStageSize.height, lightboxStageSize.width, photoEditStack]);
   const lightItemMissing = Boolean(lightItem?.missingAt);
+  // Offer the Safe Mode "Why flagged?" explainer only for a still image inside an
+  // unlocked sensitive collection (where a flag is meaningful and the pixels are visible).
+  const explainToggleVisible = Boolean(
+    activeSensitiveCollection && sensitiveCollectionsUnlocked && lightItem && !lightItemMissing && !lightItemUsesVideoControls,
+  );
   const lightItemCoordinates = photoItemCoordinates(lightItem);
   const lightItemDetectedFaceCoverCrop = useMemo(
     () => photoDetectedFaceCoverCrop(lightItem),
@@ -7966,6 +7995,7 @@ export function PhotosView(props: {
       await loadFolders();
       await loadSuggestions();
       if (nextAlbumId) setActiveId(`album:${nextAlbumId}`);
+      notifyToast({ tone: "ok", message: `${editingAlbumId ? uiText("Updated album") : uiText("Created album")} “${name}”.` });
       resetAlbumEditor();
     } catch (error) {
       setAlbumError(error instanceof Error ? error.message : String(error));
@@ -7984,6 +8014,7 @@ export function PhotosView(props: {
       setActiveId("all");
       await loadFolders();
       await loadSuggestions();
+      notifyToast({ tone: "ok", message: `${uiText("Deleted album")} “${folder.name}”.` });
       resetAlbumEditor();
     } catch (error) {
       setAlbumError(error instanceof Error ? error.message : String(error));
@@ -8009,6 +8040,7 @@ export function PhotosView(props: {
       await loadSuggestions();
       if (targetAlbumId) setActiveId(`album:${targetAlbumId}`);
       await loadPage(`album:${targetAlbumId}`, 0, sort, searchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly);
+      notifyToast({ tone: "ok", message: uiText("Albums merged.") });
     } catch (error) {
       setAlbumError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -8047,6 +8079,7 @@ export function PhotosView(props: {
         folderId: activeAlbum.folderId || "",
       });
       await loadFolders();
+      notifyToast({ tone: "ok", message: uiText("Album cover updated.") });
     } finally {
       setSavingAlbum(false);
     }
@@ -12288,6 +12321,71 @@ export function PhotosView(props: {
       x: Math.max(0, Math.min(mediaWidth - 1, Math.round(normalizedX * (mediaWidth - 1)))),
       y: Math.max(0, Math.min(mediaHeight - 1, Math.round(normalizedY * (mediaHeight - 1)))),
     };
+  }
+
+  // Safe Mode Stage-2: toggle the on-demand explainer. Runs the optional NudeNet/
+  // Freepik detector on the revealed original and overlays the returned boxes.
+  async function toggleSafetyExplain() {
+    if (explainOpen) {
+      setExplainOpen(false);
+      return;
+    }
+    setExplainOpen(true);
+    setExplainResult(null);
+    const path = lightItem?.sourcePath;
+    if (!path) return;
+    setExplainLoading(true);
+    try {
+      const result = await window.crossAge.invoke<ExplainSafetyResult>("explain_safety", { path });
+      setExplainResult(result);
+    } catch {
+      setExplainResult({ available: false, detections: [], reason: "Could not analyze this image." });
+    } finally {
+      setExplainLoading(false);
+    }
+  }
+
+  // The absolutely-positioned box layer over the lightbox image. Positioned to the
+  // image's rendered content rect (letterbox-aware) and given the same pan/zoom
+  // transform as the <img>, so boxes track the image under zoom. See safetyOverlay.ts.
+  function renderSafetyExplainOverlay() {
+    if (!explainOpen || !explainResult?.available || explainResult.detections.length === 0) return null;
+    const image = lightboxImageRef.current;
+    const mediaWidth = image?.naturalWidth || Number(lightItem?.width || lightItem?.assetMetadata?.width || 0) || 0;
+    const mediaHeight = image?.naturalHeight || Number(lightItem?.height || lightItem?.assetMetadata?.height || 0) || 0;
+    if (mediaWidth <= 0 || mediaHeight <= 0) return null;
+    const rect = containRenderRect({ width: mediaWidth, height: mediaHeight }, lightboxStageSize, lightboxFitMode);
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    return (
+      <div
+        className="photos-explain-overlay"
+        aria-hidden="true"
+        style={{
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height,
+          transformOrigin: "center center",
+          transform: `translate3d(${lightboxPan.x}px, ${lightboxPan.y}px, 0) scale(${lightboxZoom})`,
+        }}
+      >
+        {explainResult.detections.map((detection, index) => {
+          const b = clampUnitBox(toUnitBox(detection.box));
+          if (b.w <= 0 || b.h <= 0) return null;
+          return (
+            <div
+              key={index}
+              className="photos-explain-box"
+              style={{ left: `${b.x * 100}%`, top: `${b.y * 100}%`, width: `${b.w * 100}%`, height: `${b.h * 100}%` }}
+            >
+              <span className="photos-explain-box-label">
+                {formatDetectionLabel(detection.label)} · {Math.round((detection.score || 0) * 100)}%
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    );
   }
 
   function lightboxImageCropPointFromClient(clientX: number, clientY: number): PhotoManualCropPoint | null {
@@ -17936,7 +18034,8 @@ export function PhotosView(props: {
   }
 
   function recordManualAlbumReorderResult(result: unknown) {
-    setAlbumOrderNotice(photoAlbumReorderNotice(albumReorderResultValue(result)));
+    const message = photoAlbumReorderNotice(albumReorderResultValue(result));
+    if (message) notifyToast({ tone: "ok", message });
   }
 
   async function saveCurrentSortAsManualAlbumOrder() {
@@ -18778,7 +18877,18 @@ export function PhotosView(props: {
   }
 
   // Phase 3: open a memory's drill-down scope, then auto-play its movie once active.
-  const playMemory = (folder: PhotoFolder) => {
+  const playMemory = (folder: PhotoFolder, event?: { currentTarget?: EventTarget | null }) => {
+    const trigger = event?.currentTarget;
+    let rect: Rect | null = null;
+    if (trigger instanceof HTMLElement) {
+      const scope = trigger.closest(".memory-card, .memory-hero, .memory-strip-card");
+      const cover = scope?.querySelector(".memory-card-cover, .memory-strip-cover, .memory-hero-cover") ?? scope;
+      if (cover instanceof Element) {
+        const r = cover.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) rect = { x: r.left, y: r.top, width: r.width, height: r.height };
+      }
+    }
+    pendingMemoryZoomRectRef.current = rect;
     setActiveId(folder.id);
     setPendingMemoryPlayId(folder.memoryId || folder.memory?.memoryId || folder.id);
   };
@@ -18791,6 +18901,30 @@ export function PhotosView(props: {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingMemoryPlayId, activeMemory, activeMemoryId]);
+  // Replay the captured cover→stage zoom once the slideshow surface mounts. Consumes
+  // the pending rect so slide navigation never re-triggers it; reduced-motion → no-op.
+  useEffect(() => {
+    const rect = pendingMemoryZoomRectRef.current;
+    if (!slideshowItem || !rect) return;
+    pendingMemoryZoomRectRef.current = null;
+    const stage = slideshowStageRef.current;
+    if (!stage || memoryZoomReducedMotion || typeof stage.animate !== "function") return;
+    const raf = window.requestAnimationFrame(() => {
+      const box = stage.getBoundingClientRect();
+      const last: Rect = { x: box.left, y: box.top, width: box.width, height: box.height };
+      if (isDegenerateRect(rect) || isDegenerateRect(last)) return;
+      const invert = flipTransformString(computeFlipTransform(rect, last));
+      stage.animate(
+        [
+          { transformOrigin: "0 0", transform: invert, opacity: 0.5 },
+          { transformOrigin: "0 0", transform: "translate(0px, 0px) scale(1, 1)", opacity: 1 },
+        ],
+        { duration: 380, easing: "cubic-bezier(0.2, 0, 0, 1)" },
+      );
+    });
+    return () => window.cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slideshowItem, memoryZoomReducedMotion]);
 
   // Phase 3: Memories "For You" feed (replaces the flat grid for the memories landing).
   const renderMemoriesFeed = () => {
@@ -18855,7 +18989,7 @@ export function PhotosView(props: {
                 {formatCount(hero.count)} {hero.count === 1 ? uiText("photo") : uiText("photos")}
               </span>
               <div className="memory-hero-actions">
-                <button type="button" className="primary memory-play" onClick={() => playMemory(hero)} disabled={Boolean(pendingMemoryPlayId)}>
+                <button type="button" className="primary memory-play" onClick={(event) => playMemory(hero, event)} disabled={Boolean(pendingMemoryPlayId)}>
                   <Play size={16} /><span>{isMemoryOpening(hero) ? uiText("Opening") : uiText("Play the movie")}</span>
                 </button>
                 <button type="button" className="secondary memory-export" onClick={() => void exportActiveMemoryMovie(hero)} disabled={props.busy || memoryMovieExporting}>
@@ -18903,7 +19037,7 @@ export function PhotosView(props: {
                   </span>
                 </button>
                 <div className="memory-card-actions">
-                  <button type="button" className="ghost icon-action" title={uiText("Play the movie")} aria-label={`${uiText("Play the movie")} ${folder.name}`} onClick={() => playMemory(folder)} disabled={Boolean(pendingMemoryPlayId)}><Play size={15} /></button>
+                  <button type="button" className="ghost icon-action" title={uiText("Play the movie")} aria-label={`${uiText("Play the movie")} ${folder.name}`} onClick={(event) => playMemory(folder, event)} disabled={Boolean(pendingMemoryPlayId)}><Play size={15} /></button>
                   <button type="button" className="ghost icon-action" title={uiText("Export movie")} aria-label={`${uiText("Export movie")} ${folder.name}`} onClick={() => void exportActiveMemoryMovie(folder)} disabled={props.busy || memoryMovieExporting}><Video size={15} /></button>
                   <button type="button" className={`ghost icon-action${folder.memory?.favorite ? " active" : ""}${isControlSettling(`memfav:${folder.id}`) ? " save-settle" : ""}`} aria-pressed={Boolean(folder.memory?.favorite)} title={folder.memory?.favorite ? uiText("Unfavorite") : uiText("Favorite")} aria-label={`${folder.memory?.favorite ? uiText("Unfavorite") : uiText("Favorite")} ${folder.name}`} onClick={() => { void toggleMemoryFavorite(folder); settleControl(`memfav:${folder.id}`); }}><Star size={15} fill={folder.memory?.favorite ? "currentColor" : "none"} /></button>
                   <button type="button" className="ghost icon-action" title={uiText("Feature less")} aria-label={`${uiText("Feature less")} ${folder.name}`} onClick={() => void featureLessMemory(folder)}><EyeOff size={15} /></button>
@@ -27392,7 +27526,7 @@ export function PhotosView(props: {
               <X size={18} />
             </button>
           </div>
-          <div className="photos-slideshow-stage" onClick={(event) => event.stopPropagation()}>
+          <div className="photos-slideshow-stage" ref={slideshowStageRef} onClick={(event) => event.stopPropagation()}>
             <div
               key={`${slideshowItem.sourcePath}:${slideshowMotionPreset}:${slideshowCurrentKeyframes?.curve || ""}`}
               className={`photos-slideshow-media-frame motion-${slideshowMotionPreset}`}
@@ -27617,6 +27751,7 @@ export function PhotosView(props: {
                 <ImageIcon size={48} />
               </div>
             )}
+            {renderSafetyExplainOverlay()}
             {lightboxHdrDisplayState && !lightItemMissing && (
               <div
                 className={`photos-lightbox-hdr-badge ${lightboxHdrDisplayState.badgeTone}`}
@@ -30627,6 +30762,31 @@ export function PhotosView(props: {
               </div>
             </div>
             <div className="photos-lightbox-actions">
+              {explainToggleVisible && (
+                <button
+                  type="button"
+                  className={explainOpen ? "compact-action photos-explain-toggle is-active" : "secondary compact-action photos-explain-toggle"}
+                  onClick={() => void toggleSafetyExplain()}
+                  aria-pressed={explainOpen}
+                  title={uiText("Show why this photo was flagged as sensitive")}
+                >
+                  <ShieldAlert size={16} />
+                  <span>{uiText("Why flagged?")}</span>
+                </button>
+              )}
+              {explainToggleVisible && explainOpen && (
+                <span className="photos-explain-status" role="status">
+                  {explainLoading
+                    ? uiText("Analyzing…")
+                    : !explainResult
+                    ? ""
+                    : !explainResult.available
+                    ? uiText("No explainer model installed. Add one in Settings › Privacy & Safety.")
+                    : explainResult.detections.length === 0
+                    ? uiText("No specific regions detected.")
+                    : uiText("Highlighting detected regions.")}
+                </span>
+              )}
               {activeAlbum && (
                 <button
                   type="button"

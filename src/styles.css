@@ -7365,6 +7365,60 @@ button:not(:disabled):active {
   cursor: crosshair;
 }
 
+/* Safe Mode Stage-2 explainer ("Why flagged?"). The overlay layer is positioned to
+   the image's rendered content rect and carries the same pan/zoom transform as the
+   <img>, so the body-part boxes (positioned as % within it) track the image. */
+.photos-explain-overlay {
+  position: absolute;
+  pointer-events: none;
+  z-index: 6;
+  will-change: transform;
+}
+.photos-explain-box {
+  position: absolute;
+  border: 2px solid var(--danger);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--danger) 40%, transparent),
+    0 0 18px color-mix(in srgb, var(--danger) 45%, transparent);
+}
+.photos-explain-box-label {
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  margin-bottom: 4px;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.3;
+  white-space: nowrap;
+  color: #fff;
+  background: var(--danger);
+  border-radius: 5px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+.photos-explain-status {
+  align-self: center;
+  max-width: 280px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--muted, #98989f);
+}
+.photos-explain-toggle.is-active {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .photos-explain-box {
+    animation: photos-explain-pop 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes photos-explain-pop {
+    from { opacity: 0; transform: scale(0.92); }
+    to { opacity: 1; transform: scale(1); }
+  }
+}
+
 .photos-lightbox-stage.retouch-source-picking,
 .photos-lightbox-stage.retouch-source-picking .photos-lightbox-image {
   cursor: copy;
@@ -16001,6 +16055,205 @@ textarea:disabled {
 .switch-row small {
   color: var(--secondary);
   line-height: 1.35;
+}
+
+/* Safe Mode explainer install status (Settings › Privacy & Safety) — makes the
+   optional "Why flagged?" model's presence discoverable. */
+.explainer-install-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 2px 2px 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.explainer-install-status svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+.explainer-install-status.is-installed {
+  color: var(--success, #34c759);
+}
+.explainer-install-status.is-absent {
+  color: var(--secondary);
+}
+.explainer-install-status strong {
+  font-weight: 650;
+}
+
+/* Safe Mode review dashboard (Settings › Privacy & Safety → Review flagged photos). */
+.safe-review-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(3px);
+}
+.safe-review-panel {
+  width: min(1040px, 96vw);
+  max-height: 90vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+  border-radius: 16px;
+  background: var(--surface, #1c1c1e);
+  border: 1px solid var(--separator-soft, rgba(255, 255, 255, 0.1));
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+}
+.safe-review-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.safe-review-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 17px;
+}
+.safe-review-count {
+  font-size: 12px;
+  color: var(--secondary);
+  background: var(--fill);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.safe-review-close {
+  margin-left: auto;
+}
+.safe-review-sub {
+  margin: 0;
+  font-size: 12px;
+}
+.safe-review-error {
+  color: var(--danger);
+  font-size: 12px;
+}
+.safe-review-empty {
+  padding: 32px 0;
+  text-align: center;
+}
+.safe-review-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 14px;
+}
+.safe-review-card {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--fill);
+  border: 1px solid var(--separator-soft, rgba(255, 255, 255, 0.08));
+}
+.safe-review-card.is-cleared {
+  opacity: 0.72;
+}
+.safe-review-thumb {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  background: #000;
+}
+.safe-review-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: filter 160ms ease;
+}
+.safe-review-thumb img.blurred {
+  filter: blur(22px) brightness(0.7);
+}
+.safe-review-noimg {
+  width: 100%;
+  height: 100%;
+  background: repeating-linear-gradient(45deg, #222, #222 8px, #262626 8px, #262626 16px);
+}
+.safe-review-reveal {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  padding: 6px;
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.5);
+  cursor: pointer;
+}
+.safe-review-score {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.safe-review-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  padding: 2px 6px;
+  border-radius: 6px;
+  color: #fff;
+}
+.safe-review-badge.kept {
+  background: var(--danger);
+}
+.safe-review-badge.allowed {
+  background: var(--success, #34c759);
+}
+.safe-review-card figcaption {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 10px;
+}
+.safe-review-name {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.safe-review-reason {
+  font-size: 11px;
+  color: var(--secondary);
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.safe-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+.safe-review-actions .is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .safe-review-thumb img {
+    transition: none;
+  }
 }
 
 .switch-row input[type="checkbox"] {
