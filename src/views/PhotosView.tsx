@@ -1907,6 +1907,8 @@ export function PhotosView(props: {
   const memoryZoomReducedMotion = useReducedMotion();
   const pendingMemoryZoomRectRef = useRef<Rect | null>(null);
   const slideshowStageRef = useRef<HTMLDivElement | null>(null);
+  // Wave P2 on-ramp: the play disc performs its verb once as the cover launches.
+  const [launchingMemoryId, setLaunchingMemoryId] = useState("");
   // Phase 4: which person circle in the People & Pets gallery is being inline-renamed.
   const [renamingPersonId, setRenamingPersonId] = useState<string>("");
   const [peopleRailDrag, setPeopleRailDrag] = useState<PhotoPeopleRailDragState | null>(null);
@@ -8004,17 +8006,63 @@ export function PhotosView(props: {
     }
   }
 
+  async function undoDeleteAlbum(config: Record<string, unknown>, order: string[]) {
+    setSavingAlbum(true);
+    try {
+      const result = await savePhotoAlbum({ ...config, albumId: undefined });
+      const value = result.value && typeof result.value === "object" ? result.value as { albumId?: unknown } : {};
+      const newId = String(value.albumId || "");
+      if (newId && order.length > 0) {
+        await addPhotoAlbumItems({ albumId: newId, sourcePaths: order });
+        await reorderPhotoAlbumItems({ albumId: newId, sourcePaths: order });
+      }
+      await loadFolders();
+      await loadSuggestions();
+      if (newId) setActiveId(`album:${newId}`);
+      notifyToast({ tone: "ok", message: `${uiText("Restored album")} “${String(config.name || "")}”.` });
+    } catch (error) {
+      notifyToast({ tone: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setSavingAlbum(false);
+    }
+  }
+
   async function deleteAlbum(folder: PhotoFolder) {
     const albumId = folder.albumId || folder.id.replace(/^album:/, "");
     if (!albumId) return;
     setSavingAlbum(true);
     setAlbumError("");
+    // Capture enough to re-create the album if the user undoes the delete. People
+    // filters only live on the active album object, so use it when it matches.
+    const isActive = activeAlbum?.albumId === albumId;
+    const restoreConfig: Record<string, unknown> = {
+      name: folder.name,
+      albumKind: folder.albumKind || "smart",
+      description: folder.description || "",
+      includePeople: isActive ? (activeAlbum?.includePeople || []) : [],
+      excludePeople: isActive ? (activeAlbum?.excludePeople || []) : [],
+      rules: folder.rules || {},
+      coverSourcePath: folder.coverSourcePath || "",
+      folderId: folder.folderId || "",
+    };
+    let restoreOrder: string[] = [];
+    try {
+      if ((folder.albumKind || "smart") === "manual") restoreOrder = await loadAlbumSourceOrderById(albumId, "manual");
+    } catch {
+      restoreOrder = [];
+    }
     try {
       await deletePhotoAlbum({ albumId });
       setActiveId("all");
       await loadFolders();
       await loadSuggestions();
-      notifyToast({ tone: "ok", message: `${uiText("Deleted album")} “${folder.name}”.` });
+      notifyToast({
+        tone: "ok",
+        message: `${uiText("Deleted album")} “${folder.name}”.`,
+        ttl: 8000,
+        actionLabel: uiText("Undo"),
+        onAction: () => { void undoDeleteAlbum(restoreConfig, restoreOrder); },
+      });
       resetAlbumEditor();
     } catch (error) {
       setAlbumError(error instanceof Error ? error.message : String(error));
@@ -18889,6 +18937,10 @@ export function PhotosView(props: {
       }
     }
     pendingMemoryZoomRectRef.current = rect;
+    if (!memoryZoomReducedMotion) {
+      setLaunchingMemoryId(folder.id);
+      window.setTimeout(() => setLaunchingMemoryId((current) => (current === folder.id ? "" : current)), 460);
+    }
     setActiveId(folder.id);
     setPendingMemoryPlayId(folder.memoryId || folder.memory?.memoryId || folder.id);
   };
@@ -19028,7 +19080,7 @@ export function PhotosView(props: {
                 <button type="button" className="memory-card-open" onClick={() => setActiveId(folder.id)} aria-label={`${uiText("Open memory")} ${folder.name}`}>
                   <span className="memory-card-cover">
                     {folder.coverPreviewUrl ? <img src={folder.coverPreviewUrl} alt="" loading="lazy" decoding="async" style={photoCoverCropStyle(folder.coverCrop)} /> : <Sparkles size={22} />}
-                    <span className="memory-card-play" aria-hidden="true"><Play size={18} /></span>
+                    <span className={`memory-card-play${launchingMemoryId === folder.id ? " is-launching" : ""}`} aria-hidden="true"><Play size={18} /></span>
                     {folder.memory?.category ? <span className="memory-card-pill">{memoryCategoryLabel(String(folder.memory.category))}</span> : null}
                   </span>
                   <span className="memory-card-meta">

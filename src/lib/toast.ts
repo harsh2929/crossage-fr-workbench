@@ -16,6 +16,9 @@ export type Toast = {
   createdAt: number;
   /** ms to live before auto-prune; 0 = sticky (dismissed programmatically). */
   ttl: number;
+  /** Optional inline action (e.g. "Undo"); dismisses the toast after it runs. */
+  actionLabel?: string;
+  onAction?: () => void;
 };
 
 export type ToastInput = {
@@ -23,6 +26,8 @@ export type ToastInput = {
   message: string;
   id?: string;
   ttl?: number;
+  actionLabel?: string;
+  onAction?: () => void;
 };
 
 // Tone-specific lifetimes. Errors linger longest (blameless copy needs reading
@@ -45,6 +50,8 @@ export function createToast(input: ToastInput, now: number, seq: number): Toast 
     message: input.message,
     createdAt: now,
     ttl,
+    actionLabel: input.actionLabel,
+    onAction: input.onAction,
   };
 }
 

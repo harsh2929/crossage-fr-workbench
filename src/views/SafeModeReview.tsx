@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { Check, Eye, EyeOff, RotateCcw, ShieldAlert, X } from "lucide-react";
+import { formatDetectionLabel } from "./safetyOverlay";
+
+interface ExplainState {
+  loading: boolean;
+  available: boolean;
+  detections: { label: string; score: number }[];
+  reason: string;
+}
 
 // One flagged item from the `list_safe_mode_flagged` command. previewUrl/sourceUrl
 // are decorated by the Electron main process (granted vintrace-media:// URLs).
@@ -33,6 +41,7 @@ export default function SafeModeReview({ open, onClose, invoke }: SafeModeReview
   const [error, setError] = useState("");
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
   const [busyId, setBusyId] = useState("");
+  const [explainById, setExplainById] = useState<Record<string, ExplainState>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -53,6 +62,7 @@ export default function SafeModeReview({ open, onClose, invoke }: SafeModeReview
   useEffect(() => {
     if (!open) return;
     setRevealed(new Set());
+    setExplainById({});
     void load();
   }, [open, load]);
 
@@ -91,6 +101,30 @@ export default function SafeModeReview({ open, onClose, invoke }: SafeModeReview
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusyId("");
+    }
+  }
+
+  async function explainItem(item: SafeModeFlaggedItem) {
+    setExplainById((prev) => ({ ...prev, [item.assetId]: { loading: true, available: false, detections: [], reason: "" } }));
+    try {
+      const res = await invoke<{ available?: boolean; detections?: { label: string; score: number }[]; reason?: string }>(
+        "explain_safety",
+        { path: item.sourcePath },
+      );
+      setExplainById((prev) => ({
+        ...prev,
+        [item.assetId]: {
+          loading: false,
+          available: Boolean(res?.available),
+          detections: Array.isArray(res?.detections) ? res.detections : [],
+          reason: String(res?.reason || ""),
+        },
+      }));
+    } catch (err) {
+      setExplainById((prev) => ({
+        ...prev,
+        [item.assetId]: { loading: false, available: false, detections: [], reason: err instanceof Error ? err.message : String(err) },
+      }));
     }
   }
 
@@ -150,6 +184,28 @@ export default function SafeModeReview({ open, onClose, invoke }: SafeModeReview
                   <figcaption>
                     <span className="safe-review-name" title={item.sourcePath}>{item.name || item.sourcePath}</span>
                     {item.reason && <span className="safe-review-reason">{item.reason}</span>}
+                    {(() => {
+                      const ex = explainById[item.assetId];
+                      if (!ex) {
+                        return (
+                          <button type="button" className="ghost compact-action safe-review-why" onClick={() => void explainItem(item)}>
+                            <ShieldAlert size={13} /> Why flagged?
+                          </button>
+                        );
+                      }
+                      if (ex.loading) return <span className="safe-review-explain-note">Analyzing…</span>;
+                      if (!ex.available) return <span className="safe-review-explain-note">No explainer model — install one in Settings.</span>;
+                      if (ex.detections.length === 0) return <span className="safe-review-explain-note">No specific regions detected.</span>;
+                      return (
+                        <div className="safe-review-chips">
+                          {ex.detections.slice(0, 6).map((detection, i) => (
+                            <span key={i} className="safe-review-chip">
+                              {formatDetectionLabel(detection.label)} {Math.round((detection.score || 0) * 100)}%
+                            </span>
+                          ))}
+                        </div>
+                      );
+                    })()}
                     <div className="safe-review-actions">
                       <button
                         type="button"

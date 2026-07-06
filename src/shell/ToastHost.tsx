@@ -103,6 +103,18 @@ export function ToastHost() {
           >
             <Icon size={16} className={toast.tone === "busy" ? "spin" : undefined} aria-hidden="true" />
             <span className="toast-message">{toast.message}</span>
+            {toast.actionLabel && toast.onAction && (
+              <button
+                type="button"
+                className="toast-action"
+                onClick={() => {
+                  toast.onAction?.();
+                  dismiss(toast.id);
+                }}
+              >
+                {toast.actionLabel}
+              </button>
+            )}
             <button type="button" className="toast-dismiss" onClick={() => dismiss(toast.id)} aria-label="Dismiss notification">
               <X size={14} aria-hidden="true" />
             </button>
