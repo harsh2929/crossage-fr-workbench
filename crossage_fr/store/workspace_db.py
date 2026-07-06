@@ -485,7 +485,7 @@ class WorkspaceDb:
                     PRIMARY KEY (file_hash, model_version, threshold)
                 );
                 CREATE TABLE IF NOT EXISTS safe_mode_overrides (
-                    asset_id TEXT PRIMARY KEY,
+                    content_hash TEXT PRIMARY KEY,
                     override_sensitive INTEGER NOT NULL,
                     reason TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
@@ -21706,40 +21706,41 @@ class WorkspaceDb:
 
     def set_safe_mode_override(
         self,
-        asset_id: str,
+        content_hash: str,
         override_sensitive: Any,
         reason: str = "",
         conn: sqlite3.Connection | None = None,
     ) -> "bool | None":
-        """Set (True/False) or clear (None) a per-asset Safe Mode override — the user
-        confirming or overturning the classifier's verdict. Returns the stored value,
-        or None when cleared. Additive; independent of the safety_cache verdict."""
+        """Set (True/False) or clear (None) a per-image Safe Mode override — the user
+        confirming or overturning the classifier's verdict. Keyed by content_hash (the
+        same identity as safety_cache) so the ingest gate can enforce it on re-scan.
+        Returns the stored value, or None when cleared."""
         if conn is None:
             with self.connect() as local_conn:
-                return self.set_safe_mode_override(asset_id, override_sensitive, reason, local_conn)
-        asset_id = str(asset_id or "").strip()
-        if not asset_id:
+                return self.set_safe_mode_override(content_hash, override_sensitive, reason, local_conn)
+        content_hash = str(content_hash or "").strip()
+        if not content_hash:
             return None
         if override_sensitive is None:
-            conn.execute("DELETE FROM safe_mode_overrides WHERE asset_id = ?", (asset_id,))
+            conn.execute("DELETE FROM safe_mode_overrides WHERE content_hash = ?", (content_hash,))
             return None
         value = 1 if bool(override_sensitive) else 0
         conn.execute(
             """
-            INSERT OR REPLACE INTO safe_mode_overrides(asset_id, override_sensitive, reason, created_at)
+            INSERT OR REPLACE INTO safe_mode_overrides(content_hash, override_sensitive, reason, created_at)
             VALUES(?, ?, ?, ?)
             """,
-            (asset_id, value, str(reason or "")[:500], now_iso()),
+            (content_hash, value, str(reason or "")[:500], now_iso()),
         )
         return bool(value)
 
-    def safe_mode_override_for(self, asset_id: str, conn: sqlite3.Connection | None = None) -> "bool | None":
+    def safe_mode_override_for(self, content_hash: str, conn: sqlite3.Connection | None = None) -> "bool | None":
         if conn is None:
             with self.connect() as local_conn:
-                return self.safe_mode_override_for(asset_id, local_conn)
+                return self.safe_mode_override_for(content_hash, local_conn)
         row = conn.execute(
-            "SELECT override_sensitive FROM safe_mode_overrides WHERE asset_id = ? LIMIT 1",
-            (str(asset_id or "").strip(),),
+            "SELECT override_sensitive FROM safe_mode_overrides WHERE content_hash = ? LIMIT 1",
+            (str(content_hash or "").strip(),),
         ).fetchone()
         if not row:
             return None
@@ -21772,7 +21773,7 @@ class WorkspaceDb:
                    sc.model_name AS model_name, smo.override_sensitive AS override_sensitive
             FROM photo_assets pa
             JOIN ({latest}) sc ON sc.file_hash = pa.content_hash
-            LEFT JOIN safe_mode_overrides smo ON smo.asset_id = pa.asset_id
+            LEFT JOIN safe_mode_overrides smo ON smo.content_hash = pa.content_hash
             WHERE {where}
             ORDER BY sc.score DESC, pa.source_path ASC
             LIMIT ? OFFSET ?
@@ -21783,7 +21784,7 @@ class WorkspaceDb:
             f"""
             SELECT COUNT(*) AS n FROM photo_assets pa
             JOIN ({latest}) sc ON sc.file_hash = pa.content_hash
-            LEFT JOIN safe_mode_overrides smo ON smo.asset_id = pa.asset_id
+            LEFT JOIN safe_mode_overrides smo ON smo.content_hash = pa.content_hash
             WHERE {where}
             """
         ).fetchone()

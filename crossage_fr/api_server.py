@@ -2486,19 +2486,25 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return result
 
     def _cmd_set_photo_safe_mode_override(self, params, progress=None):
-        """Set or clear a per-asset Safe Mode override (the review dashboard's keep/
-        override action). params: {assetId, sensitive?}. sensitive true/false sets the
-        override; omit / null / 'clear' removes it (fall back to the classifier)."""
+        """Set or clear a per-image Safe Mode override (the review dashboard's keep/
+        override action). params: {assetId, sensitive?}. Resolves the asset's
+        content_hash and keys the override by it, so the ingest gate enforces it on
+        re-scan. sensitive true/false sets; omit / null / 'clear' removes it."""
         from crossage_fr.ingest.safety import normalize_override_value
 
         asset_id = str(params.get("assetId", "")).strip()
         if not asset_id:
             return {"ok": False, "reason": "No assetId provided."}
+        asset = self.project.db.photo_asset_by_id(asset_id)
+        content_hash = str((asset or {}).get("contentHash", "")).strip()
+        if not content_hash:
+            return {"ok": False, "reason": "Asset has no content hash to key the override."}
         override = normalize_override_value(params.get("sensitive"))
-        self.project.db.set_safe_mode_override(asset_id, override, reason=str(params.get("reason", "")))
+        self.project.db.set_safe_mode_override(content_hash, override, reason=str(params.get("reason", "")))
         self.project._append_audit({
             "action": "set_safe_mode_override",
             "asset_id": asset_id,
+            "content_hash": content_hash,
             "override": override,
         })
         return {"ok": True, "assetId": asset_id, "override": override}

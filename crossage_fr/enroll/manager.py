@@ -25,7 +25,7 @@ from crossage_fr.embed import EmbeddingEngine
 from crossage_fr.ingest import ImageLoadError, VideoLoadError, image_record_for_path, iter_image_paths, load_image, sample_video_frames
 from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, RAW_IMAGE_EXTENSIONS, sha256_file, write_preview_image
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, configure_video_decoder_paths
-from crossage_fr.ingest.safety import SafetyAssessment, assess_image_safety, safety_model_report
+from crossage_fr.ingest.safety import SafetyAssessment, apply_safe_mode_override, assess_image_safety, safety_model_report
 from crossage_fr.match import (
     accuracy_at_threshold,
     accuracy_from_label_rows,
@@ -2491,26 +2491,30 @@ class ProjectState:
         model_version = self._safety_cache_version()
         cached = self.db.safety_lookup(content_hash, model_version, self.config.safe_mode_threshold, conn)
         if cached:
-            return (
-                SafetyAssessment(
-                    sensitive=bool(cached["sensitive"]),
-                    score=float(cached["score"]),
-                    reason=str(cached["reason"]),
-                    skin_ratio=0.0,
-                    lower_skin_ratio=0.0,
-                    largest_region_ratio=0.0,
-                    engine=str(cached["engine"]),
-                    model_name=str(cached["model_name"]),
-                    model_score=None,
-                    heuristic_score=None,
-                    threshold=self.config.safe_mode_threshold,
-                    labels=dict(cached.get("labels", {})),
-                ),
-                content_hash,
+            assessment = SafetyAssessment(
+                sensitive=bool(cached["sensitive"]),
+                score=float(cached["score"]),
+                reason=str(cached["reason"]),
+                skin_ratio=0.0,
+                lower_skin_ratio=0.0,
+                largest_region_ratio=0.0,
+                engine=str(cached["engine"]),
+                model_name=str(cached["model_name"]),
+                model_score=None,
+                heuristic_score=None,
+                threshold=self.config.safe_mode_threshold,
+                labels=dict(cached.get("labels", {})),
             )
-        assessment = assess_image_safety(path, self.config.safe_mode_threshold, image=image, temperature=self.config.safe_mode_temperature)
-        if assessment.engine != "heuristic-fallback":
-            self.db.safety_store(content_hash, model_version, self.config.safe_mode_threshold, assessment, conn)
+        else:
+            assessment = assess_image_safety(path, self.config.safe_mode_threshold, image=image, temperature=self.config.safe_mode_temperature)
+            if assessment.engine != "heuristic-fallback":
+                self.db.safety_store(content_hash, model_version, self.config.safe_mode_threshold, assessment, conn)
+        # A per-item user override from the review dashboard wins over the classifier's
+        # verdict, so a corrected false positive stays corrected across re-scans.
+        override = self.db.safe_mode_override_for(content_hash, conn)
+        effective = apply_safe_mode_override(assessment.sensitive, override)
+        if effective != assessment.sensitive:
+            assessment = replace(assessment, sensitive=effective)
         return assessment, content_hash
 
     def _candidate_file_hash(self, candidate: ReviewCandidate) -> str:
