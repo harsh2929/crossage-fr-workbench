@@ -923,6 +923,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "calibrate_safe_mode": "_cmd_calibrate_safe_mode",
         "explain_safety": "_cmd_explain_safety",
         "install_safety_explainer": "_cmd_install_safety_explainer",
+        "list_safe_mode_flagged": "_cmd_list_safe_mode_flagged",
+        "set_photo_safe_mode_override": "_cmd_set_photo_safe_mode_override",
     }
 
     def _cmd_ping(self, params, progress=None):
@@ -2465,6 +2467,41 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "source": "url" if params.get("url") else "local-file",
             })
         return result
+
+    def _cmd_list_safe_mode_flagged(self, params, progress=None):
+        """List photo assets the Safe Mode classifier flagged, or that carry a user
+        override, for the review dashboard. params: {limit?, offset?}. Read-only; adds
+        a previewPath the main process decorates into a vintrace-media:// thumbnail."""
+        limit = int(params.get("limit", 200) or 200)
+        offset = int(params.get("offset", 0) or 0)
+        result = self.project.db.list_safe_mode_flagged(limit=limit, offset=offset)
+        for item in result.get("items", []):
+            source_path = str(item.get("sourcePath", ""))
+            try:
+                item["previewPath"] = self.project.preview_path_for(source_path, create=True) or ""
+            except Exception:
+                item["previewPath"] = ""
+            item["mediaKind"] = self._media_kind_for_source(source_path)
+            item["name"] = Path(source_path).name
+        return result
+
+    def _cmd_set_photo_safe_mode_override(self, params, progress=None):
+        """Set or clear a per-asset Safe Mode override (the review dashboard's keep/
+        override action). params: {assetId, sensitive?}. sensitive true/false sets the
+        override; omit / null / 'clear' removes it (fall back to the classifier)."""
+        from crossage_fr.ingest.safety import normalize_override_value
+
+        asset_id = str(params.get("assetId", "")).strip()
+        if not asset_id:
+            return {"ok": False, "reason": "No assetId provided."}
+        override = normalize_override_value(params.get("sensitive"))
+        self.project.db.set_safe_mode_override(asset_id, override, reason=str(params.get("reason", "")))
+        self.project._append_audit({
+            "action": "set_safe_mode_override",
+            "asset_id": asset_id,
+            "override": override,
+        })
+        return {"ok": True, "assetId": asset_id, "override": override}
 
     def _verification_engine(self) -> Any | None:
         config = self._effective_engine_config()

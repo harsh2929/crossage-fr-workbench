@@ -60,6 +60,38 @@ def dominant_level(probs: Any, level_names: Any) -> str:
     return str(names[best])
 
 
+def apply_safe_mode_override(stored_sensitive: Any, override: Any) -> bool:
+    """The effective sensitivity for an item: a user override (True/False) wins;
+    ``None`` falls back to the classifier's stored verdict."""
+    if override is None:
+        return bool(stored_sensitive)
+    return bool(override)
+
+
+_OVERRIDE_CLEAR = {"", "clear", "none", "reset", "auto", "default"}
+_OVERRIDE_TRUE = {"true", "1", "yes", "on", "sensitive", "flag", "flagged"}
+_OVERRIDE_FALSE = {"false", "0", "no", "off", "safe", "not_sensitive", "notsensitive", "unflag", "allow"}
+
+
+def normalize_override_value(value: Any) -> "bool | None":
+    """Parse a command param into True / False / None. None means *clear the
+    override* (fall back to the classifier). Unrecognized text also clears."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in _OVERRIDE_CLEAR:
+        return None
+    if text in _OVERRIDE_TRUE:
+        return True
+    if text in _OVERRIDE_FALSE:
+        return False
+    return None
+
+
 def assess_image_safety(path: Path, threshold: float = 0.58, image: Image.Image | None = None, temperature: float = 1.0) -> SafetyAssessment:
     image = image or load_image(path)
     heuristic = _assess_image_safety_heuristic(image, threshold)

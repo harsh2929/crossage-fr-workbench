@@ -484,6 +484,12 @@ class WorkspaceDb:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (file_hash, model_version, threshold)
                 );
+                CREATE TABLE IF NOT EXISTS safe_mode_overrides (
+                    asset_id TEXT PRIMARY KEY,
+                    override_sensitive INTEGER NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS embedding_cache (
                     file_hash TEXT NOT NULL,
                     model_version TEXT NOT NULL,
@@ -21697,6 +21703,111 @@ class WorkspaceDb:
                 now_iso(),
             ),
         )
+
+    def set_safe_mode_override(
+        self,
+        asset_id: str,
+        override_sensitive: Any,
+        reason: str = "",
+        conn: sqlite3.Connection | None = None,
+    ) -> "bool | None":
+        """Set (True/False) or clear (None) a per-asset Safe Mode override — the user
+        confirming or overturning the classifier's verdict. Returns the stored value,
+        or None when cleared. Additive; independent of the safety_cache verdict."""
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.set_safe_mode_override(asset_id, override_sensitive, reason, local_conn)
+        asset_id = str(asset_id or "").strip()
+        if not asset_id:
+            return None
+        if override_sensitive is None:
+            conn.execute("DELETE FROM safe_mode_overrides WHERE asset_id = ?", (asset_id,))
+            return None
+        value = 1 if bool(override_sensitive) else 0
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO safe_mode_overrides(asset_id, override_sensitive, reason, created_at)
+            VALUES(?, ?, ?, ?)
+            """,
+            (asset_id, value, str(reason or "")[:500], now_iso()),
+        )
+        return bool(value)
+
+    def safe_mode_override_for(self, asset_id: str, conn: sqlite3.Connection | None = None) -> "bool | None":
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.safe_mode_override_for(asset_id, local_conn)
+        row = conn.execute(
+            "SELECT override_sensitive FROM safe_mode_overrides WHERE asset_id = ? LIMIT 1",
+            (str(asset_id or "").strip(),),
+        ).fetchone()
+        if not row:
+            return None
+        return bool(row["override_sensitive"])
+
+    def list_safe_mode_flagged(
+        self,
+        limit: int = 200,
+        offset: int = 0,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        """Photo assets the Safe Mode classifier flagged (latest cached verdict) or
+        that carry a user override. Each item reports the stored verdict, the override,
+        and the resulting effective state so the review UI can show and change it.
+        Additive read path — does not touch the main photo serialization."""
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.list_safe_mode_flagged(limit, offset, local_conn)
+        limit = max(1, min(int(limit or 200), 2000))
+        offset = max(0, int(offset or 0))
+        where = "sc.sensitive = 1 OR smo.override_sensitive IS NOT NULL"
+        latest = (
+            "SELECT file_hash, sensitive, score, reason, model_name, MAX(created_at) AS created_at "
+            "FROM safety_cache GROUP BY file_hash"
+        )
+        rows = conn.execute(
+            f"""
+            SELECT pa.asset_id AS asset_id, pa.source_path AS source_path,
+                   sc.sensitive AS sensitive, sc.score AS score, sc.reason AS reason,
+                   sc.model_name AS model_name, smo.override_sensitive AS override_sensitive
+            FROM photo_assets pa
+            JOIN ({latest}) sc ON sc.file_hash = pa.content_hash
+            LEFT JOIN safe_mode_overrides smo ON smo.asset_id = pa.asset_id
+            WHERE {where}
+            ORDER BY sc.score DESC, pa.source_path ASC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+        total_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS n FROM photo_assets pa
+            JOIN ({latest}) sc ON sc.file_hash = pa.content_hash
+            LEFT JOIN safe_mode_overrides smo ON smo.asset_id = pa.asset_id
+            WHERE {where}
+            """
+        ).fetchone()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            stored = bool(row["sensitive"])
+            raw_override = row["override_sensitive"]
+            override = None if raw_override is None else bool(raw_override)
+            items.append({
+                "assetId": str(row["asset_id"]),
+                "sourcePath": str(row["source_path"]),
+                "storedSensitive": stored,
+                "override": override,
+                "effectiveSensitive": stored if override is None else override,
+                "score": float(row["score"] or 0.0),
+                "reason": str(row["reason"] or ""),
+                "modelName": str(row["model_name"] or ""),
+            })
+        return {
+            "items": items,
+            "total": int(total_row["n"]) if total_row else len(items),
+            "limit": limit,
+            "offset": offset,
+        }
 
     def embedding_lookup(
         self,

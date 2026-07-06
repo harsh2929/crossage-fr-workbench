@@ -679,6 +679,8 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "calibrate_safe_mode",
   "explain_safety",
   "install_safety_explainer",
+  "list_safe_mode_flagged",
+  "set_photo_safe_mode_override",
   "audit_events",
   "audit_chain_status",
   "list_jurisdictions",
