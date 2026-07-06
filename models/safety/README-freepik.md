@@ -5,18 +5,24 @@ high) on an EVA-02 base. On independent hard data (UnsafeBench "Sexual") it lead
 the open classifiers, and it is **MIT-licensed — so it may be bundled/redistributed**
 (unlike NudeNet). The Safe Mode gate already supports it end-to-end (multi-level
 scoring, dominant-level reporting); the only manual step is the **one-time ONNX
-export**, because Freepik ships safetensors (no ONNX) and its repo is gated.
+export**, because Freepik ships safetensors (no ONNX). The repo itself is
+**public** — flagged *not-for-all-audiences* (a content warning), **not
+access-gated**, so no download request is needed.
 
 ## 1. Export ONNX (one-time, offline)
 
-```python
-import timm, torch
-from safetensors.torch import load_file  # Freepik ships safetensors — load without pickle
+The model is a HuggingFace `TimmWrapperForImageClassification`, so load it via
+`transformers` (this pulls `config.json` + `model.safetensors` and puts the weights
+in the right place — no raw `state_dict` key juggling):
 
-model = timm.create_model("eva02_base_patch14_448.mim_in22k_ft_in22k_in1k", pretrained=False, num_classes=4)
-model.load_state_dict(load_file("model.safetensors"))  # the downloaded Freepik weights
-model.eval()
-dummy = torch.zeros(1, 3, 448, 448)
+```python
+# pip install "transformers>=4.44" timm torch onnx
+import torch
+from transformers import AutoModelForImageClassification
+
+model = AutoModelForImageClassification.from_pretrained("Freepik/nsfw_image_detector").eval()
+
+dummy = torch.zeros(1, 3, 448, 448)  # EVA-02 448px input
 torch.onnx.export(
     model, dummy, "freepik-nsfw.onnx",
     input_names=["input"], output_names=["logits"],
@@ -25,7 +31,21 @@ torch.onnx.export(
 )
 ```
 
-Verify the class/level order of the export (it must match the manifest `levels`).
+The wrapper's forward returns an `ImageClassifierOutput`; `output_names=["logits"]`
+names its logits tensor as ONNX output 0. If the export warns about the
+`ModelOutput`, export the underlying timm module instead: `model.timm_model`.
+
+**Simplest alternative** (no export code — one CLI command):
+
+```bash
+pip install "optimum[exporters]" timm
+optimum-cli export onnx --model Freepik/nsfw_image_detector --task image-classification out/
+# → out/model.onnx ; rename to freepik-nsfw.onnx
+```
+
+The repo's `config.json` fixes the level order as `{0: neutral, 1: low, 2: medium,
+3: high}` — the ONNX logits follow it, and the manifest `levels` below already
+matches, so no reordering is needed. (Verify once after export.)
 
 ## 2. Install
 

@@ -83,13 +83,17 @@ integrity-pinned by an in-code SHA-256. The staged plan was completed as follows
 
 Freepik is a **classifier** (4 ordered levels neutral/low/medium/high), not a box
 detector — so it lands in **Stage 1**, not Stage 2. The multi-level integration is
-now **shipped**; the only remaining step is the one-time ONNX export (its repo is
-gated and ships no ONNX). Provisioning doc: `models/safety/README-freepik.md`.
+now **shipped**; the only remaining step is the one-time ONNX export (the repo is
+**public** — not-for-all-audiences, *not* access-gated — and ships no ONNX, verified
+2026-07-06 via the HF model API: one repo, `config.json` + `model.safetensors`,
+`gated:false`, 4-level `id2label`). Provisioning doc: `models/safety/README-freepik.md`.
 
-1. **Export ONNX** (the one manual step) from Freepik's safetensors
-   (`eva02_base_patch14_448`, 448px) — a one-time offline export
-   (`torch.onnx.export`, opset 14+, dynamic batch axis). Load the weights with
-   `safetensors.torch.load_file` (no pickle), not `torch.load`.
+1. **Export ONNX** (the one manual step) from `Freepik/nsfw_image_detector`
+   (`eva02_base_patch14_448`, 448px, 86M params) — a one-time offline export. It is
+   packaged as a HF `TimmWrapperForImageClassification`, so load via
+   `transformers.AutoModelForImageClassification.from_pretrained` and
+   `torch.onnx.export` (opset 14+, dynamic batch axis), or use `optimum-cli export
+   onnx`. See `README-freepik.md`.
 2. **First-stage discovery — DONE.** `crossage_fr/ingest/safety.py` auto-discovers
    any `models/safety/*.onnx` + sidecar manifest. A manifest with `levels` +
    `sensitiveMinLevel` (see `README-freepik.md`) is enough; `_model_preference`
@@ -289,7 +293,13 @@ is_protected = score >= PROFILES['privacy']
 ## Caveats
 - **Vendor accuracy claims (~98%) are measured on each model's own, easier dataset and do not generalize** (aimodels.fyi notes Falconsai has "no independent benchmark on public datasets"); independent UnsafeBench numbers are far lower (59–77%). Always validate on the user's own data.
 - The independent cross-model numbers come from **KidsNanny (arXiv:2603.16181), a self-disclosed first-party technical report**; its competitor measurements are third-party but should be reproduced on your own held-out set before final model choice.
-- **Freepik's repo is gated as sensitive content**; exact file size, current download count, and ONNX availability could not be confirmed — verify before bundling, and budget time to export ONNX yourself.
+- **Freepik's repo — RESOLVED 2026-07-06 (HF model API):** it is **public**, flagged
+  *not-for-all-audiences* (content warning) but **not access-gated** (`gated:false`).
+  One model, no variants: `config.json` + `model.safetensors` (86.3M params, ~330 MB),
+  4-level `id2label` {0:neutral,1:low,2:medium,3:high}, MIT. **Still no ONNX shipped** —
+  budget time to export yourself (see `models/safety/README-freepik.md`). NOTE: the
+  research prose above (model table + shortlist) still says "gated" from the original
+  survey; this verified entry supersedes it.
 - **NudeNet v3 is AGPL-3.0 and flagged "inactive"** — do not bundle in a closed-source product without legal review or a commercial grant.
 - **All threshold values are starting points**; final operating points must come from per-user/per-app calibration on labeled local data.
 - Treat the EU AI Act timeline as moving: high-risk obligations and the intimate-image "nudifier" generation prohibition have shifting dates (2026–2027); your detection/filtering use case is distinct from generation, but document intended purpose and limitations.
