@@ -535,7 +535,7 @@ def _sample_video_frames_ffmpeg(
     except VideoLoadError:
         probe = {"width": 0, "height": 0, "durationMs": 0, "fps": 0.0}
     target_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="vintrace-ffmpeg-frames-") as temp_name:
+    with tempfile.TemporaryDirectory(prefix="vintrace-ffmpeg-frames-", dir=target_dir.parent) as temp_name:
         temp_dir = Path(temp_name)
         pattern = temp_dir / "frame-%08d.jpg"
         quality_scale = max(2, min(31, int(round(31 - (max(1, min(100, jpeg_quality)) / 100) * 29))))
@@ -572,7 +572,11 @@ def _sample_video_frames_ffmpeg(
         for offset, source_frame in enumerate(frames[:max_frames]):
             timestamp_ms = int(round(offset * interval_seconds * 1000))
             frame_path = target_dir / f"frame-ffmpeg-{offset:08d}-{timestamp_ms:010d}ms.jpg"
-            source_frame.replace(frame_path)
+            try:
+                frame_path.unlink(missing_ok=True)
+                shutil.move(str(source_frame), str(frame_path))
+            except OSError as exc:
+                raise VideoLoadError(f"Could not cache decoded frame for {resolved}: {exc}") from exc
             samples.append(
                 VideoFrameSample(
                     path=frame_path,

@@ -30,7 +30,7 @@ from crossage_fr.platform_detect import detect_platform, get_providers, split_pr
 
 # SigLIP 2 preprocessing (preprocessor_config.json): 256x256, rescale 1/255,
 # normalize mean/std 0.5 -> pixels in [-1, 1]. Text: lowercase, GemmaTokenizer,
-# EOS-terminated, padded/truncated to 64 (all baked into tokenizer.json).
+# capped to the text model's 64-token position embedding limit before ONNX.
 _IMAGE_SIZE = 256
 _TEXT_MAX_TOKENS = 64
 _VISION_GLOB = "vision_model*.onnx"
@@ -147,7 +147,9 @@ class _SemanticModel:
         return _l2_normalize(pooled)
 
     def encode_text(self, text: str) -> np.ndarray:
-        ids = list(self.tokenizer.encode(str(text).strip().lower()).ids[:_TEXT_MAX_TOKENS])
+        ids = list(self.tokenizer.encode(str(text).strip().lower()).ids)
+        if len(ids) > _TEXT_MAX_TOKENS:
+            ids = ids[:_TEXT_MAX_TOKENS]
         feed = np.asarray([ids], dtype=np.int64)
         pooled = np.asarray(self.text.run([self._text_out], {self._text_in: feed})[0], dtype=np.float32)
         return _l2_normalize(pooled)[0]
