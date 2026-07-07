@@ -6395,6 +6395,16 @@ run("Photos album cover and suggestion saves surface failures", () => {
   assert.match(source, /disabled=\{props\.busy \|\| savingAlbum\}/);
 });
 
+run("Photos metadata drafts reset only when the lightbox source changes", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  const resetEffect = source.match(/useEffect\(\(\) => \{\s*const dateTime = splitPhotoDateTimeOverride\(lightItem\?\.dateOverride \|\| ""\);[\s\S]*?setDetectedItemDraft\(""\);\s*\}, \[[^\]]+\]\);/);
+  assert.ok(resetEffect, "metadata draft reset effect should exist");
+  assert.match(resetEffect[0], /\}, \[currentLightboxSource\]\);$/);
+  const dependencies = resetEffect[0].match(/\}, \[([^\]]+)\]\);$/);
+  assert.ok(dependencies, "metadata draft reset dependencies should be parseable");
+  assert.doesNotMatch(dependencies[1], /lightItem/);
+});
+
 run("Photos lightbox viewed events patch recent rail without reloading folders", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
   assert.match(source, /const patchRecentActivityFolder = useCallback/);

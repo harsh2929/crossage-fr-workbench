@@ -7399,7 +7399,7 @@ export function PhotosView(props: {
     setReverseGeocodeError("");
     setReverseGeocodeScope("");
     setDetectedItemDraft("");
-  }, [lightItem?.sourcePath, lightItem?.title, lightItem?.caption, lightItem?.assetMetadata, lightItem?.keywords, lightItem?.dateOverride, lightItem?.captureDate, lightItem?.originalCaptureDate, lightItem?.locationOverride, lightItem?.locationHidden]);
+  }, [currentLightboxSource]);
 
   useEffect(() => {
     let cancelled = false;
