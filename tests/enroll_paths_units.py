@@ -173,7 +173,10 @@ def test_enroll_paths_dedup_across_calls() -> None:
         api.handle("set_consent", {"value": True})
         first = api.handle("enroll_paths", {"personName": "P", "ageBucket": "adult", "paths": [str(base / "a.jpg")]})
         second = api.handle("enroll_paths", {"personName": "P", "ageBucket": "adult", "paths": [str(base / "a.jpg")]})
+        third = api.handle("enroll_paths", {"personName": "Q", "ageBucket": "adult", "paths": [str(base / "a.jpg")]})
         assert first["added"] == 1 and second["added"] == 0, (first["added"], second["added"])
+        assert third["added"] == 1, third
+        assert {ref.person_name for ref in api.project.references.values()} == {"P", "Q"}
     print("ok enroll_paths dedup across calls")
 
 

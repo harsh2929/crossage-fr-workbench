@@ -371,6 +371,8 @@ def assert_command_validation_and_empty_inputs() -> None:
     assert enrolled["added"] == 1
     duplicate = api.handle("enroll", {"personName": "Person", "ageBucket": "adult", "folder": str(refs)})
     assert duplicate["added"] == 0
+    other_person = api.handle("enroll", {"personName": "Other Person", "ageBucket": "adult", "folder": str(refs)})
+    assert other_person["added"] == 1
 
     expect_raises(ValueError, lambda: api.handle("scan_paths", {"paths": "not-list"}), "list")
     filtered = api.handle("scan_paths", {"paths": [str(scan / "notes.txt")]})

@@ -811,7 +811,10 @@ class ProjectState:
             raise ValueError("A person name is required for enrollment.")
         added = 0
         errors: list[str] = []
-        known_hashes = {ref.source_hash or self._path_key(ref.source_path) for ref in self.references.values()}
+        known_hashes = {
+            (ref.source_hash or self._path_key(ref.source_path), self._person_key(ref.person_name))
+            for ref in self.references.values()
+        }
         # Enroll now honours the workspace exclusion rules (`.git`, `node_modules`,
         # size limits, ...) via the same hook the scan walk uses, so the subfolder
         # picker stays truthful for both flows. Benchmarks call iter_image_paths
@@ -847,16 +850,17 @@ class ProjectState:
         person_name: str,
         age_bucket: str,
         engine: EmbeddingEngine,
-        known_hashes: set[str],
+        known_hashes: set[tuple[str, str]],
     ) -> tuple[int, str | None]:
         """Embed one image and store any qualifying faces as references.
 
         Shared by enroll_folder and enroll_paths. Returns (faces_added, error_or_None).
-        De-duplicates by source hash via the caller-owned ``known_hashes`` set.
+        De-duplicates by source hash and person via the caller-owned ``known_hashes`` set.
         """
         try:
             source_hash = sha256_file(path)
-            if source_hash in known_hashes:
+            known_key = (source_hash or self._path_key(path), self._person_key(person_name))
+            if known_key in known_hashes:
                 return 0, None
             image = load_image(path)
             record = image_record_for_path(path, image=image, sha256=source_hash)
@@ -885,7 +889,7 @@ class ProjectState:
                 self._mark_reference_dirty(ref.ref_id)
                 self.vector_store.add(ref.ref_id, ref.vector)
                 added += 1
-            known_hashes.add(record.sha256)
+            known_hashes.add((record.sha256 or self._path_key(path), self._person_key(person_name)))
             return added, None
         except (ImageLoadError, OSError, ValueError) as exc:
             return 0, f"{path.name}: {exc}"
@@ -938,7 +942,10 @@ class ProjectState:
         paths = list(paths)
         added = 0
         errors: list[str] = []
-        known_hashes = {ref.source_hash or self._path_key(ref.source_path) for ref in self.references.values()}
+        known_hashes = {
+            (ref.source_hash or self._path_key(ref.source_path), self._person_key(ref.person_name))
+            for ref in self.references.values()
+        }
         for path in self._expand_enroll_paths(paths, recursive=recursive):
             count, error = self._enroll_one(path, person_name, age_bucket, engine, known_hashes)
             added += count
