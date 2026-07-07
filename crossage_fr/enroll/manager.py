@@ -176,6 +176,7 @@ class ProjectState:
         self.vector_store = VectorStore()
         self._reference_index_version = 0
         self._model_vector_store_cache: dict[str, tuple[int, VectorStore, dict[str, ReferenceFace]]] = {}
+        self._person_template_cache: tuple[tuple[int, str], dict[str, list[float]]] | None = None
         self._excluded_file_paths_cache_key: tuple[str, ...] = ()
         self._excluded_file_paths_cache: set[str] = set()
         self._exclusion_cache_key: tuple[Any, ...] = ()
@@ -306,6 +307,7 @@ class ProjectState:
     def _invalidate_reference_indexes(self) -> None:
         self._reference_index_version += 1
         self._model_vector_store_cache.clear()
+        self._person_template_cache = None
 
     def _config_from_payload(self, payload: dict[str, Any], fallback: RuntimeConfig | None = None) -> RuntimeConfig:
         try:

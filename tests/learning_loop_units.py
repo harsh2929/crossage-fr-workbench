@@ -80,6 +80,41 @@ def _project(tmp: Path) -> ProjectState:
     return project
 
 
+def test_rename_person_invalidates_person_template_cache() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        project = _project(tmp)
+        for index in range(2, 4):
+            ref_path = project.root / f"ref{index}.jpg"
+            ref_path.write_bytes(f"reference:{index}".encode("utf-8"))
+            project.references[f"ref{index}"] = ReferenceFace(
+                ref_id=f"ref{index}",
+                person_name="Alice",
+                age_bucket="adult",
+                source_path=str(ref_path),
+                capture_date=None,
+                quality=0.8 + index / 100,
+                model_name="modelA",
+                vector=[1.0] + [0.0] * 511,
+            )
+
+        project._invalidate_reference_indexes()
+        warmed = project._person_templates("modelA")
+        assert "Alice" in warmed
+        assert "Alice Prime" not in warmed
+        assert project._person_template_cache is not None
+        warmed_version = project._reference_index_version
+
+        renamed = project.rename_person("Alice", "Alice Prime")
+        assert renamed["references"] == 3
+        assert project._reference_index_version > warmed_version
+        assert project._person_template_cache is None
+
+        refreshed = project._person_templates("modelA")
+        assert "Alice" not in refreshed
+        assert "Alice Prime" in refreshed
+
+
 def test_audit_events_tails_recent_rows_without_full_parse() -> None:
     with tempfile.TemporaryDirectory() as raw:
         project = _project(Path(raw))
@@ -1099,6 +1134,7 @@ def test_stage_calibration_blocks_insufficient_or_regressed_feedback() -> None:
 
 
 def main() -> None:
+    test_rename_person_invalidates_person_template_cache()
     test_audit_events_tails_recent_rows_without_full_parse()
     test_review_status_persists_current_training_example()
     test_bulk_review_learning_examples_share_one_db_transaction()
