@@ -17192,20 +17192,22 @@ export function PhotosView(props: {
     const blockIndex = photoSlideshowCaptionIndex(photoSlideshowProjectCaptionLayer);
     setPhotoSlideshowProjectTimelineItems((current) => current.map((item) => (
       targets.has(item.sourcePath)
-        ? {
-          sourcePath: item.sourcePath,
-          durationMs: item.durationMs,
-          motion: item.motion || "auto",
-          ...(item.keyframes ? { keyframes: item.keyframes } : {}),
-          ...photoSlideshowTimelineCropPatch(item),
-          ...photoSlideshowTimelineTransitionPatch(item),
-          ...(blockIndex >= 0 && cleanPhotoSlideshowCaptions(item.captions).filter((_, index) => index !== blockIndex).length
-            ? { captions: cleanPhotoSlideshowCaptions(item.captions).filter((_, index) => index !== blockIndex) }
-            : blockIndex >= 0
-              ? {}
-              : {}),
-          ...(blockIndex >= 0 ? photoSlideshowPrimaryCaptionPatch(item) : {}),
-        }
+        ? (() => {
+          const existingCaptions = cleanPhotoSlideshowCaptions(item.captions);
+          const nextCaptions = blockIndex >= 0
+            ? existingCaptions.filter((_, index) => index !== blockIndex)
+            : existingCaptions;
+          return {
+            sourcePath: item.sourcePath,
+            durationMs: item.durationMs,
+            motion: item.motion || "auto",
+            ...(item.keyframes ? { keyframes: item.keyframes } : {}),
+            ...photoSlideshowTimelineCropPatch(item),
+            ...photoSlideshowTimelineTransitionPatch(item),
+            ...(nextCaptions.length ? { captions: nextCaptions } : {}),
+            ...(blockIndex >= 0 ? photoSlideshowPrimaryCaptionPatch(item) : {}),
+          };
+        })()
         : item
     )));
     resetPhotoSlideshowCaptionDraft(null);

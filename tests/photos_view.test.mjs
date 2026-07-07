@@ -6405,6 +6405,17 @@ run("Photos metadata drafts reset only when the lightbox source changes", () => 
   assert.doesNotMatch(dependencies[1], /lightItem/);
 });
 
+run("Photos slideshow primary caption clear preserves secondary captions", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  const block = source.match(/function clearPhotoSlideshowSelectedSlideCaption\(\) \{[\s\S]*?resetPhotoSlideshowCaptionDraft\(null\);\s*\}/);
+  assert.ok(block, "clearPhotoSlideshowSelectedSlideCaption should exist");
+  assert.match(block[0], /const existingCaptions = cleanPhotoSlideshowCaptions\(item\.captions\);/);
+  assert.match(block[0], /const nextCaptions = blockIndex >= 0[\s\S]*\? existingCaptions\.filter\(\(_, index\) => index !== blockIndex\)[\s\S]*: existingCaptions;/);
+  assert.match(block[0], /\.\.\.\(nextCaptions\.length \? \{ captions: nextCaptions \} : \{\}\),/);
+  assert.match(block[0], /\.\.\.\(blockIndex >= 0 \? photoSlideshowPrimaryCaptionPatch\(item\) : \{\}\),/);
+  assert.doesNotMatch(block[0], /blockIndex >= 0\s*\?\s*\{\}\s*:\s*\{\}/);
+});
+
 run("Photos lightbox viewed events patch recent rail without reloading folders", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
   assert.match(source, /const patchRecentActivityFolder = useCallback/);
