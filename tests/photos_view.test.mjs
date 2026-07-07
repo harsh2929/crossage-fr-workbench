@@ -6338,6 +6338,17 @@ run("Photos bulk favorite shortcut uses batch metadata update", () => {
   assert.doesNotMatch(block[0], /updatePhotoAssetMetadata\(\{/);
 });
 
+run("Photos burst-frame fetch effect ignores unrelated item map churn", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  assert.match(source, /const lightboxBurstLoadedSourceKey = useMemo\(\(\) => \{/);
+  const fetchEffect = source.match(/useEffect\(\(\) => \{\s*const sourcePaths = lightboxBurstStack\?\.sourcePaths \|\| \[\];[\s\S]*?itemsFnRef\.current\(\{[\s\S]*?collapseBursts: false,[\s\S]*?\}, \[[^\]]+\]\);/);
+  assert.ok(fetchEffect, "burst-frame fetch effect should exist");
+  assert.match(fetchEffect[0], /lightboxBurstLoadedSourceKey/);
+  const dependencies = fetchEffect[0].match(/\}, \[([^\]]+)\]\);$/);
+  assert.ok(dependencies, "burst-frame fetch effect dependencies should be parseable");
+  assert.doesNotMatch(dependencies[1], /photoItemsBySourcePath/);
+});
+
 run("Photos lightbox viewed events patch recent rail without reloading folders", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
   assert.match(source, /const patchRecentActivityFolder = useCallback/);

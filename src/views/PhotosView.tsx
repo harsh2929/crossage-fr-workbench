@@ -5642,6 +5642,21 @@ export function PhotosView(props: {
     });
     return bySourcePath;
   }, [lightboxBurstFrameItems]);
+  const lightboxBurstLoadedSourceKey = useMemo(() => {
+    const sourcePaths = lightboxBurstStack?.sourcePaths || [];
+    if (!sourcePaths.length) return "";
+    return sourcePaths.map((sourcePath) => {
+      const loaded = photoItemsBySourcePath.get(sourcePath);
+      if (!loaded) return `${sourcePath}\tmissing`;
+      return [
+        sourcePath,
+        loaded.assetId || "",
+        loaded.previewUrl || "",
+        loaded.sourceUrl || "",
+        loaded.missingAt || "",
+      ].join("\t");
+    }).join("\n");
+  }, [lightboxBurstFrameSourceKey, lightboxBurstStack?.sourcePaths, photoItemsBySourcePath]);
   const lightboxBurstStackItemsBySourcePath = useMemo(() => {
     const bySourcePath = new Map<string, PhotoBurstStackItem>();
     (lightboxBurstStack?.items || []).forEach((item) => {
@@ -5749,7 +5764,7 @@ export function PhotosView(props: {
     return () => {
       alive = false;
     };
-  }, [lightboxBaseItem?.sourcePath, lightboxBurstFrameSourceKey, lightboxBurstStack?.stackId, photoItemsBySourcePath]);
+  }, [lightboxBaseItem?.sourcePath, lightboxBurstFrameSourceKey, lightboxBurstLoadedSourceKey, lightboxBurstStack?.stackId]);
 
   function selectLightboxBurstFrame(sourcePath: string) {
     if (!lightboxBurstStack || !sourcePath || !lightboxBurstStack.sourcePaths.includes(sourcePath)) return;
