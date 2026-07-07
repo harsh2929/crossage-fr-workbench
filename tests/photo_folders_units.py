@@ -6885,6 +6885,49 @@ def test_search_photo_library_uses_scoped_context_loads() -> None:
     print("ok search photo library uses scoped context loads")
 
 
+def test_photo_query_filter_hydrates_search_hits_in_batch() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        batch_calls: list[list[str]] = []
+
+        def fake_ensure_photo_search_index(*_args, **_kwargs):
+            return {"pending": False, "status": "ready"}
+
+        def fake_search_photo_asset_ids(query: str, limit: int = 100_000):
+            assert query == "Aurora"
+            assert limit == 100_000
+            return ["asset-a", "asset-b"]
+
+        def fake_photo_assets_by_ids(asset_ids, conn=None):
+            del conn
+            ids = list(asset_ids)
+            batch_calls.append(ids)
+            return [
+                {"assetId": "asset-a", "sourcePath": "/photos/a.jpg"},
+                {"assetId": "asset-b", "sourcePath": "/photos/b.jpg"},
+            ]
+
+        def fail_point_lookup(*_args, **_kwargs):
+            raise AssertionError("query filter should hydrate search hits in one batch")
+
+        api.project.db.ensure_photo_search_index = fake_ensure_photo_search_index  # type: ignore[method-assign]
+        api.project.db.search_photo_asset_ids = fake_search_photo_asset_ids  # type: ignore[method-assign]
+        api.project.db.photo_assets_by_ids = fake_photo_assets_by_ids  # type: ignore[method-assign]
+        api.project.db.photo_asset_by_id = fail_point_lookup  # type: ignore[method-assign]
+        api._photo_place_labels_by_asset_id = lambda: {}  # type: ignore[method-assign]
+        result = api._filter_photo_entries_by_query(
+            [
+                {"sourcePath": "/photos/a.jpg", "metadata": {}},
+                {"sourcePath": "/photos/b.jpg", "metadata": {}},
+                {"sourcePath": "/photos/c.jpg", "metadata": {}},
+            ],
+            "Aurora",
+        )
+        assert [entry["sourcePath"] for entry in result] == ["/photos/a.jpg", "/photos/b.jpg"], result
+        assert batch_calls == [["asset-a", "asset-b"]]
+    print("ok Photos query filter hydrates search hits in one batched lookup")
+
+
 def test_photo_keyword_vocabulary_export_import_roundtrip() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -18100,6 +18143,7 @@ if __name__ == "__main__":
     test_photo_duplicate_groups_are_cached_on_folder_reads()
     test_photo_asset_metadata_update_indexes_search_and_folder_items()
     test_search_photo_library_uses_scoped_context_loads()
+    test_photo_query_filter_hydrates_search_hits_in_batch()
     test_photo_keyword_vocabulary_export_import_roundtrip()
     test_photo_object_tag_review_bounds_scope_same_label()
     test_photo_ocr_index_reads_local_sidecars_and_updates_search()

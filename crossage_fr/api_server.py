@@ -8019,8 +8019,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             asset_ids = self.project.db.search_photo_asset_ids(text, limit=100_000)
             search_paths = {
                 str(asset.get("sourcePath", "") or "")
-                for asset_id in asset_ids
-                for asset in [self.project.db.photo_asset_by_id(asset_id)]
+                for asset in self.project.db.photo_assets_by_ids(asset_ids)
                 if asset
             }
             search_ready = not bool(search_index.get("pending", False))
