@@ -7906,33 +7906,41 @@ class WorkspaceDb:
             ),
         )
 
-        asset_rows = conn.execute(
-            "SELECT asset_id, metadata_json FROM photo_assets WHERE source_scan_run = ?",
-            (clean_import_id,),
-        ).fetchall()
-        updated_assets = 0
-        for asset_row in asset_rows:
-            asset_id = str(asset_row["asset_id"] or "").strip()
-            if not asset_id:
-                continue
-            asset_metadata = parse_json(asset_row["metadata_json"])
-            asset_metadata.update({
-                "importSourceKind": next_kind,
-                "importSourceLabel": next_label,
-                "importSourceDetail": next_detail,
-                "importProvenanceEditedAt": updated_at,
-            })
-            conn.execute(
-                """
-                UPDATE photo_assets
-                SET metadata_json = ?,
-                    updated_at = ?
-                WHERE asset_id = ?
-                """,
-                (self._clean_json_dict(asset_metadata), updated_at, asset_id),
-            )
-            self._index_photo_asset(asset_id, conn)
-            updated_assets += 1
+        metadata_json = (
+            "CASE WHEN json_valid(COALESCE(metadata_json, '{}')) "
+            "THEN COALESCE(metadata_json, '{}') ELSE '{}' END"
+        )
+        updated_asset_cursor = conn.execute(
+            f"""
+            UPDATE photo_assets
+            SET metadata_json = json_set(
+                    {metadata_json},
+                    '$.importSourceKind', ?,
+                    '$.importSourceLabel', ?,
+                    '$.importSourceDetail', ?,
+                    '$.importProvenanceEditedAt', ?
+                ),
+                updated_at = ?
+            WHERE source_scan_run = ?
+                AND (
+                    COALESCE(CAST(json_extract({metadata_json}, '$.importSourceKind') AS TEXT), '') != ?
+                    OR COALESCE(CAST(json_extract({metadata_json}, '$.importSourceLabel') AS TEXT), '') != ?
+                    OR COALESCE(CAST(json_extract({metadata_json}, '$.importSourceDetail') AS TEXT), '') != ?
+                )
+            """,
+            (
+                next_kind,
+                next_label,
+                next_detail,
+                updated_at,
+                updated_at,
+                clean_import_id,
+                next_kind,
+                next_label,
+                next_detail,
+            ),
+        )
+        updated_assets = max(0, int(updated_asset_cursor.rowcount or 0))
 
         session = self.photo_import_session_by_id(clean_import_id, conn)
         if session is None:

@@ -5684,14 +5684,23 @@ def test_photo_import_session_provenance_edit_updates_assets_and_sources() -> No
         imported_path = imported["importedPaths"][0]
         assert imported["failedCount"] == 1, imported
 
-        updated = api.update_photo_import_session_provenance(
-            {
-                "importId": import_id,
-                "sourceKind": "safari",
-                "sourceLabel": "Safari Research",
-                "sourceDetail": "Source URL: https://example.test/story",
-            }
-        )
+        original_index_photo_asset = api.project.db._index_photo_asset
+
+        def fail_photo_index_rebuild(_asset_id: str, _conn: Any) -> None:
+            raise AssertionError("import provenance edits should not rebuild photo FTS rows")
+
+        api.project.db._index_photo_asset = fail_photo_index_rebuild  # type: ignore[method-assign]
+        try:
+            updated = api.update_photo_import_session_provenance(
+                {
+                    "importId": import_id,
+                    "sourceKind": "safari",
+                    "sourceLabel": "Safari Research",
+                    "sourceDetail": "Source URL: https://example.test/story",
+                }
+            )
+        finally:
+            api.project.db._index_photo_asset = original_index_photo_asset  # type: ignore[method-assign]
         assert updated["importId"] == import_id, updated
         assert updated["updatedAssets"] == 1, updated
         assert updated["previous"]["sourceKind"] == "mail", updated
@@ -5705,6 +5714,32 @@ def test_photo_import_session_provenance_edit_updates_assets_and_sources() -> No
         assert asset["metadata"]["importSourceLabel"] == "Safari Research", asset
         assert asset["metadata"]["importSourceDetail"] == "Source URL: https://example.test/story", asset
         assert asset["metadata"]["importProvenanceEditedAt"], asset
+        with api.project.db.connect() as conn:
+            asset_row_after_change = conn.execute(
+                "SELECT metadata_json, updated_at FROM photo_assets WHERE asset_id = ?",
+                (str(asset["assetId"]),),
+            ).fetchone()
+            assert asset_row_after_change is not None
+            metadata_after_change = str(asset_row_after_change["metadata_json"] or "")
+            updated_at_after_change = str(asset_row_after_change["updated_at"] or "")
+
+        repeated = api.update_photo_import_session_provenance(
+            {
+                "importId": import_id,
+                "sourceKind": "safari",
+                "sourceLabel": "Safari Research",
+                "sourceDetail": "Source URL: https://example.test/story",
+            }
+        )
+        assert repeated["updatedAssets"] == 0, repeated
+        with api.project.db.connect() as conn:
+            asset_row_after_repeat = conn.execute(
+                "SELECT metadata_json, updated_at FROM photo_assets WHERE asset_id = ?",
+                (str(asset["assetId"]),),
+            ).fetchone()
+            assert asset_row_after_repeat is not None
+            assert str(asset_row_after_repeat["metadata_json"] or "") == metadata_after_change, repeated
+            assert str(asset_row_after_repeat["updated_at"] or "") == updated_at_after_change, repeated
 
         folders = {folder["id"]: folder for folder in api.list_photo_folders({})["folders"]}
         assert folders["lastImport"]["importSession"]["sourceKind"] == "safari", folders["lastImport"]
