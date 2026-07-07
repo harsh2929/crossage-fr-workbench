@@ -28441,7 +28441,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "sharedEvent": shared_event,
         }
 
-    def _photo_portrait_blur_image(self, source: Path, *, blur_strength: int) -> tuple[Any, dict[str, Any]]:
+    def _photo_portrait_blur_image(
+        self,
+        source: Path,
+        *,
+        blur_strength: int,
+        render_max_dimension: int = 0,
+    ) -> tuple[Any, dict[str, Any]]:
         """Build a depth-aware portrait blur (subject sharp, background softened).
 
         Uses the on-device Depth-Anything-V2 map when its pack is vendored; falls
@@ -28453,10 +28459,21 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         from crossage_fr.depth import engine as depth_engine
 
         rgb = load_image(source).convert("RGB")
-        width, height = rgb.size
-        if width <= 1 or height <= 1:
+        source_width, source_height = rgb.size
+        if source_width <= 1 or source_height <= 1:
             raise ValueError("Portrait blur requires an image larger than 1 pixel.")
-        radius = max(2, min(80, int(blur_strength or max(6, min(48, min(width, height) // 18)))))
+        processing_max_dimension = max(0, int(render_max_dimension or 0))
+        resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", getattr(Image, "LANCZOS", 1))
+        if processing_max_dimension >= 2 and max(source_width, source_height) > processing_max_dimension:
+            rgb = rgb.copy()
+            rgb.thumbnail((processing_max_dimension, processing_max_dimension), resampling)
+        width, height = rgb.size
+        processing_scale = min(
+            width / max(source_width, 1),
+            height / max(source_height, 1),
+        )
+        requested_radius = int(blur_strength or max(6, min(48, min(source_width, source_height) // 18)))
+        radius = max(2, min(80, int(round(requested_radius * processing_scale))))
 
         depth_model = ""
         algorithm = "radial-center-weight-v1"
@@ -28487,8 +28504,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "algorithm": algorithm,
             "depthModel": depth_model,
             "blurStrength": radius,
-            "sourceWidth": width,
-            "sourceHeight": height,
+            "requestedBlurStrength": requested_radius,
+            "sourceWidth": source_width,
+            "sourceHeight": source_height,
+            "processingWidth": width,
+            "processingHeight": height,
+            "processingMaxDimension": processing_max_dimension,
         }
 
     def export_photo_portrait_blur(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -28527,7 +28548,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         media_root.mkdir(parents=True, exist_ok=True)
         base_name = f"{self._safe_photo_export_name(resolved.stem)}-portrait"
         target = self._photo_export_allocate_target(media_root, index=1, base_name=base_name, suffix=".png", filename_mode="original")
-        generated, blur_metadata = self._photo_portrait_blur_image(resolved, blur_strength=blur_strength)
+        generated, blur_metadata = self._photo_portrait_blur_image(
+            resolved,
+            blur_strength=blur_strength,
+            render_max_dimension=render_max_dimension,
+        )
         width, height = self._photo_export_save_pil_image(generated, target, render_format="png", quality=100, max_dimension=render_max_dimension)
         depth_model = str(blur_metadata.get("depthModel", "") or "")
         manifest = {

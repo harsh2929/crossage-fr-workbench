@@ -127,8 +127,46 @@ def test_portrait_blur_command_offline() -> None:
         assert np.abs(before - after).mean() > 1.0, "portrait blur did not change the image"
 
 
+def test_portrait_blur_downscales_before_depth_and_composite() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        photo = Path(tmp) / "large-scene.png"
+        original = _checkerboard(size=320, cell=16)
+        original.save(photo)
+
+        observed_sizes: list[tuple[int, int]] = []
+        original_estimate_depth = de.estimate_depth
+
+        def fake_estimate_depth(path=None, *, image=None):  # noqa: ANN001
+            assert image is not None, "portrait blur should pass the working image to depth estimation"
+            observed_sizes.append(image.size)
+            return de.DepthResult(False, "unavailable", "", "test fallback")
+
+        de.estimate_depth = fake_estimate_depth  # type: ignore[assignment]
+        try:
+            out = api.export_photo_portrait_blur({
+                "sourcePath": str(photo),
+                "blurStrength": 32,
+                "renderMaxDimension": 80,
+            })
+        finally:
+            de.estimate_depth = original_estimate_depth  # type: ignore[assignment]
+
+        assert observed_sizes == [(80, 80)], observed_sizes
+        target = Path(out["targetPath"])
+        with Image.open(target) as rendered:
+            assert rendered.size == (80, 80), (rendered.size, out)
+        manifest = json.loads(Path(out["manifestPath"]).read_text(encoding="utf-8"))
+        assert manifest["sourceWidth"] == 320, manifest
+        assert manifest["sourceHeight"] == 320, manifest
+        assert manifest["blur"]["processingWidth"] == 80, manifest
+        assert manifest["blur"]["processingHeight"] == 80, manifest
+        assert manifest["blur"]["blurStrength"] == 8, manifest
+
+
 if __name__ == "__main__":
     test_depth_unavailable_without_model_offline()
     test_depth_estimates_normalized_map_offline()
     test_portrait_blur_command_offline()
+    test_portrait_blur_downscales_before_depth_and_composite()
     print("all photo_depth_units tests passed")
