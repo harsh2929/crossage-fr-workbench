@@ -454,6 +454,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         self._engine: EmbeddingEngine | None = None
         self._engine_model_name = self._infer_engine_name()
         self._verification_engine_cache: tuple[str, Any] | None = None
+        self._photo_matches_cache_generation = 0
+        self._photo_matches_by_source_cache: tuple[tuple[int, int, int, int], dict[str, list[ReviewCandidate]]] | None = None
         self._startup("workspace", f"Workspace ready: {self.project.root}")
         self._startup("engine", "Recognition engine will load when needed")
         self._startup("platform", "Detecting platform acceleration")
@@ -686,7 +688,32 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             missing = [key for key in required if key not in params]
             if missing:
                 raise ValueError(f"{command} requires parameter(s): {', '.join(missing)}.")
-        return getattr(self, handler)(params, progress)
+        result = getattr(self, handler)(params, progress)
+        if command in self._PHOTO_MATCH_CACHE_INVALIDATING_COMMANDS:
+            self._invalidate_photo_matches_cache()
+        return result
+
+    _PHOTO_MATCH_CACHE_INVALIDATING_COMMANDS = {
+        "set_workspace",
+        "scan",
+        "scan_paths",
+        "set_status",
+        "bulk_set_status",
+        "set_candidate_note",
+        "block_false_match",
+        "reassign_candidate_person",
+        "apply_review_rules",
+        "clear_queue",
+        "purge_candidates",
+        "purge_duplicate_candidates",
+        "purge_old_candidates",
+        "delete_person",
+        "rename_person",
+        "relink_workspace_paths",
+        "manage_candidate_media",
+        "permanently_delete_photos",
+        "undo_photo_operation",
+    }
 
     _COMMAND_HANDLERS = {
         "ping": "_cmd_ping",
@@ -5210,29 +5237,54 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             if candidate is not None:
                 loaded[candidate.candidate_id] = candidate
         self.project.candidates = loaded
+        self._invalidate_photo_matches_cache()
         return len(loaded)
 
+    def _invalidate_photo_matches_cache(self) -> None:
+        self._photo_matches_cache_generation += 1
+        self._photo_matches_by_source_cache = None
+
+    def _photo_matches_cache_key(self) -> tuple[int, int, int, int]:
+        try:
+            indexed_count = int(self.project.db.candidate_count())
+        except Exception:
+            indexed_count = -1
+        return (
+            self._photo_matches_cache_generation,
+            id(self.project.candidates),
+            len(self.project.candidates),
+            indexed_count,
+        )
+
     def _photo_matches_by_source(self) -> dict[str, list[ReviewCandidate]]:
+        cache_key = self._photo_matches_cache_key()
+        cached = self._photo_matches_by_source_cache
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
         matches_by_source: dict[str, list[ReviewCandidate]] = {}
         seen_candidate_ids: set[str] = set()
         candidates: list[ReviewCandidate] = list(self.project.candidates.values())
-        try:
-            for payload in self.project.db.iter_candidate_payloads():
-                candidate = self._review_candidate_from_payload(payload)
-                if candidate is not None:
-                    candidates.append(candidate)
-        except Exception:
-            pass
+        indexed_count = cache_key[3]
+        if indexed_count != len(self.project.candidates):
+            try:
+                for payload in self.project.db.iter_candidate_payloads():
+                    candidate = self._review_candidate_from_payload(payload)
+                    if candidate is not None:
+                        candidates.append(candidate)
+            except Exception:
+                pass
         for candidate in candidates:
             if candidate.candidate_id in seen_candidate_ids:
                 continue
             seen_candidate_ids.add(candidate.candidate_id)
             for key in self._photo_source_keys(candidate):
                 matches_by_source.setdefault(key, []).append(candidate)
-        return {
+        result = {
             key: self._dedupe_photo_matches(matches)
             for key, matches in matches_by_source.items()
         }
+        self._photo_matches_by_source_cache = (cache_key, result)
+        return result
 
     def _photo_matches_by_source_for_source_paths(self, source_paths: Iterable[str]) -> dict[str, list[ReviewCandidate]]:
         wanted_sources = {str(source_path or "").strip() for source_path in source_paths if str(source_path or "").strip()}
@@ -21075,7 +21127,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             or min_quality_filter
             or location_filter
             or nearby_filter
-            or sort in {"newest", "oldest"}
         ):
             return None
         media_kind = media_kind_filter if media_kind_filter in PHOTO_MEDIA_KINDS else ""
@@ -30582,6 +30633,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         )
         for candidate_id in result.get("candidateIds", []) or []:
             self.project.candidates.pop(str(candidate_id or ""), None)
+        if result.get("candidateIds"):
+            self._invalidate_photo_matches_cache()
         try:
             self.project.db.ensure_photo_duplicate_groups()
         except Exception:
@@ -30683,6 +30736,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             self.project.db.ensure_photo_duplicate_groups()
         except Exception:
             pass
+        if bool(result.get("undone")):
+            self._invalidate_photo_matches_cache()
         self.project._append_audit(
             {
                 "action": "undo_photo_operation",

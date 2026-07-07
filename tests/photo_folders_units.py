@@ -6885,6 +6885,85 @@ def test_search_photo_library_uses_scoped_context_loads() -> None:
     print("ok search photo library uses scoped context loads")
 
 
+def test_photo_matches_by_source_caches_candidate_payload_map() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        source = str(Path(tmp) / "cached-candidate.jpg")
+        candidate = _candidate("cached-db", "Cache Alice", source, status="accepted", score=0.97)
+        api.project.db.upsert_candidates([candidate])
+
+        original_iter = api.project.db.iter_candidate_payloads
+        scan_count = 0
+
+        def counting_iter_candidate_payloads(conn=None):
+            nonlocal scan_count
+            scan_count += 1
+            if conn is not None:
+                yield from original_iter(conn)
+                return
+            with api.project.db.connect() as local_conn:
+                yield from original_iter(local_conn)
+
+        api.project.db.iter_candidate_payloads = counting_iter_candidate_payloads  # type: ignore[method-assign]
+        first = api._photo_matches_by_source()
+        second = api._photo_matches_by_source()
+        assert scan_count == 1, scan_count
+        assert first[source][0].candidate_id == "cached-db", first
+        assert second[source][0].candidate_id == "cached-db", second
+
+        api.project.candidates = {candidate.candidate_id: candidate}
+        api._invalidate_photo_matches_cache()
+
+        def fail_iter_candidate_payloads(*_args, **_kwargs):
+            raise AssertionError("complete in-memory candidates should not re-scan review_candidate payloads")
+
+        api.project.db.iter_candidate_payloads = fail_iter_candidate_payloads  # type: ignore[method-assign]
+        memory_matches = api._photo_matches_by_source()
+        assert memory_matches[source][0].candidate_id == "cached-db", memory_matches
+    print("ok photo matches by source caches candidate payload map")
+
+
+def test_all_photos_default_sort_uses_sql_when_candidates_are_loaded() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        first = base / "sql-default-newest-a.jpg"
+        second = base / "sql-default-newest-b.jpg"
+        first.write_bytes(b"first")
+        second.write_bytes(b"second")
+        imported = api.import_photos({
+            "sourcePaths": [str(first), str(second)],
+            "storageMode": "referenced",
+        })
+        first_path = imported["importedPaths"][0]
+        second_path = imported["importedPaths"][1]
+        candidate = _candidate("sql-default-candidate", "SQL Alice", first_path, status="accepted", score=0.98)
+        api.project.candidates = {candidate.candidate_id: candidate}
+        api.project.db.upsert_candidates([candidate])
+        api._invalidate_photo_matches_cache()
+
+        original_all_entries = api._all_photo_entries
+        original_asset_entries = api._photo_asset_entries
+
+        def fail_python_full_materialization(*_args, **_kwargs):
+            raise AssertionError("default All Photos pages with candidates should stay on the SQL page path")
+
+        api._all_photo_entries = fail_python_full_materialization  # type: ignore[method-assign]
+        api._photo_asset_entries = fail_python_full_materialization  # type: ignore[method-assign]
+        try:
+            page = api.list_photo_folder_items({"folderId": "all", "sort": "newest", "previewBudget": 0, "limit": 10})
+        finally:
+            api._all_photo_entries = original_all_entries
+            api._photo_asset_entries = original_asset_entries
+
+        source_paths = [item["sourcePath"] for item in page["items"]]
+        assert first_path in source_paths, page
+        assert second_path in source_paths, page
+        first_item = next(item for item in page["items"] if item["sourcePath"] == first_path)
+        assert first_item["candidateIds"] == ["sql-default-candidate"], first_item
+    print("ok all photos default sort uses SQL with loaded candidates")
+
+
 def test_photo_query_filter_hydrates_search_hits_in_batch() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -18143,6 +18222,8 @@ if __name__ == "__main__":
     test_photo_duplicate_groups_are_cached_on_folder_reads()
     test_photo_asset_metadata_update_indexes_search_and_folder_items()
     test_search_photo_library_uses_scoped_context_loads()
+    test_photo_matches_by_source_caches_candidate_payload_map()
+    test_all_photos_default_sort_uses_sql_when_candidates_are_loaded()
     test_photo_query_filter_hydrates_search_hits_in_batch()
     test_photo_keyword_vocabulary_export_import_roundtrip()
     test_photo_object_tag_review_bounds_scope_same_label()
