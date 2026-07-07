@@ -2863,6 +2863,33 @@ export function PhotosView(props: {
     }
   }, []);
 
+  const patchRecentActivityFolder = useCallback((
+    folderId: "recentlyViewed" | "recentlyShared",
+    eventValue: PhotoAssetEventValue,
+    fallbackCoverSourcePath = "",
+    fallbackCoverPreviewUrl = "",
+  ) => {
+    const summary = eventValue.summary && typeof eventValue.summary === "object" ? eventValue.summary : {};
+    const summaryCount = Number(summary.count);
+    const nextCount = Number.isFinite(summaryCount)
+      ? Math.max(0, Math.floor(summaryCount))
+      : null;
+    const nextCoverSourcePath = String(summary.coverSourcePath || fallbackCoverSourcePath || "").trim();
+    const nextCoverPreviewUrl = nextCoverSourcePath && nextCoverSourcePath === String(fallbackCoverSourcePath || "").trim()
+      ? fallbackCoverPreviewUrl
+      : "";
+    setFolders((current) => current.map((folder) => {
+      if (folder.id !== folderId) return folder;
+      return {
+        ...folder,
+        count: nextCount ?? Math.max(Number(folder.count) || 0, Number(eventValue.recorded) || 0),
+        coverSourcePath: nextCoverSourcePath,
+        coverPreviewPath: nextCoverPreviewUrl ? "" : nextCoverSourcePath ? folder.coverPreviewPath : null,
+        coverPreviewUrl: nextCoverPreviewUrl || (nextCoverSourcePath === folder.coverSourcePath ? folder.coverPreviewUrl : undefined),
+      };
+    }));
+  }, []);
+
   const loadPeopleManagementFolders = useCallback(async () => {
     const requestedLibraryRoot = activeLibraryRootRef.current;
     const requestedLibraryRootProfileId = activeLibraryRootProfileIdRef.current;
@@ -3788,16 +3815,22 @@ export function PhotosView(props: {
     if (!currentLightboxSource) return;
     if (lastRecordedViewedSourceRef.current === currentLightboxSource) return;
     lastRecordedViewedSourceRef.current = currentLightboxSource;
+    const requestedLibraryRoot = activeLibraryRootRef.current;
+    const requestedLibraryRootProfileId = activeLibraryRootProfileIdRef.current;
+    const viewedCoverPreviewUrl = String(lightItem?.previewUrl || lightItem?.sourceUrl || "");
     void recordPhotoAssetEvent({
       eventType: "viewed",
       sourcePaths: [currentLightboxSource],
       metadata: { surface: "photos-lightbox" },
-    }).then(() => {
-      void loadFolders();
+      libraryRoot: requestedLibraryRoot,
+      libraryRootProfileId: requestedLibraryRootProfileId,
+    }).then((result) => {
+      if (activeLibraryRootRef.current !== requestedLibraryRoot || activeLibraryRootProfileIdRef.current !== requestedLibraryRootProfileId) return;
+      patchRecentActivityFolder("recentlyViewed", result.value, currentLightboxSource, viewedCoverPreviewUrl);
     }).catch(() => {
       // Viewing photos should not be interrupted if the local event log is unavailable.
     });
-  }, [lightbox, currentLightboxSource, recordPhotoAssetEvent, loadFolders]);
+  }, [lightbox, currentLightboxSource, lightItem?.previewUrl, lightItem?.sourceUrl, recordPhotoAssetEvent, patchRecentActivityFolder]);
 
   useEffect(() => {
     if (lightboxZoom <= 1) {

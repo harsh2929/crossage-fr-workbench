@@ -1293,6 +1293,10 @@ export interface PhotoAssetEventValue {
   recorded: number;
   assetIds?: string[];
   sourcePaths?: string[];
+  summary?: {
+    count?: number;
+    coverSourcePath?: string;
+  };
 }
 
 export interface PhotoEditStackValue {

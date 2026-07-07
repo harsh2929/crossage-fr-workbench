@@ -6303,6 +6303,17 @@ run("Photos grid search reload is debounced before backend fetches", () => {
   assert.doesNotMatch(autoGridEffect[0], /loadPage\(activeId, 0, sort, searchQuery,/);
 });
 
+run("Photos lightbox viewed events patch recent rail without reloading folders", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  assert.match(source, /const patchRecentActivityFolder = useCallback/);
+  const viewedEventBlock = source.match(/recordPhotoAssetEvent\(\{\s*eventType: "viewed"[\s\S]*?\}\)\.then\(\(result\) => \{[\s\S]*?\}\)\.catch/);
+  assert.ok(viewedEventBlock, "lightbox viewed event block should exist");
+  assert.match(viewedEventBlock[0], /libraryRoot: requestedLibraryRoot/);
+  assert.match(viewedEventBlock[0], /libraryRootProfileId: requestedLibraryRootProfileId/);
+  assert.match(viewedEventBlock[0], /patchRecentActivityFolder\("recentlyViewed", result\.value, currentLightboxSource, viewedCoverPreviewUrl\)/);
+  assert.doesNotMatch(viewedEventBlock[0], /loadFolders\(/);
+});
+
 run("Safe Mode review dashboard honors sensitive collection unlock before listing flagged photos", () => {
   const reviewSource = fs.readFileSync(path.join(ROOT, "src/views/SafeModeReview.tsx"), "utf8");
   const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");

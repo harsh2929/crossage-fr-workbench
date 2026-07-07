@@ -33489,12 +33489,19 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         metadata = params.get("metadata", {})
         if not isinstance(metadata, dict):
             metadata = {}
-        return self.project.db.record_photo_asset_events(
+        result = self.project.db.record_photo_asset_events(
             event_type,
             source_paths,
             actor=self.actor,
             metadata=metadata,
         )
+        library_root_filter = self._photo_library_root_filter_from_params(params)
+        result["summary"] = self.project.db.photo_asset_event_summary(
+            event_type,
+            source_text_filters=self._photo_library_root_source_text_filters(library_root_filter),
+            since=self._photo_recent_activity_since(),
+        )
+        return result
 
     def _photo_recent_activity_since(self) -> str:
         settings = self.project.db.photo_library_settings()

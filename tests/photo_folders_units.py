@@ -5708,6 +5708,8 @@ def test_photo_recently_viewed_and_shared_event_collections() -> None:
         })
         assert viewed["requested"] == 3, viewed
         assert viewed["recorded"] == 3, viewed
+        assert viewed["summary"]["count"] == 3, viewed
+        assert viewed["summary"]["coverSourcePath"] in {first, second, third}, viewed
         first_asset = api.project.db.photo_asset_by_path(first)
         second_asset = api.project.db.photo_asset_by_path(second)
         third_asset = api.project.db.photo_asset_by_path(third)
