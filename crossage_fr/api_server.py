@@ -53,6 +53,7 @@ from crossage_fr.benchmarks.public_dataset import PublicDatasetBenchmarkMixin
 
 
 SQLITE_IN_CLAUSE_CHUNK_SIZE = 800
+SAFE_MODE_CALIBRATION_EXAMPLE_CAP = 4000
 
 
 def _sqlite_in_chunks(values: list[str]) -> Iterable[list[str]]:
@@ -61,6 +62,62 @@ def _sqlite_in_chunks(values: list[str]) -> Iterable[list[str]]:
         chunk = values[start:start + chunk_size]
         if chunk:
             yield chunk
+
+
+def _remember_safe_mode_calibration_example(
+    buckets: dict[bool, list[tuple[str, bool]]],
+    label_order: list[bool],
+    path: str,
+    sensitive: bool,
+    cap: int = SAFE_MODE_CALIBRATION_EXAMPLE_CAP,
+) -> None:
+    if not path:
+        return
+    label = bool(sensitive)
+    if label not in buckets:
+        buckets[label] = []
+        label_order.append(label)
+    if len(buckets[label]) < cap:
+        buckets[label].append((path, label))
+
+
+def _balanced_safe_mode_calibration_examples(
+    buckets: dict[bool, list[tuple[str, bool]]],
+    label_order: list[bool],
+    cap: int = SAFE_MODE_CALIBRATION_EXAMPLE_CAP,
+) -> list[tuple[str, bool]]:
+    labels = [label for label in label_order if buckets.get(label)]
+    if not labels or cap <= 0:
+        return []
+    if len(labels) == 1:
+        return buckets[labels[0]][:cap]
+
+    selected: list[tuple[str, bool]] = []
+    consumed: dict[bool, int] = {}
+    base_quota = cap // len(labels)
+    remainder = cap % len(labels)
+    for index, label in enumerate(labels):
+        rows = buckets[label]
+        quota = base_quota + (1 if index < remainder else 0)
+        take = min(quota, len(rows))
+        selected.extend(rows[:take])
+        consumed[label] = take
+
+    while len(selected) < cap:
+        moved = False
+        for label in labels:
+            offset = consumed.get(label, 0)
+            rows = buckets[label]
+            if offset >= len(rows):
+                continue
+            selected.append(rows[offset])
+            consumed[label] = offset + 1
+            moved = True
+            if len(selected) >= cap:
+                break
+        if not moved:
+            break
+    return selected
 
 
 try:
@@ -2473,8 +2530,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             self.project.save()
             self.project._append_audit({"action": "calibrate_safe_mode", "reset": True, "temperature": 1.0})
             return {"ok": True, "reset": True, "temperature": 1.0}
-        labeled: list[tuple[str, bool]] = []
-        cap = 4000
+        example_buckets: dict[bool, list[tuple[str, bool]]] = {}
+        label_order: list[bool] = []
+        cap = SAFE_MODE_CALIBRATION_EXAMPLE_CAP
         raw = params.get("examples", [])
         for item in raw if isinstance(raw, list) else []:
             if not isinstance(item, dict):
@@ -2482,11 +2540,18 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             path = str(item.get("path", "")).strip()
             if not path:
                 continue
-            labeled.append((path, bool(item.get("sensitive", item.get("label", False)))))
-            if len(labeled) >= cap:
+            _remember_safe_mode_calibration_example(
+                example_buckets,
+                label_order,
+                path,
+                bool(item.get("sensitive", item.get("label", False))),
+                cap,
+            )
+            if len(example_buckets.get(True, [])) >= cap and len(example_buckets.get(False, [])) >= cap:
                 break
         # Folder form: pick a "sensitive examples" folder + a "safe examples"
-        # folder; enumerate images server-side (capped so a huge tree can't hang).
+        # folder; enumerate images server-side with a per-label cap so a huge
+        # first folder cannot starve the opposite label.
         for folder in params.get("folders", []) if isinstance(params.get("folders"), list) else []:
             if not isinstance(folder, dict):
                 continue
@@ -2494,15 +2559,22 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             if not folder_path:
                 continue
             label = bool(folder.get("sensitive", folder.get("label", False)))
+            if len(example_buckets.get(label, [])) >= cap:
+                continue
             try:
                 for image_path in iter_image_paths(Path(folder_path), recursive=True):
-                    labeled.append((str(image_path), label))
-                    if len(labeled) >= cap:
+                    _remember_safe_mode_calibration_example(
+                        example_buckets,
+                        label_order,
+                        str(image_path),
+                        label,
+                        cap,
+                    )
+                    if len(example_buckets.get(label, [])) >= cap:
                         break
             except Exception:
                 continue
-            if len(labeled) >= cap:
-                break
+        labeled = _balanced_safe_mode_calibration_examples(example_buckets, label_order, cap)
         calibration_progress = (
             (lambda payload: progress({**payload, "source": "safe_mode_calibration"}))
             if progress

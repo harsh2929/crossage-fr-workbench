@@ -78,6 +78,7 @@ def apply_safe_mode_override(stored_sensitive: Any, override: Any) -> bool:
 _OVERRIDE_CLEAR = {"", "clear", "none", "reset", "auto", "default"}
 _OVERRIDE_TRUE = {"true", "1", "yes", "on", "sensitive", "flag", "flagged"}
 _OVERRIDE_FALSE = {"false", "0", "no", "off", "safe", "not_sensitive", "notsensitive", "unflag", "allow"}
+_CV2_CONNECTED_COMPONENTS_AVAILABLE: bool | None = None
 
 
 def normalize_override_value(value: Any) -> "bool | None":
@@ -304,6 +305,41 @@ def _skin_mask(image: Image.Image) -> np.ndarray:
 
 
 def _largest_region_ratio(mask: np.ndarray) -> float:
+    mask = np.asarray(mask, dtype=bool)
+    if not mask.size:
+        return 0.0
+    fast_ratio = _largest_region_ratio_cv2(mask)
+    if fast_ratio is not None:
+        return fast_ratio
+    return _largest_region_ratio_python(mask)
+
+
+def _largest_region_ratio_cv2(mask: np.ndarray) -> float | None:
+    global _CV2_CONNECTED_COMPONENTS_AVAILABLE
+    if _CV2_CONNECTED_COMPONENTS_AVAILABLE is False:
+        return None
+    try:
+        import cv2  # type: ignore[import-not-found]
+    except Exception:
+        _CV2_CONNECTED_COMPONENTS_AVAILABLE = False
+        return None
+    _CV2_CONNECTED_COMPONENTS_AVAILABLE = True
+    try:
+        count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            mask.astype(np.uint8),
+            connectivity=4,
+        )
+    except Exception:
+        return None
+    if count <= 1:
+        return 0.0
+    areas = np.asarray(stats)[1:, int(getattr(cv2, "CC_STAT_AREA", 4))]
+    if not areas.size:
+        return 0.0
+    return float(int(areas.max()) / mask.size)
+
+
+def _largest_region_ratio_python(mask: np.ndarray) -> float:
     height, width = mask.shape
     visited = np.zeros_like(mask, dtype=bool)
     largest = 0

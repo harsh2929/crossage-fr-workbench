@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 
+import numpy as np
 from PIL import Image
 
 from crossage_fr.ingest import safety as safety_module
@@ -60,6 +61,44 @@ finally:
     Image.Image.copy = original_copy  # type: ignore[assignment]
 
 check("heuristic prepare avoids full-size copy", prepared.mode == "RGB" and max(prepared.size) <= 160)
+
+original_cv2 = sys.modules.get("cv2")
+original_cv2_present = "cv2" in sys.modules
+original_cv2_available = safety_module._CV2_CONNECTED_COMPONENTS_AVAILABLE
+
+
+class FakeCv2:
+    CC_STAT_AREA = 4
+    calls = 0
+
+    @staticmethod
+    def connectedComponentsWithStats(image, connectivity=8):
+        FakeCv2.calls += 1
+        check("connected components uses 4-neighbor connectivity", connectivity == 4)
+        check("connected components receives uint8 mask", image.dtype == np.uint8)
+        stats = np.asarray(
+            [
+                [0, 0, 0, 0, 18],
+                [0, 0, 0, 0, 3],
+                [0, 0, 0, 0, 4],
+            ],
+            dtype=np.int32,
+        )
+        return 3, None, stats, None
+
+
+try:
+    sys.modules["cv2"] = FakeCv2
+    safety_module._CV2_CONNECTED_COMPONENTS_AVAILABLE = None
+    ratio = safety_module._largest_region_ratio(np.ones((5, 5), dtype=bool))
+finally:
+    if original_cv2_present:
+        sys.modules["cv2"] = original_cv2  # type: ignore[assignment]
+    else:
+        sys.modules.pop("cv2", None)
+    safety_module._CV2_CONNECTED_COMPONENTS_AVAILABLE = original_cv2_available
+
+check("largest skin region uses connected components fast path", FakeCv2.calls == 1 and ratio == 4 / 25)
 
 original_largest_region_ratio = safety_module._largest_region_ratio
 

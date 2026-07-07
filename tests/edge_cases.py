@@ -294,6 +294,7 @@ def assert_safe_mode_calibration_caps_examples_and_forwards_progress() -> None:
     root = Path(tempfile.mkdtemp(prefix="crossage-edge-safe-calibration-progress-"))
     api = make_api(root / "workspace")
     original_calibrate = safety_module.calibrate_safety_temperature
+    original_iter_image_paths = api_server_module.iter_image_paths
     captured: dict[str, int] = {}
     progress_events: list[dict[str, object]] = []
 
@@ -322,6 +323,44 @@ def assert_safe_mode_calibration_caps_examples_and_forwards_progress() -> None:
     assert captured == {"count": 4000}
     assert [event["phase"] for event in progress_events] == ["started", "complete"]
     assert all(event["source"] == "safe_mode_calibration" for event in progress_events)
+
+    balanced: dict[str, int] = {}
+
+    def fake_balanced_calibrate(labeled, progress=None):
+        rows = list(labeled)
+        positives = sum(1 for _path, sensitive in rows if sensitive)
+        negatives = len(rows) - positives
+        balanced.update({"count": len(rows), "positives": positives, "negatives": negatives})
+        return {
+            "ok": False,
+            "temperature": 1.0,
+            "sampleCount": len(rows),
+            "positives": positives,
+            "negatives": negatives,
+            "reason": "test",
+        }
+
+    def fake_iter_image_paths(folder: Path, recursive: bool = True):
+        count = 5000 if folder.name == "sensitive" else 3
+        for index in range(count):
+            yield folder / f"calibration-{index}.jpg"
+
+    safety_module.calibrate_safety_temperature = fake_balanced_calibrate
+    api_server_module.iter_image_paths = fake_iter_image_paths
+    try:
+        result = api._cmd_calibrate_safe_mode(
+            {
+                "folders": [
+                    {"path": "/tmp/sensitive", "sensitive": True},
+                    {"path": "/tmp/safe", "sensitive": False},
+                ]
+            }
+        )
+    finally:
+        safety_module.calibrate_safety_temperature = original_calibrate
+        api_server_module.iter_image_paths = original_iter_image_paths
+    assert result["sampleCount"] == 4000
+    assert balanced == {"count": 4000, "positives": 3997, "negatives": 3}
 
 
 def assert_invalid_project_rows_are_skipped() -> None:
