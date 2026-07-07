@@ -61,6 +61,15 @@ jobs:
       - name: Localization contract
         run: npm run test:localization
 
+      - name: Renderer and desktop JS unit suites
+        run: npm run test:js-units
+
+      - name: Previously orphaned Python unit suites
+        run: npm run test:previously-orphaned:python
+
+      - name: Test coverage contract
+        run: npm run test:coverage-contract
+
       - name: Command contract
         run: python tests/command_contract.py
 
