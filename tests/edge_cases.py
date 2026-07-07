@@ -612,6 +612,10 @@ def assert_static_app_contracts() -> None:
     assert "Publish verified GitHub Release" in mac_workflow
 
     i18n = (root / "src" / "i18n.ts").read_text(encoding="utf-8")
+    locale_sources = "\n".join(
+        (root / "src" / "i18n" / "locales" / f"{code}.ts").read_text(encoding="utf-8")
+        for code in ("zh", "es", "fr", "ar", "hi", "ja")
+    )
     for code in ('"en"', '"zh"', '"es"', '"fr"', '"ar"', '"hi"', '"ja"'):
         assert code in i18n
     assert "localizeDom" in i18n
@@ -621,8 +625,13 @@ def assert_static_app_contracts() -> None:
     assert "Français" in i18n
     assert "العربية" in i18n
     assert "日本語" in i18n
+    assert "preloadLanguage" in i18n
+    assert 'import("./i18n/locales/zh")' in i18n
+    assert "const translations: Record<LanguageCode, TranslationTable>" not in i18n
     assert "translateUiText(language: LanguageCode, source: string" in i18n
-    assert "uiPhraseTranslations" in i18n
+    assert "uiPhrases?: Record<string, string>" in i18n
+    assert '"Review flagged photos"' in locale_sources
+    assert '"Safe Mode profile"' in locale_sources
     assert "export type UiMessageKey" in i18n
     assert "formatUiMessage(language: LanguageCode" in i18n
     assert "formatErrorMessage(language: LanguageCode" in i18n

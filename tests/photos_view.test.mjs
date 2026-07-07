@@ -6583,6 +6583,9 @@ run("Safe Mode review dashboard honors sensitive collection unlock before listin
   const reviewSource = fs.readFileSync(path.join(ROOT, "src/views/SafeModeReview.tsx"), "utf8");
   const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
   const i18nSource = fs.readFileSync(path.join(ROOT, "src/i18n.ts"), "utf8");
+  const localeSources = ["zh", "es", "fr", "ar", "hi", "ja"]
+    .map((language) => fs.readFileSync(path.join(ROOT, `src/i18n/locales/${language}.ts`), "utf8"))
+    .join("\n");
   const settingsSource = fs.readFileSync(path.join(ROOT, "src/views/photoSettings.ts"), "utf8");
   const photosSource = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
   assert.match(settingsSource, /export const PHOTO_LOCAL_SETTINGS_KEY = "vintrace\.photos\.localSettings"/);
@@ -6607,12 +6610,12 @@ run("Safe Mode review dashboard honors sensitive collection unlock before listin
   assert.match(appSource, /props\.uiText\("Safe Mode profile"\)/);
   assert.match(appSource, /props\.uiText\("Calibrate to your library"\)/);
   assert.match(appSource, /props\.uiText\("Review flagged photos"\)/);
-  assert.match(i18nSource, /const safeModeReviewLiteralTranslations/);
-  assert.ok((i18nSource.match(/"Review flagged photos":/g) || []).length >= 6);
-  assert.ok((i18nSource.match(/"Not sensitive":/g) || []).length >= 6);
-  assert.ok((i18nSource.match(/"Keep hidden":/g) || []).length >= 6);
-  assert.ok((i18nSource.match(/"Safe Mode profile":/g) || []).length >= 6);
-  assert.ok((i18nSource.match(/"Calibrate to your library":/g) || []).length >= 6);
+  assert.match(i18nSource, /safeModeReviewLiterals\?: Record<string, string>/);
+  assert.ok((localeSources.match(/"Review flagged photos":/g) || []).length >= 6);
+  assert.ok((localeSources.match(/"Not sensitive":/g) || []).length >= 6);
+  assert.ok((localeSources.match(/"Keep hidden":/g) || []).length >= 6);
+  assert.ok((localeSources.match(/"Safe Mode profile":/g) || []).length >= 6);
+  assert.ok((localeSources.match(/"Calibrate to your library":/g) || []).length >= 6);
 });
 
 run("Photos route is lazy-loaded out of the initial renderer chunk", () => {
@@ -6620,6 +6623,22 @@ run("Photos route is lazy-loaded out of the initial renderer chunk", () => {
   assert.match(appSource, /const PhotosView = lazy\(\(\) => import\("\.\/views\/PhotosView"\)/);
   assert.doesNotMatch(appSource, /import \{ PhotosView \} from "\.\/views\/PhotosView"/);
   assert.match(appSource, /<Suspense fallback=\{<PhotosRouteFallback uiText=\{uiText\} \/>\}>/);
+});
+
+run("i18n locale bundles are loaded on demand", () => {
+  const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
+  const mainSource = fs.readFileSync(path.join(ROOT, "src/main.tsx"), "utf8");
+  const i18nSource = fs.readFileSync(path.join(ROOT, "src/i18n.ts"), "utf8");
+  const viteSource = fs.readFileSync(path.join(ROOT, "vite.config.ts"), "utf8");
+  assert.match(i18nSource, /export async function preloadLanguage/);
+  assert.match(i18nSource, /const localeLoaders: Record<LazyLanguageCode/);
+  assert.match(i18nSource, /zh: \(\) => import\("\.\/i18n\/locales\/zh"\)/);
+  assert.doesNotMatch(i18nSource, /const translations: Record<LanguageCode, TranslationTable>/);
+  assert.doesNotMatch(i18nSource, /const uiPhraseTranslations: Record<LanguageCode/);
+  assert.match(mainSource, /await preloadLanguage\(language\);/);
+  assert.match(appSource, /preloadLanguage\(nextLanguage\)\.finally/);
+  assert.match(appSource, /languageLoadSeqRef/);
+  assert.match(viteSource, /i18n-\$\{localeMatch\[1\]\}/);
 });
 
 run("MCP agents settings panel is extracted from App", () => {

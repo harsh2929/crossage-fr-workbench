@@ -265,7 +265,7 @@ import {
 } from "./views/reviewFocusHistory";
 import type { PhotoSlideshowProject, PhotoSlideshowThemeTemplate } from "./views/photoSlideshowProjects";
 import { initBootBackground } from "./lib/bootBackground";
-import { formatErrorMessage, formatUiMessage, languageOptions, localizeDom, normalizeLanguage, translate, translateUiText } from "./i18n";
+import { formatErrorMessage, formatUiMessage, languageOptions, localizeDom, normalizeLanguage, preloadLanguage, translate, translateUiText } from "./i18n";
 import type { LanguageCode, TranslationKey, UiMessageKey } from "./i18n";
 
 type UiMessageValue = string | number | { text: string | number; localize: true };
@@ -1970,6 +1970,7 @@ export default function App() {
   const lastAppliedWorkspaceRef = useRef<string | null>(null);
   const rendererReadySentRef = useRef(false);
   const memoryPressureNoticeRef = useRef("");
+  const languageLoadSeqRef = useRef(0);
   const appCommandHandlerRef = useRef<(command: AppCommand) => void | Promise<void>>(() => undefined);
   const externalOpenHandlerRef = useRef<(payload: ExternalOpenPayload) => void | Promise<void>>(() => undefined);
   const performanceMode = useMemo(() => resolvePerformanceMode(performanceChoice, state?.platform), [performanceChoice, state?.platform]);
@@ -2015,8 +2016,13 @@ export default function App() {
   }
 
   function changeLanguage(nextLanguage: LanguageCode) {
-    setLanguage(nextLanguage);
     writeLanguage(nextLanguage);
+    const loadSeq = ++languageLoadSeqRef.current;
+    void preloadLanguage(nextLanguage).finally(() => {
+      if (loadSeq === languageLoadSeqRef.current) {
+        setLanguage(nextLanguage);
+      }
+    });
   }
 
   function recordRendererDiagnostic(event: Record<string, unknown>) {

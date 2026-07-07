@@ -35,6 +35,10 @@ export default defineConfig(({ command }) => ({
           if (id.endsWith("/src/i18n.ts") || id.endsWith("\\src\\i18n.ts")) {
             return "i18n";
           }
+          const localeMatch = id.match(/[\\/]src[\\/]i18n[\\/]locales[\\/](ar|es|fr|hi|ja|zh)\.ts$/);
+          if (localeMatch) {
+            return `i18n-${localeMatch[1]}`;
+          }
         }
       }
     }

@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import { ToastProvider, ToastHost } from "./shell/ToastHost";
 import appIconUrl from "../desktop/assets/icon-192.webp";
-import { normalizeLanguage, translate } from "./i18n";
+import { normalizeLanguage, preloadLanguage, translate } from "./i18n";
 import type { LanguageCode, TranslationKey } from "./i18n";
 import "./styles.css";
 
@@ -214,30 +214,35 @@ class RendererBoundary extends React.Component<{ children: React.ReactNode }, { 
   }
 }
 
-const rootElement = document.getElementById("root");
-
-if (!rootElement) {
+async function startRenderer() {
   const language = readBootLanguage();
   applyBootLanguage(language);
-  document.body.innerHTML = `<main class="boot-fallback" role="alert"><section><h1>${escapeHtml(translate(language, "boot.couldNotLoad"))}</h1><p>${escapeHtml(translate(language, "boot.rootMissing"))}</p></section></main>`;
-} else if (typeof (window as { crossAge?: { invoke?: unknown } }).crossAge?.invoke !== "function") {
-  createRoot(rootElement).render(
-    <BootDiagnostic
-      title={bootT("boot.bridgeUnavailable")}
-      message={bootT("boot.bridgeMessage")}
-    />
-  );
-} else {
-  createRoot(rootElement).render(
-  <React.StrictMode>
-      <ToastProvider>
-        <RendererBoundary>
-          <StartupRecoveryGate>
-            <App />
-          </StartupRecoveryGate>
-        </RendererBoundary>
-        <ToastHost />
-      </ToastProvider>
-  </React.StrictMode>
-  );
+  await preloadLanguage(language);
+
+  const rootElement = document.getElementById("root");
+  if (!rootElement) {
+    document.body.innerHTML = `<main class="boot-fallback" role="alert"><section><h1>${escapeHtml(translate(language, "boot.couldNotLoad"))}</h1><p>${escapeHtml(translate(language, "boot.rootMissing"))}</p></section></main>`;
+  } else if (typeof (window as { crossAge?: { invoke?: unknown } }).crossAge?.invoke !== "function") {
+    createRoot(rootElement).render(
+      <BootDiagnostic
+        title={bootT("boot.bridgeUnavailable")}
+        message={bootT("boot.bridgeMessage")}
+      />
+    );
+  } else {
+    createRoot(rootElement).render(
+      <React.StrictMode>
+        <ToastProvider>
+          <RendererBoundary>
+            <StartupRecoveryGate>
+              <App />
+            </StartupRecoveryGate>
+          </RendererBoundary>
+          <ToastHost />
+        </ToastProvider>
+      </React.StrictMode>
+    );
+  }
 }
+
+void startRenderer();
