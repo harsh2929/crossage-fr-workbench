@@ -14,6 +14,7 @@ from pathlib import Path
 
 from PIL import ExifTags, Image, ImageDraw
 
+import crossage_fr.api_server as api_server_module
 from crossage_fr.api_server import DesktopApi, structured_error
 from crossage_fr.config import MAX_CLUSTER_MIN_SIZE, RuntimeConfig, Thresholds, load_config, save_config
 from crossage_fr.enroll import manager as manager_module
@@ -4533,6 +4534,54 @@ def assert_scan_progress_noisy_phases_are_throttled() -> None:
     assert events[-1]["phase"] == "complete"
 
 
+def assert_verification_engine_is_deferred_and_cached() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-verification-cache-"))
+    api = make_api(root / "workspace")
+    api.project.config.performance_mode = "quality"
+    api.project.config.two_pass_scan = True
+    api.project.config.face_detector_size = 512
+    api.project.config.verification_detector_size = 640
+    calls = {"verification": 0, "factory": 0}
+
+    def forbidden_verification_engine():
+        calls["verification"] += 1
+        raise AssertionError("verification engine should not load when there are no new candidates")
+
+    original_verification_engine = api._verification_engine
+    api._verification_engine = forbidden_verification_engine
+    try:
+        assert api._maybe_verify_new_candidates(set(), {"processed": 0}, None, "test") == {}
+    finally:
+        api._verification_engine = original_verification_engine
+    assert calls["verification"] == 0
+
+    original_create = api_server_module.create_embedding_engine
+
+    class FakeVerificationEngine:
+        model_name = "fake-verification"
+
+        def __init__(self, config):
+            self.detector_size = config.face_detector_size
+
+    def fake_create_embedding_engine(config):
+        calls["factory"] += 1
+        return FakeVerificationEngine(config)
+
+    api_server_module.create_embedding_engine = fake_create_embedding_engine
+    try:
+        first = api._verification_engine()
+        second = api._verification_engine()
+        assert first is second
+        assert calls["factory"] == 1
+        assert getattr(first, "detector_size") == 640
+        api._reset_engine()
+        third = api._verification_engine()
+        assert third is not first
+        assert calls["factory"] == 2
+    finally:
+        api_server_module.create_embedding_engine = original_create
+
+
 def assert_vector_store_persists_reference_index() -> None:
     root = Path(tempfile.mkdtemp(prefix="crossage-edge-vector-store-"))
     index_path = root / "vectors.npz"
@@ -6201,6 +6250,7 @@ def main() -> None:
     assert_accuracy_validation_pack()
     assert_scan_cancel_and_resume_manifest()
     assert_scan_progress_noisy_phases_are_throttled()
+    assert_verification_engine_is_deferred_and_cached()
     assert_vector_store_persists_reference_index()
     assert_stale_candidate_manifest_is_reprocessed()
     assert_model_governance_metadata()

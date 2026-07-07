@@ -453,6 +453,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         self.consent_on_file = self.project.consent_on_file()
         self._engine: EmbeddingEngine | None = None
         self._engine_model_name = self._infer_engine_name()
+        self._verification_engine_cache: tuple[str, Any] | None = None
         self._startup("workspace", f"Workspace ready: {self.project.root}")
         self._startup("engine", "Recognition engine will load when needed")
         self._startup("platform", "Detecting platform acceleration")
@@ -484,6 +485,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def _reset_engine(self) -> None:
         self._engine = None
+        self._verification_engine_cache = None
         self._engine_model_name = self._infer_engine_name()
 
     def _build_info(self) -> dict[str, Any]:
@@ -2541,8 +2543,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if config.verification_detector_size <= config.face_detector_size:
             return None
         config.face_detector_size = config.verification_detector_size
+        cache_key = json.dumps(asdict(config), sort_keys=True, default=str)
+        if self._verification_engine_cache and self._verification_engine_cache[0] == cache_key:
+            return self._verification_engine_cache[1]
         with redirect_stdout(sys.stderr):
-            return create_embedding_engine(config)
+            engine = create_embedding_engine(config)
+        self._verification_engine_cache = (cache_key, engine)
+        return engine
 
     def _maybe_verify_new_candidates(
         self,
@@ -2553,15 +2560,15 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     ) -> dict[str, int]:
         if int(scan_metrics.get("cancelled", 0) or 0):
             return {}
-        verification_engine = self._verification_engine()
-        if verification_engine is None:
-            return {}
         candidate_ids = [
             candidate_id
             for candidate_id in self.project.candidates
             if candidate_id not in existing_candidate_ids
         ]
         if not candidate_ids:
+            return {}
+        verification_engine = self._verification_engine()
+        if verification_engine is None:
             return {}
         deferred = max(0, len(candidate_ids) - VERIFY_CANDIDATE_BATCH_LIMIT)
         result = self.project.verify_candidates(
