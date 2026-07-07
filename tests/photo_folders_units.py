@@ -4149,6 +4149,64 @@ def test_photo_edit_stack_sidecar_save_revert_and_backup_check() -> None:
     print("ok photo edit stack sidecar save revert and backup check")
 
 
+def test_photo_edit_stack_batch_get_save_reports_partial_failures() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        first = base / "batch-edit-a.jpg"
+        second = base / "batch-edit-b.jpg"
+        missing = base / "missing-batch-edit.jpg"
+        _write_pattern_photo(first, "near")
+        _write_pattern_photo(second, "distant")
+        first_path = str(first.resolve())
+        second_path = str(second.resolve())
+        missing_path = str(missing.resolve())
+        api.import_photos({"sourcePaths": [first_path, second_path], "storageMode": "referenced", "sourceLabel": "Batch edit stacks"})
+
+        empty = api.get_photo_edit_stacks({
+            "items": [
+                {"sourcePath": first_path},
+                {"sourcePath": second_path},
+                {"sourcePath": missing_path},
+            ],
+        })
+        assert empty["requested"] == 3, empty
+        assert empty["returned"] == 2, empty
+        assert empty["failed"] == 1, empty
+        assert [item["index"] for item in empty["items"]] == [0, 1], empty
+        assert all(item["hasStack"] is False for item in empty["items"]), empty
+
+        saved = api.save_photo_edit_stacks({
+            "items": [
+                {
+                    "sourcePath": first_path,
+                    "operations": [{"kind": "crop_rotate", "rotateDegrees": 90, "source": "batch-unit"}],
+                },
+                {
+                    "sourcePath": second_path,
+                    "operations": [{"kind": "crop_rotate", "cropAspect": "square", "source": "batch-unit"}],
+                },
+                {
+                    "sourcePath": missing_path,
+                    "operations": [{"kind": "crop_rotate", "rotateDegrees": 180, "source": "batch-unit"}],
+                },
+            ],
+        })
+        assert saved["requested"] == 3, saved
+        assert saved["saved"] == 2, saved
+        assert saved["failed"] == 1, saved
+        assert [item["index"] for item in saved["items"]] == [0, 1], saved
+        assert all(Path(item["sidecarPath"]).exists() for item in saved["items"]), saved
+        assert saved["failures"][0]["index"] == 2, saved
+
+        loaded = api.get_photo_edit_stacks({"items": [{"sourcePath": first_path}, {"sourcePath": second_path}]})
+        assert loaded["failed"] == 0, loaded
+        assert [item["hasStack"] for item in loaded["items"]] == [True, True], loaded
+        assert loaded["items"][0]["stack"]["operations"][0]["rotateDegrees"] == 90, loaded
+        assert loaded["items"][1]["stack"]["operations"][0]["cropAspect"] == "square", loaded
+    print("ok photo edit stack batch get/save reports partial failures")
+
+
 def test_photo_edit_stack_version_duplicate_restore_delete() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -18288,6 +18346,7 @@ if __name__ == "__main__":
     test_photo_media_pair_manual_authoring_creates_custom_pair()
     test_photo_schema_migrates_legacy_edit_stack_tables_without_losing_rows()
     test_photo_edit_stack_sidecar_save_revert_and_backup_check()
+    test_photo_edit_stack_batch_get_save_reports_partial_failures()
     test_photo_edit_stack_version_duplicate_restore_delete()
     test_photo_edit_stack_version_counts_use_temp_table_for_large_batches()
     test_photo_date_bucket_covers_use_single_windowed_query()

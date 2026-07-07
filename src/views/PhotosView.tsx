@@ -1517,7 +1517,9 @@ export function PhotosView(props: {
   updatePhotoAssetsMetadata: (params: Record<string, unknown>) => Promise<{ value: { items?: Array<Partial<PhotoItem> & Record<string, unknown>>; updated?: number; changed?: number; operation?: PhotoOperation } }>;
   reverseGeocodePhotoLocation: (params: Record<string, unknown>) => Promise<{ value: PhotoReverseGeocodeResult }>;
   getPhotoEditStack: (params: Record<string, unknown>) => Promise<{ value: PhotoEditStackValue }>;
+  getPhotoEditStacks: (params: Record<string, unknown>) => Promise<{ value: { items?: Array<PhotoEditStackValue & { index?: number }>; requested?: number; returned?: number; failed?: number; failures?: Array<Record<string, unknown>>; truncated?: boolean } }>;
   savePhotoEditStack: (params: Record<string, unknown>) => Promise<{ value: PhotoEditStackValue }>;
+  savePhotoEditStacks: (params: Record<string, unknown>) => Promise<{ value: { items?: Array<PhotoEditStackValue & { index?: number }>; requested?: number; saved?: number; failed?: number; failures?: Array<Record<string, unknown>>; truncated?: boolean } }>;
   revertPhotoEditStack: (params: Record<string, unknown>) => Promise<{ value: PhotoEditStackValue }>;
   listPhotoEditStackVersions: (params: Record<string, unknown>) => Promise<{ value: { assetId: string; sourcePath: string; versions: PhotoEditStackVersionValue[] } }>;
   createPhotoEditStackVersion: (params: Record<string, unknown>) => Promise<{ value: PhotoEditStackVersionValue }>;
@@ -1720,7 +1722,9 @@ export function PhotosView(props: {
     updatePhotoAssetsMetadata,
     reverseGeocodePhotoLocation,
     getPhotoEditStack,
+    getPhotoEditStacks,
     savePhotoEditStack,
+    savePhotoEditStacks,
     revertPhotoEditStack,
     listPhotoEditStackVersions,
     createPhotoEditStackVersion,
@@ -13908,15 +13912,24 @@ export function PhotosView(props: {
     setMetadataError(photoPasteProgressMessage("edits", "checking", 0, total));
     const plans: Array<{ item: PhotoItem; conflict: boolean }> = [];
     let failed = 0;
-    for (const [index, item] of selectedImageEditPasteItems.entries()) {
-      setMetadataError(photoPasteProgressMessage("edits", "checking", index + 1, total));
-      try {
-        const stackResult = await getPhotoEditStack({ sourcePath: item.sourcePath, assetId: item.assetId || "" });
-        const existingOperation = photoEditStackImageOperationFromValue(stackResult.value || null);
+    try {
+      const stackResult = await getPhotoEditStacks({
+        items: selectedImageEditPasteItems.map((item) => ({
+          sourcePath: item.sourcePath,
+          assetId: item.assetId || "",
+        })),
+      });
+      failed += Math.max(0, Number(stackResult.value?.failed || 0));
+      const stackRows = stackResult.value?.items || [];
+      for (const row of stackRows) {
+        const item = selectedImageEditPasteItems[Math.max(0, Number(row.index || 0))];
+        if (!item) continue;
+        const existingOperation = photoEditStackImageOperationFromValue(row || null);
         plans.push({ item, conflict: imageEditPasteHasConflict(existingOperation, operation) });
-      } catch {
-        failed += 1;
       }
+      setMetadataError(photoPasteProgressMessage("edits", "checking", total, total));
+    } catch {
+      failed += total;
     }
     setPhotoEditStackSaving(false);
     const conflictCount = plans.filter((plan) => plan.conflict).length;
@@ -13931,25 +13944,27 @@ export function PhotosView(props: {
     setPhotoEditStackSaving(true);
     setMetadataError(photoPasteProgressMessage("edits", "pasting", 0, plans.length));
     try {
-      let pasted = 0;
-      let replaced = 0;
-      for (const [index, plan] of plans.entries()) {
-        setMetadataError(photoPasteProgressMessage("edits", "pasting", index + 1, plans.length));
-        try {
-          const result = await savePhotoEditStack({
-            sourcePath: plan.item.sourcePath,
-            assetId: plan.item.assetId || "",
-            operations: [operation],
-          });
-          if (lightItem?.sourcePath && plan.item.sourcePath === lightItem.sourcePath) {
-            setPhotoEditStack(result.value || null);
-          }
-          pasted += 1;
-          if (plan.conflict) replaced += 1;
-        } catch {
-          failed += 1;
+      const result = await savePhotoEditStacks({
+        items: plans.map((plan) => ({
+          sourcePath: plan.item.sourcePath,
+          assetId: plan.item.assetId || "",
+          operations: [operation],
+        })),
+      });
+      failed += Math.max(0, Number(result.value?.failed || 0));
+      const savedRows = result.value?.items || [];
+      const savedIndexes = new Set<number>();
+      savedRows.forEach((row) => {
+        const rowIndex = Math.max(0, Number(row.index || 0));
+        savedIndexes.add(rowIndex);
+        const plan = plans[rowIndex];
+        if (plan && lightItem?.sourcePath && plan.item.sourcePath === lightItem.sourcePath) {
+          setPhotoEditStack(row || null);
         }
-      }
+      });
+      const pasted = savedRows.length;
+      const replaced = plans.reduce((count, plan, index) => count + (plan.conflict && savedIndexes.has(index) ? 1 : 0), 0);
+      setMetadataError(photoPasteProgressMessage("edits", "pasting", plans.length, plans.length));
       setMetadataError(photoPasteResultMessage("edits", pasted, replaced, failed));
       await loadFolders();
       await reloadActivePhotoPage();
@@ -13975,20 +13990,29 @@ export function PhotosView(props: {
     const plans: Array<{ item: PhotoItem; operation: PhotoImageEditOperation; conflict: boolean }> = [];
     let failed = 0;
     let skipped = 0;
-    for (const [index, item] of selectedImageEditPasteItems.entries()) {
-      setMetadataError(photoPasteProgressMessage("adjustments", "checking", index + 1, total));
-      try {
-        const stackResult = await getPhotoEditStack({ sourcePath: item.sourcePath, assetId: item.assetId || "" });
-        const targetOperation = photoEditStackImageOperationFromValue(stackResult.value || null);
+    try {
+      const stackResult = await getPhotoEditStacks({
+        items: selectedImageEditPasteItems.map((item) => ({
+          sourcePath: item.sourcePath,
+          assetId: item.assetId || "",
+        })),
+      });
+      failed += Math.max(0, Number(stackResult.value?.failed || 0));
+      const stackRows = stackResult.value?.items || [];
+      for (const row of stackRows) {
+        const item = selectedImageEditPasteItems[Math.max(0, Number(row.index || 0))];
+        if (!item) continue;
+        const targetOperation = photoEditStackImageOperationFromValue(row || null);
         const operation = mergePhotoImageAdjustmentPasteOperation(targetOperation, imageEditClipboard, "photos-bulk-adjustment-paste");
         if (!operation) {
           skipped += 1;
           continue;
         }
         plans.push({ item, operation, conflict: imageAdjustmentPasteHasConflict(targetOperation, operation) });
-      } catch {
-        failed += 1;
       }
+      setMetadataError(photoPasteProgressMessage("adjustments", "checking", total, total));
+    } catch {
+      failed += total;
     }
     setPhotoEditStackSaving(false);
     const conflictCount = plans.filter((plan) => plan.conflict).length;
@@ -14003,25 +14027,27 @@ export function PhotosView(props: {
     setPhotoEditStackSaving(true);
     setMetadataError(photoPasteProgressMessage("adjustments", "pasting", 0, plans.length));
     try {
-      let pasted = 0;
-      let replaced = 0;
-      for (const [index, plan] of plans.entries()) {
-        setMetadataError(photoPasteProgressMessage("adjustments", "pasting", index + 1, plans.length));
-        try {
-          const result = await savePhotoEditStack({
-            sourcePath: plan.item.sourcePath,
-            assetId: plan.item.assetId || "",
-            operations: [plan.operation],
-          });
-          if (lightItem?.sourcePath && plan.item.sourcePath === lightItem.sourcePath) {
-            setPhotoEditStack(result.value || null);
-          }
-          pasted += 1;
-          if (plan.conflict) replaced += 1;
-        } catch {
-          failed += 1;
+      const result = await savePhotoEditStacks({
+        items: plans.map((plan) => ({
+          sourcePath: plan.item.sourcePath,
+          assetId: plan.item.assetId || "",
+          operations: [plan.operation],
+        })),
+      });
+      failed += Math.max(0, Number(result.value?.failed || 0));
+      const savedRows = result.value?.items || [];
+      const savedIndexes = new Set<number>();
+      savedRows.forEach((row) => {
+        const rowIndex = Math.max(0, Number(row.index || 0));
+        savedIndexes.add(rowIndex);
+        const plan = plans[rowIndex];
+        if (plan && lightItem?.sourcePath && plan.item.sourcePath === lightItem.sourcePath) {
+          setPhotoEditStack(row || null);
         }
-      }
+      });
+      const pasted = savedRows.length;
+      const replaced = plans.reduce((count, plan, index) => count + (plan.conflict && savedIndexes.has(index) ? 1 : 0), 0);
+      setMetadataError(photoPasteProgressMessage("adjustments", "pasting", plans.length, plans.length));
       const skippedLabel = skipped ? ` ${uiText("Skipped")} ${formatCount(skipped)}.` : "";
       setMetadataError(`${photoPasteResultMessage("adjustments", pasted, replaced, failed)}${skippedLabel}`);
       await loadFolders();

@@ -6338,6 +6338,31 @@ run("Photos bulk favorite shortcut uses batch metadata update", () => {
   assert.doesNotMatch(block[0], /updatePhotoAssetMetadata\(\{/);
 });
 
+run("Photos selected edit paste batches stack lookups and saves", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
+  assert.match(appSource, /"get_photo_edit_stacks"/);
+  assert.match(appSource, /"save_photo_edit_stacks"/);
+  assert.match(source, /getPhotoEditStacks: \(params: Record<string, unknown>\) => Promise/);
+  assert.match(source, /savePhotoEditStacks: \(params: Record<string, unknown>\) => Promise/);
+
+  const editBlock = source.match(/async function pasteImageEditClipboardToSelected\(\) \{[\s\S]*?\n  \}\n\n  async function pasteImageAdjustmentClipboardToSelected/);
+  assert.ok(editBlock, "pasteImageEditClipboardToSelected should exist");
+  assert.match(editBlock[0], /await getPhotoEditStacks\(\{\s*items: selectedImageEditPasteItems\.map/);
+  assert.match(editBlock[0], /await savePhotoEditStacks\(\{\s*items: plans\.map/);
+  assert.doesNotMatch(editBlock[0], /await getPhotoEditStack\(\{/);
+  assert.doesNotMatch(editBlock[0], /await savePhotoEditStack\(\{/);
+  assert.doesNotMatch(editBlock[0], /for \(const \[index, plan\] of plans\.entries\(\)\)/);
+
+  const adjustmentBlock = source.match(/async function pasteImageAdjustmentClipboardToSelected\(\) \{[\s\S]*?\n  \}\n\n  async function revertCurrentPhotoEditStack/);
+  assert.ok(adjustmentBlock, "pasteImageAdjustmentClipboardToSelected should exist");
+  assert.match(adjustmentBlock[0], /await getPhotoEditStacks\(\{\s*items: selectedImageEditPasteItems\.map/);
+  assert.match(adjustmentBlock[0], /await savePhotoEditStacks\(\{\s*items: plans\.map/);
+  assert.doesNotMatch(adjustmentBlock[0], /await getPhotoEditStack\(\{/);
+  assert.doesNotMatch(adjustmentBlock[0], /await savePhotoEditStack\(\{/);
+  assert.doesNotMatch(adjustmentBlock[0], /for \(const \[index, plan\] of plans\.entries\(\)\)/);
+});
+
 run("Photos burst-frame fetch effect ignores unrelated item map churn", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
   assert.match(source, /const lightboxBurstLoadedSourceKey = useMemo\(\(\) => \{/);

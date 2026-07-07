@@ -2830,9 +2830,21 @@ export default function App() {
     []
   );
 
+  const getPhotoEditStacks = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { items: PhotoEditStackValue[]; requested: number; returned: number; failed: number; failures?: Array<Record<string, unknown>>; truncated?: boolean } }>("get_photo_edit_stacks", params),
+    []
+  );
+
   const savePhotoEditStack = useCallback(
     (params: Record<string, unknown>) =>
       window.crossAge.invoke<{ value: PhotoEditStackValue }>("save_photo_edit_stack", params),
+    []
+  );
+
+  const savePhotoEditStacks = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { items: PhotoEditStackValue[]; requested: number; saved: number; failed: number; failures?: Array<Record<string, unknown>>; truncated?: boolean } }>("save_photo_edit_stacks", params),
     []
   );
 
@@ -6925,7 +6937,9 @@ export default function App() {
             exportPhotoVideoFrame={exportPhotoVideoFrame}
             exportPhotoVideoTrim={exportPhotoVideoTrim}
             getPhotoEditStack={getPhotoEditStack}
+            getPhotoEditStacks={getPhotoEditStacks}
             savePhotoEditStack={savePhotoEditStack}
+            savePhotoEditStacks={savePhotoEditStacks}
             revertPhotoEditStack={revertPhotoEditStack}
             listPhotoEditStackVersions={listPhotoEditStackVersions}
             createPhotoEditStackVersion={createPhotoEditStackVersion}

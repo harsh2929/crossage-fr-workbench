@@ -774,7 +774,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "relink_photo_media_pair": "_cmd_relink_photo_media_pair",
         "delete_photo_media_pair": "_cmd_delete_photo_media_pair",
         "get_photo_edit_stack": "_cmd_get_photo_edit_stack",
+        "get_photo_edit_stacks": "_cmd_get_photo_edit_stacks",
         "save_photo_edit_stack": "_cmd_save_photo_edit_stack",
+        "save_photo_edit_stacks": "_cmd_save_photo_edit_stacks",
         "revert_photo_edit_stack": "_cmd_revert_photo_edit_stack",
         "list_photo_edit_stack_versions": "_cmd_list_photo_edit_stack_versions",
         "create_photo_edit_stack_version": "_cmd_create_photo_edit_stack_version",
@@ -1334,8 +1336,14 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     def _cmd_get_photo_edit_stack(self, params, progress=None):
         return {"value": self.get_photo_edit_stack(params)}
 
+    def _cmd_get_photo_edit_stacks(self, params, progress=None):
+        return {"value": self.get_photo_edit_stacks(params)}
+
     def _cmd_save_photo_edit_stack(self, params, progress=None):
         return {"value": self.save_photo_edit_stack(params)}
+
+    def _cmd_save_photo_edit_stacks(self, params, progress=None):
+        return {"value": self.save_photo_edit_stacks(params)}
 
     def _cmd_revert_photo_edit_stack(self, params, progress=None):
         return {"value": self.revert_photo_edit_stack(params)}
@@ -33159,8 +33167,44 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "hasStack": bool(stack),
         }
 
-    def save_photo_edit_stack(self, params: dict[str, Any]) -> dict[str, Any]:
-        asset = self._photo_edit_stack_asset(params)
+    def get_photo_edit_stacks(self, params: dict[str, Any]) -> dict[str, Any]:
+        raw_items = params.get("items", [])
+        if not isinstance(raw_items, list):
+            raise ValueError("items must be a list.")
+        max_items = max(0, min(500, len(raw_items)))
+        items: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        for index, raw_item in enumerate(raw_items[:max_items]):
+            if not isinstance(raw_item, dict):
+                failures.append({"index": index, "error": "Each edit-stack lookup item must be an object."})
+                continue
+            try:
+                asset = self._photo_edit_stack_asset(raw_item)
+                stack = self.project.db.photo_edit_stack_by_asset(asset_id=str(asset.get("assetId", ""))) or {}
+                items.append({
+                    "index": index,
+                    "assetId": str(asset.get("assetId", "")),
+                    "sourcePath": str(asset.get("sourcePath", "")),
+                    "stack": stack,
+                    "hasStack": bool(stack),
+                })
+            except Exception as exc:
+                failures.append({
+                    "index": index,
+                    "assetId": str(raw_item.get("assetId", "") or ""),
+                    "sourcePath": str(raw_item.get("sourcePath", raw_item.get("path", "")) or ""),
+                    "error": str(exc),
+                })
+        return {
+            "items": items,
+            "requested": len(raw_items),
+            "returned": len(items),
+            "failed": len(failures),
+            "failures": failures,
+            "truncated": len(raw_items) > max_items,
+        }
+
+    def _photo_edit_stack_operations_from_params(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         raw_operations = params.get("operations", [])
         if not isinstance(raw_operations, list):
             raise ValueError("operations must be a list.")
@@ -33169,7 +33213,14 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             raise ValueError("Each edit operation must be an object.")
         if not operations:
             raise ValueError("Edit stack requires at least one operation.")
-        operations = operations[:100]
+        return operations[:100]
+
+    def _save_photo_edit_stack_for_asset(
+        self,
+        asset: dict[str, Any],
+        operations: list[dict[str, Any]],
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
         previous_stack = self.project.db.photo_edit_stack_by_asset(asset_id=str(asset.get("assetId", ""))) or {}
         rendered_preview_path = str(params.get("renderedPreviewPath", "") or "").strip()
         if rendered_preview_path and not self._photo_path_is_workspace_owned(rendered_preview_path):
@@ -33225,6 +33276,43 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return {
             **stack,
             "sidecarPayload": sidecar_payload,
+        }
+
+    def save_photo_edit_stack(self, params: dict[str, Any]) -> dict[str, Any]:
+        asset = self._photo_edit_stack_asset(params)
+        operations = self._photo_edit_stack_operations_from_params(params)
+        return self._save_photo_edit_stack_for_asset(asset, operations, params)
+
+    def save_photo_edit_stacks(self, params: dict[str, Any]) -> dict[str, Any]:
+        raw_items = params.get("items", [])
+        if not isinstance(raw_items, list):
+            raise ValueError("items must be a list.")
+        max_items = max(0, min(500, len(raw_items)))
+        items: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        for index, raw_item in enumerate(raw_items[:max_items]):
+            if not isinstance(raw_item, dict):
+                failures.append({"index": index, "error": "Each edit-stack save item must be an object."})
+                continue
+            try:
+                asset = self._photo_edit_stack_asset(raw_item)
+                operations = self._photo_edit_stack_operations_from_params(raw_item)
+                stack = self._save_photo_edit_stack_for_asset(asset, operations, raw_item)
+                items.append({**stack, "index": index})
+            except Exception as exc:
+                failures.append({
+                    "index": index,
+                    "assetId": str(raw_item.get("assetId", "") or ""),
+                    "sourcePath": str(raw_item.get("sourcePath", raw_item.get("path", "")) or ""),
+                    "error": str(exc),
+                })
+        return {
+            "items": items,
+            "requested": len(raw_items),
+            "saved": len(items),
+            "failed": len(failures),
+            "failures": failures,
+            "truncated": len(raw_items) > max_items,
         }
 
     def revert_photo_edit_stack(self, params: dict[str, Any]) -> dict[str, Any]:
