@@ -167,6 +167,8 @@ run("localization checker scans SafeModeReview and gates uncovered literals", ()
   assert.ok(source.includes("SafeModeReview.tsx"));
   assert.ok(source.includes("VISIBLE_LITERAL_UNCOVERED_BASELINE"));
   assert.ok(source.includes("uncovered.length <= VISIBLE_LITERAL_UNCOVERED_BASELINE"));
+  assert.ok(source.includes("VISIBLE_LITERAL_LANGUAGE_COVERAGE_FLOOR"));
+  assert.ok(source.includes("`visible literal coverage ${language}`"));
 });
 
 console.log("\nall desktop script tests passed");

@@ -22,6 +22,7 @@ const appSource = [appPath, ...extraUiPaths]
   .join("\n");
 const checks = [];
 const PHOTOS_UI_TEXT_COVERAGE_FLOOR = 0.85;
+const VISIBLE_LITERAL_LANGUAGE_COVERAGE_FLOOR = 0.90;
 const VISIBLE_LITERAL_UNCOVERED_BASELINE = 48;
 
 function add(name, ok, detail, data = {}) {
@@ -167,6 +168,18 @@ add("visible literal translation coverage", visibleLiterals.length > 100, `${vis
 add("visible literal uncovered ratchet", uncovered.length <= VISIBLE_LITERAL_UNCOVERED_BASELINE, `${uncovered.length}/${VISIBLE_LITERAL_UNCOVERED_BASELINE} uncovered visible literals`, {
   uncovered: uncovered.slice(0, 80)
 });
+
+for (const language of nonEnglish) {
+  const untranslated = visibleLiterals.filter((text) => i18n.translateUiText(language, text) === text);
+  const translated = visibleLiterals.length - untranslated.length;
+  const coverage = visibleLiterals.length ? translated / visibleLiterals.length : 1;
+  add(
+    `visible literal coverage ${language}`,
+    coverage >= VISIBLE_LITERAL_LANGUAGE_COVERAGE_FLOOR,
+    `${translated}/${visibleLiterals.length} (${(coverage * 100).toFixed(1)}%)`,
+    { untranslated: untranslated.slice(0, 80) }
+  );
+}
 
 const photosUiLiterals = extractUiTextLiterals(photosUiSource);
 add("Photos uiText literals discovered", photosUiLiterals.length > 1000, `${photosUiLiterals.length} unique literals`);
