@@ -7932,7 +7932,7 @@ class ProjectState:
         return {"jsonPath": str(json_path), "csvPath": str(csv_path), "counts": payload["counts"]}
 
     def import_accuracy_labels(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
-        imported = 0
+        pending: list[tuple[str, dict[str, Any]]] = []
         skipped = 0
         for row in rows:
             if not isinstance(row, dict):
@@ -7955,19 +7955,25 @@ class ProjectState:
             if not source_path:
                 skipped += 1
                 continue
-            self.db.add_calibration_label(
-                new_id("label"),
-                {
-                    "sourcePath": source_path,
-                    "fileHash": str(row.get("sourceHash") or (candidate.source_hash if candidate else "")),
-                    "expectedPerson": str(row.get("expectedPerson") or (candidate.person_name if candidate else "")),
-                    "actualPerson": str(row.get("actualPerson") or ((candidate.person_name if candidate else "") if is_match else "")),
-                    "matchScore": match_score,
-                    "isMatch": is_match,
-                    "safeLabel": str(row.get("safeLabel", "")),
-                },
+            pending.append(
+                (
+                    new_id("label"),
+                    {
+                        "sourcePath": source_path,
+                        "fileHash": str(row.get("sourceHash") or (candidate.source_hash if candidate else "")),
+                        "expectedPerson": str(row.get("expectedPerson") or (candidate.person_name if candidate else "")),
+                        "actualPerson": str(row.get("actualPerson") or ((candidate.person_name if candidate else "") if is_match else "")),
+                        "matchScore": match_score,
+                        "isMatch": is_match,
+                        "safeLabel": str(row.get("safeLabel", "")),
+                    },
+                )
             )
-            imported += 1
+        if pending:
+            with self.db.connect() as conn:
+                for label_id, payload in pending:
+                    self.db.add_calibration_label(label_id, payload, conn=conn)
+        imported = len(pending)
         summary = self.calibration_summary()
         self._append_audit({"action": "import_accuracy_labels", "imported": imported, "skipped": skipped})
         return {"imported": imported, "skipped": skipped, "summary": summary}
@@ -8096,7 +8102,7 @@ class ProjectState:
             except (TypeError, ValueError):
                 return fallback
 
-        imported = 0
+        pending: list[tuple[str, dict[str, Any]]] = []
         skipped = 0
         for row in rows:
             if not isinstance(row, dict):
@@ -8120,37 +8126,43 @@ class ProjectState:
             context_source.pop("trainingContext", None)
             context_source.pop("training_context", None)
             training_context = match_adapters.pair_context(context_source)
-            self.db.add_training_example(
-                str(_value(row, "exampleId", "example_id", default="")).strip() or new_id("train"),
-                {
-                    "naturalKey": str(_value(row, "naturalKey", "natural_key")).strip(),
-                    "labelId": str(_value(row, "labelId", "label_id")).strip(),
-                    "candidateId": str(_value(row, "candidateId", "candidate_id")).strip(),
-                    "sourcePath": str(_value(row, "sourcePath", "source_path")).strip(),
-                    "sourceHash": source_hash,
-                    "expectedPerson": expected_person,
-                    "actualPerson": str(_value(row, "actualPerson", "actual_person")).strip(),
-                    "isMatch": _bool(_value(row, "isMatch", "is_match")),
-                    "matchScore": _value(row, "matchScore", "match_score", default=None),
-                    "rawCosine": _value(row, "rawCosine", "raw_cosine", default=None),
-                    "quality": _value(row, "quality", default=None),
-                    "modelName": str(_value(row, "modelName", "model_name")).strip(),
-                    "detectorSize": _int(_value(row, "detectorSize", "detector_size", default=0), 0),
-                    "candidateEmbeddingKey": str(_value(row, "candidateEmbeddingKey", "candidate_embedding_key")).strip(),
-                    "bestRefId": str(_value(row, "bestRefId", "best_ref_id")).strip(),
-                    "bestRefPath": str(_value(row, "bestRefPath", "best_ref_path")).strip(),
-                    "referenceModelName": str(_value(row, "referenceModelName", "reference_model_name")).strip(),
-                    "poseBucket": str(_value(row, "poseBucket", "pose_bucket")).strip(),
-                    "ageGapYears": _value(row, "ageGapYears", "age_gap_years", default=None),
-                    "alignError": _value(row, "alignError", "align_error", default=None),
-                    "iedPx": _value(row, "iedPx", "ied_px", default=None),
-                    "mediaKind": str(_value(row, "mediaKind", "media_kind", default="image") or "image"),
-                    "features": features,
-                    "trainingContext": training_context,
-                    "createdAt": str(_value(row, "createdAt", "created_at")).strip(),
-                },
+            pending.append(
+                (
+                    str(_value(row, "exampleId", "example_id", default="")).strip() or new_id("train"),
+                    {
+                        "naturalKey": str(_value(row, "naturalKey", "natural_key")).strip(),
+                        "labelId": str(_value(row, "labelId", "label_id")).strip(),
+                        "candidateId": str(_value(row, "candidateId", "candidate_id")).strip(),
+                        "sourcePath": str(_value(row, "sourcePath", "source_path")).strip(),
+                        "sourceHash": source_hash,
+                        "expectedPerson": expected_person,
+                        "actualPerson": str(_value(row, "actualPerson", "actual_person")).strip(),
+                        "isMatch": _bool(_value(row, "isMatch", "is_match")),
+                        "matchScore": _value(row, "matchScore", "match_score", default=None),
+                        "rawCosine": _value(row, "rawCosine", "raw_cosine", default=None),
+                        "quality": _value(row, "quality", default=None),
+                        "modelName": str(_value(row, "modelName", "model_name")).strip(),
+                        "detectorSize": _int(_value(row, "detectorSize", "detector_size", default=0), 0),
+                        "candidateEmbeddingKey": str(_value(row, "candidateEmbeddingKey", "candidate_embedding_key")).strip(),
+                        "bestRefId": str(_value(row, "bestRefId", "best_ref_id")).strip(),
+                        "bestRefPath": str(_value(row, "bestRefPath", "best_ref_path")).strip(),
+                        "referenceModelName": str(_value(row, "referenceModelName", "reference_model_name")).strip(),
+                        "poseBucket": str(_value(row, "poseBucket", "pose_bucket")).strip(),
+                        "ageGapYears": _value(row, "ageGapYears", "age_gap_years", default=None),
+                        "alignError": _value(row, "alignError", "align_error", default=None),
+                        "iedPx": _value(row, "iedPx", "ied_px", default=None),
+                        "mediaKind": str(_value(row, "mediaKind", "media_kind", default="image") or "image"),
+                        "features": features,
+                        "trainingContext": training_context,
+                        "createdAt": str(_value(row, "createdAt", "created_at")).strip(),
+                    },
+                )
             )
-            imported += 1
+        if pending:
+            with self.db.connect() as conn:
+                for example_id, payload in pending:
+                    self.db.add_training_example(example_id, payload, conn=conn)
+        imported = len(pending)
         summary = self.db.training_example_summary()
         self._append_audit({"action": "import_training_examples", "imported": imported, "skipped": skipped})
         return {"imported": imported, "skipped": skipped, "summary": summary}

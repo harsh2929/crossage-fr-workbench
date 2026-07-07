@@ -158,6 +158,48 @@ def test_bulk_review_learning_examples_share_one_db_transaction() -> None:
         assert len(project.db.training_example_rows()) == 2
 
 
+def test_accuracy_label_imports_share_one_db_transaction() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        project = _project(tmp)
+        calibration_conns: list[sqlite3.Connection | None] = []
+        original_add_calibration_label = project.db.add_calibration_label
+
+        def record_calibration_conn(label_id: str, row: dict[str, object], conn: sqlite3.Connection | None = None) -> None:
+            calibration_conns.append(conn)
+            original_add_calibration_label(label_id, row, conn=conn)
+
+        project.db.add_calibration_label = record_calibration_conn  # type: ignore[method-assign]
+
+        imported = project.import_accuracy_labels(
+            [
+                {
+                    "sourcePath": "/tmp/positive.jpg",
+                    "sourceHash": "hash-positive",
+                    "expectedPerson": "Alice",
+                    "actualPerson": "Alice",
+                    "matchScore": 0.91,
+                    "isMatch": True,
+                },
+                {
+                    "sourcePath": "/tmp/negative.jpg",
+                    "sourceHash": "hash-negative",
+                    "expectedPerson": "Alice",
+                    "actualPerson": "",
+                    "matchScore": 0.12,
+                    "isMatch": False,
+                },
+                {"sourcePath": "", "expectedPerson": "Skipped", "matchScore": 0.5, "isMatch": True},
+            ]
+        )
+        assert imported["imported"] == 2
+        assert imported["skipped"] == 1
+        assert len(calibration_conns) == 2
+        assert all(conn is not None for conn in calibration_conns)
+        assert len({id(conn) for conn in calibration_conns}) == 1
+        assert len(project.db.calibration_label_rows()) == 2
+
+
 def test_reference_suggestion_stage_and_approval_adds_reference() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -466,9 +508,21 @@ def test_training_example_export_import_is_metadata_only_by_default() -> None:
         assert "sourcePath" in path_payload["examples"][0]
 
         imported_project = _project(tmp / "imported")
+        training_conns: list[sqlite3.Connection | None] = []
+        original_add_training_example = imported_project.db.add_training_example
+
+        def record_training_conn(example_id: str, row: dict[str, object], conn: sqlite3.Connection | None = None) -> dict[str, object]:
+            training_conns.append(conn)
+            return original_add_training_example(example_id, row, conn=conn)
+
+        imported_project.db.add_training_example = record_training_conn  # type: ignore[method-assign]
+
         imported = imported_project.import_training_examples([*payload["examples"], {"expectedPerson": "Missing hash", "isMatch": True}])
         assert imported["imported"] == 2
         assert imported["skipped"] == 1
+        assert len(training_conns) == 2
+        assert all(conn is not None for conn in training_conns)
+        assert len({id(conn) for conn in training_conns}) == 1
         rows = imported_project.db.training_example_rows()
         assert len(rows) == 2
         assert {row["is_match"] for row in rows} == {0, 1}
@@ -1024,6 +1078,7 @@ def test_stage_calibration_blocks_insufficient_or_regressed_feedback() -> None:
 def main() -> None:
     test_review_status_persists_current_training_example()
     test_bulk_review_learning_examples_share_one_db_transaction()
+    test_accuracy_label_imports_share_one_db_transaction()
     test_reference_suggestion_stage_and_approval_adds_reference()
     test_reference_suggestion_rejects_duplicate_outlier_and_model_mismatch()
     test_reference_suggestion_delete_person_cleanup()
