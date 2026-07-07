@@ -16401,6 +16401,56 @@ def test_smart_album_people_group_sql_exact_and_saved_exclusions() -> None:
     print("ok exact people-group smart album SQL")
 
 
+def test_smart_album_group_fallback_reuses_saved_group_rows() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        alice_bob = str(base / "fallback-alice-bob.jpg")
+        alice_bob_carol = str(base / "fallback-alice-bob-carol.jpg")
+        alice_only = str(base / "fallback-alice-only.jpg")
+        for path in (alice_bob, alice_bob_carol, alice_only):
+            Path(path).write_bytes(b"photo")
+        api.project.db.create_scan_run("run1", "label", "manual", str(base))
+        for path in (alice_bob, alice_bob_carol, alice_only):
+            api.project.db.record_scan_file("run1", Path(path), _sig(Path(path)), "completed", phase="processed")
+        api.project.candidates = {
+            "fallback-ab-a": _candidate("fallback-ab-a", "Alice", alice_bob, status="accepted", score=0.99),
+            "fallback-ab-b": _candidate("fallback-ab-b", "Bob", alice_bob, status="accepted", score=0.98),
+            "fallback-abc-a": _candidate("fallback-abc-a", "Alice", alice_bob_carol, status="accepted", score=0.97),
+            "fallback-abc-b": _candidate("fallback-abc-b", "Bob", alice_bob_carol, status="accepted", score=0.96),
+            "fallback-abc-c": _candidate("fallback-abc-c", "Carol", alice_bob_carol, status="accepted", score=0.95),
+            "fallback-a": _candidate("fallback-a", "Alice", alice_only, status="accepted", score=0.94),
+        }
+        api.project.db.upsert_candidates(api.project.candidates.values())
+        api.save_photo_people_group({
+            "name": "Fallback Core Duo",
+            "memberPeople": ["Alice", "Bob"],
+            "excludePeople": ["Carol"],
+        })
+
+        original_groups = api.project.db.list_photo_people_groups
+        group_reads = 0
+
+        def counting_groups(conn=None):  # type: ignore[no-untyped-def]
+            nonlocal group_reads
+            group_reads += 1
+            return original_groups(conn)
+
+        api.project.db.list_photo_people_groups = counting_groups  # type: ignore[method-assign]
+        try:
+            album = api.save_photo_album({
+                "name": "Fallback saved group",
+                "albumKind": "smart",
+                "rules": {"op": "all", "conditions": [{"field": "group", "operator": "contains", "value": "Fallback Core Duo"}]},
+            })
+        finally:
+            api.project.db.list_photo_people_groups = original_groups  # type: ignore[method-assign]
+
+        assert album["count"] == 1, album
+        assert group_reads <= 2, group_reads
+    print("ok smart album group fallback reuses saved group rows")
+
+
 def test_smart_album_pet_group_sql_exact_ids_and_saved_exclusions() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -19216,6 +19266,7 @@ if __name__ == "__main__":
     test_photo_saved_filters_workspace_crud()
     test_saved_search_rules_create_live_smart_album()
     test_smart_album_people_group_sql_exact_and_saved_exclusions()
+    test_smart_album_group_fallback_reuses_saved_group_rows()
     test_smart_album_pet_group_sql_exact_ids_and_saved_exclusions()
     test_smart_album_pet_group_sql_marker_metadata()
     test_smart_album_query_dsl_all_any_groups()

@@ -7607,7 +7607,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             return False
         return not any(str(pet or "").casefold() in entry_pets for pet in excluded_pets)
 
-    def _photo_entry_group_text(self, entry: dict[str, Any]) -> list[str]:
+    def _photo_entry_group_text(
+        self,
+        entry: dict[str, Any],
+        *,
+        people_groups: list[dict[str, Any]] | None = None,
+    ) -> list[str]:
         values: list[str] = []
         seen: set[str] = set()
 
@@ -7631,7 +7636,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 add(self._photo_people_group_id(group_people, group_pets))
                 add(" ".join(group_names))
                 add(", ".join(group_names))
-        for group in self.project.db.list_photo_people_groups():
+        groups = people_groups if people_groups is not None else self.project.db.list_photo_people_groups()
+        for group in groups:
             member_people = tuple(str(person or "").strip() for person in group.get("memberPeople", []) if str(person or "").strip())
             member_pets = tuple(self._clean_photo_pet_label(pet) for pet in group.get("memberPets", []) if self._clean_photo_pet_label(pet))
             if len(member_people) + len(member_pets) < 2:
@@ -7721,7 +7727,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         matched = actual == target
         return not matched if operator == "isNot" else matched
 
-    def _photo_album_entry_matches_query_condition(self, entry: dict[str, Any], condition: dict[str, Any]) -> bool:
+    def _photo_album_entry_matches_query_condition(
+        self,
+        entry: dict[str, Any],
+        condition: dict[str, Any],
+        *,
+        people_groups: list[dict[str, Any]] | None = None,
+    ) -> bool:
         field = str(condition.get("field", "") or "")
         operator = str(condition.get("operator", "is") or "is")
         expected = condition.get("value")
@@ -7755,7 +7767,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             people = self._photo_entry_named_people(entry)
             return self._photo_query_text_matches(people, operator, expected)
         if field == "group":
-            return self._photo_query_text_matches(self._photo_entry_group_text(entry), operator if operator != "is" else "contains", expected)
+            return self._photo_query_text_matches(
+                self._photo_entry_group_text(entry, people_groups=people_groups),
+                operator if operator != "is" else "contains",
+                expected,
+            )
         if field == "status":
             statuses = [str(match.status or "").lower() for match in matches]
             statuses.extend(
@@ -7915,15 +7931,24 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             return self._photo_query_number_matches(max(self._photo_entry_quality_values(entry), default=0.0), operator, expected)
         return False
 
-    def _photo_album_entry_matches_query_dsl(self, entry: dict[str, Any], query: dict[str, Any]) -> bool:
+    def _photo_album_entry_matches_query_dsl(
+        self,
+        entry: dict[str, Any],
+        query: dict[str, Any],
+        *,
+        people_groups: list[dict[str, Any]] | None = None,
+    ) -> bool:
         op = str(query.get("op", "") or "")
         if op in {"all", "any"}:
             children = [child for child in query.get("conditions", []) if isinstance(child, dict)]
             if not children:
                 return True
-            results = [self._photo_album_entry_matches_query_dsl(entry, child) for child in children]
+            results = [
+                self._photo_album_entry_matches_query_dsl(entry, child, people_groups=people_groups)
+                for child in children
+            ]
             return all(results) if op == "all" else any(results)
-        return self._photo_album_entry_matches_query_condition(entry, query)
+        return self._photo_album_entry_matches_query_condition(entry, query, people_groups=people_groups)
 
     def _photo_query_dsl_mentions_field(self, query: Any, field: str) -> bool:
         if not isinstance(query, dict):
@@ -7940,7 +7965,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             return self._photo_query_dsl_mentions_field({"op": rules.get("op"), "conditions": rules.get("conditions")}, field)
         return False
 
-    def _photo_album_entry_matches_rules(self, entry: dict[str, Any], rules: dict[str, Any]) -> bool:
+    def _photo_album_entry_matches_rules(
+        self,
+        entry: dict[str, Any],
+        rules: dict[str, Any],
+        *,
+        people_groups: list[dict[str, Any]] | None = None,
+    ) -> bool:
         matches = [match for match in entry.get("matches", []) or [] if isinstance(match, ReviewCandidate)]
         statuses = {
             str(status or "").strip().lower()
@@ -8003,7 +8034,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if recent_days and not self._entry_recent_enough(entry, recent_days):
             return False
         query_dsl = self._album_rules_query_dsl(rules)
-        if query_dsl and not self._photo_album_entry_matches_query_dsl(entry, query_dsl):
+        if query_dsl and not self._photo_album_entry_matches_query_dsl(entry, query_dsl, people_groups=people_groups):
             return False
         return True
 
@@ -17810,6 +17841,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         rules = self._clean_album_rules(album.get("rules", {}))
         if self._photo_rules_mention_query_field(rules, "duplicate"):
             self.project.db.ensure_photo_duplicate_groups()
+        people_groups = self.project.db.list_photo_people_groups() if self._photo_rules_mention_query_field(rules, "group") else None
         include_hidden_deleted = self._photo_rules_mention_query_field(rules, "hidden") or self._photo_rules_mention_query_field(rules, "deleted")
         matches_by_source = self._photo_matches_by_source()
         entries: list[dict[str, Any]] = []
@@ -17826,7 +17858,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 continue
             if self._photo_album_entry_excluded(row, exclude_keys):
                 continue
-            if not self._photo_album_entry_matches_rules(row, rules):
+            if not self._photo_album_entry_matches_rules(row, rules, people_groups=people_groups):
                 continue
             seen.add(source_path)
             entries.append(row)
@@ -17859,7 +17891,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 continue
             if self._photo_album_entry_excluded(entry, exclude_keys):
                 continue
-            if not self._photo_album_entry_matches_rules(entry, rules):
+            if not self._photo_album_entry_matches_rules(entry, rules, people_groups=people_groups):
                 continue
             seen.add(source_path)
             entries.append(entry)
