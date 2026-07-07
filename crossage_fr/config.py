@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields as dataclass_fields
 from pathlib import Path
+import copy
 import json
 import math
 
@@ -123,6 +124,10 @@ class RuntimeConfig:
     # Recognizer the calibrator was fit on; a model switch makes the calibrator stale.
     calibration_model: str = ""
     thresholds: Thresholds = field(default_factory=Thresholds)
+
+
+RUNTIME_CONFIG_FIELD_NAMES = {item.name for item in dataclass_fields(RuntimeConfig)}
+THRESHOLD_FIELD_NAMES = {item.name for item in dataclass_fields(Thresholds)}
 
 
 def archive_corrupt_file(path: Path) -> None:
@@ -307,16 +312,33 @@ def load_config(path: Path) -> RuntimeConfig:
     if not isinstance(data, dict):
         archive_corrupt_file(path)
         return RuntimeConfig()
-    try:
-        raw_thresholds = data.get("thresholds", {})
-        if not isinstance(raw_thresholds, dict):
-            raise ValueError("thresholds must be an object.")
-        thresholds = Thresholds(**raw_thresholds)
-        data = {k: v for k, v in data.items() if k != "thresholds"}
-        return _validate_config(RuntimeConfig(**data, thresholds=thresholds))
-    except (TypeError, ValueError):
-        archive_corrupt_file(path)
-        return RuntimeConfig()
+    config = RuntimeConfig()
+    for key, value in data.items():
+        if key == "thresholds" or key not in RUNTIME_CONFIG_FIELD_NAMES:
+            continue
+        candidate = copy.deepcopy(config)
+        try:
+            setattr(candidate, key, value)
+            config = _validate_config(candidate)
+        except (TypeError, ValueError):
+            continue
+    raw_thresholds = data.get("thresholds", {})
+    if isinstance(raw_thresholds, dict):
+        threshold_values = asdict(config.thresholds)
+        for key, value in raw_thresholds.items():
+            if key not in THRESHOLD_FIELD_NAMES:
+                continue
+            try:
+                threshold_values[key] = _require_unit_float(value, f"thresholds.{key}")
+            except ValueError:
+                continue
+        candidate = copy.deepcopy(config)
+        candidate.thresholds = Thresholds(**threshold_values)
+        try:
+            config = _validate_config(candidate)
+        except (TypeError, ValueError):
+            pass
+    return config
 
 
 def save_config(config: RuntimeConfig, path: Path) -> None:

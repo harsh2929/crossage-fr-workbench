@@ -7310,6 +7310,16 @@ button:not(:disabled):active {
   color: var(--secondary);
 }
 
+.photos-route-loading {
+  min-height: 320px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--secondary);
+  font-size: 13px;
+}
+
 .photos-lightbox {
   position: fixed;
   inset: 0;
@@ -16140,6 +16150,30 @@ textarea:disabled {
   padding: 32px 0;
   text-align: center;
 }
+.safe-review-lock {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 14px;
+  border: 1px solid rgba(0, 122, 255, 0.28);
+  border-radius: 8px;
+  background: rgba(0, 122, 255, 0.08);
+}
+.safe-review-lock > div {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+.safe-review-lock p {
+  margin: 0;
+}
+.safe-review-lock input {
+  max-width: 280px;
+}
+.safe-review-lock .compact-action {
+  width: fit-content;
+}
 .safe-review-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -16153,6 +16187,8 @@ textarea:disabled {
   overflow: hidden;
   background: var(--fill);
   border: 1px solid var(--separator-soft, rgba(255, 255, 255, 0.08));
+  content-visibility: auto;
+  contain-intrinsic-size: 280px;
 }
 .safe-review-card.is-cleared {
   opacity: 0.72;
@@ -16271,6 +16307,14 @@ textarea:disabled {
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 14%, transparent);
   white-space: nowrap;
+}
+.safe-review-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 2px 0 4px;
 }
 @media (prefers-reduced-motion: reduce) {
   .safe-review-thumb img {

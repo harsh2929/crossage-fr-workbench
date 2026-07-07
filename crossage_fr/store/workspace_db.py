@@ -1081,11 +1081,20 @@ class WorkspaceDb:
         )
 
     def _preflight_existing_photo_schema(self, conn: sqlite3.Connection) -> None:
+        self._preflight_safe_mode_overrides_schema(conn)
         for table, columns in self._photo_table_column_migrations():
             if not self._table_exists(conn, table):
                 continue
             for column, definition in columns:
                 self._ensure_column(conn, table, column, definition)
+
+    def _preflight_safe_mode_overrides_schema(self, conn: sqlite3.Connection) -> None:
+        if not self._table_exists(conn, "safe_mode_overrides"):
+            return
+        columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(safe_mode_overrides)").fetchall()}
+        if "content_hash" in columns and "asset_id" not in columns:
+            return
+        conn.execute("DROP TABLE IF EXISTS safe_mode_overrides")
 
     def _backfill_photo_album_item_positions(self, conn: sqlite3.Connection) -> None:
         if not self._table_exists(conn, "photo_album_items"):
@@ -23364,6 +23373,7 @@ class WorkspaceDb:
     def clear_private_data(self, include_scan_history: bool = True) -> dict[str, int]:
         tables = [
             "safety_cache",
+            "safe_mode_overrides",
             "embedding_cache",
             "calibration_labels",
             "training_examples",

@@ -6225,6 +6225,33 @@ run("Photos timeline rows avoid quadratic index lookups", () => {
   assert.doesNotMatch(timelineRowsBlock[0], /items\.indexOf\(item\)/);
 });
 
+run("Safe Mode review dashboard honors sensitive collection unlock before listing flagged photos", () => {
+  const reviewSource = fs.readFileSync(path.join(ROOT, "src/views/SafeModeReview.tsx"), "utf8");
+  const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
+  const settingsSource = fs.readFileSync(path.join(ROOT, "src/views/photoSettings.ts"), "utf8");
+  const photosSource = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  assert.match(settingsSource, /export const PHOTO_LOCAL_SETTINGS_KEY = "vintrace\.photos\.localSettings"/);
+  assert.match(photosSource, /PHOTO_LOCAL_SETTINGS_KEY/);
+  assert.match(reviewSource, /invoke<\{ value\?: PhotoLibrarySettingsValue \}>\("photo_library_settings", \{\}\)/);
+  assert.match(reviewSource, /if \(settings\.lockSensitiveCollections && !unlocked\) return;/);
+  assert.match(reviewSource, /const SAFE_REVIEW_PAGE_SIZE = 60;/);
+  assert.match(reviewSource, /previewBudget: 24/);
+  assert.doesNotMatch(reviewSource, /limit: 500/);
+  assert.match(reviewSource, /loading="lazy" decoding="async"/);
+  assert.match(reviewSource, /sensitiveUnlockRequirements\(settings/);
+  assert.match(reviewSource, /verifyPhotoSensitivePasscode\(settings, unlockPasscode\)/);
+  assert.match(reviewSource, /authenticateSensitiveAccess\("Unlock Safe Mode review in Vintrace\."\)/);
+  assert.match(appSource, /getSensitiveAuthStatus=\{getPhotosSensitiveAuthStatus\}/);
+  assert.match(appSource, /authenticateSensitiveAccess=\{authenticatePhotosSensitiveAccess\}/);
+});
+
+run("Photos route is lazy-loaded out of the initial renderer chunk", () => {
+  const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
+  assert.match(appSource, /const PhotosView = lazy\(\(\) => import\("\.\/views\/PhotosView"\)/);
+  assert.doesNotMatch(appSource, /import \{ PhotosView \} from "\.\/views\/PhotosView"/);
+  assert.match(appSource, /<Suspense fallback=\{<PhotosRouteFallback uiText=\{uiText\} \/>\}>/);
+});
+
 run("photo virtual grid windows visible bands with overscan", () => {
   const layout = virtualGridMod.buildPhotoVirtualGridLayout(
     Array.from({ length: 12 }, (_, index) => ({ kind: "item", key: `i:${index}`, index, item: { width: 100, height: 100 } })),

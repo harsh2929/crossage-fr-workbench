@@ -95,6 +95,19 @@ def test_hash_fields_redacted_in_tool_output() -> None:
     assert leak_hash not in json.dumps(mcp._agent_safe_value(payload, keep_path_names=False))
 
 
+def test_exception_text_redacted_before_mcp_framework_sees_it() -> None:
+    message = mcp._redacted_exception_message(ValueError(f"failed to open {LEAK_PATH}; thumbnail {LEAK_NAME} unavailable"))
+    assert LEAK_PATH not in message, "absolute path leaked in exception text"
+    assert LEAK_NAME not in message, "biometric filename leaked in exception text"
+
+
+def test_safe_tool_redacts_exceptions_at_the_central_wrapper() -> None:
+    source = Path(mcp.__file__).read_text(encoding="utf-8")
+    block = source[source.index("def safe_tool("):source.index("def _agent_state(")]
+    assert "except Exception as exc" in block
+    assert "raise ValueError(_redacted_exception_message(exc)) from None" in block
+
+
 def test_rate_limiter_token_bucket() -> None:
     # Burst of 3, refilling 1 token/sec, with a deterministic injected clock.
     limiter = mcp._RateLimiter(capacity=3, refill_per_sec=1.0)
@@ -118,6 +131,8 @@ def main() -> None:
     test_embedded_path_redacted_in_audit_message()
     test_embedded_path_redacted_in_tool_output()
     test_hash_fields_redacted_in_tool_output()
+    test_exception_text_redacted_before_mcp_framework_sees_it()
+    test_safe_tool_redacts_exceptions_at_the_central_wrapper()
     test_rate_limiter_token_bucket()
     print("mcp redaction + model integrity ok")
 

@@ -270,6 +270,14 @@ def _redact_tool_output(value: Any) -> Any:
     return value
 
 
+def _redacted_exception_message(exc: Exception) -> str:
+    message = str(exc) or exc.__class__.__name__
+    if _looks_like_path(message):
+        return _redacted_path(message, keep_name=False)
+    redacted = _scrub_text(message, mask_filenames=True).strip()
+    return redacted or exc.__class__.__name__
+
+
 def _allowed_roots() -> list[Path]:
     # MCP-03: the active workspace is always in-scope; everything else must be an
     # operator-approved root configured via VINTRACE_MCP_ALLOWED_ROOTS
@@ -349,8 +357,11 @@ def safe_tool(*tool_args: Any, **tool_kwargs: Any):
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*call_args: Any, **call_kwargs: Any):
-            _assert_unlocked()
-            return _redact_tool_output(fn(*call_args, **call_kwargs))
+            try:
+                _assert_unlocked()
+                return _redact_tool_output(fn(*call_args, **call_kwargs))
+            except Exception as exc:
+                raise ValueError(_redacted_exception_message(exc)) from None
 
         return mcp.tool(*tool_args, **tool_kwargs)(wrapper)
 

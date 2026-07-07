@@ -4,6 +4,8 @@ export type PhotoVideoAutoplayMode = "off" | "muted" | "sound";
 export type PhotoHdrViewingMode = "auto" | "standard" | "hdr";
 export type PhotoIndexingPowerMode = "low" | "balanced" | "performance";
 
+export const PHOTO_LOCAL_SETTINGS_KEY = "vintrace.photos.localSettings";
+
 type PhotoManagedRootCoverage = NonNullable<PhotoLibrarySettingsValue["backupPolicyStatus"]>["rootCoverage"][number];
 export type PhotoLibraryMediaSettingsOverride = Partial<Pick<PhotoLocalSettings, "videoAutoplay" | "pauseVideoWhenBackgrounded" | "hdrViewing">>;
 

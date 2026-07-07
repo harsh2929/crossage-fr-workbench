@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -110,23 +111,109 @@ def assert_config_round_trip_and_invalid_shape() -> None:
     assert loaded.cluster_min_size == 5
 
     bad_path = root / "bad-config.json"
-    bad_path.write_text(json.dumps({"thresholds": "invalid"}), encoding="utf-8")
+    bad_path.write_text("{not json", encoding="utf-8")
     recovered = load_config(bad_path)
     assert recovered.safe_mode is True
     assert (root / "bad-config.corrupt.json").exists()
 
     unsafe_path = root / "unsafe-config.json"
-    unsafe_path.write_text(json.dumps({"safe_mode": "yes", "cluster_min_size": 1}), encoding="utf-8")
+    unsafe_path.write_text(json.dumps({"safe_mode": False, "cluster_min_size": 1, "unknown_future_field": "kept-out"}), encoding="utf-8")
     recovered = load_config(unsafe_path)
-    assert recovered.safe_mode is True
+    assert recovered.safe_mode is False
     assert recovered.cluster_min_size == 2
-    assert (root / "unsafe-config.corrupt.json").exists()
+    assert not (root / "unsafe-config.corrupt.json").exists()
+
+    threshold_path = root / "threshold-config.json"
+    threshold_path.write_text(json.dumps({
+        "safe_mode": False,
+        "thresholds": {
+            "confident": 0.72,
+            "likely": "bad",
+            "relaxed_child": 0.24,
+            "quality_min": 0.11,
+        },
+    }), encoding="utf-8")
+    recovered = load_config(threshold_path)
+    assert recovered.safe_mode is False
+    assert recovered.thresholds.confident == 0.72
+    assert recovered.thresholds.likely == Thresholds().likely
+    assert recovered.thresholds.relaxed_child == 0.24
+    assert recovered.thresholds.quality_min == 0.11
+    assert not (root / "threshold-config.corrupt.json").exists()
 
     oversized_path = root / "oversized-config.json"
-    oversized_path.write_text(json.dumps({"cluster_min_size": MAX_CLUSTER_MIN_SIZE + 1}), encoding="utf-8")
+    oversized_path.write_text(json.dumps({"safe_mode": False, "cluster_min_size": MAX_CLUSTER_MIN_SIZE + 1}), encoding="utf-8")
     recovered = load_config(oversized_path)
+    assert recovered.safe_mode is False
     assert recovered.cluster_min_size == 2
-    assert (root / "oversized-config.corrupt.json").exists()
+    assert not (root / "oversized-config.corrupt.json").exists()
+
+
+def assert_safe_mode_override_schema_migrates_and_private_delete_clears() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-safe-mode-overrides-"))
+    db_path = root / "workspace.sqlite3"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE safe_mode_overrides (
+                asset_id TEXT PRIMARY KEY,
+                override_sensitive INTEGER NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO safe_mode_overrides(asset_id, override_sensitive, reason, created_at) VALUES(?, ?, ?, ?)",
+            ("legacy-asset-id", 1, "legacy", "2026-07-07T00:00:00Z"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    db = WorkspaceDb(db_path)
+    with db.connect() as db_conn:
+        columns = {str(row["name"]) for row in db_conn.execute("PRAGMA table_info(safe_mode_overrides)").fetchall()}
+        assert "content_hash" in columns
+        assert "asset_id" not in columns
+        count = int(db_conn.execute("SELECT COUNT(*) AS n FROM safe_mode_overrides").fetchone()["n"])
+        assert count == 0
+    db.set_safe_mode_override("private-safe-mode-hash", True, reason="operator-confirmed-sensitive")
+    deleted = db.clear_private_data()
+    assert deleted["safe_mode_overrides"] == 1
+    assert db.safe_mode_override_for("private-safe-mode-hash") is None
+
+
+def assert_safe_mode_flagged_list_is_paged_and_preview_budgeted() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-safe-review-budget-"))
+    api = make_api(root / "workspace")
+    captured: dict[str, int] = {}
+
+    def fake_list_safe_mode_flagged(limit: int = 200, offset: int = 0):
+        captured["limit"] = limit
+        captured["offset"] = offset
+        return {
+            "total": 3,
+            "items": [
+                {"assetId": "a1", "sourcePath": str(root / "one.jpg"), "storedSensitive": True, "override": None, "effectiveSensitive": True, "score": 0.9, "reason": "", "modelName": "test"},
+                {"assetId": "a2", "sourcePath": str(root / "two.jpg"), "storedSensitive": True, "override": None, "effectiveSensitive": True, "score": 0.8, "reason": "", "modelName": "test"},
+                {"assetId": "a3", "sourcePath": str(root / "three.jpg"), "storedSensitive": True, "override": None, "effectiveSensitive": True, "score": 0.7, "reason": "", "modelName": "test"},
+            ],
+        }
+
+    preview_create_flags: list[bool] = []
+
+    def fake_preview_path_for(path: str, create: bool = False):
+        preview_create_flags.append(bool(create))
+        return f"/preview/{Path(path).name}" if create else ""
+
+    api.project.db.list_safe_mode_flagged = fake_list_safe_mode_flagged  # type: ignore[method-assign]
+    api.project.preview_path_for = fake_preview_path_for  # type: ignore[method-assign]
+    result = api._cmd_list_safe_mode_flagged({"limit": 500, "offset": -10, "previewBudget": 1})
+    assert captured == {"limit": 100, "offset": 0}
+    assert preview_create_flags == [True, False, False]
+    assert result["items"][0]["previewPath"].endswith("one.jpg")
+    assert result["items"][1]["previewPath"] == ""
 
 
 def assert_invalid_project_rows_are_skipped() -> None:
@@ -5165,6 +5252,8 @@ def assert_privacy_controls_delete_face_data() -> None:
     candidate_id = scanned["state"]["candidates"][0]["candidateId"]
     blocked = api.handle("block_false_match", {"candidateId": candidate_id})
     assert blocked["value"]["summary"]["total"] == 2
+    api.project.db.set_safe_mode_override("private-safe-mode-hash", True, reason="operator-confirmed-sensitive")
+    assert api.project.db.safe_mode_override_for("private-safe-mode-hash") is True
     before = api.handle("privacy_report", {})
     assert before["references"] == 1
     assert before["candidates"] == 1
@@ -5172,6 +5261,8 @@ def assert_privacy_controls_delete_face_data() -> None:
     deleted = api.handle("delete_face_data", {"confirm": True})
     assert deleted["value"]["before"]["references"] == 1
     assert deleted["value"]["dbDeleted"]["blocked_pairs"] == 2
+    assert deleted["value"]["dbDeleted"]["safe_mode_overrides"] == 1
+    assert api.project.db.safe_mode_override_for("private-safe-mode-hash") is None
     assert deleted["state"]["counts"]["references"] == 0
     assert deleted["state"]["counts"]["candidates"] == 0
     after = api.handle("privacy_report", {})
@@ -5933,6 +6024,8 @@ def main() -> None:
     assert_corrupt_workspace_recovery()
     assert_corrupt_sqlite_startup_recovery()
     assert_config_round_trip_and_invalid_shape()
+    assert_safe_mode_override_schema_migrates_and_private_delete_clears()
+    assert_safe_mode_flagged_list_is_paged_and_preview_budgeted()
     assert_invalid_project_rows_are_skipped()
     assert_command_validation_and_empty_inputs()
     assert_consent_workspace_registry_and_audit_pagination()

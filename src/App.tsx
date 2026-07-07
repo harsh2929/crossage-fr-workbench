@@ -55,7 +55,7 @@ import {
   Video,
   X
 } from "lucide-react";
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 // H9: the 1024px/1.46MB icon.png is the OS app-icon master (still read at
 // runtime by the Electron main process). The renderer only paints a ~40px logo,
@@ -227,7 +227,6 @@ import type {
 } from "./types";
 import { computeScannedCounts, countExcludedBranches, excludeNode, includeNode } from "./lib/folderTreeSelection";
 import { filterPeople, groupReferencesByPerson, type Person } from "./lib/peopleGrouping";
-import { PhotosView } from "./views/PhotosView";
 import SafeModeReview from "./views/SafeModeReview";
 import { AppShell } from "./shell/AppShell";
 import { Sidebar } from "./shell/Sidebar";
@@ -245,6 +244,8 @@ import {
   PHOTO_TAB_ACTIVE_ID,
   legacyTabTarget,
 } from "./shell/navModel";
+
+const PhotosView = lazy(() => import("./views/PhotosView").then((module) => ({ default: module.PhotosView })));
 import { SearchView } from "./shell/SearchView";
 import { SectionTabs } from "./shell/SectionTabs";
 import { useSaveSettle } from "./shell/useSaveSettle";
@@ -6758,9 +6759,10 @@ export default function App() {
           />
         )}
         {showPhotosBody && (
-          <PhotosView
-            key="photos-main"
-            initialActiveId={photosTabActiveId ?? "all"}
+          <Suspense fallback={<PhotosRouteFallback uiText={uiText} />}>
+            <PhotosView
+              key="photos-main"
+              initialActiveId={photosTabActiveId ?? "all"}
             reloadSignal={photosReloadSignal}
             onRequestPeopleSection={(section) => { setActiveTab("people"); setPeopleSection(section); }}
             listPhotoFolders={listPhotoFolders}
@@ -6924,8 +6926,9 @@ export default function App() {
             formatNumber={formatNumber}
             copyText={copyText}
             busy={Boolean(busy)}
-            appShortcutCommand={photoAppShortcutCommand}
-          />
+              appShortcutCommand={photoAppShortcutCommand}
+            />
+          </Suspense>
         )}
         {!workspaceLocked && activeTab === "search" && (
           <SearchView
@@ -7101,6 +7104,8 @@ export default function App() {
             lockWorkspace={lockWorkspace}
             unlockWorkspace={unlockWorkspace}
             disableWorkspaceLock={disableWorkspaceLock}
+            getSensitiveAuthStatus={getPhotosSensitiveAuthStatus}
+            authenticateSensitiveAccess={authenticatePhotosSensitiveAccess}
           />
         )}
         {showOnboarding && (
@@ -7162,6 +7167,15 @@ function WorkspaceLockGate({
         <small>Workspace Lock controls access inside the app. It does not alter original photo files outside the app folder.</small>
       </div>
     </div>
+  );
+}
+
+function PhotosRouteFallback({ uiText }: { uiText: (text: string) => string }) {
+  return (
+    <section className="photos-route-loading" role="status" aria-busy="true">
+      <Loader2 className="spin" size={18} aria-hidden="true" />
+      <span>{uiText("Loading Photos")}</span>
+    </section>
   );
 }
 
@@ -12628,6 +12642,8 @@ function SettingsView(props: {
   lockWorkspace(): void;
   unlockWorkspace(): void;
   disableWorkspaceLock(): void;
+  getSensitiveAuthStatus(): Promise<PhotoSensitiveAuthStatus | null>;
+  authenticateSensitiveAccess(reason: string): Promise<PhotoSensitiveAuthResult | null>;
 }) {
   const [personToDelete, setPersonToDelete] = useState("");
   const [personToRename, setPersonToRename] = useState("");
@@ -12998,7 +13014,13 @@ function SettingsView(props: {
                 <ShieldAlert size={16} /> Review…
               </button>
             </label>
-            <SafeModeReview open={safeReviewOpen} onClose={() => setSafeReviewOpen(false)} invoke={window.crossAge.invoke} />
+            <SafeModeReview
+              open={safeReviewOpen}
+              onClose={() => setSafeReviewOpen(false)}
+              invoke={window.crossAge.invoke}
+              getSensitiveAuthStatus={props.getSensitiveAuthStatus}
+              authenticateSensitiveAccess={props.authenticateSensitiveAccess}
+            />
             <label className="switch-row">
               <span>
                 <strong>Zero-admittance (strict)</strong>

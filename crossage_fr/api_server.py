@@ -2472,15 +2472,22 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         """List photo assets the Safe Mode classifier flagged, or that carry a user
         override, for the review dashboard. params: {limit?, offset?}. Read-only; adds
         a previewPath the main process decorates into a vintrace-media:// thumbnail."""
-        limit = int(params.get("limit", 200) or 200)
-        offset = int(params.get("offset", 0) or 0)
+        limit = max(1, min(100, int(params.get("limit", 50) or 50)))
+        offset = max(0, int(params.get("offset", 0) or 0))
+        preview_budget = max(0, min(limit, int(params.get("previewBudget", min(limit, 24)) or 0)))
         result = self.project.db.list_safe_mode_flagged(limit=limit, offset=offset)
-        for item in result.get("items", []):
+        for index, item in enumerate(result.get("items", [])):
             source_path = str(item.get("sourcePath", ""))
-            try:
-                item["previewPath"] = self.project.preview_path_for(source_path, create=True) or ""
-            except Exception:
-                item["previewPath"] = ""
+            if index < preview_budget:
+                try:
+                    item["previewPath"] = self.project.preview_path_for(source_path, create=True) or ""
+                except Exception:
+                    item["previewPath"] = ""
+            else:
+                try:
+                    item["previewPath"] = self.project.preview_path_for(source_path, create=False) or ""
+                except Exception:
+                    item["previewPath"] = ""
             item["mediaKind"] = self._media_kind_for_source(source_path)
             item["name"] = Path(source_path).name
         return result
