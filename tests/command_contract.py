@@ -60,13 +60,20 @@ def _main_allowlist() -> set[str]:
     return _cjs_allowlist("main.cjs")
 
 
+def _mcp_commands() -> set[str]:
+    src = (ROOT / "crossage_fr" / "mcp_server.py").read_text(encoding="utf-8")
+    return set(re.findall(r'_call\(\s*"([a-z_]+)"', src))
+
+
 def main() -> None:
     py = _python_commands()
     allow = _preload_allowlist()
     main_allow = _main_allowlist()
+    mcp = _mcp_commands()
     assert py, "no backend commands found — extraction regex is broken"
     assert allow, "no preload allowlist commands found — extraction regex is broken"
     assert main_allow, "no main.cjs allowlist commands found — extraction regex is broken"
+    assert mcp, "no MCP backend calls found — extraction regex is broken"
 
     # 1) No dead allowlist entries: everything the renderer may call must exist.
     dead = sorted(allow - py)
@@ -95,7 +102,12 @@ def main() -> None:
     stale_internal = sorted(INTERNAL_COMMANDS - py)
     assert not stale_internal, f"INTERNAL_COMMANDS lists non-existent commands: {stale_internal}"
 
-    # 4) MA-2/MA-4: the registry and the required-param schema must reference only
+    # 4) MCP tools are a third backend-command consumer. Every literal command
+    # sent through mcp_server._call must exist in the Python registry.
+    dead_mcp = sorted(mcp - py)
+    assert not dead_mcp, f"MCP tools call backend commands the backend does not handle: {dead_mcp}"
+
+    # 5) MA-2/MA-4: the registry and the required-param schema must reference only
     # real commands, and every registered handler method must exist.
     try:
         from crossage_fr.api_server import DesktopApi
@@ -107,7 +119,7 @@ def main() -> None:
     except ImportError:
         pass
 
-    print(f"command contract ok ({len(py)} backend commands, {len(allow)} renderer-allowlisted)")
+    print(f"command contract ok ({len(py)} backend commands, {len(allow)} renderer-allowlisted, {len(mcp)} MCP-used)")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ dist/
 backend-dist/
 build/
 pyinstaller/
+.tsbuildinfo
 *.dmg
 *.exe
 *.blockmap
