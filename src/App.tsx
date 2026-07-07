@@ -6999,6 +6999,7 @@ export default function App() {
             openOnboarding={openOnboarding}
             language={language}
             onChangeLanguage={(value) => changeLanguage(normalizeLanguage(value))}
+            uiText={uiText}
             consentOnFile={state.consentOnFile}
             setConsent={setConsent}
             recentWorkspaces={recentWorkspaces}
@@ -12588,6 +12589,7 @@ function SettingsView(props: {
   openOnboarding(): void;
   language: LanguageCode;
   onChangeLanguage(value: string): void;
+  uiText(source: string): string;
   consentOnFile: boolean;
   setConsent(value: boolean): void;
   recentWorkspaces: WorkspaceListItem[];
@@ -13021,8 +13023,8 @@ function SettingsView(props: {
             </label>
             <label className="switch-row">
               <span>
-                <strong>Safe Mode profile</strong>
-                <small>Privacy-first catches more sensitive content (more false positives on swimwear/medical); Permissive minimizes them. Custom uses the slider below.</small>
+                <strong>{props.uiText("Safe Mode profile")}</strong>
+                <small>{props.uiText("Privacy-first catches more sensitive content (more false positives on swimwear/medical); Permissive minimizes them. Custom uses the slider below.")}</small>
               </span>
               <select
                 value={props.settings.safeModeProfile ?? "custom"}
@@ -13037,39 +13039,39 @@ function SettingsView(props: {
                   );
                 }}
               >
-                <option value="privacy">Privacy-first (aggressive)</option>
-                <option value="balanced">Balanced</option>
-                <option value="permissive">Permissive (fewer false positives)</option>
-                <option value="custom">Custom</option>
+                <option value="privacy">{props.uiText("Privacy-first (aggressive)")}</option>
+                <option value="balanced">{props.uiText("Balanced")}</option>
+                <option value="permissive">{props.uiText("Permissive (fewer false positives)")}</option>
+                <option value="custom">{props.uiText("Custom")}</option>
               </select>
             </label>
             <Slider
-              label="Safe Mode sensitivity"
+              label={props.uiText("Safe Mode sensitivity")}
               value={props.settings.safeModeThreshold}
               onChange={(value) => setCustomSettings({ safeModeThreshold: value, safeModeProfile: "custom" })}
             />
             <label className="switch-row">
               <span>
-                <strong>Calibrate to your library</strong>
-                <small>Vendor accuracy claims don't transfer — fit Safe Mode to your own photos. Pick a folder of sensitive examples, then a folder of safe examples; everything stays on this device.</small>
+                <strong>{props.uiText("Calibrate to your library")}</strong>
+                <small>{props.uiText("Vendor accuracy claims don't transfer — fit Safe Mode to your own photos. Pick a folder of sensitive examples, then a folder of safe examples; everything stays on this device.")}</small>
               </span>
               <span className="settings-inline-actions">
                 <button type="button" className="secondary compact-action" disabled={!props.settings.safeMode || safeCalibBusy} onClick={() => void calibrateSafeModeFromFolders()}>
-                  {safeCalibBusy ? "Calibrating…" : "Calibrate…"}
+                  {safeCalibBusy ? props.uiText("Calibrating...") : props.uiText("Calibrate...")}
                 </button>
                 <button type="button" className="ghost compact-action" disabled={safeCalibBusy} onClick={() => void resetSafeModeCalibration()}>
-                  Reset
+                  {props.uiText("Reset")}
                 </button>
               </span>
             </label>
             {safeCalibResult && <p className="muted safe-calib-result" role="status" aria-live="polite">{safeCalibResult}</p>}
             <label className="switch-row">
               <span>
-                <strong>Explain why flagged (optional)</strong>
-                <small>Install an on-device body-part detector to see which regions triggered Safe Mode. NudeNet is AGPL-3.0 — download it yourself, then install the .onnx here. Nothing is bundled or sent anywhere.</small>
+                <strong>{props.uiText("Explain why flagged (optional)")}</strong>
+                <small>{props.uiText("Install an on-device body-part detector to see which regions triggered Safe Mode. NudeNet is AGPL-3.0 — download it yourself, then install the .onnx here. Nothing is bundled or sent anywhere.")}</small>
               </span>
               <button type="button" className="secondary compact-action" disabled={explainBusy} onClick={() => void installExplainerFromFile()}>
-                {explainBusy ? "Installing…" : safeExplain?.available ? "Replace explainer…" : "Install explainer…"}
+                {explainBusy ? props.uiText("Installing...") : safeExplain?.available ? props.uiText("Replace explainer...") : props.uiText("Install explainer...")}
               </button>
             </label>
             <p className={`explainer-install-status ${safeExplain?.available ? "is-installed" : "is-absent"}`} role="status">
@@ -13091,11 +13093,11 @@ function SettingsView(props: {
             {explainStatus && <p className="muted safe-calib-result" role="status" aria-live="polite">{explainStatus}</p>}
             <label className="switch-row">
               <span>
-                <strong>Review flagged photos</strong>
-                <small>See every photo Safe Mode marked sensitive and correct false positives. Your keep/allow choices override the classifier and stay on this device.</small>
+                <strong>{props.uiText("Review flagged photos")}</strong>
+                <small>{props.uiText("See every photo Safe Mode marked sensitive and correct false positives. Your keep/allow choices override the classifier and stay on this device.")}</small>
               </span>
               <button type="button" className="secondary compact-action" onClick={() => setSafeReviewOpen(true)}>
-                <ShieldAlert size={16} /> Review…
+                <ShieldAlert size={16} /> {props.uiText("Review...")}
               </button>
             </label>
             <SafeModeReview
@@ -13104,6 +13106,7 @@ function SettingsView(props: {
               invoke={window.crossAge.invoke}
               getSensitiveAuthStatus={props.getSensitiveAuthStatus}
               authenticateSensitiveAccess={props.authenticateSensitiveAccess}
+              uiText={props.uiText}
             />
             <label className="switch-row">
               <span>

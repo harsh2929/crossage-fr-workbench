@@ -6293,6 +6293,7 @@ run("Photos timeline rows avoid quadratic index lookups", () => {
 run("Safe Mode review dashboard honors sensitive collection unlock before listing flagged photos", () => {
   const reviewSource = fs.readFileSync(path.join(ROOT, "src/views/SafeModeReview.tsx"), "utf8");
   const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
+  const i18nSource = fs.readFileSync(path.join(ROOT, "src/i18n.ts"), "utf8");
   const settingsSource = fs.readFileSync(path.join(ROOT, "src/views/photoSettings.ts"), "utf8");
   const photosSource = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
   assert.match(settingsSource, /export const PHOTO_LOCAL_SETTINGS_KEY = "vintrace\.photos\.localSettings"/);
@@ -6305,9 +6306,24 @@ run("Safe Mode review dashboard honors sensitive collection unlock before listin
   assert.match(reviewSource, /loading="lazy" decoding="async"/);
   assert.match(reviewSource, /sensitiveUnlockRequirements\(settings/);
   assert.match(reviewSource, /verifyPhotoSensitivePasscode\(settings, unlockPasscode\)/);
-  assert.match(reviewSource, /authenticateSensitiveAccess\("Unlock Safe Mode review in Vintrace\."\)/);
+  assert.match(reviewSource, /authenticateSensitiveAccess\(uiText\("Unlock Safe Mode review in Vintrace\."\)\)/);
+  assert.match(reviewSource, /uiText\?: \(source: string\) => string/);
+  assert.match(reviewSource, /uiText\("Review flagged photos"\)/);
+  assert.match(reviewSource, /uiText\("Not sensitive"\)/);
+  assert.match(reviewSource, /uiText\("Keep hidden"\)/);
   assert.match(appSource, /getSensitiveAuthStatus=\{getPhotosSensitiveAuthStatus\}/);
   assert.match(appSource, /authenticateSensitiveAccess=\{authenticatePhotosSensitiveAccess\}/);
+  assert.match(appSource, /<SettingsView[\s\S]*uiText=\{uiText\}[\s\S]*consentOnFile=/);
+  assert.match(appSource, /<SafeModeReview[\s\S]*uiText=\{props\.uiText\}/);
+  assert.match(appSource, /props\.uiText\("Safe Mode profile"\)/);
+  assert.match(appSource, /props\.uiText\("Calibrate to your library"\)/);
+  assert.match(appSource, /props\.uiText\("Review flagged photos"\)/);
+  assert.match(i18nSource, /const safeModeReviewLiteralTranslations/);
+  assert.ok((i18nSource.match(/"Review flagged photos":/g) || []).length >= 6);
+  assert.ok((i18nSource.match(/"Not sensitive":/g) || []).length >= 6);
+  assert.ok((i18nSource.match(/"Keep hidden":/g) || []).length >= 6);
+  assert.ok((i18nSource.match(/"Safe Mode profile":/g) || []).length >= 6);
+  assert.ok((i18nSource.match(/"Calibrate to your library":/g) || []).length >= 6);
 });
 
 run("Photos route is lazy-loaded out of the initial renderer chunk", () => {

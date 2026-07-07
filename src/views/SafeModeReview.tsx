@@ -40,6 +40,7 @@ interface SafeModeReviewProps {
   invoke: <T>(command: string, params?: Record<string, unknown>) => Promise<T>;
   getSensitiveAuthStatus?: () => Promise<PhotoSensitiveAuthStatus | null>;
   authenticateSensitiveAccess?: (reason: string) => Promise<PhotoSensitiveAuthResult | null>;
+  uiText?: (source: string) => string;
 }
 
 function readStoredPhotoLocalSettings(): PhotoLocalSettings {
@@ -70,6 +71,7 @@ export default function SafeModeReview({
   invoke,
   getSensitiveAuthStatus,
   authenticateSensitiveAccess,
+  uiText = (source: string) => source,
 }: SafeModeReviewProps) {
   const [items, setItems] = useState<SafeModeFlaggedItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -181,19 +183,19 @@ export default function SafeModeReview({
       });
       if (firstRequirements.deviceAuthRequired) {
         if (!authenticateSensitiveAccess) {
-          setUnlockError("Device authentication is not available in this build.");
+          setUnlockError(uiText("Device authentication is not available in this build."));
           return;
         }
         const status = authStatus?.available ? authStatus : (getSensitiveAuthStatus ? await getSensitiveAuthStatus() : null);
         if (status) setAuthStatus(status);
         if (!status?.available) {
-          setUnlockError(status?.reason || "Device authentication is not available on this computer.");
+          setUnlockError(status?.reason || uiText("Device authentication is not available on this computer."));
           return;
         }
-        const result = await authenticateSensitiveAccess("Unlock Safe Mode review in Vintrace.");
+        const result = await authenticateSensitiveAccess(uiText("Unlock Safe Mode review in Vintrace."));
         setAuthStatus(result || status);
         if (!result?.ok) {
-          setUnlockError(result?.error || result?.reason || "Device authentication did not complete.");
+          setUnlockError(result?.error || result?.reason || uiText("Device authentication did not complete."));
           return;
         }
         verifiedWithDevice = true;
@@ -205,12 +207,12 @@ export default function SafeModeReview({
       });
       if (secondRequirements.passcodeRequired) {
         if (!unlockPasscode) {
-          setUnlockError("Enter the sensitive collection passcode.");
+          setUnlockError(uiText("Enter the sensitive collection passcode."));
           return;
         }
         const verified = await verifyPhotoSensitivePasscode(settings, unlockPasscode);
         if (!verified) {
-          setUnlockError("Passcode did not match.");
+          setUnlockError(uiText("Passcode did not match."));
           return;
         }
       }
@@ -272,28 +274,28 @@ export default function SafeModeReview({
   if (!open) return null;
 
   return (
-    <div className="safe-review-overlay" role="dialog" aria-modal="true" aria-label="Review flagged photos" onClick={onClose}>
+    <div className="safe-review-overlay" role="dialog" aria-modal="true" aria-label={uiText("Review flagged photos")} onClick={onClose}>
       <div className="safe-review-panel" onClick={(event) => event.stopPropagation()}>
         <header className="safe-review-head">
           <h2>
-            <ShieldAlert size={18} aria-hidden="true" /> Review flagged photos
+            <ShieldAlert size={18} aria-hidden="true" /> {uiText("Review flagged photos")}
           </h2>
-          <span className="safe-review-count">{total} flagged</span>
-          <button type="button" className="ghost compact-action safe-review-close" onClick={onClose} aria-label="Close review">
+          <span className="safe-review-count">{total} {uiText("flagged")}</span>
+          <button type="button" className="ghost compact-action safe-review-close" onClick={onClose} aria-label={uiText("Close review")}>
             <X size={18} />
           </button>
         </header>
         <p className="muted safe-review-sub">
-          Safe Mode flagged these on-device. Mark a false positive “Not sensitive”, or keep it hidden — your choice overrides the classifier and stays local.
+          {uiText("Safe Mode flagged these on-device. Mark a false positive “Not sensitive”, or keep it hidden — your choice overrides the classifier and stays local.")}
         </p>
         {error && <p className="safe-review-error" role="alert">{error}</p>}
         {reviewLocked ? (
-          <section className="safe-review-lock" aria-label="Safe Mode review locked">
+          <section className="safe-review-lock" aria-label={uiText("Safe Mode review locked")}>
             <span className="photo-sensitive-lock-icon"><Lock size={20} aria-hidden="true" /></span>
             <div>
-              <strong>Review is locked</strong>
+              <strong>{uiText("Review is locked")}</strong>
               <p className="muted">
-                Unlock the sensitive collection session before showing flagged photos or classifier details.
+                {uiText("Unlock the sensitive collection session before showing flagged photos or classifier details.")}
               </p>
               {passcodeConfigured && (
                 <input
@@ -303,21 +305,21 @@ export default function SafeModeReview({
                   onKeyDown={(event) => {
                     if (event.key === "Enter") void unlockReview();
                   }}
-                  placeholder="Sensitive passcode"
-                  aria-label="Sensitive collection passcode"
+                  placeholder={uiText("Sensitive passcode")}
+                  aria-label={uiText("Sensitive collection passcode")}
                 />
               )}
               <button type="button" className="secondary compact-action" onClick={() => void unlockReview()} disabled={unlocking}>
                 <Lock size={14} />
-                <span>{unlocking ? "Unlocking…" : "Unlock review"}</span>
+                <span>{unlocking ? uiText("Unlocking...") : uiText("Unlock review")}</span>
               </button>
               {unlockError && <small className="photo-inline-status" role="alert">{unlockError}</small>}
             </div>
           </section>
         ) : loading && items.length === 0 ? (
-          <p className="muted safe-review-empty">Loading…</p>
+          <p className="muted safe-review-empty">{uiText("Loading...")}</p>
         ) : items.length === 0 ? (
-          <p className="muted safe-review-empty">Nothing flagged — Safe Mode hasn’t marked any indexed photo as sensitive.</p>
+          <p className="muted safe-review-empty">{uiText("Nothing flagged — Safe Mode hasn’t marked any indexed photo as sensitive.")}</p>
         ) : (
           <>
             <div className="safe-review-grid">
@@ -337,16 +339,16 @@ export default function SafeModeReview({
                         className="safe-review-reveal"
                         onClick={() => toggleReveal(item.assetId)}
                         aria-pressed={isRevealed}
-                        title={isRevealed ? "Hide" : "Reveal"}
+                        title={isRevealed ? uiText("Hide") : uiText("Reveal")}
                       >
                         {isRevealed ? <EyeOff size={14} /> : <Eye size={14} />}
                       </button>
-                      <span className="safe-review-score" title={`Score ${item.score.toFixed(3)} · ${item.modelName || "classifier"}`}>
+                      <span className="safe-review-score" title={`${uiText("Score")} ${item.score.toFixed(3)} · ${item.modelName || uiText("classifier")}`}>
                         {Math.round(item.score * 100)}%
                       </span>
                       {item.override !== null && (
                         <span className={`safe-review-badge ${item.override ? "kept" : "allowed"}`}>
-                          {item.override ? "kept hidden" : "allowed"}
+                          {item.override ? uiText("kept hidden") : uiText("allowed")}
                         </span>
                       )}
                     </div>
@@ -358,13 +360,13 @@ export default function SafeModeReview({
                         if (!ex) {
                           return (
                             <button type="button" className="ghost compact-action safe-review-why" onClick={() => void explainItem(item)}>
-                              <ShieldAlert size={13} /> Why flagged?
+                              <ShieldAlert size={13} /> {uiText("Why flagged?")}
                             </button>
                           );
                         }
-                        if (ex.loading) return <span className="safe-review-explain-note">Analyzing…</span>;
-                        if (!ex.available) return <span className="safe-review-explain-note">No explainer model — install one in Settings.</span>;
-                        if (ex.detections.length === 0) return <span className="safe-review-explain-note">No specific regions detected.</span>;
+                        if (ex.loading) return <span className="safe-review-explain-note">{uiText("Analyzing...")}</span>;
+                        if (!ex.available) return <span className="safe-review-explain-note">{uiText("No explainer model — install one in Settings.")}</span>;
+                        if (ex.detections.length === 0) return <span className="safe-review-explain-note">{uiText("No specific regions detected.")}</span>;
                         return (
                           <div className="safe-review-chips">
                             {ex.detections.slice(0, 6).map((detection, i) => (
@@ -382,7 +384,7 @@ export default function SafeModeReview({
                           className={item.override === false ? "compact-action is-active" : "secondary compact-action"}
                           onClick={() => setOverride(item, false)}
                         >
-                          <Check size={14} /> Not sensitive
+                          <Check size={14} /> {uiText("Not sensitive")}
                         </button>
                         <button
                           type="button"
@@ -390,10 +392,10 @@ export default function SafeModeReview({
                           className={item.override === true ? "compact-action is-active" : "secondary compact-action"}
                           onClick={() => setOverride(item, true)}
                         >
-                          <ShieldAlert size={14} /> Keep hidden
+                          <ShieldAlert size={14} /> {uiText("Keep hidden")}
                         </button>
                         {item.override !== null && (
-                          <button type="button" disabled={busy} className="ghost compact-action" onClick={() => setOverride(item, null)} title="Clear override (use the classifier)">
+                          <button type="button" disabled={busy} className="ghost compact-action" onClick={() => setOverride(item, null)} title={uiText("Clear override (use the classifier)")}>
                             <RotateCcw size={14} />
                           </button>
                         )}
@@ -405,9 +407,9 @@ export default function SafeModeReview({
             </div>
             {hasMore && (
               <div className="safe-review-footer">
-                <span className="muted">{items.length} of {total} shown</span>
+                <span className="muted">{items.length} {uiText("of")} {total} {uiText("shown")}</span>
                 <button type="button" className="secondary compact-action" disabled={loading} onClick={() => void loadPage(nextOffset, true)}>
-                  {loading ? "Loading…" : "Load more"}
+                  {loading ? uiText("Loading...") : uiText("Load more")}
                 </button>
               </div>
             )}
