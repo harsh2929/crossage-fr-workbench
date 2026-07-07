@@ -6303,6 +6303,15 @@ run("Photos grid search reload is debounced before backend fetches", () => {
   assert.doesNotMatch(autoGridEffect[0], /loadPage\(activeId, 0, sort, searchQuery,/);
 });
 
+run("Photos grid page limit stays within the preview generation budget", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  assert.match(source, /const PAGE_LIMIT = 64;/);
+  assert.match(source, /const PREVIEW_BUDGET = PAGE_LIMIT;/);
+  assert.match(source, /limit: PAGE_LIMIT,\s*previewBudget: PREVIEW_BUDGET,/);
+  assert.doesNotMatch(source, /const PAGE_LIMIT = 100;/);
+  assert.doesNotMatch(source, /const PREVIEW_BUDGET = 64;/);
+});
+
 run("Photos lightbox viewed events patch recent rail without reloading folders", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
   assert.match(source, /const patchRecentActivityFolder = useCallback/);

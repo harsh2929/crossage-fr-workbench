@@ -325,9 +325,10 @@ import {
 } from "./photoVirtualGrid";
 import { hasMorePages, nextOffset } from "./photosPaging";
 
-const PAGE_LIMIT = 100;
-// Matches the backend per-call preview-generation cap (api_server clamps to 64).
-const PREVIEW_BUDGET = 64;
+// Keep browse pages within the backend per-call preview-generation cap so the
+// initial grid cannot leave a guaranteed tail of full-original fallbacks.
+const PAGE_LIMIT = 64;
+const PREVIEW_BUDGET = PAGE_LIMIT;
 const COVER_PREVIEW_BUDGET = 32;
 const PHOTO_GRID_GAP = 8;
 const PHOTO_GRID_HEADER_HEIGHT = 28;
