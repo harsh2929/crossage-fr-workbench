@@ -13,6 +13,9 @@ const lockPath = path.join(repoRoot, "package-lock.json");
 const checksumName = "SHA256SUMS.txt";
 const sbomName = "vintrace-sbom.json";
 const provenanceName = "vintrace-provenance.json";
+const checksumSignatureName = `${checksumName}.sig`;
+const releaseMetadataNames = new Set([sbomName, provenanceName]);
+const installerExtensions = new Set([".appimage", ".deb", ".dmg", ".exe", ".msi", ".pkg", ".rpm", ".snap", ".zip"]);
 
 function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
@@ -42,18 +45,45 @@ function sha256(file) {
   return hash.digest("hex");
 }
 
-function walk(root) {
-  if (!fs.existsSync(root)) return [];
-  const result = [];
-  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-    const fullPath = path.join(root, entry.name);
-    if (entry.isDirectory()) {
-      result.push(...walk(fullPath));
-    } else if (entry.isFile()) {
-      result.push(fullPath);
-    }
+function isReleaseArtifactName(name, options = {}) {
+  const includeMetadata = options.includeMetadata !== false;
+  const lower = String(name || "").toLowerCase();
+  if (!lower || lower === checksumName.toLowerCase() || lower === checksumSignatureName.toLowerCase()) {
+    return false;
   }
-  return result.sort((a, b) => a.localeCompare(b));
+  if (releaseMetadataNames.has(name) || releaseMetadataNames.has(lower)) {
+    return includeMetadata;
+  }
+  if (lower.endsWith(".blockmap")) {
+    return true;
+  }
+  if (lower.endsWith(".yml")) {
+    return true;
+  }
+  return installerExtensions.has(path.extname(lower));
+}
+
+function releaseArtifactFiles(root, options = {}) {
+  if (!fs.existsSync(root)) return [];
+  return fs.readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && isReleaseArtifactName(entry.name, options))
+    .map((entry) => path.join(root, entry.name))
+    .sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
+}
+
+function artifactRecord(file, root = dist) {
+  const stat = fs.statSync(file);
+  return {
+    path: path.relative(root, file).replace(/\\/g, "/"),
+    bytes: stat.size,
+    sha256: sha256(file)
+  };
+}
+
+function checksumLines(records) {
+  return records
+    .map((record) => `${record.sha256}  ${record.path}`)
+    .sort();
 }
 
 function lockPackages(lock) {
@@ -86,17 +116,7 @@ function main() {
   const commit = process.env.VINTRACE_BUILD_SHA || process.env.GITHUB_SHA || gitValue(["rev-parse", "HEAD"], "local");
   const ref = process.env.VINTRACE_BUILD_REF || process.env.GITHUB_REF_NAME || gitValue(["rev-parse", "--abbrev-ref", "HEAD"], "");
   const dirty = gitValue(["status", "--porcelain"], "") ? true : false;
-  const filesBeforeMetadata = walk(dist)
-    .filter((file) => ![checksumName, sbomName, provenanceName].includes(path.basename(file)))
-    .map((file) => {
-      const relative = path.relative(dist, file).replace(/\\/g, "/");
-      const stat = fs.statSync(file);
-      return {
-        path: relative,
-        bytes: stat.size,
-        sha256: sha256(file)
-      };
-    });
+  const filesBeforeMetadata = releaseArtifactFiles(dist, { includeMetadata: false }).map((file) => artifactRecord(file, dist));
 
   const sbom = {
     bomFormat: "Vintrace-SBOM",
@@ -140,14 +160,11 @@ function main() {
   writeJson(path.join(dist, sbomName), sbom);
   writeJson(path.join(dist, provenanceName), provenance);
 
-  const signatureName = `${checksumName}.sig`;
-  const hashable = walk(dist)
-    .filter((file) => ![checksumName, signatureName].includes(path.basename(file)))
-    .map((file) => {
-      const relative = path.relative(dist, file).replace(/\\/g, "/");
-      return `${sha256(file)}  ${relative}`;
-    })
-    .sort();
+  const metadataRecords = [sbomName, provenanceName]
+    .map((name) => path.join(dist, name))
+    .filter((file) => fs.existsSync(file))
+    .map((file) => artifactRecord(file, dist));
+  const hashable = checksumLines([...filesBeforeMetadata, ...metadataRecords]);
   const checksumBytes = Buffer.from(`${hashable.join("\n")}\n`, "utf8");
   fs.writeFileSync(path.join(dist, checksumName), checksumBytes);
 
@@ -161,7 +178,7 @@ function main() {
   if (privKeyPath) {
     const privateKey = crypto.createPrivateKey(fs.readFileSync(privKeyPath, "utf8"));
     const signature = crypto.sign(null, checksumBytes, privateKey);
-    fs.writeFileSync(path.join(dist, signatureName), signature);
+    fs.writeFileSync(path.join(dist, checksumSignatureName), signature);
     signed = true;
   }
 
@@ -171,10 +188,19 @@ function main() {
     dist,
     files: hashable.length,
     checksums: checksumName,
-    signature: signed ? signatureName : null,
+    signature: signed ? checksumSignatureName : null,
     sbom: sbomName,
     provenance: provenanceName
   }, null, 2));
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  artifactRecord,
+  checksumLines,
+  isReleaseArtifactName,
+  releaseArtifactFiles,
+};

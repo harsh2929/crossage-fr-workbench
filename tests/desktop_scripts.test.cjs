@@ -1,7 +1,11 @@
 "use strict";
 
 const assert = require("assert");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
 const { resolveMcpbRunner, runMcpbStep } = require("../desktop/scripts/build-mcp-bundle.cjs");
+const { isReleaseArtifactName, releaseArtifactFiles, checksumLines } = require("../desktop/scripts/create-release-artifacts.cjs");
 const { runFirstPython } = require("../desktop/scripts/python-runner.cjs");
 
 function run(name, fn) {
@@ -103,6 +107,66 @@ run("python runner warns when explicit PYTHON is missing", () => {
   assert.strictEqual(result.ran, true);
   assert.strictEqual(result.command, "python");
   assert.ok(warnings.some((message) => message.includes("PYTHON points to missing interpreter")), warnings);
+});
+
+run("release artifact checksums include only top-level release files", () => {
+  const dist = fs.mkdtempSync(path.join(os.tmpdir(), "vintrace-release-artifacts-"));
+  try {
+    fs.mkdirSync(path.join(dist, "assets"), { recursive: true });
+    fs.mkdirSync(path.join(dist, "mac-arm64", "Vintrace.app", "Contents", "MacOS"), { recursive: true });
+    for (const name of [
+      "Vintrace Setup 0.1.0.exe",
+      "Vintrace-0.1.0-arm64.dmg",
+      "Vintrace-0.1.0-mac.zip",
+      "Vintrace-0.1.0-mac.zip.blockmap",
+      "latest-mac.yml",
+      "vintrace-sbom.json",
+      "vintrace-provenance.json",
+      "SHA256SUMS.txt",
+      "SHA256SUMS.txt.sig",
+      "builder-effective-config.yaml",
+      "index.html",
+    ]) {
+      fs.writeFileSync(path.join(dist, name), name);
+    }
+    fs.writeFileSync(path.join(dist, "assets", "index.js"), "compiled app");
+    fs.writeFileSync(path.join(dist, "mac-arm64", "Vintrace.app", "Contents", "MacOS", "Vintrace"), "binary");
+
+    assert.strictEqual(isReleaseArtifactName("builder-effective-config.yaml"), false);
+    assert.strictEqual(isReleaseArtifactName("index.html"), false);
+    assert.strictEqual(isReleaseArtifactName("latest-mac.yml"), true);
+    assert.strictEqual(isReleaseArtifactName("vintrace-provenance.json"), true);
+    const artifactNames = releaseArtifactFiles(dist).map((file) => path.basename(file));
+    assert.deepStrictEqual(artifactNames, [
+      "latest-mac.yml",
+      "Vintrace Setup 0.1.0.exe",
+      "Vintrace-0.1.0-arm64.dmg",
+      "Vintrace-0.1.0-mac.zip",
+      "Vintrace-0.1.0-mac.zip.blockmap",
+      "vintrace-provenance.json",
+      "vintrace-sbom.json",
+    ].sort((a, b) => a.localeCompare(b)));
+    assert.deepStrictEqual(
+      releaseArtifactFiles(dist, { includeMetadata: false }).map((file) => path.basename(file)),
+      artifactNames.filter((name) => !name.startsWith("vintrace-"))
+    );
+    assert.deepStrictEqual(checksumLines([
+      { sha256: "b".repeat(64), path: "b.zip" },
+      { sha256: "a".repeat(64), path: "a.dmg" },
+    ]), [
+      `${"a".repeat(64)}  a.dmg`,
+      `${"b".repeat(64)}  b.zip`,
+    ]);
+  } finally {
+    fs.rmSync(dist, { recursive: true, force: true });
+  }
+});
+
+run("localization checker scans SafeModeReview and gates uncovered literals", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "desktop", "scripts", "check-localization.cjs"), "utf8");
+  assert.ok(source.includes("SafeModeReview.tsx"));
+  assert.ok(source.includes("VISIBLE_LITERAL_UNCOVERED_BASELINE"));
+  assert.ok(source.includes("uncovered.length <= VISIBLE_LITERAL_UNCOVERED_BASELINE"));
 });
 
 console.log("\nall desktop script tests passed");

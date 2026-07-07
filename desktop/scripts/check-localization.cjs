@@ -9,7 +9,8 @@ const repoRoot = path.resolve(__dirname, "..", "..");
 const i18nPath = path.join(repoRoot, "src", "i18n.ts");
 const appPath = path.join(repoRoot, "src", "App.tsx");
 const extraUiPaths = [
-  path.join(repoRoot, "src", "views", "PhotosView.tsx")
+  path.join(repoRoot, "src", "views", "PhotosView.tsx"),
+  path.join(repoRoot, "src", "views", "SafeModeReview.tsx")
 ];
 const source = fs.readFileSync(i18nPath, "utf8");
 const photosUiSource = fs.existsSync(extraUiPaths[0])
@@ -21,6 +22,7 @@ const appSource = [appPath, ...extraUiPaths]
   .join("\n");
 const checks = [];
 const PHOTOS_UI_TEXT_COVERAGE_FLOOR = 0.85;
+const VISIBLE_LITERAL_UNCOVERED_BASELINE = 48;
 
 function add(name, ok, detail, data = {}) {
   checks.push({ name, ok: Boolean(ok), detail, ...data });
@@ -160,6 +162,9 @@ for (const language of nonEnglish) {
 const visibleLiterals = visibleLiteralCandidates();
 const uncovered = visibleLiterals.filter((text) => nonEnglish.every((language) => i18n.translateUiText(language, text) === text));
 add("visible literal translation coverage", visibleLiterals.length > 100, `${visibleLiterals.length - uncovered.length}/${visibleLiterals.length} visible literals have a non-English mapping`, {
+  uncovered: uncovered.slice(0, 80)
+});
+add("visible literal uncovered ratchet", uncovered.length <= VISIBLE_LITERAL_UNCOVERED_BASELINE, `${uncovered.length}/${VISIBLE_LITERAL_UNCOVERED_BASELINE} uncovered visible literals`, {
   uncovered: uncovered.slice(0, 80)
 });
 
