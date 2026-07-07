@@ -24,6 +24,8 @@ from crossage_fr.workspace_registry import now_iso, restrict_file_mode
 
 SCHEMA_VERSION = 4
 PHOTO_LOCATION_INDEX_VERSION = "1"
+PHOTO_IMPORT_BACKFILL_SIGNATURE_META_KEY = "photoImportBackfillSignature"
+PHOTO_IMPORT_BACKFILL_SIGNATURE_VERSION = "1"
 SQLITE_CACHE_SIZE_KIB = 65536
 SQLITE_MMAP_SIZE_BYTES = 256 * 1024 * 1024
 PHOTO_OPERATION_JOURNAL_PENDING_LIMIT = 250
@@ -7662,10 +7664,6 @@ class WorkspaceDb:
         metadata = parse_json(row["metadata_json"])
         archived_at = str(metadata.get("archivedAt", "") or "")
         archived_reason = str(metadata.get("archivedReason", "") or "")
-        if conn is not None:
-            counts = self._photo_import_scan_counts(import_id, conn)
-            imported_count = max(imported_count, counts["imported"])
-            failed_count = max(failed_count, counts["failed"])
         return {
             "importId": import_id,
             "sourceKind": str(row["source_kind"] or "folder"),
@@ -7790,10 +7788,64 @@ class WorkspaceDb:
             (str(import_id or ""), str(source_path or "")),
         )
 
+    def _photo_import_backfill_signature(self, conn: sqlite3.Connection) -> dict[str, Any]:
+        run_row = conn.execute(
+            """
+            SELECT COUNT(*) AS n, COALESCE(MAX(updated_at), '') AS max_updated_at
+            FROM scan_runs
+            """
+        ).fetchone()
+        file_row = conn.execute(
+            """
+            SELECT COUNT(*) AS n, COALESCE(MAX(processed_at), '') AS max_processed_at
+            FROM scan_files
+            """
+        ).fetchone()
+        error_row = conn.execute(
+            """
+            SELECT COUNT(*) AS n, COALESCE(MAX(processed_at), '') AS max_processed_at
+            FROM scan_files
+            WHERE status = 'error' OR phase = 'error'
+            """
+        ).fetchone()
+        return {
+            "version": PHOTO_IMPORT_BACKFILL_SIGNATURE_VERSION,
+            "scanRuns": int(run_row["n"] if run_row else 0),
+            "maxScanRunUpdatedAt": str(run_row["max_updated_at"] or "") if run_row else "",
+            "scanFiles": int(file_row["n"] if file_row else 0),
+            "maxScanFileProcessedAt": str(file_row["max_processed_at"] or "") if file_row else "",
+            "errorScanFiles": int(error_row["n"] if error_row else 0),
+            "maxErrorScanFileProcessedAt": str(error_row["max_processed_at"] or "") if error_row else "",
+        }
+
+    def _photo_import_backfill_signature_value(self, signature: dict[str, Any]) -> str:
+        return json.dumps(signature, separators=(",", ":"), sort_keys=True)
+
+    def _photo_import_backfill_signature_is_current(self, signature_value: str, conn: sqlite3.Connection) -> bool:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = ? LIMIT 1",
+            (PHOTO_IMPORT_BACKFILL_SIGNATURE_META_KEY,),
+        ).fetchone()
+        if row is None or str(row["value"] or "") != signature_value:
+            return False
+        missing_session_row = conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM scan_runs AS r
+            LEFT JOIN photo_import_sessions AS s ON s.import_id = r.run_id
+            WHERE s.import_id IS NULL
+            """
+        ).fetchone()
+        return int(missing_session_row["n"] if missing_session_row else 0) == 0
+
     def backfill_photo_import_sessions_from_scan_runs(self, conn: sqlite3.Connection | None = None) -> int:
         if conn is None:
             with self.connect() as local_conn:
                 return self.backfill_photo_import_sessions_from_scan_runs(local_conn)
+        signature = self._photo_import_backfill_signature(conn)
+        signature_value = self._photo_import_backfill_signature_value(signature)
+        if self._photo_import_backfill_signature_is_current(signature_value, conn):
+            return 0
         rows = conn.execute("SELECT run_id FROM scan_runs ORDER BY updated_at ASC, started_at ASC").fetchall()
         total = 0
         for row in rows:
@@ -7816,6 +7868,10 @@ class WorkspaceDb:
                 source_path=str(row["path"] or ""),
                 reason=reason,
             )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+            (PHOTO_IMPORT_BACKFILL_SIGNATURE_META_KEY, signature_value),
+        )
         return total
 
     def photo_import_session_by_id(self, import_id: str, conn: sqlite3.Connection | None = None) -> dict[str, Any] | None:

@@ -889,6 +889,170 @@ def test_photo_backfills_legacy_scan_rows_into_assets_sessions_and_failures() ->
     print("ok legacy scan rows backfill assets, sessions, and failures")
 
 
+def test_photo_import_session_backfill_skips_unchanged_scan_signature() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        db = WorkspaceDb(base / "workspace.db")
+        imported = base / "legacy-cached.jpg"
+        failed = base / "legacy-cached-broken.jpg"
+        imported.write_bytes(b"legacy cached bytes")
+        with db.connect() as conn:
+            conn.execute("DELETE FROM photo_import_failures")
+            conn.execute("DELETE FROM photo_import_sessions")
+            conn.execute("DELETE FROM scan_files")
+            conn.execute("DELETE FROM scan_runs")
+            conn.execute(
+                """
+                INSERT INTO scan_runs(
+                    run_id, label, source, root_path, status, started_at, completed_at, updated_at,
+                    total, processed, added, matched, clustered, skipped, errors, unmatched,
+                    safe_filtered, video_files, video_frames, video_protected, cancelled, last_path
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "legacy-cached-run",
+                    "Legacy cached",
+                    "manual",
+                    str(base),
+                    "complete",
+                    "2024-01-02T00:00:00Z",
+                    "2024-01-02T00:00:03Z",
+                    "2024-01-02T00:00:03Z",
+                    2,
+                    2,
+                    1,
+                    0,
+                    0,
+                    0,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    str(failed),
+                ),
+            )
+            conn.executemany(
+                """
+                INSERT INTO scan_files(
+                    run_id, path, path_key, size, mtime_ns, content_hash,
+                    status, phase, message, candidate_id, processed_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        "legacy-cached-run",
+                        str(imported),
+                        "legacy-cached-key",
+                        imported.stat().st_size,
+                        123,
+                        "legacy-cached-hash",
+                        "completed",
+                        "processed",
+                        "",
+                        "",
+                        "2024-01-02T00:00:01Z",
+                    ),
+                    (
+                        "legacy-cached-run",
+                        str(failed),
+                        "legacy-cached-failed-key",
+                        0,
+                        0,
+                        "",
+                        "error",
+                        "error",
+                        "cached decode failure",
+                        "",
+                        "2024-01-02T00:00:02Z",
+                    ),
+                ],
+            )
+
+        original_upsert = db._upsert_photo_import_session_from_scan_run
+        original_counts = db._photo_import_scan_counts
+        upsert_calls: list[str] = []
+
+        def counted_upsert(run_id: str, conn: sqlite3.Connection) -> dict[str, Any] | None:
+            upsert_calls.append(run_id)
+            return original_upsert(run_id, conn)
+
+        db._upsert_photo_import_session_from_scan_run = counted_upsert  # type: ignore[method-assign]
+        try:
+            sessions = db.list_photo_import_sessions()
+        finally:
+            db._upsert_photo_import_session_from_scan_run = original_upsert  # type: ignore[method-assign]
+        assert upsert_calls == ["legacy-cached-run"], upsert_calls
+        assert sessions and sessions[0]["importId"] == "legacy-cached-run", sessions
+        assert sessions[0]["importedCount"] == 1, sessions
+        assert sessions[0]["failedCount"] == 1, sessions
+
+        def fail_upsert(_run_id: str, _conn: sqlite3.Connection) -> dict[str, Any] | None:
+            raise AssertionError("unchanged import-session reads should skip legacy scan-run backfill")
+
+        def fail_counts(_import_id: str, _conn: sqlite3.Connection) -> dict[str, int]:
+            raise AssertionError("import-session row hydration should use stored counts, not per-session recounts")
+
+        db._upsert_photo_import_session_from_scan_run = fail_upsert  # type: ignore[method-assign]
+        db._photo_import_scan_counts = fail_counts  # type: ignore[method-assign]
+        try:
+            sessions_again = db.list_photo_import_sessions()
+            failures_again = db.list_photo_import_failures(import_id="legacy-cached-run")
+            recovered_summary = db.photo_recovered_summary()
+        finally:
+            db._upsert_photo_import_session_from_scan_run = original_upsert  # type: ignore[method-assign]
+            db._photo_import_scan_counts = original_counts  # type: ignore[method-assign]
+        assert sessions_again[0]["importId"] == "legacy-cached-run", sessions_again
+        assert len(failures_again) == 1, failures_again
+        assert failures_again[0]["reason"] == "cached decode failure", failures_again
+        assert recovered_summary["failureCount"] == 1, recovered_summary
+
+        with db.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO scan_runs(
+                    run_id, label, source, root_path, status, started_at, completed_at, updated_at,
+                    total, processed, added, matched, clustered, skipped, errors, unmatched,
+                    safe_filtered, video_files, video_frames, video_protected, cancelled, last_path
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "legacy-cached-run-new",
+                    "Legacy cached new",
+                    "manual",
+                    str(base),
+                    "complete",
+                    "2024-01-03T00:00:00Z",
+                    "2024-01-03T00:00:01Z",
+                    "2024-01-03T00:00:01Z",
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    "",
+                ),
+            )
+        upsert_calls = []
+        db._upsert_photo_import_session_from_scan_run = counted_upsert  # type: ignore[method-assign]
+        try:
+            db.list_photo_import_sessions()
+        finally:
+            db._upsert_photo_import_session_from_scan_run = original_upsert  # type: ignore[method-assign]
+        assert set(upsert_calls) == {"legacy-cached-run", "legacy-cached-run-new"}, upsert_calls
+    print("ok photo import session backfill skips unchanged scan signature")
+
+
 def test_photo_backfills_stream_without_full_manifest_or_asset_path_sets() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
@@ -18578,6 +18742,7 @@ if __name__ == "__main__":
     test_photo_schema_migrates_legacy_album_rows_without_losing_covers()
     test_photo_schema_migrates_legacy_organization_tables_without_losing_rows()
     test_photo_backfills_legacy_scan_rows_into_assets_sessions_and_failures()
+    test_photo_import_session_backfill_skips_unchanged_scan_signature()
     test_photo_backfills_stream_without_full_manifest_or_asset_path_sets()
     test_photo_asset_page_materializes_filter_once_for_count_and_page()
     test_scan_runs_create_photo_import_sessions_and_import_folders()
