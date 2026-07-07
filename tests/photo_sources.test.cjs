@@ -13,13 +13,13 @@ const {
   uniquePhotoSources,
 } = require("../desktop/main/photo-sources.cjs");
 
-function testMountedDrivePhotoSourcesEnumeratesVolumes() {
+async function testMountedDrivePhotoSourcesEnumeratesVolumes() {
   const root = makeTempDir();
   for (const volume of ["MyUSB", "SD Card", "Backup Drive"]) {
     fs.mkdirSync(path.join(root, volume, "Photos"), { recursive: true });
   }
   fs.writeFileSync(path.join(root, "loose-file.txt"), "x");
-  const drives = mountedDrivePhotoSources({ platform: "darwin", mountRoots: [root] });
+  const drives = await mountedDrivePhotoSources({ platform: "darwin", mountRoots: [root] });
   assert.deepStrictEqual(
     drives.map((source) => source.label).sort(),
     ["Backup Drive", "MyUSB", "SD Card"],
@@ -34,7 +34,7 @@ function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "vintrace-photo-sources-"));
 }
 
-function testMountedCameraDcimSources() {
+async function testMountedCameraDcimSources() {
   const root = makeTempDir();
   const volumes = path.join(root, "Volumes");
   const camera = path.join(volumes, "EOS_CARD");
@@ -42,7 +42,7 @@ function testMountedCameraDcimSources() {
   fs.mkdirSync(path.join(dcim, "100CANON"), { recursive: true });
   fs.mkdirSync(path.join(volumes, "Docs", "Files"), { recursive: true });
 
-  const sources = mountedCameraPhotoSources({ platform: "darwin", mountRoots: [volumes] });
+  const sources = await mountedCameraPhotoSources({ platform: "darwin", mountRoots: [volumes] });
   assert.strictEqual(sources.length, 1, sources);
   assert.strictEqual(sources[0].id, "mounted-camera-eos-card");
   assert.strictEqual(sources[0].label, "EOS_CARD DCIM");
@@ -54,12 +54,12 @@ function testMountedCameraDcimSources() {
   fs.rmSync(root, { recursive: true, force: true });
 }
 
-function testMountedDcimRootSources() {
+async function testMountedDcimRootSources() {
   const root = makeTempDir();
   const dcim = path.join(root, "DCIM");
   fs.mkdirSync(path.join(dcim, "100APPLE"), { recursive: true });
 
-  const sources = mountedCameraPhotoSources({ platform: "linux", mountRoots: [dcim] });
+  const sources = await mountedCameraPhotoSources({ platform: "linux", mountRoots: [dcim] });
   assert.strictEqual(sources.length, 1, sources);
   assert.strictEqual(sources[0].kind, "camera");
   assert.strictEqual(sources[0].path, dcim);
@@ -67,13 +67,13 @@ function testMountedDcimRootSources() {
   fs.rmSync(root, { recursive: true, force: true });
 }
 
-function testMountedVolumeRootSources() {
+async function testMountedVolumeRootSources() {
   const root = makeTempDir();
   const volume = path.join(root, "EOS_CARD");
   const dcim = path.join(volume, "DCIM");
   fs.mkdirSync(path.join(dcim, "100CANON"), { recursive: true });
 
-  const sources = mountedCameraPhotoSources({ platform: "darwin", mountRoots: [volume] });
+  const sources = await mountedCameraPhotoSources({ platform: "darwin", mountRoots: [volume] });
   assert.strictEqual(sources.length, 1, sources);
   assert.strictEqual(sources[0].id, "mounted-camera-eos-card");
   assert.strictEqual(sources[0].label, "EOS_CARD DCIM");
@@ -82,13 +82,13 @@ function testMountedVolumeRootSources() {
   fs.rmSync(root, { recursive: true, force: true });
 }
 
-function testMountedPhoneNestedDcimSources() {
+async function testMountedPhoneNestedDcimSources() {
   const root = makeTempDir();
   const volumes = path.join(root, "Volumes");
   const dcim = path.join(volumes, "Pixel 8", "Internal shared storage", "DCIM");
   fs.mkdirSync(path.join(dcim, "Camera"), { recursive: true });
 
-  const sources = mountedCameraPhotoSources({ platform: "darwin", mountRoots: [volumes] });
+  const sources = await mountedCameraPhotoSources({ platform: "darwin", mountRoots: [volumes] });
   assert.strictEqual(sources.length, 1, sources);
   assert.strictEqual(sources[0].id, "mounted-camera-pixel-8-internal-shared-storage-dcim");
   assert.strictEqual(sources[0].label, "Pixel 8 Internal shared storage/DCIM");
@@ -100,7 +100,7 @@ function testMountedPhoneNestedDcimSources() {
   fs.rmSync(root, { recursive: true, force: true });
 }
 
-function testMountedVolumeMultipleMediaRootsHaveUniqueIds() {
+async function testMountedVolumeMultipleMediaRootsHaveUniqueIds() {
   const root = makeTempDir();
   const volumes = path.join(root, "Volumes");
   const volume = path.join(volumes, "HYBRID_CARD");
@@ -111,7 +111,7 @@ function testMountedVolumeMultipleMediaRootsHaveUniqueIds() {
   fs.mkdirSync(path.join(privateRoot, "AVCHD"), { recursive: true });
   fs.mkdirSync(path.join(mpRoot, "100ANV01"), { recursive: true });
 
-  const sources = mountedCameraPhotoSources({ platform: "darwin", mountRoots: [volumes] });
+  const sources = await mountedCameraPhotoSources({ platform: "darwin", mountRoots: [volumes] });
   assert.deepStrictEqual(sources.map((source) => source.id), [
     "mounted-camera-hybrid-card",
     "mounted-camera-hybrid-card-private",
@@ -122,18 +122,18 @@ function testMountedVolumeMultipleMediaRootsHaveUniqueIds() {
   fs.rmSync(root, { recursive: true, force: true });
 }
 
-function testNonMediaMountedVolumeIgnored() {
+async function testNonMediaMountedVolumeIgnored() {
   const root = makeTempDir();
   const volumes = path.join(root, "Volumes");
   fs.mkdirSync(path.join(volumes, "Docs", "Files"), { recursive: true });
 
-  const sources = mountedCameraPhotoSources({ platform: "darwin", mountRoots: [volumes] });
+  const sources = await mountedCameraPhotoSources({ platform: "darwin", mountRoots: [volumes] });
   assert.deepStrictEqual(sources, []);
 
   fs.rmSync(root, { recursive: true, force: true });
 }
 
-function testBuildSystemPhotoSourcesIncludesMountedOverride() {
+async function testBuildSystemPhotoSourcesIncludesMountedOverride() {
   const root = makeTempDir();
   const pictures = path.join(root, "Pictures");
   const volumes = path.join(root, "mnt");
@@ -141,7 +141,7 @@ function testBuildSystemPhotoSourcesIncludesMountedOverride() {
   fs.mkdirSync(pictures, { recursive: true });
   fs.mkdirSync(dcim, { recursive: true });
 
-  const sources = buildSystemPhotoSources({
+  const sources = await buildSystemPhotoSources({
     platform: "darwin",
     home: root,
     pictures,
@@ -178,14 +178,21 @@ function testUniquePhotoSourcesDedupesResolvedPaths() {
   fs.rmSync(root, { recursive: true, force: true });
 }
 
-testMountedCameraDcimSources();
-testMountedDcimRootSources();
-testMountedVolumeRootSources();
-testMountedPhoneNestedDcimSources();
-testMountedVolumeMultipleMediaRootsHaveUniqueIds();
-testNonMediaMountedVolumeIgnored();
-testBuildSystemPhotoSourcesIncludesMountedOverride();
-testMountedDrivePhotoSourcesEnumeratesVolumes();
-testDefaultMountRoots();
-testUniquePhotoSourcesDedupesResolvedPaths();
-console.log("photo sources ok");
+async function main() {
+  await testMountedCameraDcimSources();
+  await testMountedDcimRootSources();
+  await testMountedVolumeRootSources();
+  await testMountedPhoneNestedDcimSources();
+  await testMountedVolumeMultipleMediaRootsHaveUniqueIds();
+  await testNonMediaMountedVolumeIgnored();
+  await testBuildSystemPhotoSourcesIncludesMountedOverride();
+  await testMountedDrivePhotoSourcesEnumeratesVolumes();
+  testDefaultMountRoots();
+  testUniquePhotoSourcesDedupesResolvedPaths();
+  console.log("photo sources ok");
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

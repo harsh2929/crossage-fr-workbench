@@ -866,10 +866,10 @@ function pathAvailable(targetPath) {
   }
 }
 
-function systemPhotoSources() {
+async function systemPhotoSources() {
   const home = safeUserPath("home") || os.homedir();
   const pictures = safeUserPath("pictures") || path.join(home, "Pictures");
-  return buildSystemPhotoSources({
+  return await buildSystemPhotoSources({
     platform: process.platform,
     home,
     pictures,
@@ -4024,7 +4024,7 @@ ipcMain.handle("diagnostics:record-event", async (event, payload = {}) => {
 
 ipcMain.handle("photos:get-sources", async (event) => {
   assertTrustedSender(event);
-  return systemPhotoSources();
+  return await systemPhotoSources();
 });
 
 ipcMain.handle("photos:sensitive-auth-status", async (event) => {

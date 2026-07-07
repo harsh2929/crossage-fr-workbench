@@ -4,31 +4,34 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-function pathAvailable(targetPath) {
+async function pathAvailable(targetPath) {
   try {
-    return Boolean(targetPath && fs.existsSync(targetPath));
+    if (!targetPath) return false;
+    await fs.promises.access(targetPath, fs.constants.F_OK);
+    return true;
   } catch {
     return false;
   }
 }
 
-function pathIsDirectory(targetPath) {
+async function pathIsDirectory(targetPath) {
   try {
-    return Boolean(targetPath && fs.statSync(targetPath).isDirectory());
+    if (!targetPath) return false;
+    return (await fs.promises.stat(targetPath)).isDirectory();
   } catch {
     return false;
   }
 }
 
-function safeReadDir(targetPath, limit = 80) {
+async function safeReadDir(targetPath, limit = 80) {
   try {
-    return fs.readdirSync(targetPath, { withFileTypes: true }).slice(0, limit);
+    return (await fs.promises.readdir(targetPath, { withFileTypes: true })).slice(0, limit);
   } catch {
     return [];
   }
 }
 
-function photoSource(id, label, detail, sourcePath, kind = "folder", platform = process.platform) {
+async function photoSource(id, label, detail, sourcePath, kind = "folder", platform = process.platform) {
   return {
     id,
     label,
@@ -36,7 +39,7 @@ function photoSource(id, label, detail, sourcePath, kind = "folder", platform = 
     path: sourcePath,
     kind,
     platform,
-    available: pathAvailable(sourcePath)
+    available: await pathAvailable(sourcePath)
   };
 }
 
@@ -86,9 +89,9 @@ function defaultMountRoots(platform = process.platform, home = os.homedir(), env
   ].filter(Boolean);
 }
 
-function childDirectories(parent, wantedNames) {
+async function childDirectories(parent, wantedNames) {
   const matches = [];
-  const entries = safeReadDir(parent);
+  const entries = await safeReadDir(parent);
   for (const wantedName of wantedNames) {
     const wanted = String(wantedName).toLowerCase();
     for (const entry of entries) {
@@ -129,24 +132,24 @@ function looksLikePhoneStorageDirectory(name) {
   );
 }
 
-function mountedMediaCandidatesForVolume(volumePath) {
+async function mountedMediaCandidatesForVolume(volumePath) {
   const candidates = [];
-  for (const mediaPath of childDirectories(volumePath, CAMERA_MEDIA_ROOT_NAMES)) {
+  for (const mediaPath of await childDirectories(volumePath, CAMERA_MEDIA_ROOT_NAMES)) {
     candidates.push(mountedMediaRootCandidate(volumePath, mediaPath, [path.basename(mediaPath)]));
   }
-  for (const entry of safeReadDir(volumePath)) {
+  for (const entry of await safeReadDir(volumePath)) {
     if (!entry.isDirectory()) continue;
     if (CAMERA_MEDIA_ROOT_NAMES.some((name) => name.toLowerCase() === entry.name.toLowerCase())) continue;
     if (!looksLikePhoneStorageDirectory(entry.name)) continue;
     const storagePath = path.join(volumePath, entry.name);
-    for (const mediaPath of childDirectories(storagePath, CAMERA_MEDIA_ROOT_NAMES)) {
+    for (const mediaPath of await childDirectories(storagePath, CAMERA_MEDIA_ROOT_NAMES)) {
       candidates.push(mountedMediaRootCandidate(volumePath, mediaPath, [entry.name, path.basename(mediaPath)]));
     }
   }
   return candidates;
 }
 
-function mountedCameraPhotoSources({
+async function mountedCameraPhotoSources({
   platform = process.platform,
   home = os.homedir(),
   env = process.env,
@@ -154,24 +157,24 @@ function mountedCameraPhotoSources({
   maxVolumes = 40,
 } = {}) {
   const sources = [];
-  const addCandidate = (candidate) => {
-    sources.push(photoSource(candidate.id, candidate.label, candidate.detail, candidate.path, "camera", platform));
+  const addCandidate = async (candidate) => {
+    sources.push(await photoSource(candidate.id, candidate.label, candidate.detail, candidate.path, "camera", platform));
   };
   for (const root of mountRoots) {
-    if (!pathIsDirectory(root)) continue;
+    if (!await pathIsDirectory(root)) continue;
     const resolvedRoot = path.resolve(root);
     const rootName = path.basename(resolvedRoot);
     if (CAMERA_MEDIA_ROOT_NAMES.some((name) => name.toLowerCase() === rootName.toLowerCase())) {
-      addCandidate(mountedMediaRootCandidate(path.dirname(resolvedRoot), resolvedRoot, [rootName]));
+      await addCandidate(mountedMediaRootCandidate(path.dirname(resolvedRoot), resolvedRoot, [rootName]));
     }
-    for (const candidate of mountedMediaCandidatesForVolume(resolvedRoot)) {
-      addCandidate(candidate);
+    for (const candidate of await mountedMediaCandidatesForVolume(resolvedRoot)) {
+      await addCandidate(candidate);
     }
-    for (const entry of safeReadDir(root, maxVolumes)) {
+    for (const entry of await safeReadDir(root, maxVolumes)) {
       if (!entry.isDirectory()) continue;
       const volumePath = path.join(root, entry.name);
-      for (const candidate of mountedMediaCandidatesForVolume(volumePath)) {
-        addCandidate(candidate);
+      for (const candidate of await mountedMediaCandidatesForVolume(volumePath)) {
+        await addCandidate(candidate);
       }
     }
   }
@@ -181,7 +184,7 @@ function mountedCameraPhotoSources({
 // Every mounted external drive / volume (not just camera cards) so the
 // "index everything" consent sheet can offer them as one-tap scope chips. The
 // boot/system volume is skipped (it's already covered by the Home folder scope).
-function mountedDrivePhotoSources({
+async function mountedDrivePhotoSources({
   platform = process.platform,
   home = os.homedir(),
   env = process.env,
@@ -190,36 +193,36 @@ function mountedDrivePhotoSources({
 } = {}) {
   const sources = [];
   const seen = new Set();
-  const addVolume = (volumePath) => {
-    if (!pathIsDirectory(volumePath)) return;
+  const addVolume = async (volumePath) => {
+    if (!await pathIsDirectory(volumePath)) return;
     const resolved = path.resolve(volumePath);
     if (seen.has(resolved)) return;
     let real = resolved;
     try {
-      real = fs.realpathSync(resolved);
+      real = await fs.promises.realpath(resolved);
     } catch {
       /* keep resolved */
     }
     if (real === "/" || real.startsWith("/System/Volumes/")) return;
     seen.add(resolved);
     const name = path.basename(resolved) || resolved;
-    sources.push(photoSource(`drive-${sourceSlug(resolved)}`, name, "Mounted drive — index its photos in place.", resolved, "drive", platform));
+    sources.push(await photoSource(`drive-${sourceSlug(resolved)}`, name, "Mounted drive — index its photos in place.", resolved, "drive", platform));
   };
   for (const root of mountRoots) {
-    if (!pathIsDirectory(root)) continue;
+    if (!await pathIsDirectory(root)) continue;
     if (platform === "win32") {
-      addVolume(root);
+      await addVolume(root);
     } else {
-      for (const entry of safeReadDir(root, maxVolumes)) {
+      for (const entry of await safeReadDir(root, maxVolumes)) {
         if (!entry.isDirectory()) continue;
-        addVolume(path.join(root, entry.name));
+        await addVolume(path.join(root, entry.name));
       }
     }
   }
   return uniquePhotoSources(sources);
 }
 
-function buildSystemPhotoSources({
+async function buildSystemPhotoSources({
   platform = process.platform,
   home = os.homedir(),
   pictures = path.join(home, "Pictures"),
@@ -227,7 +230,7 @@ function buildSystemPhotoSources({
   mountRoots,
 } = {}) {
   const sources = [
-    photoSource(
+    await photoSource(
       "this-computer",
       "This computer",
       "Index every photo across your Home folder in one library. Skips caches, app data, and system files; originals stay where they are.",
@@ -235,27 +238,27 @@ function buildSystemPhotoSources({
       "this-computer",
       platform
     ),
-    photoSource("pictures", "Pictures folder", "Default photo folder on this computer.", pictures, "folder", platform)
+    await photoSource("pictures", "Pictures folder", "Default photo folder on this computer.", pictures, "folder", platform)
   ];
   if (platform === "darwin") {
     const photosLibrary = path.join(pictures, "Photos Library.photoslibrary");
     sources.push(
-      photoSource("apple-photos-originals", "Apple Photos originals", "Original media inside the local Apple Photos library package.", path.join(photosLibrary, "originals"), "apple-photos", platform),
-      photoSource("apple-photos-library", "Apple Photos library", "Search the Photos library package if originals are stored in another package layout.", photosLibrary, "apple-photos", platform),
-      photoSource("icloud-drive", "iCloud Drive", "Useful when photos are exported or synced into iCloud Drive folders.", path.join(home, "Library", "Mobile Documents", "com~apple~CloudDocs"), "folder", platform)
+      await photoSource("apple-photos-originals", "Apple Photos originals", "Original media inside the local Apple Photos library package.", path.join(photosLibrary, "originals"), "apple-photos", platform),
+      await photoSource("apple-photos-library", "Apple Photos library", "Search the Photos library package if originals are stored in another package layout.", photosLibrary, "apple-photos", platform),
+      await photoSource("icloud-drive", "iCloud Drive", "Useful when photos are exported or synced into iCloud Drive folders.", path.join(home, "Library", "Mobile Documents", "com~apple~CloudDocs"), "folder", platform)
     );
   } else if (platform === "win32") {
     const oneDriveRoot = env.OneDrive || path.join(home, "OneDrive");
     sources.push(
-      photoSource("windows-camera-roll", "Camera Roll", "Windows Photos camera import folder.", path.join(pictures, "Camera Roll"), "windows-photos", platform),
-      photoSource("windows-saved-pictures", "Saved Pictures", "Windows Photos saved media folder.", path.join(pictures, "Saved Pictures"), "windows-photos", platform),
-      photoSource("onedrive-pictures", "OneDrive Pictures", "Common Windows Photos and phone-sync location.", path.join(oneDriveRoot, "Pictures"), "windows-photos", platform)
+      await photoSource("windows-camera-roll", "Camera Roll", "Windows Photos camera import folder.", path.join(pictures, "Camera Roll"), "windows-photos", platform),
+      await photoSource("windows-saved-pictures", "Saved Pictures", "Windows Photos saved media folder.", path.join(pictures, "Saved Pictures"), "windows-photos", platform),
+      await photoSource("onedrive-pictures", "OneDrive Pictures", "Common Windows Photos and phone-sync location.", path.join(oneDriveRoot, "Pictures"), "windows-photos", platform)
     );
   }
   return uniquePhotoSources([
     ...sources,
-    ...mountedCameraPhotoSources({ platform, home, env, mountRoots }),
-    ...mountedDrivePhotoSources({ platform, home, env, mountRoots }),
+    ...(await mountedCameraPhotoSources({ platform, home, env, mountRoots })),
+    ...(await mountedDrivePhotoSources({ platform, home, env, mountRoots })),
   ]);
 }
 

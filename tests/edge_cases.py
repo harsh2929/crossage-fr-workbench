@@ -1098,6 +1098,11 @@ def assert_static_app_contracts() -> None:
     photo_sources_cjs = (root / "desktop" / "main" / "photo-sources.cjs").read_text(encoding="utf-8")
     photo_sources_tests = (root / "tests" / "photo_sources.test.cjs").read_text(encoding="utf-8")
     photo_folders = (root / "tests" / "photo_folders_units.py").read_text(encoding="utf-8")
+    assert "async function buildSystemPhotoSources" in photo_sources_cjs
+    assert "fs.promises.readdir" in photo_sources_cjs
+    assert "fs.readdirSync" not in photo_sources_cjs
+    assert "fs.statSync" not in photo_sources_cjs
+    assert "fs.existsSync" not in photo_sources_cjs
     assert '"export_photo_keywords": "_cmd_export_photo_keywords"' in api_server
     assert '"import_photo_keywords": "_cmd_import_photo_keywords"' in api_server
     assert "COVER_PREVIEW_BUDGET" in photos_view
