@@ -72,14 +72,20 @@ def atomic_write(path: Path, writer: Callable[[Any], None], *, fsync: bool = Tru
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     restrict_file_mode(path.parent, 0o700)  # MISS-05
-    temp = path.with_suffix(path.suffix + ".tmp")
-    with temp.open("w", encoding="utf-8") as handle:
-        writer(handle)
-        handle.flush()
-        if fsync:
-            os.fsync(handle.fileno())
-    restrict_file_mode(temp, 0o600)  # MISS-05: set before it becomes the live file
-    os.replace(temp, path)
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temp.open("w", encoding="utf-8") as handle:
+            writer(handle)
+            handle.flush()
+            if fsync:
+                os.fsync(handle.fileno())
+        restrict_file_mode(temp, 0o600)  # MISS-05: set before it becomes the live file
+        os.replace(temp, path)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
     if fsync:
         _fsync_dir(path.parent)
 
@@ -121,6 +127,77 @@ def ensure_workspace_metadata(workspace: Path, actor: str = "backend") -> dict[s
     return metadata
 
 
+def workspace_list_path() -> Path:
+    return registry_root() / "workspace-list.json"
+
+
+def _read_workspace_list() -> list[dict[str, Any]]:
+    payload = read_json_object(workspace_list_path())
+    entries = payload.get("workspaces")
+    if isinstance(entries, list):
+        return [entry for entry in entries if isinstance(entry, dict) and entry.get("path")]
+    # Migrate from the single active-workspace pointer the first time a list is needed.
+    active = read_json_object(active_workspace_path())
+    path = active.get("workspace")
+    if isinstance(path, str) and path.strip():
+        resolved = str(Path(path).expanduser().resolve())
+        return [
+            {
+                "workspaceId": str(active.get("workspaceId", "")),
+                "path": resolved,
+                "alias": Path(resolved).name,
+                "lastOpenedAt": str(active.get("updatedAt") or now_iso()),
+            }
+        ]
+    return []
+
+
+def record_workspace(workspace: Path, metadata: dict[str, Any] | None = None) -> None:
+    # Upsert a workspace into the known-workspace list so the desktop can offer a switcher.
+    resolved = str(workspace.expanduser().resolve())
+    entries = _read_workspace_list()
+    workspace_id = str((metadata or {}).get("workspaceId", ""))
+    for entry in entries:
+        if entry.get("path") == resolved:
+            entry["lastOpenedAt"] = now_iso()
+            if workspace_id:
+                entry["workspaceId"] = workspace_id
+            entry.setdefault("alias", Path(resolved).name)
+            break
+    else:
+        entries.append(
+            {
+                "workspaceId": workspace_id,
+                "path": resolved,
+                "alias": Path(resolved).name,
+                "lastOpenedAt": now_iso(),
+            }
+        )
+    entries = sorted(entries, key=lambda item: str(item.get("lastOpenedAt") or ""), reverse=True)[:50]
+    write_json_atomic(workspace_list_path(), {"schemaVersion": 1, "workspaces": entries, "updatedAt": now_iso()})
+
+
+def list_known_workspaces() -> list[dict[str, Any]]:
+    active = read_active_workspace()
+    active_str = str(active) if active else ""
+    result: list[dict[str, Any]] = []
+    for entry in _read_workspace_list():
+        path = Path(str(entry.get("path"))).expanduser()
+        available = workspace_marker_path(path).exists() or legacy_workspace_marker_path(path).exists()
+        result.append(
+            {
+                "workspaceId": str(entry.get("workspaceId", "")),
+                "path": str(path),
+                "alias": str(entry.get("alias") or path.name),
+                "lastOpenedAt": str(entry.get("lastOpenedAt", "")),
+                "active": str(path) == active_str,
+                "available": bool(available),
+            }
+        )
+    result.sort(key=lambda item: str(item.get("lastOpenedAt") or ""), reverse=True)
+    return result
+
+
 def write_active_workspace(workspace: Path, actor: str, metadata: dict[str, Any] | None = None) -> None:
     resolved = workspace.expanduser().resolve()
     payload = {
@@ -131,6 +208,11 @@ def write_active_workspace(workspace: Path, actor: str, metadata: dict[str, Any]
         "lastOpenedBy": actor,
     }
     write_json_atomic(active_workspace_path(), payload)
+    # Keep the known-workspace list in sync so switching/opening always lists the workspace.
+    try:
+        record_workspace(resolved, metadata)
+    except OSError:
+        pass
 
 
 def read_active_workspace() -> Path | None:

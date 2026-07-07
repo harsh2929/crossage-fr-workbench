@@ -1,0 +1,39 @@
+{
+  "generatedAtUnix": 1781837759.889,
+  "schemaVersion": 1,
+  "scope": "phase5-onnx-training-runtime-study-fragment",
+  "sourceMeasurementPath": "D:\\a\\crossage-fr-workbench\\crossage-fr-workbench\\onnx-training-evidence\\windows-x64\\phase5_onnx_training_measurement.json",
+  "targets": [
+    {
+      "artifactCount": 5,
+      "artifactGenerationStatus": "complete",
+      "blockers": [],
+      "currentHost": true,
+      "failureModes": [
+        "artifact-tamper",
+        "cancelled",
+        "disk-full",
+        "missing-training-runtime",
+        "out-of-memory",
+        "thermal-throttle"
+      ],
+      "featureFlag": "VINTRACE_EXPERIMENTAL_ONNX_TRAINING",
+      "gpuAvailable": false,
+      "measuredAtUnix": 1781837757.693,
+      "missingArtifacts": [],
+      "packageSizeBytes": 648195711,
+      "performanceTier": "low",
+      "primaryProvider": "CPUExecutionProvider",
+      "providers": [
+        "CPUExecutionProvider"
+      ],
+      "status": "pass",
+      "target": "windows-x64",
+      "trainingDurationMs": 50,
+      "trainingJobDurationMs": 18.704,
+      "trainingJobStatus": "complete",
+      "trainingPackageAvailable": true,
+      "trainingRuntimeAvailable": true
+    }
+  ]
+}

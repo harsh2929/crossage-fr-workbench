@@ -10,9 +10,68 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Iterable
+from typing import Iterable, Sequence
 
+import numpy as np
 from PIL import Image
+
+
+def variance_of_laplacian(gray: "np.ndarray") -> float:
+    """Focus measure: variance of the Laplacian (high = sharp, low = blurred).
+
+    §5.3 keyframe selection — a blurred/motion-smeared frame carries little identity, so
+    among candidate frames the sharpest is the recognition-best representative. Pure NumPy
+    (4-neighbour Laplacian) so it needs no cv2 and is unit-testable in isolation.
+    """
+    arr = np.asarray(gray, dtype="float64")
+    if arr.ndim != 2 or arr.size == 0:
+        return 0.0
+    lap = (
+        -4.0 * arr
+        + np.roll(arr, 1, axis=0)
+        + np.roll(arr, -1, axis=0)
+        + np.roll(arr, 1, axis=1)
+        + np.roll(arr, -1, axis=1)
+    )
+    if lap.shape[0] > 2 and lap.shape[1] > 2:
+        lap = lap[1:-1, 1:-1]  # drop np.roll wrap-around border before measuring spread
+    return float(lap.var())
+
+
+def sharpest_index(grays: "Sequence[np.ndarray]") -> int:
+    """Index of the sharpest frame (max variance-of-Laplacian); 0 for an empty set."""
+    if not grays:
+        return 0
+    return int(max(range(len(grays)), key=lambda i: variance_of_laplacian(grays[i])))
+
+
+# Frames to probe on each side of a target index when choosing the sharpest representative.
+# 1 -> 3 decodes per sample (cheap; removes the worst motion blur). 0 disables.
+SHARPEN_WINDOW = 1
+
+
+def _sharpest_in_window(capture, cv2, index: int, frame_count: int, window: int):
+    """Decode a small neighbourhood around `index` and return (best_index, best_frame_bgr)
+    by variance-of-Laplacian. Falls back to the single target frame when window<=0."""
+    if window <= 0:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, max(0, index))
+        ok, frame = capture.read()
+        return index, (frame if ok else None)
+    lo = max(0, index - window)
+    hi = index + window if frame_count <= 0 else min(frame_count - 1, index + window)
+    best_index, best_frame, best_score = index, None, -1.0
+    for cand in range(lo, hi + 1):
+        capture.set(cv2.CAP_PROP_POS_FRAMES, cand)
+        ok, frame = capture.read()
+        if not ok or frame is None:
+            continue
+        try:
+            score = variance_of_laplacian(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        except Exception:
+            score = 0.0
+        if score > best_score:
+            best_index, best_frame, best_score = cand, frame, score
+    return best_index, best_frame
 
 
 VIDEO_EXTENSIONS = {
@@ -189,9 +248,10 @@ def sample_video_frames(
         target_dir.mkdir(parents=True, exist_ok=True)
         samples: list[VideoFrameSample] = []
         for index in indices:
-            capture.set(cv2.CAP_PROP_POS_FRAMES, max(0, index))
-            ok, frame = capture.read()
-            if not ok or frame is None:
+            # §5.3: pick the SHARPEST frame in a small neighbourhood, so a motion-blurred
+            # representative is replaced by a crisp one (blur destroys identity signal).
+            index, frame = _sharpest_in_window(capture, cv2, index, frame_count, SHARPEN_WINDOW)
+            if frame is None:
                 continue
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             image = Image.fromarray(rgb).convert("RGB")
@@ -395,7 +455,7 @@ def _probe_video_ffmpeg(path: Path) -> dict[str, object]:
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=width,height,nb_frames,r_frame_rate,duration",
+        "stream=codec_name,codec_long_name,profile,width,height,nb_frames,r_frame_rate,duration,pix_fmt,color_space,color_transfer,color_primaries:format=format_name,format_long_name,duration,size,bit_rate",
         "-of",
         "json",
         str(resolved),
@@ -406,12 +466,16 @@ def _probe_video_ffmpeg(path: Path) -> dict[str, object]:
     try:
         payload = json.loads(completed.stdout or "{}")
         stream = (payload.get("streams") or [{}])[0]
+        container = payload.get("format") or {}
     except (json.JSONDecodeError, AttributeError, IndexError):
         stream = {}
+        container = {}
     width = _safe_int(stream.get("width"))
     height = _safe_int(stream.get("height"))
     frame_rate = _parse_frame_rate(stream.get("r_frame_rate"))
     duration_seconds = _safe_float(stream.get("duration"))
+    if duration_seconds <= 0:
+        duration_seconds = _safe_float(container.get("duration"))
     frame_count = _safe_int(stream.get("nb_frames"))
     if frame_count <= 0 and duration_seconds > 0 and frame_rate > 0:
         frame_count = int(round(duration_seconds * frame_rate))
@@ -424,6 +488,19 @@ def _probe_video_ffmpeg(path: Path) -> dict[str, object]:
         "width": width,
         "height": height,
         "durationMs": int(duration_seconds * 1000) if duration_seconds > 0 else 0,
+        "codec": str(stream.get("codec_name") or ""),
+        "codecName": str(stream.get("codec_name") or ""),
+        "codecLongName": str(stream.get("codec_long_name") or ""),
+        "profile": str(stream.get("profile") or ""),
+        "pixelFormat": str(stream.get("pix_fmt") or ""),
+        "colorSpace": str(stream.get("color_space") or ""),
+        "colorTransfer": str(stream.get("color_transfer") or ""),
+        "colorPrimaries": str(stream.get("color_primaries") or ""),
+        "container": str(container.get("format_name") or ""),
+        "format": str(container.get("format_name") or ""),
+        "formatLongName": str(container.get("format_long_name") or ""),
+        "bitRate": _safe_int(container.get("bit_rate")),
+        "size": _safe_int(container.get("size")),
         "backend": "ffmpeg",
     }
 
@@ -477,7 +554,12 @@ def _sample_video_frames_ffmpeg(
             str(quality_scale),
             str(pattern),
         ]
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=max(30, max_frames * 2), check=False)
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, timeout=max(30, max_frames * 2), check=False)
+        except subprocess.TimeoutExpired as exc:
+            # A slow/huge decode must degrade to a clean VideoLoadError, not an
+            # uncaught TimeoutExpired that crashes the ingest pipeline.
+            raise VideoLoadError(f"Timed out decoding video {resolved} after {getattr(exc, 'timeout', '?')}s.") from exc
         if completed.returncode != 0:
             raise VideoLoadError((completed.stderr or completed.stdout or f"Could not decode video {resolved}").strip()[:400])
         frames = sorted(temp_dir.glob("frame-*.jpg"))

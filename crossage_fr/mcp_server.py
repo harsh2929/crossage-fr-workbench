@@ -14,6 +14,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from crossage_fr import __version__
 from crossage_fr.api_server import DesktopApi
+from crossage_fr.config import normalize_safe_mode_profile, safe_mode_threshold_for_profile
 from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS
 from crossage_fr.ingest.safety import assess_image_safety
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, probe_video
@@ -99,6 +100,7 @@ def _state_summary(state: dict[str, Any]) -> dict[str, Any]:
         "counts": state["counts"],
         "safeMode": state["config"]["safeMode"],
         "safeModeThreshold": state["config"]["safeModeThreshold"],
+        "safeModeProfile": state["config"].get("safeModeProfile", "balanced"),
         "safeModeModel": state.get("safeModeModel", {}),
         "scanTotals": state.get("scanTotals", {}),
     }
@@ -245,6 +247,13 @@ def _redact_tool_output(value: Any) -> Any:
                     result[key_text] = [_redacted_path(item, keep_name=False) for item in child[:50]]
                 else:
                     result[key_text] = _redacted_path(child, keep_name=False)
+            elif key_text in HASH_KEYS or key_lower.endswith("hash"):
+                # MCP-04: image hashes (sourceHash/sha256/phash) are biometric
+                # fingerprints — they enable reverse-image-search and cross-
+                # workspace linking. _agent_safe_value() (resources) already
+                # hid these; tool output must too, or query_candidates leaks
+                # them to the agent.
+                result[key_text] = "[hidden]"
             else:
                 result[key_text] = _redact_tool_output(child)
         return result
@@ -461,6 +470,19 @@ def set_workspace(path: str) -> dict[str, Any]:
     return _state_summary(result)
 
 
+def _validate_operator_token(action: str, operator_token: str) -> None:
+    # MCP-02: human-only operator actions (granting consent, deleting the audit log) require a
+    # one-time token the agent cannot mint, set as VINTRACE_MCP_OPERATOR_TOKEN on the server.
+    required = env_value("MCP_OPERATOR_TOKEN")
+    if not required:
+        raise ValueError(
+            f"{action} over MCP requires an operator approval token. Set VINTRACE_MCP_OPERATOR_TOKEN "
+            "on the server (and pass it as operator_token), or perform this action in the Vintrace desktop app."
+        )
+    if operator_token != required:
+        raise ValueError(f"Invalid operator approval token; {action.lower()} was refused.")
+
+
 @safe_tool()
 def mark_consent(
     confirmed: bool,
@@ -468,28 +490,34 @@ def mark_consent(
     note: str = "",
     confirm: bool = False,
     operator_token: str = "",
+    person_name: str = "",
+    lawful_basis: str = "",
 ) -> dict[str, Any]:
-    """Record consent for processing in this workspace.
+    """Record consent for processing in this workspace, or for one named subject.
 
     MCP-02: the agent CANNOT grant consent on its own authority. Granting
     (confirmed=True) requires a one-time operator token the agent cannot mint —
     set VINTRACE_MCP_OPERATOR_TOKEN on the server and pass it as operator_token,
     or grant consent in the Vintrace desktop app. Revoking (confirmed=False)
-    needs no token.
+    needs no token. Pass person_name to record a per-subject consent (with an
+    optional lawful_basis) instead of the workspace-level consent.
     """
     _confirmed(confirm, "change consent status")
     if confirmed:
-        required = env_value("MCP_OPERATOR_TOKEN")
-        if not required:
-            raise ValueError(
-                "Granting consent over MCP requires an operator approval token. Set "
-                "VINTRACE_MCP_OPERATOR_TOKEN on the server (and pass it as operator_token), "
-                "or grant consent in the Vintrace desktop app."
-            )
-        if operator_token != required:
-            raise ValueError("Invalid operator approval token; consent was not granted.")
-    state = _call("set_consent", {"value": confirmed, "source": "mcp", "operator": operator, "note": note, "scope": str(WORKSPACE)})
-    return {**_state_summary(state), "operator": operator, "note": note}
+        _validate_operator_token("Granting consent", operator_token)
+    state = _call(
+        "set_consent",
+        {
+            "value": confirmed,
+            "source": "mcp",
+            "operator": operator,
+            "note": note,
+            "scope": str(WORKSPACE),
+            "personName": person_name,
+            "lawfulBasis": lawful_basis,
+        },
+    )
+    return {**_state_summary(state), "operator": operator, "note": note, "personName": person_name}
 
 
 @safe_tool()
@@ -620,7 +648,7 @@ def assess_image(path: str) -> dict[str, Any]:
     extension_ok = resolved.suffix.lower() in IMAGE_EXTENSIONS
     if not extension_ok:
         return {"path": "[hidden]", "extensionOk": False, "sensitive": False, "score": 0.0}
-    assessment = assess_image_safety(resolved, _api().project.config.safe_mode_threshold)
+    assessment = assess_image_safety(resolved, _api().project.config.safe_mode_threshold, temperature=_api().project.config.safe_mode_temperature)
     return {
         "path": "[hidden]",
         "extensionOk": True,
@@ -768,6 +796,62 @@ def read_audit_events(limit: int = 100, offset: int = 0) -> dict[str, Any]:
 
 
 @safe_tool()
+def list_jurisdictions() -> dict[str, Any]:
+    """List the per-jurisdiction consent/retention presets (operator defaults, not legal advice)."""
+    return _call("list_jurisdictions")
+
+
+@safe_tool()
+def set_jurisdiction_preset(preset: str) -> dict[str, Any]:
+    """Apply a per-jurisdiction consent/retention preset (e.g. gdpr, bipa-il, ccpa-cpra, colorado, standard).
+
+    Operator-configurable defaults only — NOT legal advice or certification.
+    """
+    result = _call("set_jurisdiction_preset", {"preset": preset})
+    return {"applied": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def export_examination_report(person_name: str = "") -> dict[str, Any]:
+    """Export a DRAFT court-aware examination report (markdown + JSON) for one person or all
+    reviewed candidates: method, model provenance, per-decision cross-age uncertainty, consent
+    basis, and the tamper-evident audit reference.
+
+    DRAFT only — an investigative lead record, NOT a positive identification or expert testimony.
+    """
+    result = _call("export_examination_report", {"personName": person_name})
+    return {"report": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def list_workspaces() -> dict[str, Any]:
+    """List known Vintrace workspaces (alias, last-opened, which is active) for switching context."""
+    return _call("list_workspaces")
+
+
+@safe_tool()
+def export_compliance_pack() -> dict[str, Any]:
+    """Export a governance-evidence ZIP: consent + tamper-evident audit + retention + model
+    provenance, plus generated DRAFT DPIA/FRIA/Annex-IV documents.
+
+    All generated legal documents are DRAFTs requiring DPO/counsel review — not certification.
+    """
+    result = _call("export_compliance_pack")
+    return {"pack": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def audit_chain_status() -> dict[str, Any]:
+    """Verify the tamper-evident SHA-256 hash chain over the audit log.
+
+    Returns verified=true when every chained entry hashes correctly and links to its
+    predecessor; otherwise firstBreak identifies the first altered/missing entry. Entries
+    that predate chaining are counted as legacy and do not count as breaks.
+    """
+    return _call("audit_chain_status")
+
+
+@safe_tool()
 def purge_duplicate_candidates(confirm: bool = False) -> dict[str, Any]:
     """Compact duplicate review rows for the same person/media item while preserving the strongest candidate."""
     _confirmed(confirm, "purge duplicate candidate rows")
@@ -827,6 +911,8 @@ def save_settings(
     verification_detector_size: int,
     safe_mode: bool,
     safe_mode_threshold: float,
+    safe_mode_profile: str | None = None,
+    safe_mode_zero_admittance: bool | None = None,
     performance_mode: str | None = None,
     storage_budget_bytes: int = 0,
     max_media_file_bytes: int | None = None,
@@ -839,7 +925,18 @@ def save_settings(
 ) -> dict[str, Any]:
     """Update thresholds, clustering minimum, Safe Mode settings, storage budget, and optional scan exclusions."""
     current = _api().project.config
-    relaxes_safe_mode = (current.safe_mode and not safe_mode) or safe_mode_threshold > current.safe_mode_threshold
+    new_zero_admittance = (
+        current.safe_mode_zero_admittance if safe_mode_zero_admittance is None else bool(safe_mode_zero_admittance)
+    )
+    # A named profile is authoritative for the effective threshold; use it (not
+    # the raw arg) to decide whether protection is being relaxed and confirmed.
+    new_profile = normalize_safe_mode_profile(safe_mode_profile) if safe_mode_profile is not None else current.safe_mode_profile
+    effective_threshold = safe_mode_threshold if new_profile == "custom" else safe_mode_threshold_for_profile(new_profile)
+    relaxes_safe_mode = (
+        (current.safe_mode and not safe_mode)
+        or effective_threshold > current.safe_mode_threshold
+        or (current.safe_mode_zero_admittance and not new_zero_admittance)
+    )
     relaxes_review_thresholds = (
         confident < current.thresholds.confident
         or likely < current.thresholds.likely
@@ -865,7 +962,9 @@ def save_settings(
             "verificationDetectorSize": verification_detector_size,
             "performanceMode": performance_mode if performance_mode is not None else current.performance_mode,
             "safeMode": safe_mode,
+            "safeModeZeroAdmittance": new_zero_admittance,
             "safeModeThreshold": safe_mode_threshold,
+            "safeModeProfile": new_profile,
             "storageBudgetBytes": storage_budget_bytes,
             "maxMediaFileBytes": max_media_file_bytes if max_media_file_bytes is not None else current.max_media_file_bytes,
             "scanExclusions": {
@@ -1211,11 +1310,124 @@ def import_accuracy_labels(labels: list[dict[str, Any]], confirm: bool = False) 
 
 
 @safe_tool()
+def export_training_examples(include_paths: bool = False) -> dict[str, Any]:
+    """Export reviewed training-example metadata without media files or vectors."""
+    result = _call("export_training_examples", {"includePaths": include_paths})
+    return {"export": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def import_training_examples(examples: list[dict[str, Any]], confirm: bool = False) -> dict[str, Any]:
+    """Import reviewed training-example metadata into the local learning set."""
+    _confirmed(confirm, "import training examples")
+    result = _call("import_training_examples", {"rows": examples})
+    return {"imported": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
 def apply_calibration(confirm: bool = False) -> dict[str, Any]:
     """Apply local review feedback to matching thresholds."""
     _confirmed(confirm, "apply review feedback to matching thresholds")
     result = _call("apply_calibration")
     return {"calibration": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def calibration_learning_status() -> dict[str, Any]:
+    """Read staged/promoted calibration-learning artifacts and current calibration state."""
+    return _call("calibration_learning_status")
+
+
+@safe_tool()
+def run_learning_jobs(confirm: bool = False) -> dict[str, Any]:
+    """Run guarded local learning jobs; currently auto-stages calibration when ready."""
+    _confirmed(confirm, "run local learning jobs")
+    result = _call("run_learning_jobs")
+    return {"learning": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def reference_suggestion_status() -> dict[str, Any]:
+    """Read staged/promoted suggested-reference artifacts."""
+    return _call("reference_suggestion_status")
+
+
+@safe_tool()
+def stage_reference_suggestions(limit: int = 20, confirm: bool = False) -> dict[str, Any]:
+    """Stage suggested references from high-quality accepted matches."""
+    _confirmed(confirm, "stage suggested references")
+    result = _call("stage_reference_suggestions", {"limit": limit})
+    return {"suggestions": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def approve_reference_suggestion(artifact_id: str, confirm: bool = False) -> dict[str, Any]:
+    """Approve a staged suggested reference and add it to saved person photos."""
+    _confirmed(confirm, "approve a suggested reference")
+    result = _call("approve_reference_suggestion", {"artifactId": artifact_id})
+    return {"approval": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def reject_reference_suggestion(artifact_id: str, reason: str = "", confirm: bool = False) -> dict[str, Any]:
+    """Reject a staged suggested reference artifact."""
+    _confirmed(confirm, "reject a suggested reference")
+    result = _call("reject_reference_suggestion", {"artifactId": artifact_id, "reason": reason})
+    return {"rejection": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def stage_calibration(confirm: bool = False) -> dict[str, Any]:
+    """Stage a learned calibration artifact from local review feedback without applying it."""
+    _confirmed(confirm, "stage a learned calibration artifact")
+    result = _call("stage_calibration")
+    return {"calibration": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def promote_calibration(artifact_id: str = "", confirm: bool = False) -> dict[str, Any]:
+    """Promote a staged learned calibration artifact after validation."""
+    _confirmed(confirm, "promote a staged calibration artifact")
+    result = _call("promote_calibration", {"artifactId": artifact_id})
+    return {"calibration": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def rollback_calibration(artifact_id: str = "", confirm: bool = False) -> dict[str, Any]:
+    """Rollback a promoted learned calibration artifact to its previous thresholds."""
+    _confirmed(confirm, "rollback a promoted calibration artifact")
+    result = _call("rollback_calibration", {"artifactId": artifact_id})
+    return {"calibration": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def embedding_adapter_status() -> dict[str, Any]:
+    """Read staged/promoted embedding-adapter artifacts and adapter readiness."""
+    return _call("embedding_adapter_status")
+
+
+@safe_tool()
+def stage_embedding_adapter(confirm: bool = False) -> dict[str, Any]:
+    """Stage a JSON logistic adapter over frozen embeddings after held-out validation."""
+    _confirmed(confirm, "stage an embedding adapter artifact")
+    result = _call("stage_embedding_adapter")
+    return {"adapter": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def promote_embedding_adapter(artifact_id: str = "", confirm: bool = False) -> dict[str, Any]:
+    """Promote a staged embedding adapter after validation."""
+    _confirmed(confirm, "promote an embedding adapter artifact")
+    result = _call("promote_embedding_adapter", {"artifactId": artifact_id})
+    return {"adapter": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
+def rollback_embedding_adapter(artifact_id: str = "", confirm: bool = False) -> dict[str, Any]:
+    """Rollback a promoted embedding adapter artifact."""
+    _confirmed(confirm, "rollback an embedding adapter artifact")
+    result = _call("rollback_embedding_adapter", {"artifactId": artifact_id})
+    return {"adapter": result.get("value", {}), "state": _state_summary(result["state"])}
 
 
 @safe_tool()
@@ -1225,9 +1437,20 @@ def privacy_report() -> dict[str, Any]:
 
 
 @safe_tool()
-def delete_face_data(confirm: bool = False, include_audit: bool = False) -> dict[str, Any]:
-    """Delete saved faces, possible matches, scan history, generated previews, and private caches."""
+def delete_face_data(
+    confirm: bool = False,
+    include_audit: bool = False,
+    operator_token: str = "",
+) -> dict[str, Any]:
+    """Delete saved faces, possible matches, scan history, generated previews, and private caches.
+
+    Deleting the tamper-evident audit log too (include_audit=True) is a human-only operator
+    action: it requires the VINTRACE_MCP_OPERATOR_TOKEN (passed as operator_token), so an
+    authenticated agent cannot erase its own trail.
+    """
     _confirmed(confirm, "delete face data from the workspace")
+    if include_audit:
+        _validate_operator_token("Deleting the audit log", operator_token)
     result = _call("delete_face_data", {"confirm": True, "includeAudit": include_audit})
     return {"deleted": result.get("value", {}), "state": _state_summary(result["state"])}
 
@@ -1263,12 +1486,14 @@ def triage_pending(max_items: int = 20) -> str:
             "previewBudget": 0,
         },
     )
-    pending = _agent_safe_value(pending_result.get("items", []))
+    # MCP-04: hide basenames too (keep_path_names=False) — filenames frequently
+    # encode names/dates, so this prompt must match the resource redaction policy.
+    pending = _agent_safe_value(pending_result.get("items", []), keep_path_names=False)
     return (
         "You are assisting a human reviewer with Vintrace.\n"
         "Summarize pending candidates, call out low-confidence or clustered cases, "
         "and do not make autonomous identity claims.\n\n"
-        f"State summary:\n{_json(_agent_safe_value(_state_summary(state)))}\n\n"
+        f"State summary:\n{_json(_agent_safe_value(_state_summary(state), keep_path_names=False))}\n\n"
         f"Pending candidates:\n{_json(pending)}"
     )
 
@@ -1319,12 +1544,56 @@ def _bearer_token_ok(authorization_header: str, token: str) -> bool:
     return hmac.compare_digest(presented.strip().encode("utf-8"), token.encode("utf-8"))
 
 
+class _RateLimiter:
+    """Token-bucket limiter with an injectable clock (so the logic is unit-testable)."""
+
+    def __init__(self, capacity: float, refill_per_sec: float) -> None:
+        self.capacity = max(1.0, float(capacity))
+        self.refill_per_sec = max(0.0, float(refill_per_sec))
+        self._tokens = self.capacity
+        self._last: float | None = None
+
+    def allow(self, now: float) -> bool:
+        if self._last is None:
+            self._last = now
+        elapsed = max(0.0, now - self._last)
+        self._last = now
+        self._tokens = min(self.capacity, self._tokens + elapsed * self.refill_per_sec)
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return True
+        return False
+
+
+def _rate_limit_settings() -> tuple[float, float, int]:
+    # MCP-08: env-tunable flood protection for the HTTP host. Rate 0 disables rate limiting,
+    # max-concurrency 0 disables the concurrency cap.
+    def _num(name: str, default: float) -> float:
+        raw = env_value(name)
+        if raw is None or str(raw).strip() == "":
+            return default
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return default
+
+    rate = max(0.0, _num("MCP_RATE_LIMIT", 20.0))  # requests/sec per client
+    burst = max(1.0, _num("MCP_RATE_BURST", max(rate * 2.0, 1.0)))
+    max_concurrency = max(0, int(_num("MCP_MAX_CONCURRENCY", 8.0)))
+    return (rate, burst, max_concurrency)
+
+
 def _build_bearer_auth_app(token: str):
     # MCP-01: wrap FastMCP's streamable_http_app() (a Starlette app) so the
     # operator token is enforced on EVERY request, not just at startup. Returns
     # the wrapped app (kept separate from uvicorn.run so it is unit-testable).
+    import asyncio
+    import time
+
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
+
+    rate, burst, max_concurrency = _rate_limit_settings()
 
     class BearerAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
@@ -1336,8 +1605,36 @@ def _build_bearer_auth_app(token: str):
                 )
             return await call_next(request)
 
+    class RateLimitMiddleware(BaseHTTPMiddleware):
+        # MCP-08: per-client token bucket + a global concurrency cap so a single agent
+        # cannot flood the highest-risk (biometric) tool surface.
+        def __init__(self, app) -> None:
+            super().__init__(app)
+            self._buckets: dict[str, _RateLimiter] = {}
+            self._semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency > 0 else None
+
+        async def dispatch(self, request, call_next):
+            if rate > 0:
+                client = request.client.host if request.client else "unknown"
+                bucket = self._buckets.get(client)
+                if bucket is None:
+                    bucket = _RateLimiter(burst, rate)
+                    self._buckets[client] = bucket
+                if not bucket.allow(time.monotonic()):
+                    return JSONResponse(
+                        {"error": "rate_limited", "detail": "Too many requests; slow down."},
+                        status_code=429,
+                        headers={"Retry-After": "1"},
+                    )
+            if self._semaphore is not None:
+                async with self._semaphore:
+                    return await call_next(request)
+            return await call_next(request)
+
     app = mcp.streamable_http_app()
     app.add_middleware(BearerAuthMiddleware)
+    # Added last => outermost: rate-limiting runs before auth, capping floods (incl. auth brute force).
+    app.add_middleware(RateLimitMiddleware)
     return app
 
 

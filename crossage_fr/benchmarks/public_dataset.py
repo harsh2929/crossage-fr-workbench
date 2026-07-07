@@ -21,7 +21,7 @@ import json
 import os
 import re
 
-from crossage_fr.benchmark_quality import calibrate_public_labels
+from crossage_fr.benchmark_quality import BENCHMARK_DISCLAIMER, calibrate_public_labels, wilson_interval
 from crossage_fr.dataset_benchmarks import (
     identity_media_index,
     inspect_identity_dataset,
@@ -531,7 +531,13 @@ class PublicDatasetBenchmarkMixin:
                 "recall": round(recall, 6),
                 "specificity": round(specificity, 6),
                 "accuracy": round(accuracy, 6),
+                # Wilson 95% CIs expose sampling noise so a 0.99 on 40 items is not
+                # mistaken for a 0.99 on thousands. See benchmarkDisclaimer below.
+                "precisionCI": [round(value, 6) for value in wilson_interval(true_positives, true_positives + false_positives)],
+                "recallCI": [round(value, 6) for value in wilson_interval(true_positives, true_positives + false_negatives)],
+                "accuracyCI": [round(value, 6) for value in wilson_interval(true_positives + true_negatives, len(ground_truth))],
             },
+            "benchmarkDisclaimer": BENCHMARK_DISCLAIMER,
             "metricsByThreshold": metrics_by_threshold,
             "thresholdCalibration": threshold_calibration,
             "validationMatrix": validation_matrix,
@@ -912,6 +918,7 @@ class PublicDatasetBenchmarkMixin:
                             vector=embedding.vector,
                             source_hash=record.sha256,
                             pose_bucket=embedding.pose_bucket,
+                            capture_date_provenance=record.capture_date_provenance,
                         )
                         project.references[ref.ref_id] = ref
                         project.vector_store.add(ref.ref_id, ref.vector)

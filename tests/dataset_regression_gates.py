@@ -158,7 +158,9 @@ def _assert_threshold_calibration_and_matrix() -> dict[str, Any]:
 def main() -> None:
     os.environ["CROSSAGE_FORCE_FALLBACK"] = os.environ.get("CROSSAGE_FORCE_FALLBACK", "1")
     root = Path(tempfile.mkdtemp(prefix="vintrace-dataset-gates-"))
-    os.environ["CROSSAGE_REGISTRY_HOME"] = str(root / "registry")
+    registry = str(root / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
     api = DesktopApi(root / "workspace")
     result = _assert_recommendation_gate(api)
     result["quality"] = _assert_threshold_calibration_and_matrix()

@@ -45,11 +45,14 @@ test("UI interaction soak stays responsive without unbounded memory growth", asy
   const projectRoot = process.cwd();
   const temp = mkdtempSync(path.join(os.tmpdir(), "vintrace-soak-"));
   const workspace = path.join(temp, "workspace");
+  const registry = path.join(temp, "registry");
   const env: Record<string, string> = {
     ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
     CROSSAGE_FORCE_FALLBACK: "1",
     CROSSAGE_TEST_DIALOG_PATHS: workspace,
-    CROSSAGE_REGISTRY_HOME: path.join(temp, "registry"),
+    VINTRACE_REGISTRY_HOME: registry,
+    CROSSAGE_REGISTRY_HOME: registry,
+    VINTRACE_WORKSPACE: workspace,
     CROSSAGE_WORKSPACE: workspace,
     CROSSAGE_ALLOW_MULTI_INSTANCE: "1",
     PYTHONPATH: projectRoot
@@ -73,7 +76,7 @@ test("UI interaction soak stays responsive without unbounded memory growth", asy
   const beforeRenderer = await rendererSnapshot(page);
   for (let cycle = 0; cycle < 14; cycle += 1) {
     await closeDialogIfVisible(page);
-    for (const name of ["Dashboard", "People", "Scan", "Review", "Settings"]) {
+    for (const name of ["Dashboard", "People", "Scan", "Review", "Photos", "Settings"]) {
       await page.locator(".nav-list").getByRole("button", { name }).click();
       await page.mouse.wheel(0, 800);
       await page.waitForTimeout(30);
@@ -99,6 +102,6 @@ test("UI interaction soak stays responsive without unbounded memory growth", asy
   if (heapGrowth > 0) {
     expect(heapGrowth, "renderer heap growth in bytes").toBeLessThan(120 * 1024 * 1024);
   }
-  await expect(page.locator(".nav-list").getByRole("button", { name: "Dashboard" })).toBeVisible();
+  await expect(page.locator(".nav-list").getByRole("button", { name: "Library" })).toBeVisible();
   await app.close();
 });

@@ -35,21 +35,25 @@ function writeSyntheticPpm(filePath: string, accent: [number, number, number]) {
 test("packaged desktop app launches, scans, exports diagnostics, and exposes production controls", async () => {
   const projectRoot = process.cwd();
   const executablePath = packagedExecutable(projectRoot);
+  test.skip(process.env.VINTRACE_PACKAGED_SMOKE !== "1", "Run npm run test:e2e:packaged.");
   test.skip(!existsSync(executablePath), `Packaged app not found at ${executablePath}. Run npm run pack:unsigned first.`);
   const temp = mkdtempSync(path.join(os.tmpdir(), "vintrace-packaged-e2e-"));
   const refDir = path.join(temp, "references");
   const scanDir = path.join(temp, "scan");
   const diagnosticsPath = path.join(temp, "diagnostics.json");
+  const workspace = path.join(temp, "workspace");
+  const registry = path.join(temp, "registry");
   writeSyntheticPpm(path.join(refDir, "person.ppm"), [34, 74, 132]);
   writeSyntheticPpm(path.join(scanDir, "candidate.ppm"), [34, 74, 132]);
   const env: Record<string, string> = {
     ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
     CROSSAGE_ALLOW_MULTI_INSTANCE: "1",
     CROSSAGE_FORCE_FALLBACK: "1",
-    CROSSAGE_REGISTRY_HOME: path.join(temp, "registry"),
+    VINTRACE_REGISTRY_HOME: registry,
+    CROSSAGE_REGISTRY_HOME: registry,
     CROSSAGE_TEST_DIAGNOSTICS_PATH: diagnosticsPath,
-    CROSSAGE_WORKSPACE: path.join(temp, "workspace"),
-    VINTRACE_WORKSPACE: path.join(temp, "workspace")
+    CROSSAGE_WORKSPACE: workspace,
+    VINTRACE_WORKSPACE: workspace
   };
   delete env.ELECTRON_RUN_AS_NODE;
 
@@ -73,10 +77,14 @@ test("packaged desktop app launches, scans, exports diagnostics, and exposes pro
     }
     await page.locator(".nav-list").getByRole("button", { name: "Settings" }).click();
     await expect(page.getByText("Performance center")).toBeVisible();
-    await page.getByRole("button", { name: /Fast/ }).click();
-    await expect(page.locator(".performance-mode.selected").filter({ hasText: "Fast" })).toBeVisible();
-    await page.getByRole("button", { name: /Auto/ }).click();
-    await expect(page.locator(".performance-mode.selected").filter({ hasText: "Auto" })).toBeVisible();
+    const performanceCenter = page.locator(".performance-center");
+    await expect(performanceCenter.locator(".performance-mode")).toHaveCount(4);
+    for (const name of [/^Auto\b/, /^Fast\b/, /^Balanced\b/, /^Quality\b/]) {
+      const modeButton = performanceCenter.getByRole("button", { name });
+      await expect(modeButton).toBeVisible();
+      await expect(modeButton).toBeEnabled();
+      await modeButton.click({ trial: true });
+    }
     await expect(page.getByText("Model switch guide")).toBeVisible();
     const modelDryRun = await page.evaluate(() => (window as any).crossAge.invoke("model_switch_dry_run", { targetPack: "antelopev2" }));
     expect(modelDryRun.targetPack).toBe("antelopev2");

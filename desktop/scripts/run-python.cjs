@@ -2,6 +2,7 @@
 
 const { spawnSync } = require("child_process");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const repoRoot = path.resolve(__dirname, "..", "..");
@@ -20,28 +21,72 @@ function candidates() {
   return [explicit, local, "python3", "python"].filter(Boolean);
 }
 
-for (const candidate of candidates()) {
-  if (path.isAbsolute(candidate) && !fs.existsSync(candidate)) {
-    continue;
+const inheritedRegistry = process.env.VINTRACE_RUN_PYTHON_USE_ENV_REGISTRY === "1"
+  ? (process.env.VINTRACE_REGISTRY_HOME || process.env.CROSSAGE_REGISTRY_HOME || "")
+  : "";
+let tempRegistryRoot = "";
+
+function registryHome() {
+  if (inheritedRegistry) {
+    return inheritedRegistry;
   }
-  const result = spawnSync(candidate, [script, ...process.argv.slice(3)], {
-    cwd: repoRoot,
-    env: {
-      ...process.env,
-      PYTHONPATH: process.env.PYTHONPATH || repoRoot,
-      CROSSAGE_FORCE_FALLBACK: process.env.CROSSAGE_FORCE_FALLBACK || "1"
-    },
-    stdio: "inherit",
-    windowsHide: true
-  });
-  if (!result.error) {
-    process.exit(result.status ?? 1);
+  if (!tempRegistryRoot) {
+    tempRegistryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vintrace-python-registry-"));
   }
-  if (result.error.code !== "ENOENT") {
-    console.error(result.error.message);
-    process.exit(1);
+  return tempRegistryRoot;
+}
+
+function pythonPath() {
+  if (!process.env.PYTHONPATH) {
+    return repoRoot;
+  }
+  // repoRoot is deliberately PREPENDED so first-party crossage_fr modules always
+  // resolve ahead of anything an inherited PYTHONPATH might try to shadow. This
+  // is a dev/CI helper; we keep the inherited entries (venv etc.) but never let
+  // them take precedence over the repo.
+  return `${repoRoot}${path.delimiter}${process.env.PYTHONPATH}`;
+}
+
+let exitCode = 127;
+let ran = false;
+
+try {
+  for (const candidate of candidates()) {
+    if (path.isAbsolute(candidate) && !fs.existsSync(candidate)) {
+      continue;
+    }
+    const registry = registryHome();
+    const result = spawnSync(candidate, [script, ...process.argv.slice(3)], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        PYTHONPATH: pythonPath(),
+        CROSSAGE_FORCE_FALLBACK: process.env.CROSSAGE_FORCE_FALLBACK || "1",
+        VINTRACE_REGISTRY_HOME: registry,
+        CROSSAGE_REGISTRY_HOME: registry
+      },
+      stdio: "inherit",
+      windowsHide: true
+    });
+    if (!result.error) {
+      exitCode = result.status ?? 1;
+      ran = true;
+      break;
+    }
+    if (result.error.code !== "ENOENT") {
+      console.error(result.error.message);
+      exitCode = 1;
+      ran = true;
+      break;
+    }
+  }
+} finally {
+  if (tempRegistryRoot) {
+    fs.rmSync(tempRegistryRoot, { recursive: true, force: true });
   }
 }
 
-console.error("Could not find Python. Create .venv or set PYTHON.");
-process.exit(127);
+if (!ran) {
+  console.error("Could not find Python. Create .venv or set PYTHON.");
+}
+process.exit(exitCode);

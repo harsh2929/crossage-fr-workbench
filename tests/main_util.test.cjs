@@ -66,6 +66,19 @@ function testBackendRestartDelay() {
   assert.strictEqual(util.backendRestartDelayMs("nan"), 0);
 }
 
+function testPythonBackendStartRaceGuards() {
+  const source = fs.readFileSync(path.join(__dirname, "..", "desktop", "main.cjs"), "utf8");
+  const startBlock = source.slice(source.indexOf("  start() {"), source.indexOf("  _spawn() {"));
+  assert.match(startBlock, /if \(this\.readyPromise\) \{\s*return this\.readyPromise;/);
+  assert.doesNotMatch(startBlock, /this\.readyPromise && this\.child/);
+
+  const spawnBlock = source.slice(source.indexOf("  _spawn() {"), source.indexOf("  async invoke("));
+  assert.match(spawnBlock, /if \(this\.child !== child\) \{\s*return;\s*\}/);
+  assert.match(spawnBlock, /const activeChild = this\.child === child;/);
+  assert.match(spawnBlock, /if \(activeChild\) \{[\s\S]*?this\.pending\.clear\(\);[\s\S]*?this\.readyPromise = null;[\s\S]*?this\.child = null;[\s\S]*?reject\(error\);[\s\S]*?\}/);
+  assert.match(spawnBlock, /stale: !activeChild/);
+}
+
 function testCanonicalPathKey() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vintrace-canon-"));
   // case-fold on -> equal keys regardless of case
@@ -91,5 +104,6 @@ testIsSubpath();
 testTimestampSlug();
 testSafeRealpath();
 testBackendRestartDelay();
+testPythonBackendStartRaceGuards();
 testCanonicalPathKey();
 console.log("main util ok");

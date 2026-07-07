@@ -32,7 +32,7 @@ async function clickSafeVisibleButtons(page: Page, pageErrors: string[], tabName
   const clicked = new Set<string>();
 
   for (let pass = 0; pass < 4; pass += 1) {
-    const buttons = page.locator(".workspace button:visible, .onboarding-card button:visible, .topbar-actions button:visible");
+    const buttons = page.locator(".workspace button:visible, .onboarding-card button:visible, .sidebar-footer button:visible");
     const count = await buttons.count();
     for (let index = 0; index < count; index += 1) {
       const button = buttons.nth(index);
@@ -62,13 +62,16 @@ test("every visible safe button path remains non-crashing", async () => {
   const projectRoot = process.cwd();
   const temp = mkdtempSync(path.join(os.tmpdir(), "vintrace-button-audit-"));
   const workspace = path.join(temp, "workspace");
+  const registry = path.join(temp, "registry");
   const pageErrors: string[] = [];
   const env: Record<string, string> = {
     ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
     CROSSAGE_FORCE_FALLBACK: "1",
     CROSSAGE_TEST_CAMERA: "1",
     CROSSAGE_TEST_DIALOG_PATHS: workspace,
-    CROSSAGE_REGISTRY_HOME: path.join(temp, "registry"),
+    VINTRACE_REGISTRY_HOME: registry,
+    CROSSAGE_REGISTRY_HOME: registry,
+    VINTRACE_WORKSPACE: workspace,
     CROSSAGE_WORKSPACE: workspace,
     CROSSAGE_ALLOW_MULTI_INSTANCE: "1",
     PYTHONPATH: projectRoot
@@ -88,7 +91,7 @@ test("every visible safe button path remains non-crashing", async () => {
   await page.locator(".language-picker select").selectOption("en");
   await closeDialogIfVisible(page);
   const clicked = new Set<string>();
-  for (const name of ["Dashboard", "People", "Scan", "Review", "Settings"]) {
+  for (const name of ["Dashboard", "People", "Scan", "Review", "Photos", "Settings"]) {
     await page.locator(".nav-list").getByRole("button", { name }).click();
     await expect(page.locator(".nav-list").getByRole("button", { name })).toHaveClass(/active/);
     for (const item of await clickSafeVisibleButtons(page, pageErrors, name)) clicked.add(item);

@@ -73,7 +73,11 @@ function backendRestartDelayMs(consecutiveFailures, baseMs = 500, capMs = 30000)
   if (failures <= 0) {
     return 0;
   }
-  const delay = baseMs * 2 ** (failures - 1);
+  // Cap the exponent before shifting so a runaway failure count can't overflow
+  // 2**n past IEEE-754 safe range (which would return Infinity/NaN and defeat
+  // the backoff). Any exponent that already blows past capMs is clamped anyway.
+  const exponent = Math.min(failures - 1, 30);
+  const delay = baseMs * 2 ** exponent;
   return Math.min(capMs, delay);
 }
 

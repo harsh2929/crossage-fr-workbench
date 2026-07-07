@@ -26,7 +26,9 @@ def make_face(path: Path, shirt: tuple[int, int, int] = (74, 88, 138)) -> None:
 def assert_filesystem_chaos_scan() -> None:
     os.environ["CROSSAGE_FORCE_FALLBACK"] = "1"
     root = Path(tempfile.mkdtemp(prefix="vintrace-fs-chaos-"))
-    os.environ["CROSSAGE_REGISTRY_HOME"] = str(root / "registry")
+    registry = str(root / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
     workspace = root / "workspace"
     refs = root / "refs"
     scan = root / "scan"

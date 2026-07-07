@@ -1,0 +1,714 @@
+{
+  "blockers": [
+    "phase6.legalReview:legal:legal-review-not-approved",
+    "phase6.legalReview:legal:legal-review-reviewer-missing",
+    "phase6.legalReview:legal:legal-review-date-missing",
+    "phase6.legalReview:legal:legal-topic-missing:derivativeWeightLicense",
+    "phase6.legalReview:legal:legal-topic-missing:biometricTrainingConsent",
+    "phase6.legalReview:legal:legal-topic-missing:withdrawalAndDeletion",
+    "phase6.legalReview:legal:legal-topic-missing:retentionScope",
+    "phase6.legalReview:legal:legal-topic-missing:exportAndBackupScope",
+    "phase6.legalReview:legal:legal-topic-missing:jurisdictionalBasis",
+    "phase6.legalReview:legal:legal-license-model-missing:0",
+    "phase6.legalReview:legal:legal-license-source-missing:0",
+    "phase6.legalReview:legal:legal-license-not-approved:0",
+    "phase6.legalReview:legal:legal-scope-missing:jurisdiction",
+    "phase6.legalReview:legal:legal-scope-missing:modelFamilies",
+    "phase6.legalReview:legal:legal-scope-missing:biometricDataCategories",
+    "phase6.legalReview:legal:legal-scope-missing:consentPolicyVersion",
+    "phase6.legalReview:legal:legal-scope-missing:retentionDays",
+    "phase6.legalReview:legal:legal-scope-missing:withdrawalProcedure",
+    "phase6.legalReview:legal:legal-scope-missing:exportBackupPolicy"
+  ],
+  "evidenceFiles": [
+    {
+      "exists": true,
+      "kind": "phase5-decision-report",
+      "path": "benchmarks/evidence/self-learning-rd/public-validation-large-four/phase5_onnx_training_decision_verified_matrix.json",
+      "sha256": "a1cb28ed55b475cd29cdfdfe392a7a11f1ca6a2424dcbda77f34785d93cf8465",
+      "sizeBytes": 5772
+    },
+    {
+      "exists": true,
+      "kind": "phase6-readiness-report",
+      "path": "benchmarks/evidence/self-learning-rd/governance/backbone_readiness_report.json",
+      "sha256": "2be3d18eead872d9e36272062e4aab182f09b8be3d22ebabe18dfc27228530df",
+      "sizeBytes": 11589
+    }
+  ],
+  "generatedAtUnix": 1781862280.64,
+  "message": "Self-learning R&D checklist remains blocked or incomplete; keep frozen-backbone learning as the production path.",
+  "notProductionAuthorization": true,
+  "ok": false,
+  "reportHash": "6392487f325cdd0876bfaff4a275ce017045813dd2a3b0cb2855ae62ff2a2898",
+  "requirements": [
+    {
+      "blockers": [],
+      "evidence": {
+        "artifact": {
+          "errors": [],
+          "manifestHash": "e7e1448538cc95b5bbf56b6edcb5dc4878dd51cf533ee61fae57ee12b3331288",
+          "manifestId": "ortlearn_d468e7f98a05",
+          "manifestPath": "benchmarks/evidence/self-learning-rd/public-validation-large-four/row-training-validation/row_training_artifacts/training_artifact_manifest.json",
+          "verified": true
+        },
+        "decisionReportHash": "51c202643258e2ca5d874d9b66df8722cd03fc9b7e48b7d1667b8d732ff6c737",
+        "decisionReportPath": "benchmarks/evidence/self-learning-rd/public-validation-large-four/phase5_onnx_training_decision_verified_matrix.json",
+        "decisionReportVerified": true
+      },
+      "id": "phase5.trainingArtifacts",
+      "label": "Generate required ORT training artifacts",
+      "ok": true,
+      "phase": "phase5",
+      "status": "satisfied"
+    },
+    {
+      "blockers": [],
+      "evidence": {
+        "decisionReportHash": "51c202643258e2ca5d874d9b66df8722cd03fc9b7e48b7d1667b8d732ff6c737",
+        "decisionReportPath": "benchmarks/evidence/self-learning-rd/public-validation-large-four/phase5_onnx_training_decision_verified_matrix.json",
+        "decisionReportVerified": true,
+        "runtime": {
+          "blockers": [],
+          "maxPackageBytes": null,
+          "maxTargetPackageSizeBytes": 1327049623,
+          "ok": true,
+          "requiredTargets": [
+            "macos-arm64",
+            "macos-x64",
+            "windows-x64",
+            "linux-x64"
+          ],
+          "source": "benchmarks/evidence/self-learning-rd/matrix-27802462328/phase5_combined_runtime_study.json",
+          "status": "complete",
+          "targets": [
+            {
+              "blockers": [],
+              "failureModes": [
+                "artifact-tamper",
+                "cancelled",
+                "disk-full",
+                "missing-training-runtime",
+                "out-of-memory",
+                "thermal-throttle"
+              ],
+              "gpuAvailable": true,
+              "measuredAtUnix": 1781837690.807,
+              "ok": true,
+              "packageSizeBytes": 591665508,
+              "performanceTier": "low",
+              "primaryProvider": "CoreMLExecutionProvider",
+              "providers": [
+                "CoreMLExecutionProvider",
+                "CPUExecutionProvider"
+              ],
+              "status": "pass",
+              "target": "macos-arm64",
+              "trainingDurationMs": 14,
+              "trainingPackageAvailable": true,
+              "trainingRuntimeAvailable": true
+            },
+            {
+              "blockers": [],
+              "failureModes": [
+                "artifact-tamper",
+                "cancelled",
+                "disk-full",
+                "missing-training-runtime",
+                "out-of-memory",
+                "thermal-throttle"
+              ],
+              "gpuAvailable": false,
+              "measuredAtUnix": 1781837717.088,
+              "ok": true,
+              "packageSizeBytes": 739657692,
+              "performanceTier": "low",
+              "primaryProvider": "CPUExecutionProvider",
+              "providers": [
+                "CoreMLExecutionProvider",
+                "CPUExecutionProvider"
+              ],
+              "status": "pass",
+              "target": "macos-x64",
+              "trainingDurationMs": 26,
+              "trainingPackageAvailable": true,
+              "trainingRuntimeAvailable": true
+            },
+            {
+              "blockers": [],
+              "failureModes": [
+                "artifact-tamper",
+                "cancelled",
+                "disk-full",
+                "missing-training-runtime",
+                "out-of-memory",
+                "thermal-throttle"
+              ],
+              "gpuAvailable": false,
+              "measuredAtUnix": 1781837757.693,
+              "ok": true,
+              "packageSizeBytes": 648195711,
+              "performanceTier": "low",
+              "primaryProvider": "CPUExecutionProvider",
+              "providers": [
+                "CPUExecutionProvider"
+              ],
+              "status": "pass",
+              "target": "windows-x64",
+              "trainingDurationMs": 50,
+              "trainingPackageAvailable": true,
+              "trainingRuntimeAvailable": true
+            },
+            {
+              "blockers": [],
+              "failureModes": [
+                "artifact-tamper",
+                "cancelled",
+                "disk-full",
+                "missing-training-runtime",
+                "out-of-memory",
+                "thermal-throttle"
+              ],
+              "gpuAvailable": false,
+              "measuredAtUnix": 1781837719.089,
+              "ok": true,
+              "packageSizeBytes": 1327049623,
+              "performanceTier": "low",
+              "primaryProvider": "CPUExecutionProvider",
+              "providers": [
+                "CPUExecutionProvider"
+              ],
+              "status": "pass",
+              "target": "linux-x64",
+              "trainingDurationMs": 17,
+              "trainingPackageAvailable": true,
+              "trainingRuntimeAvailable": true
+            }
+          ],
+          "totalPackageSizeBytes": 3306568534
+        }
+      },
+      "id": "phase5.runtimeStudy",
+      "label": "Measure runtime, disk usage, package size, and failure modes",
+      "ok": true,
+      "phase": "phase5",
+      "status": "satisfied"
+    },
+    {
+      "blockers": [],
+      "evidence": {
+        "decisionReportHash": "51c202643258e2ca5d874d9b66df8722cd03fc9b7e48b7d1667b8d732ff6c737",
+        "decisionReportPath": "benchmarks/evidence/self-learning-rd/public-validation-large-four/phase5_onnx_training_decision_verified_matrix.json",
+        "decisionReportVerified": true,
+        "validation": {
+          "bestMetricGain": 0.011719,
+          "blockers": [],
+          "delta": {
+            "accuracy": 0.009375,
+            "precision": 0.000107,
+            "recall": 0.011719
+          },
+          "minMetricGain": 0.01,
+          "ok": true,
+          "source": "benchmarks/evidence/self-learning-rd/public-validation-large-four/row-training-validation/phase5_onnx_training_validation.json",
+          "status": "pass"
+        }
+      },
+      "id": "phase5.measurableGain",
+      "label": "Prototype proves a measurable gain over the JSON adapter",
+      "ok": true,
+      "phase": "phase5",
+      "status": "satisfied"
+    },
+    {
+      "blockers": [],
+      "evidence": {
+        "decisionReportHash": "51c202643258e2ca5d874d9b66df8722cd03fc9b7e48b7d1667b8d732ff6c737",
+        "decisionReportPath": "benchmarks/evidence/self-learning-rd/public-validation-large-four/phase5_onnx_training_decision_verified_matrix.json",
+        "decisionReportVerified": true,
+        "maxTargetPackageSizeBytes": 1327049623,
+        "runtimeTargets": [
+          {
+            "blockers": [],
+            "failureModes": [
+              "artifact-tamper",
+              "cancelled",
+              "disk-full",
+              "missing-training-runtime",
+              "out-of-memory",
+              "thermal-throttle"
+            ],
+            "gpuAvailable": true,
+            "measuredAtUnix": 1781837690.807,
+            "ok": true,
+            "packageSizeBytes": 591665508,
+            "performanceTier": "low",
+            "primaryProvider": "CoreMLExecutionProvider",
+            "providers": [
+              "CoreMLExecutionProvider",
+              "CPUExecutionProvider"
+            ],
+            "status": "pass",
+            "target": "macos-arm64",
+            "trainingDurationMs": 14,
+            "trainingPackageAvailable": true,
+            "trainingRuntimeAvailable": true
+          },
+          {
+            "blockers": [],
+            "failureModes": [
+              "artifact-tamper",
+              "cancelled",
+              "disk-full",
+              "missing-training-runtime",
+              "out-of-memory",
+              "thermal-throttle"
+            ],
+            "gpuAvailable": false,
+            "measuredAtUnix": 1781837717.088,
+            "ok": true,
+            "packageSizeBytes": 739657692,
+            "performanceTier": "low",
+            "primaryProvider": "CPUExecutionProvider",
+            "providers": [
+              "CoreMLExecutionProvider",
+              "CPUExecutionProvider"
+            ],
+            "status": "pass",
+            "target": "macos-x64",
+            "trainingDurationMs": 26,
+            "trainingPackageAvailable": true,
+            "trainingRuntimeAvailable": true
+          },
+          {
+            "blockers": [],
+            "failureModes": [
+              "artifact-tamper",
+              "cancelled",
+              "disk-full",
+              "missing-training-runtime",
+              "out-of-memory",
+              "thermal-throttle"
+            ],
+            "gpuAvailable": false,
+            "measuredAtUnix": 1781837757.693,
+            "ok": true,
+            "packageSizeBytes": 648195711,
+            "performanceTier": "low",
+            "primaryProvider": "CPUExecutionProvider",
+            "providers": [
+              "CPUExecutionProvider"
+            ],
+            "status": "pass",
+            "target": "windows-x64",
+            "trainingDurationMs": 50,
+            "trainingPackageAvailable": true,
+            "trainingRuntimeAvailable": true
+          },
+          {
+            "blockers": [],
+            "failureModes": [
+              "artifact-tamper",
+              "cancelled",
+              "disk-full",
+              "missing-training-runtime",
+              "out-of-memory",
+              "thermal-throttle"
+            ],
+            "gpuAvailable": false,
+            "measuredAtUnix": 1781837719.089,
+            "ok": true,
+            "packageSizeBytes": 1327049623,
+            "performanceTier": "low",
+            "primaryProvider": "CPUExecutionProvider",
+            "providers": [
+              "CPUExecutionProvider"
+            ],
+            "status": "pass",
+            "target": "linux-x64",
+            "trainingDurationMs": 17,
+            "trainingPackageAvailable": true,
+            "trainingRuntimeAvailable": true
+          }
+        ],
+        "totalPackageSizeBytes": 3306568534
+      },
+      "id": "phase5.packagingImpact",
+      "label": "Packaging impact is understood",
+      "ok": true,
+      "phase": "phase5",
+      "status": "satisfied"
+    },
+    {
+      "blockers": [
+        "legal:legal-review-not-approved",
+        "legal:legal-review-reviewer-missing",
+        "legal:legal-review-date-missing",
+        "legal:legal-topic-missing:derivativeWeightLicense",
+        "legal:legal-topic-missing:biometricTrainingConsent",
+        "legal:legal-topic-missing:withdrawalAndDeletion",
+        "legal:legal-topic-missing:retentionScope",
+        "legal:legal-topic-missing:exportAndBackupScope",
+        "legal:legal-topic-missing:jurisdictionalBasis",
+        "legal:legal-license-model-missing:0",
+        "legal:legal-license-source-missing:0",
+        "legal:legal-license-not-approved:0",
+        "legal:legal-scope-missing:jurisdiction",
+        "legal:legal-scope-missing:modelFamilies",
+        "legal:legal-scope-missing:biometricDataCategories",
+        "legal:legal-scope-missing:consentPolicyVersion",
+        "legal:legal-scope-missing:retentionDays",
+        "legal:legal-scope-missing:withdrawalProcedure",
+        "legal:legal-scope-missing:exportBackupPolicy"
+      ],
+      "evidence": {
+        "legal": {
+          "blockers": [
+            "legal-review-not-approved",
+            "legal-review-reviewer-missing",
+            "legal-review-date-missing",
+            "legal-topic-missing:derivativeWeightLicense",
+            "legal-topic-missing:biometricTrainingConsent",
+            "legal-topic-missing:withdrawalAndDeletion",
+            "legal-topic-missing:retentionScope",
+            "legal-topic-missing:exportAndBackupScope",
+            "legal-topic-missing:jurisdictionalBasis",
+            "legal-license-model-missing:0",
+            "legal-license-source-missing:0",
+            "legal-license-not-approved:0",
+            "legal-scope-missing:jurisdiction",
+            "legal-scope-missing:modelFamilies",
+            "legal-scope-missing:biometricDataCategories",
+            "legal-scope-missing:consentPolicyVersion",
+            "legal-scope-missing:retentionDays",
+            "legal-scope-missing:withdrawalProcedure",
+            "legal-scope-missing:exportBackupPolicy"
+          ],
+          "decision": "pending",
+          "evidence": {
+            "exists": true,
+            "kind": "legal-review",
+            "path": "benchmarks/evidence/self-learning-rd/governance/backbone_legal_review.json",
+            "sha256": "e364f822f2ce00bb8546289c2fe8afed2504d0a8a37211298fa3556ec55df70a",
+            "sizeBytes": 689
+          },
+          "message": "Legal review evidence is incomplete or not approved.",
+          "missingScopeFields": [
+            "jurisdiction",
+            "modelFamilies",
+            "biometricDataCategories",
+            "consentPolicyVersion",
+            "retentionDays",
+            "withdrawalProcedure",
+            "exportBackupPolicy"
+          ],
+          "missingTopics": [
+            "derivativeWeightLicense",
+            "biometricTrainingConsent",
+            "withdrawalAndDeletion",
+            "retentionScope",
+            "exportAndBackupScope",
+            "jurisdictionalBasis"
+          ],
+          "ok": false,
+          "path": "benchmarks/evidence/self-learning-rd/governance/backbone_legal_review.json",
+          "requiredScopeFields": [
+            "jurisdiction",
+            "modelFamilies",
+            "baseModelLicenses",
+            "biometricDataCategories",
+            "consentPolicyVersion",
+            "retentionDays",
+            "withdrawalProcedure",
+            "exportBackupPolicy"
+          ],
+          "requiredTopics": [
+            "derivativeWeightLicense",
+            "biometricTrainingConsent",
+            "withdrawalAndDeletion",
+            "retentionScope",
+            "exportAndBackupScope",
+            "jurisdictionalBasis"
+          ],
+          "reviewedAt": "",
+          "reviewer": "",
+          "scope": {
+            "baseModelLicenses": [
+              {
+                "licenseStatus": "pending",
+                "modelFamily": "",
+                "notes": "",
+                "source": ""
+              }
+            ],
+            "biometricDataCategories": [],
+            "consentPolicyVersion": "",
+            "exportBackupPolicy": "",
+            "jurisdiction": "",
+            "modelFamilies": [],
+            "retentionDays": 0,
+            "withdrawalProcedure": ""
+          },
+          "status": "blocked"
+        },
+        "readinessReportHash": "8adc011212a05b73ce6e8f05e11bdffdb923ce2f1b285f5acca8b09a103a2a14",
+        "readinessReportPath": "benchmarks/evidence/self-learning-rd/governance/backbone_readiness_report.json",
+        "readinessReportVerified": true
+      },
+      "id": "phase6.legalReview",
+      "label": "Legal review for derivative weights and model licenses",
+      "ok": false,
+      "phase": "phase6",
+      "status": "blocked"
+    },
+    {
+      "blockers": [],
+      "evidence": {
+        "readinessReportHash": "8adc011212a05b73ce6e8f05e11bdffdb923ce2f1b285f5acca8b09a103a2a14",
+        "readinessReportPath": "benchmarks/evidence/self-learning-rd/governance/backbone_readiness_report.json",
+        "readinessReportVerified": true,
+        "runtime": {
+          "blockers": [],
+          "currentHost": {
+            "cpuLogicalCount": 15,
+            "machine": "arm64",
+            "memoryTotalBytes": 25769803776,
+            "packageFootprint": [
+              {
+                "available": true,
+                "name": "onnxruntime",
+                "sizeBytes": 72850256,
+                "sizeMB": 69.48,
+                "version": "1.26.0"
+              },
+              {
+                "available": true,
+                "name": "onnx",
+                "sizeBytes": 40081782,
+                "sizeMB": 38.22,
+                "version": "1.21.0"
+              },
+              {
+                "available": true,
+                "name": "numpy",
+                "sizeBytes": 31057805,
+                "sizeMB": 29.62,
+                "version": "2.4.6"
+              },
+              {
+                "available": true,
+                "name": "scikit-learn",
+                "sizeBytes": 45180961,
+                "sizeMB": 43.09,
+                "version": "1.9.0"
+              },
+              {
+                "available": false,
+                "name": "onnxruntime-training",
+                "sizeBytes": 0,
+                "sizeMB": 0.0,
+                "version": ""
+              },
+              {
+                "available": false,
+                "name": "onnxruntime-training-cpu",
+                "sizeBytes": 0,
+                "sizeMB": 0.0,
+                "version": ""
+              },
+              {
+                "available": false,
+                "name": "torch",
+                "sizeBytes": 0,
+                "sizeMB": 0.0,
+                "version": ""
+              }
+            ],
+            "performanceTier": "high",
+            "platformKey": "apple_silicon",
+            "primaryProvider": "CoreMLExecutionProvider",
+            "providers": [
+              "CoreMLExecutionProvider",
+              "AzureExecutionProvider",
+              "CPUExecutionProvider"
+            ],
+            "system": "Darwin",
+            "trainingModules": {
+              "numpy": true,
+              "onnx": true,
+              "onnxruntime": true,
+              "onnxruntime.training": false
+            }
+          },
+          "evidence": {
+            "exists": true,
+            "kind": "runtime-study",
+            "path": "benchmarks/evidence/self-learning-rd/matrix-27802462328/phase5_combined_runtime_study.json",
+            "sha256": "f2c507287f21c7ca21e34658e1c20111333e1584e992ad7e33a2888ac67b97a7",
+            "sizeBytes": 6092
+          },
+          "message": "Runtime feasibility evidence is complete for R&D.",
+          "ok": true,
+          "path": "benchmarks/evidence/self-learning-rd/matrix-27802462328/phase5_combined_runtime_study.json",
+          "requiredTargets": [
+            "macos-arm64",
+            "macos-x64",
+            "windows-x64",
+            "linux-x64"
+          ],
+          "status": "complete",
+          "targets": [
+            {
+              "artifactCount": 5,
+              "artifactGenerationStatus": "complete",
+              "blockers": [],
+              "currentHost": true,
+              "failureModes": [
+                "artifact-tamper",
+                "cancelled",
+                "disk-full",
+                "missing-training-runtime",
+                "out-of-memory",
+                "thermal-throttle"
+              ],
+              "featureFlag": "VINTRACE_EXPERIMENTAL_ONNX_TRAINING",
+              "gpuAvailable": true,
+              "measuredAtUnix": 1781837690.807,
+              "missingArtifacts": [],
+              "packageSizeBytes": 591665508,
+              "performanceTier": "low",
+              "primaryProvider": "CoreMLExecutionProvider",
+              "providers": [
+                "CoreMLExecutionProvider",
+                "CPUExecutionProvider"
+              ],
+              "status": "pass",
+              "target": "macos-arm64",
+              "trainingDurationMs": 14,
+              "trainingJobDurationMs": 8.405,
+              "trainingJobStatus": "complete",
+              "trainingPackageAvailable": true,
+              "trainingRuntimeAvailable": true
+            },
+            {
+              "artifactCount": 5,
+              "artifactGenerationStatus": "complete",
+              "blockers": [],
+              "currentHost": true,
+              "failureModes": [
+                "artifact-tamper",
+                "cancelled",
+                "disk-full",
+                "missing-training-runtime",
+                "out-of-memory",
+                "thermal-throttle"
+              ],
+              "featureFlag": "VINTRACE_EXPERIMENTAL_ONNX_TRAINING",
+              "gpuAvailable": false,
+              "measuredAtUnix": 1781837717.088,
+              "missingArtifacts": [],
+              "packageSizeBytes": 739657692,
+              "performanceTier": "low",
+              "primaryProvider": "CPUExecutionProvider",
+              "providers": [
+                "CoreMLExecutionProvider",
+                "CPUExecutionProvider"
+              ],
+              "status": "pass",
+              "target": "macos-x64",
+              "trainingDurationMs": 26,
+              "trainingJobDurationMs": 12.354,
+              "trainingJobStatus": "complete",
+              "trainingPackageAvailable": true,
+              "trainingRuntimeAvailable": true
+            },
+            {
+              "artifactCount": 5,
+              "artifactGenerationStatus": "complete",
+              "blockers": [],
+              "currentHost": true,
+              "failureModes": [
+                "artifact-tamper",
+                "cancelled",
+                "disk-full",
+                "missing-training-runtime",
+                "out-of-memory",
+                "thermal-throttle"
+              ],
+              "featureFlag": "VINTRACE_EXPERIMENTAL_ONNX_TRAINING",
+              "gpuAvailable": false,
+              "measuredAtUnix": 1781837757.693,
+              "missingArtifacts": [],
+              "packageSizeBytes": 648195711,
+              "performanceTier": "low",
+              "primaryProvider": "CPUExecutionProvider",
+              "providers": [
+                "CPUExecutionProvider"
+              ],
+              "status": "pass",
+              "target": "windows-x64",
+              "trainingDurationMs": 50,
+              "trainingJobDurationMs": 18.704,
+              "trainingJobStatus": "complete",
+              "trainingPackageAvailable": true,
+              "trainingRuntimeAvailable": true
+            },
+            {
+              "artifactCount": 5,
+              "artifactGenerationStatus": "complete",
+              "blockers": [],
+              "currentHost": true,
+              "failureModes": [
+                "artifact-tamper",
+                "cancelled",
+                "disk-full",
+                "missing-training-runtime",
+                "out-of-memory",
+                "thermal-throttle"
+              ],
+              "featureFlag": "VINTRACE_EXPERIMENTAL_ONNX_TRAINING",
+              "gpuAvailable": false,
+              "measuredAtUnix": 1781837719.089,
+              "missingArtifacts": [],
+              "packageSizeBytes": 1327049623,
+              "performanceTier": "low",
+              "primaryProvider": "CPUExecutionProvider",
+              "providers": [
+                "CPUExecutionProvider"
+              ],
+              "status": "pass",
+              "target": "linux-x64",
+              "trainingDurationMs": 17,
+              "trainingJobDurationMs": 13.247,
+              "trainingJobStatus": "complete",
+              "trainingPackageAvailable": true,
+              "trainingRuntimeAvailable": true
+            }
+          ]
+        }
+      },
+      "id": "phase6.gpuRuntimeStudy",
+      "label": "GPU/runtime feasibility study",
+      "ok": true,
+      "phase": "phase6",
+      "status": "satisfied"
+    }
+  ],
+  "schemaVersion": 1,
+  "scope": "self-learning-loop-r-and-d-checklist",
+  "sourceReports": {
+    "phase5Decision": {
+      "errors": [],
+      "path": "benchmarks/evidence/self-learning-rd/public-validation-large-four/phase5_onnx_training_decision_verified_matrix.json",
+      "reportHash": "51c202643258e2ca5d874d9b66df8722cd03fc9b7e48b7d1667b8d732ff6c737",
+      "verified": true
+    },
+    "phase6Readiness": {
+      "errors": [],
+      "path": "benchmarks/evidence/self-learning-rd/governance/backbone_readiness_report.json",
+      "reportHash": "8adc011212a05b73ce6e8f05e11bdffdb923ce2f1b285f5acca8b09a103a2a14",
+      "verified": true
+    }
+  },
+  "status": "blocked"
+}

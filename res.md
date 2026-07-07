@@ -5,6 +5,125 @@
 - **For a single-model, lowest-friction option, Falconsai/nsfw_image_detection (Apache-2.0, ViT-base, 224px, ~85M params) is the most battle-tested** (its FALCONS.AI GitHub repo claims "the #1 NSFW classification model … leading the community with a staggering 80 MILLION downloads"; aimodels.fyi lists 37.9M), **but it is high-precision/low-recall on hard data, so it is the wrong default for a privacy-first "Safe Mode."** Multi-level/calibrated models (Marqo, Freepik) are better fits.
 - **Bundle one small, permissively-licensed ONNX model with the app** (Apache-2.0/MIT weights make redistribution legal), run it **BEFORE thumbnailing/face-matching/clustering/indexing/MCP/export**, cache scores by file content hash, store only scores/labels/hashes (never previews), and calibrate three thresholds (privacy-first/balanced/permissive) on a user-owned validation set using temperature scaling + PR-curve selection.
 
+## Implementation status (2026-07-05)
+
+The plan below is **implemented**. Safe Mode already runs a bundled ONNX gate
+(`models/safety/adamcodd_vit_base_nsfw_int8.onnx`, Apache-2.0 — the res.md "best
+off-the-shelf ONNX" finalist; a ready-made ONNX was preferred over exporting Marqo
+myself) with the exposed-skin heuristic kept as a hybrid guard + offline fallback,
+integrity-pinned by an in-code SHA-256. The staged plan was completed as follows:
+
+- **Stage 0 — ONNX gate: DONE** (pre-existing). `crossage_fr/ingest/safety.py`.
+- **Stage 1a — threshold profiles: SHIPPED.** `privacy/balanced/permissive`
+  (0.30/0.50/0.85) + `custom`, in `crossage_fr/config.py`
+  (`SAFE_MODE_PROFILES`, `safe_mode_threshold_for_profile`, `safe_mode_profile`);
+  a named profile is authoritative for the effective threshold, threaded through
+  `save_settings` (api_server + mcp_server), exposed in state
+  (`safeModeProfile`/`safeModeProfiles`), and selectable in Settings → Privacy &
+  Safety. **Deviation:** default profile is `custom` (preserves the shipped 0.58
+  and any user-set threshold — a migration-safety choice) rather than res.md's
+  privacy-first default; privacy-first is one click away. Tests:
+  `tests/safe_mode_profiles_units.py`.
+- **Stage 1b — temperature-scaling calibration: SHIPPED.** Pure engine
+  `crossage_fr/ingest/safety_calibration.py` (`apply_temperature`,
+  `temperature_nll`, `fit_temperature` via coarse-to-fine 1-D NLL minimization);
+  the ONNX model divides logits by `T` before softmax (`config.safe_mode_temperature`,
+  clamped, default 1.0 = raw model); `calibrate_safe_mode` command fits `T` from
+  user-labeled local images/folders and persists it (audited); state exposes
+  `safeModeTemperature`. Tests: `tests/safe_mode_calibration_units.py`.
+- **Stage 1c — blurred-preview review UX + labeling loop: SHIPPED.** The
+  blur/reveal/override review UX **already existed** and is stronger than the plan
+  (a per-item `sensitive` DB flag, a passcode/OS-auth reveal gate, the privacy
+  veil, and the sensitive-collection rail toggles). Added the calibration loop:
+  the `calibrate_safe_mode` command accepts example **folders** (pick a
+  sensitive-examples folder + a safe-examples folder; enumerated server-side,
+  capped), wired into a "Calibrate to your library" control in Settings → Privacy
+  & Safety with a Reset. Everything stays on-device.
+- **Stage 2 — explain-why-flagged detector: WIRED for NudeNet; model download is
+  the only user step.** `crossage_fr/ingest/safety_explain.py` implements the full
+  second stage: the correct **NudeNet YOLOv8 pipeline** — letterbox pad-resize →
+  run → parse → per-label NMS → un-letterbox to normalized [0,1] boxes — with the
+  18 NudeNet classes in output order, a stable `ExplainDetection` schema, model
+  discovery + sidecar manifest, graceful degradation with no model (never raises),
+  and **unit-tested pure geometry** (`letterbox_params`, `unletterbox_box`,
+  `box_iou`, `non_max_suppression`, in `tests/safety_explain_units.py`). Commands:
+  `explain_safety` (localize a flagged image) and `install_safety_explainer`
+  (installs a user-downloaded ONNX or a URL, with **AGPL acknowledgment** +
+  SHA-256 verify + manifest); a `chooseModelFile` picker and a "Install explainer…"
+  control in Settings → Privacy & Safety drive it; `safeModeExplain` reports
+  availability in state. **Only the model bytes are a user step** — NudeNet v3 is
+  AGPL-3.0 + download-only (source-offer obligation, surfaced in the install
+  consent), so nothing is bundled/redistributed.
+  **Remaining UI increment:** overlaying the returned boxes on the revealed
+  sensitive image in the review (the `explain_safety` command + normalized-box data
+  are ready; the lightbox overlay is a straightforward follow-up).
+- **Stage 1d — Freepik multi-level first-stage: SHIPPED; ONNX export is the only
+  user step.** `crossage_fr/ingest/safety.py` supports a 4-level classifier
+  (neutral/low/medium/high) as a drop-in first-stage model: a manifest with `levels`
+  + `sensitiveMinLevel` makes `_OnnxSafetyModel.assess` derive the gate score from
+  the softmax mass at/above the sensitive level (`nsfw_probability_from_levels`) and
+  expose the argmax `dominant_level` on `SafetyAssessment.level` + in the `reason`;
+  `_model_preference` ranks a `freepik*` model above the bundled AdamCodd gate. The
+  threshold-profile + temperature machinery applies unchanged. Because Freepik is
+  **MIT**, an exported ONNX may be bundled/redistributed. Tests:
+  `tests/safe_mode_levels_units.py`. Provisioning: `models/safety/README-freepik.md`.
+
+### Installing NudeNet (Stage 2 explainer)
+
+1. Download a NudeNet v3 ONNX detector yourself (its `320n` ≈ 7 MB or `640m` ≈ 25 MB),
+   honoring its **AGPL-3.0** license.
+2. In Settings → Privacy & Safety → **Explain why flagged**, click *Install
+   explainer…*, acknowledge the AGPL notice, and pick the `.onnx`. The app copies it
+   into `models/safety-explain/`, writes a manifest (NudeNet classes, `inputSize`
+   640, `format: nudenet`), records its SHA-256, and enables the second stage.
+   (Equivalent CLI/MCP: the `install_safety_explainer` command with
+   `{sourcePath, license:"AGPL-3.0", confirmAgpl:true, format:"nudenet"}`.)
+
+### Freepik (the MIT first-stage alternative) — INTEGRATED
+
+Freepik is a **classifier** (4 ordered levels neutral/low/medium/high), not a box
+detector — so it lands in **Stage 1**, not Stage 2. The multi-level integration is
+now **shipped**; the only remaining step is the one-time ONNX export (the repo is
+**public** — not-for-all-audiences, *not* access-gated — and ships no ONNX, verified
+2026-07-06 via the HF model API: one repo, `config.json` + `model.safetensors`,
+`gated:false`, 4-level `id2label`). Provisioning doc: `models/safety/README-freepik.md`.
+
+1. **Export ONNX** (the one manual step) from `Freepik/nsfw_image_detector`
+   (`eva02_base_patch14_448`, 448px, 86M params) — a one-time offline export. It is
+   packaged as a HF `TimmWrapperForImageClassification`, so load via
+   `transformers.AutoModelForImageClassification.from_pretrained` and
+   `torch.onnx.export` (opset 14+, dynamic batch axis), or use `optimum-cli export
+   onnx`. See `README-freepik.md`.
+2. **First-stage discovery — DONE.** `crossage_fr/ingest/safety.py` auto-discovers
+   any `models/safety/*.onnx` + sidecar manifest. A manifest with `levels` +
+   `sensitiveMinLevel` (see `README-freepik.md`) is enough; `_model_preference`
+   ranks a `freepik*` model **above** the bundled AdamCodd gate, and the loader
+   still verifies a manifest `sha256` when present.
+3. **Level→gate mapping — DONE.** `_OnnxSafetyModel.assess` branches on
+   `spec.levels`: `nsfw_probability_from_levels` sums the softmax mass at/above
+   `sensitiveMinLevel` (medium+high by default) as the gate score, and
+   `dominant_level` (argmax) is surfaced on `SafetyAssessment.level` + in the
+   `reason`, so the UI can separate "suggestive" from "explicit." The existing
+   threshold-profile + temperature machinery applies to the derived probability
+   unchanged. Covered by `tests/safe_mode_levels_units.py`.
+4. **License:** Freepik is MIT — it *may* be bundled/redistributed (unlike NudeNet),
+   so once exported it can ship with the app rather than being a user download.
+
+Freepik does **not** give body-part boxes, so it does not replace NudeNet for the
+Stage 2 "explain why" overlay — it's a stronger, redistributable *first-stage*
+classifier. For localization boxes you still need NudeNet (or another detector).
+- **Stage 3 — enterprise cloud: DEFERRED (documented, intentional).** Cloud
+  moderation transfers biometric + intimate-image data off-device, which
+  contradicts the local-first default that is the app's core and marketed posture;
+  it also needs API keys and cannot run offline. Per this doc's own guidance it is
+  "never the default, opt-in enterprise only," and enabling it is a product + legal
+  decision, not a code default. It is therefore **not built** — it would be a
+  separate, explicitly-labeled, opt-in module added only on that decision.
+
+All new logic is unit-tested; the two new IPC commands (`calibrate_safe_mode`,
+`explain_safety`) are in the Python≡preload≡main contract (`npm run
+test:command-contract` passes).
+
 ## Key Findings
 
 1. **Best license + accuracy + size balance is Marqo/nsfw-image-detection-384 (Apache-2.0).** Its HF card states it is "approximately 18–20x smaller than other open-source models and achieves a superior accuracy of 98.56% on our dataset … trained on a proprietary dataset of 220,000 images" (base: `timm/vit_tiny_patch16_384.augreg_in21k_ft_in1k`). It outputs a calibrated 2-class softmax (SFW/NSFW) and is heavily adopted (1.62M monthly downloads on Marqo's HF org page).
@@ -174,7 +293,13 @@ is_protected = score >= PROFILES['privacy']
 ## Caveats
 - **Vendor accuracy claims (~98%) are measured on each model's own, easier dataset and do not generalize** (aimodels.fyi notes Falconsai has "no independent benchmark on public datasets"); independent UnsafeBench numbers are far lower (59–77%). Always validate on the user's own data.
 - The independent cross-model numbers come from **KidsNanny (arXiv:2603.16181), a self-disclosed first-party technical report**; its competitor measurements are third-party but should be reproduced on your own held-out set before final model choice.
-- **Freepik's repo is gated as sensitive content**; exact file size, current download count, and ONNX availability could not be confirmed — verify before bundling, and budget time to export ONNX yourself.
+- **Freepik's repo — RESOLVED 2026-07-06 (HF model API):** it is **public**, flagged
+  *not-for-all-audiences* (content warning) but **not access-gated** (`gated:false`).
+  One model, no variants: `config.json` + `model.safetensors` (86.3M params, ~330 MB),
+  4-level `id2label` {0:neutral,1:low,2:medium,3:high}, MIT. **Still no ONNX shipped** —
+  budget time to export yourself (see `models/safety/README-freepik.md`). NOTE: the
+  research prose above (model table + shortlist) still says "gated" from the original
+  survey; this verified entry supersedes it.
 - **NudeNet v3 is AGPL-3.0 and flagged "inactive"** — do not bundle in a closed-source product without legal review or a commercial grant.
 - **All threshold values are starting points**; final operating points must come from per-user/per-app calibration on labeled local data.
 - Treat the EU AI Act timeline as moving: high-risk obligations and the intimate-image "nudifier" generation prohibition have shifting dates (2026–2027); your detection/filtering use case is distinct from generation, but document intended purpose and limitations.

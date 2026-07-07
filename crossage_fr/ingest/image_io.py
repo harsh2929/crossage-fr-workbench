@@ -4,9 +4,10 @@ from datetime import datetime
 from pathlib import Path
 import hashlib
 import importlib.util
+import logging
 import os
 import warnings
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 from PIL import ExifTags, Image, ImageOps
 
@@ -116,8 +117,10 @@ def register_image_openers() -> None:
         register_avif_opener = getattr(pillow_heif, "register_avif_opener", None)
         if register_avif_opener:
             register_avif_opener()
-    except Exception:
-        pass
+    except Exception as exc:
+        # Surface why HEIC/AVIF support is unavailable instead of failing later
+        # with a cryptic "could not load image" for those formats.
+        logging.getLogger(__name__).warning("HEIF/AVIF opener registration failed (%s); HEIC/AVIF may not load.", exc)
     Image.init()
     _IMAGE_OPENERS_REGISTERED = True
 
@@ -146,19 +149,53 @@ def image_decoder_report() -> dict[str, object]:
     }
 
 
-def iter_image_paths(root: Path) -> Iterable[Path]:
+def iter_image_paths(
+    root: Path,
+    recursive: bool = True,
+    excluded_dirs: set[Path] | None = None,
+    exclusion_reason: Callable[..., str] | None = None,
+) -> Iterable[Path]:
+    """Yield image paths under ``root``.
+
+    With no extra arguments the behaviour is unchanged (recursive, images-only,
+    no exclusions) so existing callers — benchmarks included — are untouched.
+
+    - ``recursive=False`` enumerates only the top-level folder.
+    - ``excluded_dirs`` is a set of resolved directory paths whose subtrees are skipped.
+    - ``exclusion_reason`` is an optional ``(path, is_dir) -> reason`` callable
+      (e.g. ``ProjectState.scan_exclusion_reason``); any truthy reason skips the
+      directory or file. This is how enroll opts into the workspace exclusion rules.
+    """
+    from crossage_fr.storage import safe_resolve
+
     root = root.expanduser().resolve()
     if root.is_file() and root.suffix.lower() in IMAGE_EXTENSIONS:
         yield root
         return
     if not root.exists():
         return
+    excluded = excluded_dirs or set()
     for current, dirnames, filenames in os.walk(root):
         dirnames.sort()
+        if not recursive:
+            dirnames[:] = []
+        else:
+            kept = []
+            for name in dirnames:
+                child = Path(current) / name
+                if excluded and safe_resolve(child) in excluded:
+                    continue
+                if exclusion_reason is not None and exclusion_reason(child, True):
+                    continue
+                kept.append(name)
+            dirnames[:] = kept
         for filename in sorted(filenames):
             path = Path(current) / filename
-            if path.suffix.lower() in IMAGE_EXTENSIONS:
-                yield path
+            if path.suffix.lower() not in IMAGE_EXTENSIONS:
+                continue
+            if exclusion_reason is not None and exclusion_reason(path, False):
+                continue
+            yield path
 
 
 def _representative_frame(image: Image.Image) -> Image.Image:
@@ -167,6 +204,7 @@ def _representative_frame(image: Image.Image) -> Image.Image:
     try:
         image.seek(target)
     except Exception:
+        logging.getLogger(__name__).info("Frame seek to %d failed (n_frames=%d); falling back to frame 0.", target, frame_count)
         try:
             image.seek(0)
         except Exception:
@@ -183,6 +221,23 @@ def _to_rgb(image: Image.Image) -> Image.Image:
         background.alpha_composite(rgba)
         return background.convert("RGB")
     return image.convert("RGB")
+
+
+def _raw_postprocess_kwargs(rawpy_module: Any) -> dict[str, Any]:
+    """High-fidelity LibRaw postprocess settings for RAW decode (APL-RAW-01).
+
+    Prefers LibRaw's DHT demosaic (user_qual 11) and an explicit sRGB output
+    color space for top-tier color fidelity, degrading gracefully to LibRaw's
+    defaults when a given build (or a test stub) lacks those options.
+    """
+    kwargs: dict[str, Any] = {"use_camera_wb": True, "no_auto_bright": False, "output_bps": 8}
+    color_space = getattr(getattr(rawpy_module, "ColorSpace", None), "sRGB", None)
+    if color_space is not None:
+        kwargs["output_color"] = color_space
+    demosaic = getattr(getattr(rawpy_module, "DemosaicAlgorithm", None), "DHT", None)
+    if demosaic is not None:
+        kwargs["demosaic_algorithm"] = demosaic
+    return kwargs
 
 
 def _load_raw_image(path: Path) -> Image.Image:
@@ -202,11 +257,22 @@ def _load_raw_image(path: Path) -> Image.Image:
                 int(getattr(sizes, "width", 0)) * int(getattr(sizes, "height", 0)),
             )
             limit = int(getattr(Image, "MAX_IMAGE_PIXELS", 0) or 0)
+            if limit and pixels <= 0:
+                # A crafted RAW can report 0/missing dimensions to slip past the
+                # pixel ceiling and then OOM in postprocess(). If we can't verify
+                # the size, refuse to decode rather than trust it.
+                raise ImageLoadError(
+                    f"RAW/DNG image reports no decodable dimensions; refusing to decode: {path}"
+                )
             if limit and pixels > limit:
                 raise ImageLoadError(
                     f"RAW/DNG image exceeds the maximum allowed pixels ({pixels} > {limit}): {path}"
                 )
-            rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=False, output_bps=8)
+            try:
+                rgb = raw.postprocess(**_raw_postprocess_kwargs(rawpy))
+            except Exception:
+                # A given LibRaw build may reject DHT (user_qual 11); fall back to defaults.
+                rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=False, output_bps=8)
         return Image.fromarray(rgb).convert("RGB")
     except ImageLoadError:
         raise
@@ -266,29 +332,53 @@ def average_hash(image: Image.Image) -> str:
     return f"{bits:016x}"
 
 
-def capture_date(path: Path, image: Image.Image) -> str | None:
+def _exif_tag_map(image: Image.Image) -> dict[str, object]:
     try:
         exif = image.getexif()
     except Exception:
         exif = {}
-    tags = {ExifTags.TAGS.get(k, str(k)): v for k, v in exif.items()}
+    tags = {ExifTags.TAGS.get(k, str(k)): v for k, v in exif.items()} if exif else {}
+    for ifd_id in (getattr(ExifTags.IFD, "Exif", 34665),):
+        try:
+            nested = exif.get_ifd(ifd_id) if exif else {}
+        except Exception:
+            nested = {}
+        if nested:
+            tags.update({ExifTags.TAGS.get(k, str(k)): v for k, v in nested.items()})
+    return tags
+
+
+def capture_date_with_provenance(path: Path, image: Image.Image) -> tuple[str | None, str]:
+    """Return (capture_date_iso, provenance).
+
+    §5.4 governance: distinguishing a real EXIF event date from the mtime fallback
+    is load-bearing. For a digitized historical photo, mtime is the *scan* date —
+    an age gap derived from it is meaningless, so downstream the uncertainty banner
+    is suppressed unless provenance is "exif". provenance is "exif" | "mtime" | "none".
+    """
+    tags = _exif_tag_map(image)
     for key in ("DateTimeOriginal", "DateTimeDigitized", "DateTime"):
         value = tags.get(key)
         if not value:
             continue
         for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
             try:
-                return datetime.strptime(str(value), fmt).date().isoformat()
+                return datetime.strptime(str(value), fmt).date().isoformat(), "exif"
             except ValueError:
                 pass
     try:
-        return datetime.fromtimestamp(os.path.getmtime(path)).date().isoformat()
+        return datetime.fromtimestamp(os.path.getmtime(path)).date().isoformat(), "mtime"
     except OSError:
-        return None
+        return None, "none"
+
+
+def capture_date(path: Path, image: Image.Image) -> str | None:
+    return capture_date_with_provenance(path, image)[0]
 
 
 def image_record_for_path(path: Path, image: Image.Image | None = None, sha256: str | None = None) -> ImageRecord:
     image = image or load_image(path)
+    captured, provenance = capture_date_with_provenance(path, image)
     return ImageRecord(
         image_id=new_id("img"),
         path=str(path),
@@ -296,5 +386,6 @@ def image_record_for_path(path: Path, image: Image.Image | None = None, sha256: 
         phash=average_hash(image),
         width=image.width,
         height=image.height,
-        capture_date=capture_date(path, image),
+        capture_date=captured,
+        capture_date_provenance=provenance,
     )

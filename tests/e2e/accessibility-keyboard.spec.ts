@@ -29,11 +29,14 @@ test("primary UI supports keyboard navigation and modal focus trapping", async (
   const projectRoot = process.cwd();
   const temp = mkdtempSync(path.join(os.tmpdir(), "vintrace-a11y-"));
   const workspace = path.join(temp, "workspace");
+  const registry = path.join(temp, "registry");
   const env: Record<string, string> = {
     ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
     CROSSAGE_FORCE_FALLBACK: "1",
     CROSSAGE_TEST_DIALOG_PATHS: workspace,
-    CROSSAGE_REGISTRY_HOME: path.join(temp, "registry"),
+    VINTRACE_REGISTRY_HOME: registry,
+    CROSSAGE_REGISTRY_HOME: registry,
+    VINTRACE_WORKSPACE: workspace,
     CROSSAGE_WORKSPACE: workspace,
     CROSSAGE_ALLOW_MULTI_INSTANCE: "1",
     PYTHONPATH: projectRoot
@@ -78,7 +81,7 @@ test("primary UI supports keyboard navigation and modal focus trapping", async (
   }
   expect(visited.size).toBeGreaterThan(6);
 
-  for (const tabName of ["Dashboard", "People", "Scan", "Review", "Settings"]) {
+  for (const tabName of ["Dashboard", "People", "Scan", "Review", "Photos", "Settings"]) {
     const tab = page.locator(".nav-list").getByRole("button", { name: tabName });
     await tab.focus();
     await page.keyboard.press("Enter");

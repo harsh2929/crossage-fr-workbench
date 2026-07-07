@@ -11,6 +11,45 @@ MAX_CLUSTER_MIN_SIZE = 20
 MIN_FACE_DETECTOR_SIZE = 320
 MAX_FACE_DETECTOR_SIZE = 1024
 PERFORMANCE_MODES = {"auto", "fast", "balanced", "quality"}
+LEARNING_MODES = {"off", "manual", "auto_stage"}
+
+# Safe Mode threshold profiles (res.md Stage 1a). Three tunable operating points
+# plus a "custom" escape hatch, so users can move the Safe Mode gate instead of
+# being stuck at one threshold. privacy-first is the most aggressive (catches
+# more sensitive content, tolerates more false positives on beachwear/medical);
+# permissive minimizes false positives. Starting values — final operating points
+# come from per-user calibration (Stage 1b).
+SAFE_MODE_PROFILES: dict[str, float] = {
+    "privacy": 0.30,
+    "balanced": 0.50,
+    "permissive": 0.85,
+}
+SAFE_MODE_PROFILE_NAMES = ("privacy", "balanced", "permissive", "custom")
+
+
+def normalize_safe_mode_profile(value) -> str:
+    """Coerce any input to a valid profile name; unknown → 'balanced'."""
+    name = str(value or "").strip().lower()
+    if name in SAFE_MODE_PROFILES or name == "custom":
+        return name
+    return "balanced"
+
+
+def safe_mode_threshold_for_profile(profile, custom_threshold=None) -> float:
+    """Effective NSFW threshold for a profile. Named profiles ignore the custom
+    value; 'custom' uses it (clamped to [0,1]); missing custom → balanced."""
+    profile = normalize_safe_mode_profile(profile)
+    if profile in SAFE_MODE_PROFILES:
+        return SAFE_MODE_PROFILES[profile]
+    if custom_threshold is None:
+        return SAFE_MODE_PROFILES["balanced"]
+    try:
+        value = float(custom_threshold)
+    except (TypeError, ValueError):
+        return SAFE_MODE_PROFILES["balanced"]
+    if not math.isfinite(value):
+        return SAFE_MODE_PROFILES["balanced"]
+    return max(0.0, min(1.0, value))
 DEFAULT_EXCLUDED_DIR_NAMES = [
     ".git",
     ".hg",
@@ -39,11 +78,28 @@ class Thresholds:
 class RuntimeConfig:
     model_pack: str = "antelopev2"
     model_root: str = ""
+    # Optional drop-in recognizer filename to prefer (e.g. an LVFace ONNX); empty =
+    # the built-in default priority. Switching recognizers re-spaces embeddings, so a
+    # change requires re-enrollment + recalibration (the calibrator is model-tagged).
+    recognizer_filename: str = ""
     review_only: bool = True
     require_consent: bool = True
+    learning_mode: str = "manual"
+    per_subject_consent: bool = False
+    jurisdiction_preset: str = "standard"
+    retention_reviewed_days: int = 90
     safe_mode: bool = True
     safe_mode_threshold: float = 0.58
+    # "custom" by default so an existing/explicit safe_mode_threshold is preserved
+    # (a named profile — privacy/balanced/permissive — is authoritative when chosen).
+    safe_mode_profile: str = "custom"
+    # Stage 1b: per-user temperature-scaling calibration for the ML gate. 1.0 = raw
+    # model; >1 softens over-confident scores. Fit from local labeled images.
+    safe_mode_temperature: float = 1.0
+    safe_mode_zero_admittance: bool = False
     face_detector_size: int = 512
+    multi_scale_detect: bool = True
+    flip_tta: bool = False
     two_pass_scan: bool = True
     verification_detector_size: int = 640
     performance_mode: str = "auto"
@@ -60,6 +116,12 @@ class RuntimeConfig:
     excluded_path_keywords: list[str] = field(default_factory=list)
     excluded_extensions: list[str] = field(default_factory=list)
     excluded_file_paths: list[str] = field(default_factory=list)
+    # Persisted Platt calibrator [a, b] (score -> P(same identity)); empty = uncalibrated.
+    calibration_platt: list[float] = field(default_factory=list)
+    # Per-identity Platt calibrators {person: [a, b]} (§5.6 personalization); empty = none.
+    calibration_platt_by_person: dict[str, list[float]] = field(default_factory=dict)
+    # Recognizer the calibrator was fit on; a model switch makes the calibrator stale.
+    calibration_model: str = ""
     thresholds: Thresholds = field(default_factory=Thresholds)
 
 
@@ -129,6 +191,38 @@ def _normalize_extensions(value: object) -> list[str]:
     return result
 
 
+def _require_platt(value: object) -> list[float]:
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("calibration_platt must be a list.")
+    items = list(value)
+    if not items:
+        return []
+    if len(items) != 2:
+        raise ValueError("calibration_platt must be empty or [a, b].")
+    result: list[float] = []
+    for item in items:
+        if isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(float(item)):
+            raise ValueError("calibration_platt entries must be finite numbers.")
+        result.append(float(item))
+    return result
+
+
+def _require_platt_map(value: object) -> dict[str, list[float]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("calibration_platt_by_person must be a mapping.")
+    result: dict[str, list[float]] = {}
+    for key, params in list(value.items())[:5000]:
+        person = str(key).strip()[:200]
+        if not person:
+            continue
+        result[person] = _require_platt(params)
+    return result
+
+
 def _require_performance_mode(value: object) -> str:
     mode = str(value or "auto").strip().lower()
     if mode not in PERFORMANCE_MODES:
@@ -136,14 +230,40 @@ def _require_performance_mode(value: object) -> str:
     return mode
 
 
+def _require_learning_mode(value: object) -> str:
+    mode = str(value or "manual").strip().lower().replace("-", "_")
+    if mode not in LEARNING_MODES:
+        raise ValueError("learning_mode must be off, manual, or auto_stage.")
+    return mode
+
+
 def _validate_config(config: RuntimeConfig) -> RuntimeConfig:
     config.model_pack = str(config.model_pack)
     config.model_root = str(config.model_root)
+    config.recognizer_filename = str(config.recognizer_filename or "")[:200]
     config.review_only = _require_bool(config.review_only, "review_only")
     config.require_consent = _require_bool(config.require_consent, "require_consent")
+    config.learning_mode = _require_learning_mode(config.learning_mode)
+    config.per_subject_consent = _require_bool(config.per_subject_consent, "per_subject_consent")
+    config.jurisdiction_preset = str(config.jurisdiction_preset or "standard").strip().lower()[:40] or "standard"
+    config.retention_reviewed_days = _require_int(config.retention_reviewed_days, "retention_reviewed_days", minimum=1)
     config.safe_mode = _require_bool(config.safe_mode, "safe_mode")
+    config.safe_mode_zero_admittance = _require_bool(config.safe_mode_zero_admittance, "safe_mode_zero_admittance")
     config.safe_mode_threshold = _require_unit_float(config.safe_mode_threshold, "safe_mode_threshold")
+    # A named profile is authoritative for the effective threshold; "custom"
+    # keeps the explicit safe_mode_threshold above.
+    config.safe_mode_profile = normalize_safe_mode_profile(config.safe_mode_profile)
+    if config.safe_mode_profile != "custom":
+        config.safe_mode_threshold = SAFE_MODE_PROFILES[config.safe_mode_profile]
+    try:
+        temperature = float(config.safe_mode_temperature)
+    except (TypeError, ValueError):
+        temperature = 1.0
+    config.safe_mode_temperature = temperature if (math.isfinite(temperature) and temperature > 0) else 1.0
+    config.safe_mode_temperature = max(0.1, min(10.0, config.safe_mode_temperature))
     config.face_detector_size = _require_detector_size(config.face_detector_size)
+    config.multi_scale_detect = _require_bool(config.multi_scale_detect, "multi_scale_detect")
+    config.flip_tta = _require_bool(config.flip_tta, "flip_tta")
     config.two_pass_scan = _require_bool(config.two_pass_scan, "two_pass_scan")
     config.verification_detector_size = _require_detector_size(config.verification_detector_size)
     config.performance_mode = _require_performance_mode(config.performance_mode)
@@ -164,6 +284,9 @@ def _validate_config(config: RuntimeConfig) -> RuntimeConfig:
     config.excluded_path_keywords = _require_string_list(config.excluded_path_keywords, "excluded_path_keywords")
     config.excluded_extensions = _normalize_extensions(config.excluded_extensions)
     config.excluded_file_paths = _require_string_list(config.excluded_file_paths, "excluded_file_paths", limit=400)
+    config.calibration_platt = _require_platt(config.calibration_platt)
+    config.calibration_platt_by_person = _require_platt_map(config.calibration_platt_by_person)
+    config.calibration_model = str(config.calibration_model or "")[:200]
     config.thresholds.confident = _require_unit_float(config.thresholds.confident, "thresholds.confident")
     config.thresholds.likely = _require_unit_float(config.thresholds.likely, "thresholds.likely")
     config.thresholds.relaxed_child = _require_unit_float(config.thresholds.relaxed_child, "thresholds.relaxed_child")

@@ -7,6 +7,32 @@ import json
 import math
 
 
+BENCHMARK_DISCLAIMER = (
+    "These are closed-set top-1 product metrics at fixed cosine thresholds, NOT "
+    "standard face-recognition verification accuracy (TAR@FAR / DET) -- they are not "
+    "comparable to LFW/IJB-C/paper numbers. Reported intervals are Wilson 95% score "
+    "intervals; small samples remain statistically weak even when the point estimate is high."
+)
+
+
+def wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score confidence interval for a binomial proportion.
+
+    Exposes how much sampling noise a point estimate carries -- e.g. a 0.99 on 40
+    items is far weaker than a 0.99 on 6000. Returns (0.0, 1.0) for an empty sample.
+    """
+    n = int(total)
+    if n <= 0:
+        return (0.0, 1.0)
+    s = max(0, min(int(successes), n))
+    p = s / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = (p + z2 / (2 * n)) / denom
+    half = (z * math.sqrt(p * (1.0 - p) / n + z2 / (4.0 * n * n))) / denom
+    return (max(0.0, center - half), min(1.0, center + half))
+
+
 DEFAULT_DATASET_GATES: dict[str, dict[str, float | int | bool]] = {
     "calfw": {"minEvaluated": 40, "minPrecision": 0.99, "minRecall": 0.99, "minAccuracy": 0.99, "maxWrongIdentity": 0},
     "cplfw": {"minEvaluated": 40, "minPrecision": 0.95, "minRecall": 0.90, "minAccuracy": 0.92, "minProfileRecall": 0.90, "maxWrongIdentity": 1},
@@ -239,12 +265,28 @@ def model_pack_quality_matrix(rows: list[dict[str, Any]], *, current_pack: str =
                 "score": round(max(0.0, score), 6),
             }
         )
+    # H11: a pack evaluated on only a few favourable datasets must not outrank a
+    # broadly-validated one. Record coverage and down-weight partial coverage so
+    # breadth of validation counts toward the recommendation (a pack with full
+    # coverage is unaffected: factor == 1.0).
+    max_datasets = max((int(p["datasets"]) for p in packs), default=0)
+    for p in packs:
+        coverage = (int(p["datasets"]) / max_datasets) if max_datasets else 1.0
+        p["coverage"] = round(coverage, 4)
+        p["datasetsEvaluated"] = int(p["datasets"])
+        p["maxDatasets"] = max_datasets
+        p["score"] = round(float(p["score"]) * (0.6 + 0.4 * coverage), 6)
     packs.sort(key=lambda row: float(row["score"]), reverse=True)
     recommended = packs[0] if packs else None
     recommendations: list[str] = []
     if recommended:
         status = "keep" if current_pack and recommended["pack"] == current_pack else "switch" if current_pack else "recommend"
         recommendations.append(f"{recommended['pack']} has the strongest aggregate benchmark score across completed datasets.")
+        if max_datasets and int(recommended["datasetsEvaluated"]) < max_datasets:
+            recommendations.append(
+                f"The recommended pack was evaluated on only {recommended['datasetsEvaluated']} of {max_datasets} benchmarked "
+                "dataset(s); broaden dataset coverage before promoting it, as another pack has wider validation."
+            )
         if recommended.get("hardNegativeFalsePositives"):
             recommendations.append("The recommended pack still has hard-negative false positives; keep manual review for lookalikes.")
         if recommended.get("profileRecall") is not None and float(recommended.get("profileRecall") or 0.0) < 0.85:

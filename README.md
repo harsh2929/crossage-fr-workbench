@@ -4,6 +4,35 @@ A Mac/Windows desktop workbench based on `report.md`. The app is now an Electron
 
 The product stance from the report is preserved: cross-age recognition is review-first and consent-gated. It is not an autonomous identification system.
 
+## July 2026 Audit Checkpoint
+
+The July 7 full-stack audit checkpoint closed the confirmed Critical and High issues for the local-first photo workflow. The fixes focus on keeping 50k-100k photo libraries responsive and protecting user trust boundaries:
+
+- Photo listings, folders, search, generated collections, duplicate summaries, timeline covers, and edit-stack lookups now avoid repeated whole-library work on hot read paths.
+- Smart-album, people, pet, and scan/import bookkeeping now use indexed or dirty-flagged paths instead of repeated full scans.
+- Semantic search, photo settings, album suggestions, utility folders, and generated folders are bounded by the requested page or targeted SQL probes.
+- Photos UI coverage is enforced by the localization test gate, with fallback phrase/term translation for the redesigned Photos surface.
+- Workspace state saves merge stale desktop/MCP writers instead of overwriting unrelated changes, and Safe Mode calibration changes invalidate cached safety decisions.
+- EXIF capture-date parsing now reads nested `DateTimeOriginal` / `DateTimeDigitized` metadata before falling back.
+- Desktop backend startup avoids duplicate Python backend spawns during backoff races, and stale child exits no longer reject unrelated pending requests.
+- Camera scanning cleans up pending `getUserMedia` streams on unmount, and canceling a move destination no longer moves originals.
+
+The checkpoint was verified with:
+
+```bash
+npm run test:localization
+npm run test:photos-view
+npm run build
+PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/photo_semantic_search_units.py
+npm run test:photo-folders
+npm run test:safe-mode-calibration
+npm run test:main-util
+npm run test:edge
+git diff --check
+```
+
+The remaining audit backlog is primarily Medium-severity privacy hardening, async job extraction, renderer splitting, and Apple Photos parity work. See `docs/2026-07-07-full-stack-audit-final.md` for the current remediation roadmap.
+
 ## Run The Desktop App
 
 ```bash
@@ -89,7 +118,7 @@ npm run release:check
 npm run release:verify -- --repo harsh2929/crossage-fr-workbench --tag v0.1.0 --platform win32
 ```
 
-`release:check` aggregates runtime diagnostics, database integrity, storage I/O, model distribution metadata, clean-workspace boot, benchmark history, and update-feed dry-run validation into one JSON report. Use `docs/tester-checklist.md` for manual tester verification before broad sharing.
+`release:check` aggregates runtime diagnostics, database integrity, storage I/O, model distribution metadata, clean-workspace boot, benchmark history, update-feed dry-run validation, and self-learning R&D release posture into one JSON report. Use `docs/tester-checklist.md` for manual tester verification before broad sharing.
 
 Release artifacts:
 
@@ -100,7 +129,7 @@ Release artifacts:
 - The unsigned macOS DMG is for trusted testers only. Gatekeeper may require **Privacy & Security > Open Anyway**.
 - `npm run release:artifacts` writes `dist/SHA256SUMS.txt`, `dist/vintrace-sbom.json`, and `dist/vintrace-provenance.json`. `npm run release:verify -- --require-release-metadata` checks those files on newly published releases.
 - `npm run release:verify` checks published assets after release upload: installer/update metadata presence, public downloadability, sane asset size, release metadata when required, and SHA-256 digest matching when `--full` is passed.
-- Before sharing broad test builds, run Settings -> Release readiness, Settings -> Machine benchmark, `npm run release:check`, and the tester checklist. These checks now include model license/checksum manifest status, SQLite database integrity, writable local storage, update-feed setup, crash diagnostics, benchmark history, and signing-environment detection. The checks intentionally stay red for code signing and model redistribution until real certificates and final license approvals are configured.
+- Before sharing broad test builds, run Settings -> Release readiness, Settings -> Machine benchmark, `npm run release:check`, and the tester checklist. These checks now include model license/checksum manifest status, SQLite database integrity, writable local storage, update-feed setup, crash diagnostics, benchmark history, self-learning R&D posture, and signing-environment detection. The checks intentionally stay red for code signing, model redistribution, and true retraining authorization until real certificates, final license approvals, and external Phase 5/6 evidence are configured.
 
 Additional CI gates cover the most common consumer-test failures:
 

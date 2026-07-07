@@ -202,8 +202,68 @@
       "description": "Import local ground-truth label rows, requiring confirm=true."
     },
     {
+      "name": "export_training_examples",
+      "description": "Export reviewed training-example metadata without media files or vectors."
+    },
+    {
+      "name": "import_training_examples",
+      "description": "Import reviewed training-example metadata, requiring confirm=true."
+    },
+    {
       "name": "apply_calibration",
       "description": "Apply local review feedback to matching thresholds, requiring confirm=true."
+    },
+    {
+      "name": "calibration_learning_status",
+      "description": "Read staged/promoted calibration-learning artifacts and current calibration state."
+    },
+    {
+      "name": "run_learning_jobs",
+      "description": "Run guarded local learning jobs; currently auto-stages calibration when enough new review labels are available, requiring confirm=true."
+    },
+    {
+      "name": "reference_suggestion_status",
+      "description": "Read staged/promoted suggested-reference artifacts."
+    },
+    {
+      "name": "stage_reference_suggestions",
+      "description": "Stage suggested references from high-quality accepted matches, requiring confirm=true."
+    },
+    {
+      "name": "approve_reference_suggestion",
+      "description": "Approve a staged suggested reference and add it to saved person photos, requiring confirm=true."
+    },
+    {
+      "name": "reject_reference_suggestion",
+      "description": "Reject a staged suggested reference artifact, requiring confirm=true."
+    },
+    {
+      "name": "stage_calibration",
+      "description": "Stage a learned calibration artifact from local review feedback without applying it, requiring confirm=true."
+    },
+    {
+      "name": "promote_calibration",
+      "description": "Promote a staged learned calibration artifact after validation, requiring confirm=true."
+    },
+    {
+      "name": "rollback_calibration",
+      "description": "Rollback a promoted learned calibration artifact to its previous thresholds, requiring confirm=true."
+    },
+    {
+      "name": "embedding_adapter_status",
+      "description": "Read staged/promoted embedding-adapter artifacts and adapter readiness."
+    },
+    {
+      "name": "stage_embedding_adapter",
+      "description": "Stage a JSON logistic adapter over frozen embeddings after held-out validation, requiring confirm=true."
+    },
+    {
+      "name": "promote_embedding_adapter",
+      "description": "Promote a staged embedding adapter after validation, requiring confirm=true."
+    },
+    {
+      "name": "rollback_embedding_adapter",
+      "description": "Rollback a promoted embedding adapter artifact, requiring confirm=true."
     },
     {
       "name": "export_review_report",

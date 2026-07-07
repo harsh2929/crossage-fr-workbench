@@ -126,7 +126,12 @@ class VectorStore:
             with temp.open("wb") as handle:
                 np.savez_compressed(
                     handle,
-                    ids=np.asarray(self.ids, dtype=object),
+                    # Store ids as a fixed-width unicode array (not dtype=object),
+                    # so the archive contains NO pickled Python objects and can be
+                    # loaded with allow_pickle=False — closing the arbitrary-code-
+                    # execution risk of np.load(allow_pickle=True) on a workspace
+                    # vector store that could be shared/imported.
+                    ids=np.asarray(self.ids, dtype=str),
                     vectors=self._vectors[: len(self.ids)].astype("float32", copy=False),
                     dimension=np.asarray([self.dimension], dtype="int32"),
                 )
@@ -144,7 +149,12 @@ class VectorStore:
         if not path.exists():
             return False
         try:
-            with np.load(path, allow_pickle=True) as archive:
+            # allow_pickle=False: never execute pickled objects from a workspace
+            # vector-store file (arbitrary-code-execution vector). Legacy files
+            # written with dtype=object (pickled ids) will raise here and fall
+            # through to return False, after which the caller rebuilds the store
+            # from the reference records and re-saves it in the pickle-free format.
+            with np.load(path, allow_pickle=False) as archive:
                 dimension = int(np.asarray(archive["dimension"]).reshape(-1)[0])
                 ids = [str(item) for item in archive["ids"].tolist()]
                 values = np.asarray(archive["vectors"], dtype="float32")

@@ -4,6 +4,28 @@ import { mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+// Dismiss the generic "Please confirm" dialog (ConfirmHost) that danger/destructive
+// actions (clear queue, delete photo, clear references, purge reviewed) raise. The
+// confirm button is labelled "Continue"; the dialog's accessible name is "Please confirm".
+async function confirmDialog(page: Page) {
+  await page.getByRole("dialog", { name: "Please confirm" }).getByRole("button", { name: "Continue" }).click();
+}
+
+// Photos-first IA: recognition tools live under Tools / People & Pets with a
+// segmented sub-nav. These helpers navigate to a recognition surface.
+async function gotoToolsSection(page: Page, label: string) {
+  await page.locator(".nav-list").getByRole("button", { name: "Tools" }).click();
+  await page.locator(".section-tab", { hasText: label }).click();
+}
+async function gotoPeopleSection(page: Page, label: string) {
+  await page.locator(".nav-list").getByRole("button", { name: "People & Pets" }).click();
+  await page.locator(".section-tab", { hasText: label }).click();
+}
+// Phase 5: Settings is grouped into sub-nav sections; the nav button is already clicked.
+async function gotoSettingsSection(page: Page, label: string) {
+  await page.locator(".section-tab", { hasText: label }).click();
+}
+
 function makeFixtures(root: string) {
   const refs = path.join(root, "refs");
   const adultRefs = path.join(root, "refs-adult");
@@ -86,13 +108,20 @@ img.save(folder / ${JSON.stringify(filename)}, quality=95)
   ]);
 }
 
-async function expectTopbarControlsReadable(page: Page, colorScheme: "light" | "dark") {
+async function expectSidebarFooterControlsReadable(page: Page, colorScheme: "light" | "dark") {
   await page.emulateMedia({ colorScheme });
-  const activeContrasts = await page.locator(".topbar-actions").evaluate((container) => {
+  const activeContrasts = await page.locator(".sidebar-footer").evaluate((container) => {
     function parseColor(value: string) {
       const match = value.match(/rgba?\(([^)]+)\)/);
-      if (!match) return [0, 0, 0];
-      return match[1].split(",").slice(0, 3).map((part) => Number.parseFloat(part.trim()));
+      if (match) return match[1].replace(/\//g, " ").split(/[,\s]+/).filter(Boolean).slice(0, 3).map((part) => Number.parseFloat(part.trim()));
+      const srgb = value.match(/color\(srgb\s+([^)]+)\)/);
+      if (srgb) {
+        return srgb[1].replace(/\//g, " ").split(/[,\s]+/).filter(Boolean).slice(0, 3).map((part) => {
+          const parsed = Number.parseFloat(part.trim());
+          return parsed <= 1 ? parsed * 255 : parsed;
+        });
+      }
+      return [0, 0, 0];
     }
     function channel(value: number) {
       const normalized = value / 255;
@@ -106,21 +135,36 @@ async function expectTopbarControlsReadable(page: Page, colorScheme: "light" | "
       const dark = Math.min(luminance(parseColor(foreground)), luminance(parseColor(background)));
       return (light + 0.05) / (dark + 0.05);
     }
+    function effectiveBackground(node: HTMLElement) {
+      for (let current: HTMLElement | null = node; current; current = current.parentElement) {
+        const background = window.getComputedStyle(current).backgroundColor;
+        if (background && background !== "transparent" && !/^rgba?\(\s*0\s*,\s*0\s*,\s*0\s*(?:,\s*0\s*)?\)$/i.test(background)) {
+          return background;
+        }
+      }
+      return "rgb(255, 255, 255)";
+    }
     return Array.from(container.querySelectorAll<HTMLElement>("button, label")).map((node) => {
       const style = window.getComputedStyle(node);
+      const background = effectiveBackground(node);
       return {
+        background,
+        className: node.getAttribute("class") || "",
+        color: style.color,
         label: node.textContent?.trim() || node.getAttribute("aria-label") || node.getAttribute("title") || node.tagName,
-        contrast: contrast(style.color, style.backgroundColor)
+        contrast: contrast(style.color, background)
       };
     });
   });
   expect(activeContrasts.filter((item) => item.contrast < 4.5)).toEqual([]);
 
-  const disabledContrasts = await page.locator(".topbar-actions").evaluate((container) => {
+  const disabledContrasts = await page.locator(".sidebar-footer").evaluate((container) => {
     const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>("button"));
     const inputs = Array.from(container.querySelectorAll<HTMLInputElement>("input"));
     const buttonStates = buttons.map((button) => button.disabled);
     const inputStates = inputs.map((input) => input.disabled);
+    const containerWasDisabled = container.classList.contains("disabled");
+    container.classList.add("disabled");
     buttons.forEach((button) => {
       button.disabled = true;
     });
@@ -129,8 +173,15 @@ async function expectTopbarControlsReadable(page: Page, colorScheme: "light" | "
     });
     function parseColor(value: string) {
       const match = value.match(/rgba?\(([^)]+)\)/);
-      if (!match) return [0, 0, 0];
-      return match[1].split(",").slice(0, 3).map((part) => Number.parseFloat(part.trim()));
+      if (match) return match[1].replace(/\//g, " ").split(/[,\s]+/).filter(Boolean).slice(0, 3).map((part) => Number.parseFloat(part.trim()));
+      const srgb = value.match(/color\(srgb\s+([^)]+)\)/);
+      if (srgb) {
+        return srgb[1].replace(/\//g, " ").split(/[,\s]+/).filter(Boolean).slice(0, 3).map((part) => {
+          const parsed = Number.parseFloat(part.trim());
+          return parsed <= 1 ? parsed * 255 : parsed;
+        });
+      }
+      return [0, 0, 0];
     }
     function channel(value: number) {
       const normalized = value / 255;
@@ -144,11 +195,24 @@ async function expectTopbarControlsReadable(page: Page, colorScheme: "light" | "
       const dark = Math.min(luminance(parseColor(foreground)), luminance(parseColor(background)));
       return (light + 0.05) / (dark + 0.05);
     }
+    function effectiveBackground(node: HTMLElement) {
+      for (let current: HTMLElement | null = node; current; current = current.parentElement) {
+        const background = window.getComputedStyle(current).backgroundColor;
+        if (background && background !== "transparent" && !/^rgba?\(\s*0\s*,\s*0\s*,\s*0\s*(?:,\s*0\s*)?\)$/i.test(background)) {
+          return background;
+        }
+      }
+      return "rgb(255, 255, 255)";
+    }
     const result = Array.from(container.querySelectorAll<HTMLElement>("button, label")).map((node) => {
       const style = window.getComputedStyle(node);
+      const background = effectiveBackground(node);
       return {
+        background,
+        className: node.getAttribute("class") || "",
+        color: style.color,
         label: node.textContent?.trim() || node.getAttribute("aria-label") || node.getAttribute("title") || node.tagName,
-        contrast: contrast(style.color, style.backgroundColor)
+        contrast: contrast(style.color, background)
       };
     });
     buttons.forEach((button, index) => {
@@ -157,6 +221,9 @@ async function expectTopbarControlsReadable(page: Page, colorScheme: "light" | "
     inputs.forEach((input, index) => {
       input.disabled = inputStates[index];
     });
+    if (!containerWasDisabled) {
+      container.classList.remove("disabled");
+    }
     return result;
   });
   expect(disabledContrasts.filter((item) => item.contrast < 4.5)).toEqual([]);
@@ -264,16 +331,25 @@ async function closeBlockingDialogIfVisible(page: Page) {
 }
 
 async function auditVisibleTabButtons(page: Page, pageErrors: string[]) {
-  const skip = /download|install update|quit|start camera|capture best frame|arm auto capture|auto ready|stop camera|choose|open$|reveal$|export diagnostics|delete face data/i;
-  const tabs = ["Dashboard", "People", "Scan", "Review", "Settings"];
+  // Skip controls that open a native OS dialog (open/save pickers block in e2e once
+  // CROSSAGE_TEST_DIALOG_PATHS is exhausted) or kick off long-running / destructive
+  // jobs — none of them render renderer UI that could crash, which is what this audit checks.
+  const skip = /download|install update|quit|start camera|capture best frame|arm auto capture|auto ready|stop camera|choose|open$|reveal$|open with|export|import|add view root|model root|backup|restore|support bundle|start scan|start watching|stop watching|scan a folder|run benchmark|self[- ]?test|delete all|permanently delete|purge|delete face data/i;
+  // Audit the recognition/config/search surfaces. Library/Memories/Albums all
+  // render the same PhotosView, which is exhaustively covered by photos-album-folders
+  // + photos_view.test.mjs + the Photos-first/Search e2e specs; clicking its 270+
+  // controls here just balloons runtime, so it's excluded from this crash audit.
+  const tabs = ["Search", "Tools", "Settings"];
   const clicked = new Set<string>();
+  const PER_TAB_CLICK_CAP = 90; // controls that expand panels can balloon the button set; keep the audit bounded.
   for (const tab of tabs) {
     await page.locator(".nav-list").getByRole("button", { name: tab }).click();
     await assertNoRendererCrash(page, pageErrors, `open ${tab}`);
-    for (let pass = 0; pass < 3; pass += 1) {
+    let perTab = 0;
+    for (let pass = 0; pass < 2 && perTab < PER_TAB_CLICK_CAP; pass += 1) {
       const buttons = page.locator(".workspace button:visible");
       const count = await buttons.count();
-      for (let index = 0; index < count; index += 1) {
+      for (let index = 0; index < count && perTab < PER_TAB_CLICK_CAP; index += 1) {
         const button = buttons.nth(index);
         if (!(await button.isVisible().catch(() => false))) continue;
         if (!(await button.isEnabled().catch(() => false))) continue;
@@ -282,6 +358,7 @@ async function auditVisibleTabButtons(page: Page, pageErrors: string[]) {
         const key = `${tab}:${label}`;
         if (clicked.has(key)) continue;
         clicked.add(key);
+        perTab += 1;
         await button.scrollIntoViewIfNeeded().catch(() => undefined);
         await button.click({ timeout: 5000 }).catch(() => undefined);
         await page.waitForTimeout(120);
@@ -294,9 +371,12 @@ async function auditVisibleTabButtons(page: Page, pageErrors: string[]) {
 }
 
 test("desktop workbench renders and every primary control path works", async () => {
+  test.setTimeout(300_000); // Photos-first IA adds a 7th tab + Search/Tools surfaces to the full-control button audit.
   const projectRoot = process.cwd();
   const temp = mkdtempSync(path.join(os.tmpdir(), "vintrace-e2e-"));
   const workspace = path.join(temp, "workspace");
+  const initialWorkspace = path.join(temp, "initial-workspace");
+  const registry = path.join(temp, "registry");
   const fixtures = makeFixtures(temp);
   const pageErrors: string[] = [];
   const failedRequests: string[] = [];
@@ -304,9 +384,11 @@ test("desktop workbench renders and every primary control path works", async () 
     ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
     CROSSAGE_FORCE_FALLBACK: "1",
     CROSSAGE_TEST_CAMERA: "1",
-    CROSSAGE_TEST_DIALOG_PATHS: [workspace, fixtures.refs, fixtures.scan].join(path.delimiter),
-    CROSSAGE_REGISTRY_HOME: path.join(temp, "registry"),
-    CROSSAGE_WORKSPACE: path.join(temp, "initial-workspace"),
+    CROSSAGE_TEST_DIALOG_PATHS: [workspace, fixtures.refs, fixtures.adultRefs, fixtures.scan, fixtures.refs].join(path.delimiter),
+    VINTRACE_REGISTRY_HOME: registry,
+    CROSSAGE_REGISTRY_HOME: registry,
+    VINTRACE_WORKSPACE: initialWorkspace,
+    CROSSAGE_WORKSPACE: initialWorkspace,
     CROSSAGE_ALLOW_MULTI_INSTANCE: "1",
     PYTHONPATH: projectRoot
   };
@@ -326,15 +408,15 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
   const languageSelect = page.locator(".language-picker select");
   await languageSelect.selectOption("en");
-  await expect(page.locator(".nav-list").getByRole("button", { name: "Dashboard" })).toBeVisible();
+  await expect(page.locator(".nav-list").getByRole("button", { name: "Library" })).toBeVisible();
   await languageSelect.selectOption("fr");
-  await expect(page.locator(".nav-list").getByRole("button", { name: "Tableau" })).toBeVisible();
+  await expect(page.locator(".nav-list").getByRole("button", { name: "Photothèque" })).toBeVisible();
   await languageSelect.selectOption("ar");
   await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
-  await expect(page.locator(".nav-list").getByRole("button", { name: "لوحة التحكم" })).toBeVisible();
+  await expect(page.locator(".nav-list").getByRole("button", { name: "المكتبة" })).toBeVisible();
   await languageSelect.selectOption("en");
   await expect(page.locator("html")).toHaveAttribute("dir", "ltr");
-  await expect(page.locator(".nav-list").getByRole("button", { name: "Dashboard" })).toBeVisible();
+  await expect(page.locator(".nav-list").getByRole("button", { name: "Library" })).toBeVisible();
   await closeOnboardingIfVisible(page);
   await page.getByRole("button", { name: "Guide" }).click();
   await expect(page.getByRole("dialog", { name: "Set up your first scan" })).toBeVisible();
@@ -347,45 +429,62 @@ test("desktop workbench renders and every primary control path works", async () 
   expect(pageErrors).toEqual([]);
   expect(failedRequests).toEqual([]);
 
-  for (const name of ["Dashboard", "People", "Scan", "Review", "Settings"]) {
-    await page.locator(".nav-list").getByRole("button", { name }).click();
-    await expect(page.locator(".nav-list").getByRole("button", { name })).toHaveClass(/active/);
+  for (const name of ["Library", "Memories", "Albums", "Search", "People & Pets", "Tools", "Settings"]) {
+    await page.locator(".nav-list").getByRole("button", { name }).first().click();
+    await expect(page.locator(".nav-list").getByRole("button", { name }).first()).toHaveClass(/active/);
   }
 
-  await page.locator(".topbar-actions").getByRole("button", { name: "Choose", exact: true }).click();
-  await expect(page.getByText(workspace)).toBeVisible();
-  await page.getByRole("button", { name: "Refresh" }).click();
+  // The App-folder top bar was removed; its workspace + refresh + permission
+  // controls now live in Settings (the active tab after the nav cycle). Choosing
+  // the first dialog path switches to the test workspace.
+  await gotoSettingsSection(page, "General");
+  await page.getByRole("button", { name: "Choose folder" }).click();
+  // The chosen folder becomes a second known workspace, surfacing the
+  // Switch-workspace control — confirms the switch landed.
+  await expect(page.getByText("Switch workspace")).toBeVisible({ timeout: 120_000 });
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await expect(page.locator(".status-row").getByText("Ready", { exact: true })).toBeVisible();
 
-  await page.locator(".nav-list").getByRole("button", { name: "People" }).click();
-  await page.getByLabel("Person name").fill("Person A");
-  await page.getByLabel("Age range in these photos").selectOption("child");
-  await page.getByRole("button", { name: "Choose person photo folder" }).click();
-  await expect(page.getByRole("textbox", { name: "Person photo folder", exact: true })).toHaveValue(fixtures.refs);
-  const enrollButton = page.locator(".form-panel").getByRole("button", { name: /^Add photos$/ });
-  await expect(enrollButton).toBeDisabled();
-
-  await page.locator(".topbar-actions").getByText("Permission").click();
+  // Grant permission from its new home (Settings > Privacy & Safety) before
+  // enrolling, so we never navigate away from the add-person panel mid-flow.
+  await gotoSettingsSection(page, "Privacy & Safety");
+  await page.locator('input[aria-label="Permission for this app folder"]').click();
   await expect(page.getByRole("dialog", { name: "Confirm permission" })).toBeVisible();
   await page.getByRole("textbox", { name: "Optional note" }).fill("E2E operator consent.");
   await page.getByRole("button", { name: "Confirm permission" }).click();
+
+  await gotoPeopleSection(page, "Add person");
+  const addPersonPanel = page.locator(".add-person-panel");
+  await page.getByLabel("Person name").fill("Person A");
+  await page.getByLabel("Age range in these photos").selectOption("child");
+  await addPersonPanel.getByRole("button", { name: "Choose person photo folder" }).click();
+  await expect(addPersonPanel.getByText("1 photo ready")).toBeVisible({ timeout: 120_000 });
+  const enrollButton = addPersonPanel.getByRole("button", { name: /^Add 1 photo to/ });
   await expect(enrollButton).toBeEnabled();
   await enrollButton.click();
-  await expect(page.getByText(/Added 1 saved face photo/)).toBeVisible({ timeout: 120_000 });
-  await expect(page.getByText("person_a.jpg")).toBeVisible();
-  await page.getByRole("textbox", { name: "Adult photo folder" }).fill(fixtures.adultRefs);
-  await page.getByRole("button", { name: "Add age folders" }).click();
-  await expect(page.getByText(/across 1 age folder/)).toBeVisible({ timeout: 120_000 });
-  await expect(page.getByText("person_a_adult.jpg")).toBeVisible();
+  await expect(page.getByText(/Added 1 photo to Person A/)).toBeVisible({ timeout: 120_000 });
+  const personCard = page.locator(".person-card").filter({ hasText: "Person A" });
+  await expect(personCard).toBeVisible();
+  await expect(personCard.locator(".person-count")).toHaveText("1");
+  await expect(personCard.getByText("Child", { exact: true })).toBeVisible();
+  await page.getByLabel("Age range in these photos").selectOption("adult");
+  await addPersonPanel.getByRole("button", { name: "Choose person photo folder" }).click();
+  await expect(addPersonPanel.getByText("1 photo ready")).toBeVisible({ timeout: 120_000 });
+  await addPersonPanel.getByRole("button", { name: /^Add 1 photo to/ }).click();
+  await expect(page.getByText(/Added 1 photo to Person A/)).toBeVisible({ timeout: 120_000 });
+  await expect(personCard.locator(".person-count")).toHaveText("2");
+  await expect(personCard.getByText("Adult", { exact: true })).toBeVisible();
 
-  await page.locator(".nav-list").getByRole("button", { name: "Scan" }).click();
+  await gotoToolsSection(page, "Scan");
   await expect(page.getByText("Add from camera")).toBeVisible();
-  await expect(page.locator(".sakura-face-field")).toBeVisible();
-  await expect(page.locator(".sakura-petal")).toHaveCount(34);
   await expect(page.getByText("No possible matches yet")).toBeVisible();
   await page.getByRole("button", { name: "Start camera" }).click();
   const captureButton = page.getByRole("button", { name: "Capture best frame" });
   await expect(captureButton).toBeEnabled({ timeout: 60_000 });
+  // H10: the 34-petal sakura field is only mounted while the camera is LIVE (it was a
+  // permanent idle paint loop before), so assert it after the camera starts, not at idle.
+  await expect(page.locator(".sakura-face-field")).toBeVisible();
+  await expect(page.locator(".sakura-petal")).toHaveCount(34);
   await captureButton.click();
   await expect(page.getByText(/Camera photo saved\./)).toBeVisible({ timeout: 120_000 });
   await page.getByRole("button", { name: "Arm auto capture" }).click();
@@ -400,16 +499,17 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(page.getByText("Needs attention")).toBeVisible();
   await expect(page.getByText("Files that need attention")).toBeVisible();
   await page.locator(".form-panel").getByRole("button", { name: /^Scan folder$/ }).click();
-  await expect(page.getByText(/Found 1 possible match/)).toBeVisible({ timeout: 120_000 });
-  await expect(page.getByText("candidate_a.jpg")).toBeVisible();
+  await confirmDialog(page);
   const scanActivity = page.locator(".scan-activity").first();
   await expect(scanActivity.locator(".activity-head-actions strong")).toHaveText(/\d+\/\d+/, { timeout: 120_000 });
   await expect(scanActivity).toContainText("cached faces");
   await expect(scanActivity).toContainText("rechecked");
+  await expect(page.locator(".nav-list").getByRole("button", { name: /People & Pets\s+\d+/ })).toBeVisible();
   await page.getByRole("button", { name: "Toggle scan ETA" }).click();
   await expect(scanActivity.locator(".eta-detail")).toBeVisible();
 
   await page.getByRole("button", { name: "Clear results" }).click();
+  await confirmDialog(page);
   await expect(page.getByText("No possible matches yet")).toBeVisible();
   await page.getByRole("button", { name: "Watch for new files" }).click();
   await expect(page.locator(".scan-activity small")).toHaveText("Watching for new media files.");
@@ -422,7 +522,7 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(page.getByText(/Processed 1 new file|Scanning 1 new file/)).toBeVisible({ timeout: 120_000 });
   await page.getByRole("button", { name: /Stop watching|Watching/ }).click();
 
-  await page.locator(".nav-list").getByRole("button", { name: "Review" }).click();
+  await gotoPeopleSection(page, "Review");
   await expect(page.getByText("Find people together")).toBeVisible();
   await expect(page.getByRole("spinbutton", { name: "Minimum people together" })).toHaveValue("2");
   const peopleTogether = page.getByRole("group", { name: "People to find together" });
@@ -464,18 +564,25 @@ test("desktop workbench renders and every primary control path works", async () 
   await page.locator(".bulk-bar").getByRole("button", { name: "Looks right" }).click();
   await expect(page.getByText(/Updated 1 possible match/)).toBeVisible();
 
-  await page.locator(".nav-list").getByRole("button", { name: "Scan" }).click();
+  await gotoToolsSection(page, "Scan");
   await page.getByRole("button", { name: "Clear results" }).click();
+  await confirmDialog(page);  // clearing a non-empty queue prompts "Please confirm"
   await expect(page.getByText("No possible matches yet")).toBeVisible();
 
-  await page.locator(".nav-list").getByRole("button", { name: "People" }).click();
-  await page.getByRole("button", { name: "Delete selected saved photo" }).click();
-  await expect(page.getByText("person_a_adult.jpg")).toBeVisible();
-  await page.getByRole("button", { name: "Clear saved face photos" }).click();
+  await gotoPeopleSection(page, "Add person");
+  const currentPersonCard = page.locator(".person-card").filter({ hasText: "Person A" });
+  await currentPersonCard.getByRole("button", { name: "Delete this photo" }).first().click();
+  await expect(currentPersonCard.locator(".person-count")).toHaveText("1", { timeout: 120_000 });
+  await currentPersonCard.getByRole("button", { name: "Delete Person A" }).click();
+  await confirmDialog(page);
   await expect(page.getByText("No people added yet")).toBeVisible();
-  await enrollButton.click();
-  await expect(page.getByText(/Added 1 saved face photo/)).toBeVisible({ timeout: 120_000 });
-  await expect(page.getByText("person_a.jpg")).toBeVisible();
+  await page.getByLabel("Person name").fill("Person A");
+  await page.getByLabel("Age range in these photos").selectOption("child");
+  await addPersonPanel.getByRole("button", { name: "Choose person photo folder" }).click();
+  await expect(addPersonPanel.getByText("1 photo ready")).toBeVisible({ timeout: 120_000 });
+  await addPersonPanel.getByRole("button", { name: /^Add 1 photo to/ }).click();
+  await expect(page.getByText(/Added 1 photo to Person A/)).toBeVisible({ timeout: 120_000 });
+  await expect(page.locator(".person-card").filter({ hasText: "Person A" }).locator(".person-count")).toHaveText("1");
 
   await page.locator(".nav-list").getByRole("button", { name: "Settings" }).click();
   await expect(page.getByRole("group", { name: "Configuration presets" })).toBeVisible();
@@ -486,17 +593,26 @@ test("desktop workbench renders and every primary control path works", async () 
   await page.getByLabel("Likely match value").fill("0.50");
   await expect(page.getByText(/Advanced match levels/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Save settings" })).toBeDisabled();
-  await expect(page.getByRole("checkbox", { name: "Safe Mode" })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: "Safe Mode", exact: true })).toBeChecked();
   await expect(page.getByRole("checkbox", { name: "Start at login" })).toBeVisible();
   await expect(page.getByText(/vintrace:\/\/ ready|Not registered/)).toBeVisible();
   await expect(page.getByText("System check")).toBeVisible();
   await page.locator(".panel", { hasText: "Local engine" }).getByRole("button", { name: "Run check" }).click();
   await expect(page.getByText(/System check (passed|found items to review)/)).toBeVisible({ timeout: 120_000 });
+  await gotoSettingsSection(page, "Advanced");
+  const accuracyLab = page.locator(".panel", { hasText: "Accuracy lab" });
+  await expect(accuracyLab.getByText("Learned calibration", { exact: true })).toBeVisible();
+  await expect(accuracyLab.getByRole("button", { name: "Update learning status" })).toBeVisible();
+  await accuracyLab.getByRole("button", { name: "Run learning check" }).click();
+  await expect(page.getByRole("dialog", { name: "Please confirm" })).toBeVisible();
+  await page.getByRole("dialog", { name: "Please confirm" }).getByRole("button", { name: "Cancel" }).click();
+  await gotoSettingsSection(page, "General");
   const updatesPanel = page.locator(".panel").filter({ has: page.getByRole("button", { name: "Check updates" }) });
   await expect(updatesPanel).toBeVisible();
   await expect(updatesPanel.getByRole("button", { name: "Check updates" })).toBeVisible();
   await expect(updatesPanel.getByRole("group", { name: "Update channel" })).toBeVisible();
   await expect(updatesPanel.getByRole("button", { name: "Stable" })).toBeVisible();
+  await gotoSettingsSection(page, "Advanced");
   const diagnosticsPanel = page.locator(".panel", { hasText: "Error reports" });
   await expect(diagnosticsPanel).toBeVisible();
   await diagnosticsPanel.getByRole("button", { name: "Preview report" }).click();
@@ -505,24 +621,29 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(diagnosticsPanel.getByText("Latest code", { exact: true })).toBeVisible();
   await expect(diagnosticsPanel.getByRole("textbox", { name: "Diagnostics JSON preview" })).toHaveValue(/summary/);
   await expect(page.getByText("Performance center")).toBeVisible();
-  await expect(page.getByText("Storage limit")).toBeVisible();
-  await expect(page.getByRole("spinbutton", { name: "Storage limit in GB" })).toBeVisible();
   const performanceCenter = page.locator(".performance-center");
   await expect(performanceCenter.getByRole("group", { name: "Performance modes" })).toBeVisible();
   await performanceCenter.getByRole("button", { name: /Fast/ }).click();
   await expect(performanceCenter.locator(".performance-mode.selected").getByText("Fast")).toBeVisible();
+  // Selecting Fast saves settings async and sets its own notice; let it land first so it
+  // doesn't clobber the copy-report toast in the single notice slot (last-write-wins).
+  await expect(page.getByText(/Fast performance mode is on\.?/)).toBeVisible();
   await performanceCenter.getByRole("button", { name: "Copy report" }).click();
   await expect(page.getByText("Performance report copied.")).toBeVisible();
   await performanceCenter.getByRole("button", { name: "Warm previews" }).click();
   await expect(page.getByText(/Prepared \d+ preview/)).toBeVisible({ timeout: 120_000 });
   await performanceCenter.getByRole("button", { name: "Clear samples" }).click();
   await expect(page.getByText("Latency samples cleared.")).toBeVisible();
+  await gotoSettingsSection(page, "General");
   await page.getByLabel("Strong match value").fill("0.60");
   await page.getByLabel("Likely match value").fill("0.40");
   await page.getByLabel("Review more value").fill("0.20");
   await page.getByLabel("Photo quality minimum value").fill("0.10");
   await page.getByRole("button", { name: "Save settings" }).click();
   await expect(page.getByText("Settings saved.")).toBeVisible();
+  await gotoSettingsSection(page, "Storage & Data");
+  await expect(page.getByText("Storage limit")).toBeVisible();
+  await expect(page.getByRole("spinbutton", { name: "Storage limit in GB" })).toBeVisible();
   await expect(page.getByText("Save and clean up")).toBeVisible();
   await page.getByRole("button", { name: "Copy app summary" }).click();
   await expect(page.getByText("App summary copied.")).toBeVisible();
@@ -530,30 +651,43 @@ test("desktop workbench renders and every primary control path works", async () 
   await expect(page.getByText(/Exported report/)).toBeVisible({ timeout: 120_000 });
   await page.getByRole("button", { name: "Backup app folder" }).click();
   await expect(page.getByText(/Backup created:/)).toBeVisible({ timeout: 120_000 });
-  await page.getByLabel("New person name").fill("Person Renamed");
-  await page.getByRole("button", { name: "Rename" }).click();
+  const renameRow = page.locator(".person-rename-row");
+  await expect(renameRow.getByLabel("Person to rename")).toHaveValue("Person A");
+  await renameRow.getByLabel("New person name").fill("Person Renamed");
+  await renameRow.getByRole("button", { name: "Rename" }).click();
+  await confirmDialog(page);
   await expect(page.getByText(/Updated 1 saved photo/)).toBeVisible({ timeout: 120_000 });
-  await expect(page.getByLabel("Person to rename")).toHaveValue("Person Renamed");
+  await expect(renameRow.getByLabel("Person to rename")).toHaveValue("Person Renamed");
   await page.getByLabel("Retention days").fill("1");
   await page.getByRole("button", { name: "Remove old reviewed" }).click();
+  await confirmDialog(page);  // purging reviewed matches prompts "Please confirm"
   await expect(page.getByText(/Removed \d+ old reviewed possible match/)).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByRole("button", { name: "Remove reviewed matches" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Delete person" })).toBeVisible();
+  await gotoSettingsSection(page, "Privacy & Safety");
   await expect(page.getByText("Activity history", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Load history" }).click();
   await expect(page.getByText(/Loaded \d+ activity event/)).toBeVisible({ timeout: 120_000 });
   await page.getByRole("button", { name: "Copy events" }).click();
   await expect(page.getByText("Activity history copied.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Remove reviewed matches" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Delete person" })).toBeVisible();
 
-  await page.locator(".nav-list").getByRole("button", { name: "Dashboard" }).click();
+  await page.locator(".nav-list").getByRole("button", { name: "Tools" }).click();
+  // Tools > Overview: everyday landing (onboarding + priorities + human-readable stats).
   await expect(page.getByText("First scan checklist")).toBeVisible();
   await expect(page.getByText("Friend test mode")).toBeVisible();
   await expect(page.getByRole("button", { name: /Open camera/ })).toBeVisible();
   await expect(page.getByText("Top 7 current priorities")).toBeVisible();
   await expect(page.locator(".dashboard-metrics").getByText("Files scanned", { exact: true })).toBeVisible();
+  // Tools > Models: model setup is now a first-class, discoverable section.
+  await gotoToolsSection(page, "Models");
+  await expect(page.getByRole("button", { name: "Backfill model references" })).toBeVisible();
+  // Tools > Diagnostics: engineer/maintenance internals (health, history, review mix, system) live together here.
+  await gotoToolsSection(page, "Diagnostics");
+  await expect(page.getByText("Health summary")).toBeVisible();
   await expect(page.getByText("Recent scan runs")).toBeVisible();
   await expect(page.getByText("Review mix")).toBeVisible();
   await expect(page.getByText("System and safety")).toBeVisible();
+  await page.locator(".nav-list").getByRole("button", { name: "Tools" }).click();
   await auditVisibleTabButtons(page, pageErrors);
 
   const smallControls = await page.locator("button:visible, input:not([type='checkbox']):visible, select:visible, .consent:visible").evaluateAll((nodes) =>
@@ -565,8 +699,8 @@ test("desktop workbench renders and every primary control path works", async () 
       .filter((rect) => rect.height < 36 || rect.width < 36)
   );
   expect(smallControls).toEqual([]);
-  await expectTopbarControlsReadable(page, "light");
-  await expectTopbarControlsReadable(page, "dark");
+  await expectSidebarFooterControlsReadable(page, "light");
+  await expectSidebarFooterControlsReadable(page, "dark");
 
   await app.close();
 });

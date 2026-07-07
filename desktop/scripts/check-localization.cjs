@@ -8,9 +8,19 @@ const vm = require("vm");
 const repoRoot = path.resolve(__dirname, "..", "..");
 const i18nPath = path.join(repoRoot, "src", "i18n.ts");
 const appPath = path.join(repoRoot, "src", "App.tsx");
+const extraUiPaths = [
+  path.join(repoRoot, "src", "views", "PhotosView.tsx")
+];
 const source = fs.readFileSync(i18nPath, "utf8");
-const appSource = fs.readFileSync(appPath, "utf8");
+const photosUiSource = fs.existsSync(extraUiPaths[0])
+  ? fs.readFileSync(extraUiPaths[0], "utf8")
+  : "";
+const appSource = [appPath, ...extraUiPaths]
+  .filter((filePath) => fs.existsSync(filePath))
+  .map((filePath) => fs.readFileSync(filePath, "utf8"))
+  .join("\n");
 const checks = [];
+const PHOTOS_UI_TEXT_COVERAGE_FLOOR = 0.85;
 
 function add(name, ok, detail, data = {}) {
   checks.push({ name, ok: Boolean(ok), detail, ...data });
@@ -23,7 +33,10 @@ function extractUnionKeys(typeName) {
 }
 
 function loadI18n() {
-  const compiled = ts.transpileModule(source, {
+  // i18n.ts uses Vite's `import.meta.env` (a dev-only warning); that syntax is
+  // invalid in this CommonJS VM eval, so neutralize it before transpiling.
+  const sanitized = source.replace(/import\.meta\.env\??\.[A-Za-z0-9_]+/g, "false");
+  const compiled = ts.transpileModule(sanitized, {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
       target: ts.ScriptTarget.ES2022,
@@ -58,6 +71,24 @@ function visibleLiteralCandidates() {
     if (/[{}[\]<>]/.test(text)) return false;
     return true;
   }).sort();
+}
+
+function decodeUiTextLiteral(value) {
+  return value
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t")
+    .replace(/\\"/g, "\"")
+    .replace(/\\'/g, "'")
+    .replace(/\\\\/g, "\\");
+}
+
+function extractUiTextLiterals(content) {
+  const literals = new Set();
+  const pattern = /uiText\(\s*(["'`])([^"'`$\\]*(?:\\.[^"'`$\\]*)*)\1\s*(?:,\s*\{[^)]*\})?\)/g;
+  for (const match of content.matchAll(pattern)) {
+    literals.add(decodeUiTextLiteral(match[2]));
+  }
+  return [...literals].sort();
 }
 
 const i18n = loadI18n();
@@ -95,7 +126,18 @@ const criticalLiterals = [
   "Move files",
   "Trash files",
   "Start camera",
-  "Capture best frame"
+  "Capture best frame",
+  "All Photos",
+  "No photos here yet",
+  "Photo preview",
+  "Add a person",
+  "Name them, add a few clear photos, and they'll appear in your people list.",
+  "Who is this?",
+  "Add their photos",
+  "Drag photos or a folder here",
+  "Review & add",
+  "Photos you add will preview here before they're saved.",
+  "Choose person photo folder"
 ];
 
 for (const language of nonEnglish) {
@@ -103,11 +145,38 @@ for (const language of nonEnglish) {
   add(`critical literals ${language}`, untranslated.length === 0, untranslated.join(", ") || "covered", { untranslated });
 }
 
+const criticalUiMessages = [
+  ["addPerson.stagedReadyMany", { count: 3 }],
+  ["addPerson.addCountNamedMany", { count: 3, name: "Ada" }]
+];
+
+for (const language of nonEnglish) {
+  const untranslated = criticalUiMessages
+    .filter(([key, values]) => i18n.formatUiMessage(language, key, values) === i18n.formatUiMessage("en", key, values))
+    .map(([key]) => key);
+  add(`critical ui messages ${language}`, untranslated.length === 0, untranslated.join(", ") || "covered", { untranslated });
+}
+
 const visibleLiterals = visibleLiteralCandidates();
 const uncovered = visibleLiterals.filter((text) => nonEnglish.every((language) => i18n.translateUiText(language, text) === text));
 add("visible literal translation coverage", visibleLiterals.length > 100, `${visibleLiterals.length - uncovered.length}/${visibleLiterals.length} visible literals have a non-English mapping`, {
   uncovered: uncovered.slice(0, 80)
 });
+
+const photosUiLiterals = extractUiTextLiterals(photosUiSource);
+add("Photos uiText literals discovered", photosUiLiterals.length > 1000, `${photosUiLiterals.length} unique literals`);
+
+for (const language of nonEnglish) {
+  const untranslated = photosUiLiterals.filter((text) => i18n.translateUiText(language, text) === text);
+  const translated = photosUiLiterals.length - untranslated.length;
+  const coverage = photosUiLiterals.length ? translated / photosUiLiterals.length : 1;
+  add(
+    `Photos uiText coverage ${language}`,
+    coverage >= PHOTOS_UI_TEXT_COVERAGE_FLOOR,
+    `${translated}/${photosUiLiterals.length} (${(coverage * 100).toFixed(1)}%)`,
+    { untranslated: untranslated.slice(0, 80) }
+  );
+}
 
 const ok = checks.every((check) => check.ok);
 console.log(JSON.stringify({

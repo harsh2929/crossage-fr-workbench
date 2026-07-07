@@ -1,0 +1,266 @@
+{
+  "bestNoRecallRegressionRuns": [
+    {
+      "architecture": "mlp",
+      "delta": {
+        "accuracy": 0.008333,
+        "precision": 0.009689,
+        "recall": 0.0
+      },
+      "epochs": 128,
+      "fixedThresholdOnnx": {
+        "accuracy": 0.933333,
+        "count": 120,
+        "falseNegatives": 2,
+        "falsePositives": 6,
+        "precision": 0.94,
+        "recall": 0.979167,
+        "specificity": 0.75,
+        "threshold": 0.5,
+        "trueNegatives": 18,
+        "truePositives": 94
+      },
+      "hiddenUnits": 16,
+      "jsonAdapter": {
+        "accuracy": 0.941667,
+        "count": 120,
+        "falseNegatives": 2,
+        "falsePositives": 5,
+        "precision": 0.949495,
+        "recall": 0.979167,
+        "specificity": 0.791667,
+        "threshold": 0.5,
+        "trueNegatives": 19,
+        "truePositives": 94
+      },
+      "learningRate": 0.02,
+      "onnxHead": {
+        "accuracy": 0.95,
+        "count": 120,
+        "falseNegatives": 2,
+        "falsePositives": 4,
+        "precision": 0.959184,
+        "recall": 0.979167,
+        "specificity": 0.833333,
+        "threshold": 0.568308,
+        "trueNegatives": 20,
+        "truePositives": 94
+      },
+      "reportHash": "fd0959bcffad6ec85790e2df118ebb7b6d376f33dd861804f078ab99ff86432d",
+      "source": "/tmp/vintrace-onnx-mlp-sweep/h16_lr0.02_e128/row-training-validation/phase5_onnx_training_validation.json",
+      "status": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "delta": {
+        "accuracy": 0.0,
+        "precision": 0.0,
+        "recall": 0.0
+      },
+      "epochs": 64,
+      "fixedThresholdOnnx": {
+        "accuracy": 0.941667,
+        "count": 120,
+        "falseNegatives": 2,
+        "falsePositives": 5,
+        "precision": 0.949495,
+        "recall": 0.979167,
+        "specificity": 0.791667,
+        "threshold": 0.5,
+        "trueNegatives": 19,
+        "truePositives": 94
+      },
+      "hiddenUnits": 16,
+      "jsonAdapter": {
+        "accuracy": 0.941667,
+        "count": 120,
+        "falseNegatives": 2,
+        "falsePositives": 5,
+        "precision": 0.949495,
+        "recall": 0.979167,
+        "specificity": 0.791667,
+        "threshold": 0.5,
+        "trueNegatives": 19,
+        "truePositives": 94
+      },
+      "learningRate": 0.05,
+      "onnxHead": {
+        "accuracy": 0.941667,
+        "count": 120,
+        "falseNegatives": 2,
+        "falsePositives": 5,
+        "precision": 0.949495,
+        "recall": 0.979167,
+        "specificity": 0.791667,
+        "threshold": 0.402898,
+        "trueNegatives": 19,
+        "truePositives": 94
+      },
+      "reportHash": "f224a34b4bb0663b17c13bad9edb063f7a08eb56fd9b4f46ff6e3d94453a5397",
+      "source": "/tmp/vintrace-onnx-mlp-sweep/h16_lr0.05_e64/row-training-validation/phase5_onnx_training_validation.json",
+      "status": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "delta": {
+        "accuracy": 0.0,
+        "precision": 0.0,
+        "recall": 0.0
+      },
+      "epochs": 128,
+      "fixedThresholdOnnx": {
+        "accuracy": 0.941667,
+        "count": 120,
+        "falseNegatives": 2,
+        "falsePositives": 5,
+        "precision": 0.949495,
+        "recall": 0.979167,
+        "specificity": 0.791667,
+        "threshold": 0.5,
+        "trueNegatives": 19,
+        "truePositives": 94
+      },
+      "hiddenUnits": 4,
+      "jsonAdapter": {
+        "accuracy": 0.941667,
+        "count": 120,
+        "falseNegatives": 2,
+        "falsePositives": 5,
+        "precision": 0.949495,
+        "recall": 0.979167,
+        "specificity": 0.791667,
+        "threshold": 0.5,
+        "trueNegatives": 19,
+        "truePositives": 94
+      },
+      "learningRate": 0.01,
+      "onnxHead": {
+        "accuracy": 0.941667,
+        "count": 120,
+        "falseNegatives": 2,
+        "falsePositives": 5,
+        "precision": 0.949495,
+        "recall": 0.979167,
+        "specificity": 0.791667,
+        "threshold": 0.611583,
+        "trueNegatives": 19,
+        "truePositives": 94
+      },
+      "reportHash": "84ffcf4e332d380b7b5dbc766463274f92bc4be09b17fde509cb2b79bc53d424",
+      "source": "/tmp/vintrace-onnx-mlp-sweep/h4_lr0.01_e128/row-training-validation/phase5_onnx_training_validation.json",
+      "status": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "delta": {
+        "accuracy": 0.0,
+        "precision": 0.0,
+        "recall": 0.0
+      },
+      "epochs": 128,
+      "fixedThresholdOnnx": {
+        "accuracy": 0.941667,
+        "count": 120,
+        "falseNegatives": 2,
+        "falsePositives": 5,
+        "precision": 0.949495,
+        "recall": 0.979167,
+        "specificity": 0.791667,
+        "threshold": 0.5,
+        "trueNegatives": 19,
+        "truePositives": 94
+      },
+      "hiddenUnits": 4,
+      "jsonAdapter": {
+        "accuracy": 0.941667,
+        "count": 120,
+        "falseNegatives": 2,
+        "falsePositives": 5,
+        "precision": 0.949495,
+        "recall": 0.979167,
+        "specificity": 0.791667,
+        "threshold": 0.5,
+        "trueNegatives": 19,
+        "truePositives": 94
+      },
+      "learningRate": 0.02,
+      "onnxHead": {
+        "accuracy": 0.941667,
+        "count": 120,
+        "falseNegatives": 2,
+        "falsePositives": 5,
+        "precision": 0.949495,
+        "recall": 0.979167,
+        "specificity": 0.791667,
+        "threshold": 0.574401,
+        "trueNegatives": 19,
+        "truePositives": 94
+      },
+      "reportHash": "eacfc837b284c1ecf07c7217868feab3069294876e2145eec377b00b43d214eb",
+      "source": "/tmp/vintrace-onnx-mlp-sweep/h4_lr0.02_e128/row-training-validation/phase5_onnx_training_validation.json",
+      "status": "pass"
+    },
+    {
+      "architecture": "mlp",
+      "delta": {
+        "accuracy": 0.0,
+        "precision": 0.0,
+        "recall": 0.0
+      },
+      "epochs": 64,
+      "fixedThresholdOnnx": {
+        "accuracy": 0.933333,
+        "count": 120,
+        "falseNegatives": 2,
+        "falsePositives": 6,
+        "precision": 0.94,
+        "recall": 0.979167,
+        "specificity": 0.75,
+        "threshold": 0.5,
+        "trueNegatives": 18,
+        "truePositives": 94
+      },
+      "hiddenUnits": 4,
+      "jsonAdapter": {
+        "accuracy": 0.941667,
+        "count": 120,
+        "falseNegatives": 2,
+        "falsePositives": 5,
+        "precision": 0.949495,
+        "recall": 0.979167,
+        "specificity": 0.791667,
+        "threshold": 0.5,
+        "trueNegatives": 19,
+        "truePositives": 94
+      },
+      "learningRate": 0.05,
+      "onnxHead": {
+        "accuracy": 0.941667,
+        "count": 120,
+        "falseNegatives": 2,
+        "falsePositives": 5,
+        "precision": 0.949495,
+        "recall": 0.979167,
+        "specificity": 0.791667,
+        "threshold": 0.560255,
+        "trueNegatives": 19,
+        "truePositives": 94
+      },
+      "reportHash": "68a826a013ffefa8c24eedc839dec491dd6e4cae64baca3e32e9f8c907e06ce3",
+      "source": "/tmp/vintrace-onnx-mlp-sweep/h4_lr0.05_e64/row-training-validation/phase5_onnx_training_validation.json",
+      "status": "pass"
+    }
+  ],
+  "clearedMeasurableGainGate": false,
+  "conclusion": "No MLP sweep run cleared the Phase 5 measurable-gain gate; best no-recall-regression run improved one validation row (+0.008333 accuracy, +0.009689 precision), below the 0.01 floor.",
+  "datasetProfile": "public-all-six-datasets-antelopev2",
+  "notProductionAuthorization": true,
+  "passingRuns": [],
+  "runCount": 60,
+  "schemaVersion": 1,
+  "scope": "phase5-onnx-mlp-sweep-summary",
+  "sourceRows": {
+    "trainingRows": "benchmarks/results/onnx-public-dataset-validation-all/rows/split/training-rows.json",
+    "validationRows": "benchmarks/results/onnx-public-dataset-validation-all/rows/split/validation-rows.json"
+  }
+}

@@ -1,0 +1,182 @@
+{
+  "artifact": {
+    "errors": [],
+    "manifestHash": "e7e1448538cc95b5bbf56b6edcb5dc4878dd51cf533ee61fae57ee12b3331288",
+    "manifestId": "ortlearn_d468e7f98a05",
+    "manifestPath": "benchmarks/evidence/self-learning-rd/public-validation-large-four/row-training-validation/row_training_artifacts/training_artifact_manifest.json",
+    "verified": true
+  },
+  "blockers": [],
+  "evidenceFiles": [
+    {
+      "exists": true,
+      "kind": "artifact-manifest",
+      "path": "benchmarks/evidence/self-learning-rd/public-validation-large-four/row-training-validation/row_training_artifacts/training_artifact_manifest.json",
+      "sha256": "bd98434c7c30d3e5cd4cc4343c5fffd7ab453a2419e288914cee59a14a1a7097",
+      "sizeBytes": 3805
+    },
+    {
+      "exists": true,
+      "kind": "runtime-study",
+      "path": "benchmarks/evidence/self-learning-rd/matrix-27802462328/phase5_combined_runtime_study.json",
+      "sha256": "f2c507287f21c7ca21e34658e1c20111333e1584e992ad7e33a2888ac67b97a7",
+      "sizeBytes": 6092
+    },
+    {
+      "exists": true,
+      "kind": "validation",
+      "path": "benchmarks/evidence/self-learning-rd/public-validation-large-four/row-training-validation/phase5_onnx_training_validation.json",
+      "sha256": "558917a5141aa09dac21958de13c224ace166c52fa3331d1f9db2a0271c7e8f5",
+      "sizeBytes": 34213
+    }
+  ],
+  "generatedAtUnix": 1781853778.177,
+  "message": "Phase 5 ONNX training R&D is justified by verified artifacts, complete target runtime/package evidence, and measured validation gain.",
+  "notProductionAuthorization": true,
+  "ok": true,
+  "reportHash": "51c202643258e2ca5d874d9b66df8722cd03fc9b7e48b7d1667b8d732ff6c737",
+  "requirements": {
+    "completeTargetRuntimeStudy": true,
+    "maxPackageBytes": null,
+    "measurableGainOverJsonAdapter": true,
+    "minMetricGain": 0.01,
+    "packageImpactUnderstood": true,
+    "trainingPackageAvailableOnTargets": true,
+    "verifiedTrainingArtifacts": true
+  },
+  "runtime": {
+    "blockers": [],
+    "maxPackageBytes": null,
+    "maxTargetPackageSizeBytes": 1327049623,
+    "ok": true,
+    "requiredTargets": [
+      "macos-arm64",
+      "macos-x64",
+      "windows-x64",
+      "linux-x64"
+    ],
+    "source": "benchmarks/evidence/self-learning-rd/matrix-27802462328/phase5_combined_runtime_study.json",
+    "status": "complete",
+    "targets": [
+      {
+        "blockers": [],
+        "failureModes": [
+          "artifact-tamper",
+          "cancelled",
+          "disk-full",
+          "missing-training-runtime",
+          "out-of-memory",
+          "thermal-throttle"
+        ],
+        "gpuAvailable": true,
+        "measuredAtUnix": 1781837690.807,
+        "ok": true,
+        "packageSizeBytes": 591665508,
+        "performanceTier": "low",
+        "primaryProvider": "CoreMLExecutionProvider",
+        "providers": [
+          "CoreMLExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "status": "pass",
+        "target": "macos-arm64",
+        "trainingDurationMs": 14,
+        "trainingPackageAvailable": true,
+        "trainingRuntimeAvailable": true
+      },
+      {
+        "blockers": [],
+        "failureModes": [
+          "artifact-tamper",
+          "cancelled",
+          "disk-full",
+          "missing-training-runtime",
+          "out-of-memory",
+          "thermal-throttle"
+        ],
+        "gpuAvailable": false,
+        "measuredAtUnix": 1781837717.088,
+        "ok": true,
+        "packageSizeBytes": 739657692,
+        "performanceTier": "low",
+        "primaryProvider": "CPUExecutionProvider",
+        "providers": [
+          "CoreMLExecutionProvider",
+          "CPUExecutionProvider"
+        ],
+        "status": "pass",
+        "target": "macos-x64",
+        "trainingDurationMs": 26,
+        "trainingPackageAvailable": true,
+        "trainingRuntimeAvailable": true
+      },
+      {
+        "blockers": [],
+        "failureModes": [
+          "artifact-tamper",
+          "cancelled",
+          "disk-full",
+          "missing-training-runtime",
+          "out-of-memory",
+          "thermal-throttle"
+        ],
+        "gpuAvailable": false,
+        "measuredAtUnix": 1781837757.693,
+        "ok": true,
+        "packageSizeBytes": 648195711,
+        "performanceTier": "low",
+        "primaryProvider": "CPUExecutionProvider",
+        "providers": [
+          "CPUExecutionProvider"
+        ],
+        "status": "pass",
+        "target": "windows-x64",
+        "trainingDurationMs": 50,
+        "trainingPackageAvailable": true,
+        "trainingRuntimeAvailable": true
+      },
+      {
+        "blockers": [],
+        "failureModes": [
+          "artifact-tamper",
+          "cancelled",
+          "disk-full",
+          "missing-training-runtime",
+          "out-of-memory",
+          "thermal-throttle"
+        ],
+        "gpuAvailable": false,
+        "measuredAtUnix": 1781837719.089,
+        "ok": true,
+        "packageSizeBytes": 1327049623,
+        "performanceTier": "low",
+        "primaryProvider": "CPUExecutionProvider",
+        "providers": [
+          "CPUExecutionProvider"
+        ],
+        "status": "pass",
+        "target": "linux-x64",
+        "trainingDurationMs": 17,
+        "trainingPackageAvailable": true,
+        "trainingRuntimeAvailable": true
+      }
+    ],
+    "totalPackageSizeBytes": 3306568534
+  },
+  "schemaVersion": 1,
+  "scope": "phase5-onnx-training-r-and-d",
+  "status": "go-for-r-and-d",
+  "validation": {
+    "bestMetricGain": 0.011719,
+    "blockers": [],
+    "delta": {
+      "accuracy": 0.009375,
+      "precision": 0.000107,
+      "recall": 0.011719
+    },
+    "minMetricGain": 0.01,
+    "ok": true,
+    "source": "benchmarks/evidence/self-learning-rd/public-validation-large-four/row-training-validation/phase5_onnx_training_validation.json",
+    "status": "pass"
+  }
+}

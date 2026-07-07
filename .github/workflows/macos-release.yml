@@ -64,6 +64,7 @@ jobs:
           python tests/clean_workspace_smoke.py
           python tests/accuracy_benchmark.py
           python tests/dataset_regression_gates.py
+          python tests/mcp_redaction.py
 
       - name: Validate release checks
         env:

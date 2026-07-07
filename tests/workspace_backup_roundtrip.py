@@ -36,7 +36,9 @@ def digest(path: Path) -> str:
 def assert_backup_restore_roundtrip() -> None:
     os.environ["CROSSAGE_FORCE_FALLBACK"] = "1"
     root = Path(tempfile.mkdtemp(prefix="vintrace-backup-roundtrip-"))
-    os.environ["CROSSAGE_REGISTRY_HOME"] = str(root / "registry")
+    registry = str(root / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
     workspace = root / "workspace"
     refs = root / "refs"
     scan = root / "scan"
@@ -50,6 +52,25 @@ def assert_backup_restore_roundtrip() -> None:
     assert scan_result["state"]["counts"]["candidates"] >= 1
     candidate_id = next(iter(api.project.candidates))
     api.handle("set_candidate_note", {"candidateId": candidate_id, "note": "roundtrip note"})
+    api.project.db.upsert_learned_artifact(
+        "learn_backup_suggested_ref",
+        {
+            "artifactType": "suggested_reference",
+            "status": "staged",
+            "modelName": "local-image-fingerprint",
+            "versionKey": "suggested-reference-v1",
+            "trainingDataHash": "backup-roundtrip-training-hash",
+            "inputCount": 1,
+            "positiveCount": 1,
+            "metrics": {"quality": 0.84, "bestReferenceCosine": 0.72},
+            "payload": {
+                "candidateId": candidate_id,
+                "personName": "Roundtrip Person",
+                "sourceHash": "backup-roundtrip-source-hash",
+                "modelName": "local-image-fingerprint",
+            },
+        },
+    )
 
     backup = api.handle("export_workspace_backup", {"includeGenerated": False})["value"]
     backup_path = Path(backup["zipPath"])
@@ -79,6 +100,11 @@ def assert_backup_restore_roundtrip() -> None:
     assert restored_state["counts"]["references"] == api.state()["counts"]["references"]
     assert restored_state["counts"]["candidates"] == api.state()["counts"]["candidates"]
     assert any(candidate.note == "roundtrip note" for candidate in restored_api.project.candidates.values())
+    restored_artifact = restored_api.project.db.learned_artifact_by_id("learn_backup_suggested_ref")
+    assert restored_artifact is not None
+    assert restored_artifact["artifact_type"] == "suggested_reference"
+    assert restored_artifact["artifact_hash"]
+    assert restored_artifact["payload"]["candidateId"] == candidate_id
 
     nonempty = root / "nonempty"
     nonempty.mkdir()
@@ -115,7 +141,9 @@ def assert_encrypted_backup_roundtrip() -> None:
     os.environ["CROSSAGE_FORCE_FALLBACK"] = "1"
     os.environ["VINTRACE_BACKUP_PASSPHRASE"] = "roundtrip-secret-passphrase"
     root = Path(tempfile.mkdtemp(prefix="vintrace-backup-enc-"))
-    os.environ["CROSSAGE_REGISTRY_HOME"] = str(root / "registry")
+    registry = str(root / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
     try:
         api = DesktopApi(root / "workspace")
         make_face(root / "refs" / "person.jpg")

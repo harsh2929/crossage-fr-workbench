@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Vintrace — Opening (Liquid Mesh)</title>
+<style>
+  /* ============================================================
+     "Liquid Mesh" — a living, GPU-driven mesh gradient.
+     A WebGL1 / GLSL ES 1.00 fragment shader paints 6 saturated
+     colour blobs (coral, magenta, electric blue, teal, gold, violet)
+     drifting on smooth noise paths and blending into one another like
+     a slow lava-lamp. Domain-warped fbm gives organic turbulence; a
+     light ordered grain kills banding. Capped DPR, paused off-screen,
+     reduced-motion freezes ONE gorgeous frame, and a rich animated CSS
+     gradient stands in if WebGL is unavailable.
+
+     Foreground (frosted card, mark, progress, chips) is shared with the
+     shipped boot screen so this can drop straight in — strictly
+     transform/opacity motion, hairline highlights, soft real shadows.
+     ============================================================ */
+  :root {
+    --text: #fbfbfe;
+    --text-72: rgba(251, 251, 254, 0.74);
+    --text-56: rgba(251, 251, 254, 0.58);
+    --text-40: rgba(251, 251, 254, 0.42);
+    --accent: #0a84ff;
+    --cyan: #5ce1e6;
+    --ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-inout: cubic-bezier(0.4, 0, 0.2, 1);
+    --boot-fill: 0.18;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+
+  body {
+    font-family: -apple-system, "SF Pro Display", "SF Pro Text", BlinkMacSystemFont, system-ui, sans-serif;
+    color: var(--text);
+    /* deep ink base — the shader/CSS fallback paints over this, but it
+       guarantees we are never on a true black flash before first frame */
+    background: #0a0712;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+  }
+
+  .stage {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: grid;
+    place-items: center;
+    isolation: isolate;
+  }
+
+  /* ---------- LIVING COLOUR LAYER ----------
+     The WebGL canvas fills the viewport behind everything. It is purely
+     decorative, so it is aria-hidden and never in the tab order. */
+  #mesh {
+    position: absolute;
+    inset: 0;
+    z-index: -4;
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  /* Rich animated CSS mesh-gradient fallback.
+     Only revealed (display:block) if WebGL fails — it is a genuine
+     multi-hue, continuously drifting gradient, never a flat colour. */
+  .fallback {
+    position: absolute;
+    inset: 0;
+    z-index: -4;
+    display: none;
+    background:
+      radial-gradient(42% 52% at 22% 30%, rgba(255, 99, 132, 0.85) 0%, rgba(255, 99, 132, 0) 60%),
+      radial-gradient(40% 46% at 78% 24%, rgba(214, 64, 232, 0.80) 0%, rgba(214, 64, 232, 0) 62%),
+      radial-gradient(48% 54% at 70% 76%, rgba(10, 132, 255, 0.88) 0%, rgba(10, 132, 255, 0) 60%),
+      radial-gradient(44% 50% at 24% 78%, rgba(48, 209, 196, 0.82) 0%, rgba(48, 209, 196, 0) 60%),
+      radial-gradient(38% 44% at 50% 50%, rgba(255, 196, 84, 0.55) 0%, rgba(255, 196, 84, 0) 64%),
+      linear-gradient(135deg, #2a0d3a 0%, #160a2e 45%, #0a0a22 100%);
+    background-size: 200% 200%, 220% 220%, 240% 200%, 200% 240%, 180% 180%, 100% 100%;
+    background-position: 0% 50%, 100% 0%, 50% 100%, 0% 100%, 50% 50%, 0% 0%;
+    animation: fallbackFlow 22s var(--ease-inout) infinite alternate;
+    filter: saturate(118%);
+  }
+  .no-webgl #mesh { display: none; }
+  .no-webgl .fallback { display: block; }
+  @keyframes fallbackFlow {
+    0%   { background-position: 0% 50%, 100% 0%, 50% 100%, 0% 100%, 50% 50%, 0% 0%; }
+    50%  { background-position: 60% 30%, 40% 60%, 20% 50%, 70% 30%, 30% 70%, 0% 0%; }
+    100% { background-position: 100% 60%, 0% 80%, 80% 20%, 100% 50%, 70% 40%, 0% 0%; }
+  }
+
+  /* depth + readability: a soft central darkening so the vivid colour
+     reads as light *behind glass*, and the foreground card always wins
+     on contrast. Static, cheap, no animation. */
+  .vignette {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      radial-gradient(135% 100% at 50% 44%, rgba(6, 4, 14, 0) 30%, rgba(6, 4, 14, 0.42) 72%, rgba(4, 2, 10, 0.72) 100%),
+      radial-gradient(60% 50% at 50% 46%, rgba(4, 2, 10, 0.30) 0%, rgba(4, 2, 10, 0) 60%);
+  }
+
+  /* a near-invisible bloom directly under the card so it floats on the
+     colour rather than sitting on it — adds layering. */
+  .halo {
+    position: absolute;
+    z-index: -1;
+    top: 50%;
+    left: 50%;
+    width: 560px;
+    height: 560px;
+    margin: -280px 0 0 -280px;
+    pointer-events: none;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.10) 0%, rgba(255, 255, 255, 0) 58%);
+    will-change: transform, opacity;
+    animation: haloBreathe 8s var(--ease-inout) infinite alternate;
+  }
+  @keyframes haloBreathe {
+    0%   { opacity: 0.55; transform: scale(0.96); }
+    100% { opacity: 0.85; transform: scale(1.06); }
+  }
+
+  /* ---------- FROSTED CARD ---------- */
+  .card {
+    position: relative;
+    width: 384px;
+    max-width: calc(100vw - 48px);
+    padding: 40px 38px 34px;
+    border-radius: 22px;
+    /* slightly cooler, lower-alpha glass so the saturated colour breathes
+       through but text stays crisp */
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.10) 0%, rgba(255, 255, 255, 0.035) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    -webkit-backdrop-filter: blur(22px) saturate(140%);
+    backdrop-filter: blur(22px) saturate(140%);
+    box-shadow:
+      0 1px 0 0 rgba(255, 255, 255, 0.16) inset,
+      0 0 0 1px rgba(0, 0, 0, 0.18),
+      0 34px 90px -22px rgba(0, 0, 0, 0.62),
+      0 10px 30px -14px rgba(0, 0, 0, 0.5);
+    text-align: center;
+    opacity: 0;
+    will-change: transform, opacity;
+    transform: translate3d(0, 14px, 0) scale(0.985);
+    animation: cardIn 1s var(--ease-soft) 0.05s forwards;
+  }
+  @keyframes cardIn { to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); } }
+
+  /* hairline inner top highlight (masked rim) — jewel edge */
+  .card::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 22px;
+    padding: 1px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.30), rgba(255, 255, 255, 0) 34%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+            mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  /* ---------- MARK ---------- */
+  .mark {
+    position: relative;
+    width: 58px;
+    height: 58px;
+    margin: 4px auto 26px;
+    border-radius: 8px;
+    display: grid;
+    place-items: center;
+    background: linear-gradient(160deg, #2a96ff 0%, #0a84ff 48%, #0066e0 100%);
+    box-shadow:
+      0 1px 0 0 rgba(255, 255, 255, 0.5) inset,
+      0 -1px 1px rgba(0, 30, 80, 0.5) inset,
+      0 12px 28px -8px rgba(10, 132, 255, 0.6),
+      0 2px 6px rgba(0, 0, 0, 0.4);
+    opacity: 0;
+    will-change: transform, opacity;
+    transform: translate3d(0, 8px, 0) scale(0.9);
+    animation:
+      markIn 0.9s var(--ease-soft) 0.18s forwards,
+      markBreathe 4.6s var(--ease-inout) 1.3s infinite;
+  }
+  @keyframes markIn  { to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); } }
+  @keyframes markBreathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.028); } }
+
+  /* top specular highlight on the badge (jewel-like, static) */
+  .mark::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 8px;
+    background: radial-gradient(120% 80% at 50% 0%, rgba(255, 255, 255, 0.32), transparent 60%);
+    pointer-events: none;
+  }
+  .mark svg { position: relative; z-index: 1; display: block; }
+
+  /* ---------- TEXT ---------- */
+  .name {
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    margin: 0 0 14px;
+    opacity: 0;
+    will-change: transform, opacity;
+    transform: translate3d(0, 8px, 0);
+    animation: textIn 0.8s var(--ease-soft) 0.30s forwards;
+  }
+  .status {
+    font-size: 13.5px;
+    font-weight: 500;
+    letter-spacing: -0.005em;
+    color: var(--text-72);
+    margin: 0 0 5px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    opacity: 0;
+    will-change: transform, opacity;
+    transform: translate3d(0, 8px, 0);
+    animation: textIn 0.8s var(--ease-soft) 0.38s forwards;
+  }
+  .status .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--cyan);
+    box-shadow: 0 0 8px rgba(92, 225, 230, 0.9);
+    will-change: transform, opacity;
+    animation: dotPulse 1.9s var(--ease-inout) infinite;
+  }
+  @keyframes dotPulse {
+    0%, 100% { opacity: 0.45; transform: scale(0.82); }
+    50%      { opacity: 1;    transform: scale(1); }
+  }
+  .sub {
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: 0.005em;
+    color: var(--text-56);
+    margin: 0 0 26px;
+    min-height: 15px;
+    opacity: 0;
+    will-change: transform, opacity;
+    transform: translate3d(0, 8px, 0);
+    animation: textIn 0.8s var(--ease-soft) 0.46s forwards;
+  }
+  @keyframes textIn { to { opacity: 1; transform: translate3d(0, 0, 0); } }
+
+  /* ---------- PROGRESS (scaleX via transform only) ---------- */
+  .progress {
+    position: relative;
+    height: 4px;
+    width: 100%;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.12);
+    overflow: hidden;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+    opacity: 0;
+    animation: textIn 0.8s var(--ease-soft) 0.54s forwards;
+  }
+  .progress .fill {
+    position: absolute;
+    inset: 0;
+    transform-origin: left center;
+    border-radius: 999px;
+    /* the progress bar itself carries the palette — a tiny live gradient */
+    background: linear-gradient(90deg, #ff6384 0%, #d640e8 32%, #0a84ff 64%, #30d1c4 100%);
+    box-shadow: 0 0 12px rgba(120, 160, 255, 0.5);
+    will-change: transform;
+    transform: scaleX(var(--boot-fill, 0.18));
+    transition: transform 1.1s var(--ease-soft);
+  }
+  /* a moving specular sheen riding the bar — transform only */
+  .progress .fill::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 40%;
+    height: 100%;
+    background: linear-gradient(90deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.55) 50%, rgba(255, 255, 255, 0) 100%);
+    will-change: transform;
+    animation: sheen 2.4s var(--ease-inout) infinite;
+  }
+  @keyframes sheen {
+    0%   { transform: translateX(-120%); }
+    60%  { transform: translateX(320%); }
+    100% { transform: translateX(320%); }
+  }
+
+  /* ---------- STEP CHIPS ---------- */
+  .chips {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin-top: 22px;
+    opacity: 0;
+    animation: textIn 0.8s var(--ease-soft) 0.62s forwards;
+  }
+  .chip {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    color: var(--text-40);
+    padding: 5px 11px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    background: rgba(255, 255, 255, 0.04);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: color 0.5s var(--ease-inout), border-color 0.5s var(--ease-inout), background-color 0.5s var(--ease-inout);
+  }
+  .chip .tick {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: 0.45;
+    transform: scale(0.7);
+    transition: opacity 0.5s var(--ease-inout), transform 0.5s var(--ease-soft);
+  }
+  .chip.done {
+    color: var(--cyan);
+    border-color: rgba(92, 225, 230, 0.36);
+    background: rgba(92, 225, 230, 0.12);
+  }
+  .chip.done .tick { opacity: 1; transform: scale(1); }
+
+  /* ---------- ERROR STATE ---------- */
+  .boot-failed .status .dot {
+    background: #ff6b62;
+    box-shadow: 0 0 8px rgba(255, 107, 98, 0.7);
+    animation: none;
+    opacity: 1;
+  }
+  .boot-failed .progress .fill { background: linear-gradient(90deg, #ff453a, #ff9f0a); }
+  .boot-failed .progress .fill::after { display: none; }
+
+  /* ---------- REDUCED MOTION ----------
+     Freeze to ONE gorgeous, still, colourful frame. The rAF loop is
+     paused in JS (one frame rendered then stopped); here we also calm
+     every CSS animation so nothing strobes. */
+  @media (prefers-reduced-motion: reduce) {
+    .fallback { animation: none; }
+    .halo { animation: none; opacity: 0.7; transform: scale(1); }
+    .mark { animation: markIn 0.9s var(--ease-soft) 0.18s forwards; }
+    .status .dot { animation: none; opacity: 1; }
+    .progress .fill::after { animation: none; opacity: 0; }
+    .card, .name, .status, .sub, .progress, .chips {
+      opacity: 1;
+      transform: none;
+      animation: none;
+    }
+    .card { animation: cardIn 0.6s var(--ease-soft) forwards; }
+  }
+</style>
+</head>
+<body>
+  <div class="stage boot">
+    <canvas id="mesh" aria-hidden="true"></canvas>
+    <div class="fallback" aria-hidden="true"></div>
+    <div class="vignette" aria-hidden="true"></div>
+    <div class="halo" aria-hidden="true"></div>
+
+    <main class="card" role="status" aria-live="polite" aria-label="Opening Vintrace">
+      <div class="mark" aria-hidden="true">
+        <svg width="30" height="30" viewBox="0 0 30 30" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M5 6 L15 23 L25 6" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+      <h1 class="name">Vintrace</h1>
+      <p class="status"><span class="dot"></span><span id="status-text">Opening app</span></p>
+      <p class="sub">Loading private on-device review data.</p>
+
+      <div class="progress" aria-hidden="true">
+        <div class="fill" id="fill"></div>
+      </div>
+
+      <div class="chips" aria-hidden="true">
+        <span class="chip done" id="chip-0"><span class="tick"></span>Shell</span>
+        <span class="chip" id="chip-1"><span class="tick"></span>Engine</span>
+        <span class="chip" id="chip-2"><span class="tick"></span>App folder</span>
+      </div>
+    </main>
+  </div>
+
+  <!-- ===================== LIVING MESH (WebGL1 / GLSL ES 1.00) ===================== -->
+  <script id="vert" type="x-shader/x-vertex">
+    attribute vec2 aPos;
+    void main() {
+      gl_Position = vec4(aPos, 0.0, 1.0);
+    }
+  </script>
+
+  <script id="frag" type="x-shader/x-fragment">
+    precision highp float;
+
+    uniform vec2  uRes;
+    uniform float uTime;
+
+    /* ---- value noise + fbm (cheap, smooth, organic) ---- */
+    float hash(vec2 p) {
+      p = fract(p * vec2(123.34, 345.45));
+      p += dot(p, p + 34.345);
+      return fract(p.x * p.y);
+    }
+    float noise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      vec2 u = f * f * (3.0 - 2.0 * f);
+      float a = hash(i + vec2(0.0, 0.0));
+      float b = hash(i + vec2(1.0, 0.0));
+      float c = hash(i + vec2(0.0, 1.0));
+      float d = hash(i + vec2(1.0, 1.0));
+      return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+    }
+    float fbm(vec2 p) {
+      float v = 0.0;
+      float a = 0.5;
+      mat2 rot = mat2(0.80, 0.60, -0.60, 0.80);
+      for (int i = 0; i < 5; i++) {
+        v += a * noise(p);
+        p = rot * p * 2.02;
+        a *= 0.5;
+      }
+      return v;
+    }
+
+    /* a colour blob: smooth radial falloff around a moving centre */
+    float blob(vec2 uv, vec2 c, float r, float soft) {
+      float d = length(uv - c);
+      return smoothstep(r, r - soft, d);
+    }
+
+    void main() {
+      // aspect-correct uv centred at 0, with a touch of headroom
+      vec2 uv = (gl_FragCoord.xy - 0.5 * uRes) / uRes.y;
+      uv *= 1.18;
+
+      float t = uTime * 0.06;
+
+      // -------- domain warp: bend space with two fbm fields so blobs
+      //          melt into each other organically (the "liquid") --------
+      vec2 q = vec2(fbm(uv * 1.3 + vec2(0.0, t)),
+                    fbm(uv * 1.3 + vec2(5.2, -t)));
+      vec2 r = vec2(fbm(uv * 1.3 + 1.9 * q + vec2(1.7, 9.2) + 0.15 * t),
+                    fbm(uv * 1.3 + 1.9 * q + vec2(8.3, 2.8) - 0.13 * t));
+      vec2 wuv = uv + 0.42 * r;
+
+      // -------- 6 drifting control blobs on smooth circular-ish paths --------
+      vec2 c0 = vec2(sin(t * 1.30 + 0.0) * 0.55, cos(t * 1.10 + 1.0) * 0.40) + vec2(-0.30, 0.18);
+      vec2 c1 = vec2(sin(t * 0.90 + 2.1) * 0.50, cos(t * 1.40 + 0.4) * 0.46) + vec2( 0.34, -0.10);
+      vec2 c2 = vec2(sin(t * 1.10 + 4.0) * 0.60, cos(t * 0.80 + 2.7) * 0.42) + vec2( 0.10, 0.36);
+      vec2 c3 = vec2(sin(t * 0.75 + 1.3) * 0.52, cos(t * 1.25 + 5.1) * 0.50) + vec2(-0.26, -0.30);
+      vec2 c4 = vec2(sin(t * 1.45 + 3.3) * 0.46, cos(t * 0.95 + 0.9) * 0.38) + vec2( 0.40, 0.30);
+      vec2 c5 = vec2(sin(t * 0.65 + 5.5) * 0.58, cos(t * 1.05 + 3.8) * 0.44) + vec2(-0.04, -0.04);
+
+      // -------- curated, harmonious saturated palette --------
+      vec3 colCoral   = vec3(1.00, 0.36, 0.46); // warm coral / rose
+      vec3 colMagenta = vec3(0.84, 0.22, 0.92); // electric magenta
+      vec3 colBlue    = vec3(0.10, 0.46, 1.00); // electric blue
+      vec3 colTeal    = vec3(0.16, 0.84, 0.78); // teal / aqua
+      vec3 colGold     = vec3(1.00, 0.74, 0.30); // warm gold
+      vec3 colViolet   = vec3(0.55, 0.36, 1.00); // deep violet
+
+      // weighted accumulation in linear-ish space for creamy blends
+      float w0 = blob(wuv, c0, 0.95, 0.95);
+      float w1 = blob(wuv, c1, 0.92, 0.95);
+      float w2 = blob(wuv, c2, 1.02, 1.00);
+      float w3 = blob(wuv, c3, 0.96, 0.98);
+      float w4 = blob(wuv, c4, 0.85, 0.90);
+      float w5 = blob(wuv, c5, 1.05, 1.05);
+
+      float wsum = w0 + w1 + w2 + w3 + w4 + w5 + 0.0001;
+      vec3 col =
+          colCoral   * w0 +
+          colMagenta * w1 +
+          colBlue    * w2 +
+          colTeal    * w3 +
+          colGold    * w4 +
+          colViolet  * w5;
+      col /= wsum;
+
+      // -------- depth: a slow large-scale fbm shades the field, giving
+      //          a sense of light pooling and receding (3D-ish) --------
+      float depth = fbm(wuv * 0.9 + vec2(t * 0.5, -t * 0.4));
+      col *= mix(0.72, 1.16, depth);
+
+      // a soft golden core glow in the centre so the card sits in light
+      float core = smoothstep(1.05, 0.0, length(uv));
+      col += colGold * 0.10 * core * (0.6 + 0.4 * depth);
+
+      // deepen the corners toward an inky violet for premium contrast
+      float vig = smoothstep(0.35, 1.35, length(uv));
+      col = mix(col, vec3(0.05, 0.03, 0.11), vig * 0.62);
+
+      // gentle overall lift + saturation polish
+      col = pow(col, vec3(0.92));
+      col = mix(vec3(dot(col, vec3(0.299, 0.587, 0.114))), col, 1.14); // +saturation
+
+      // -------- ordered grain to kill banding (very subtle, animated) --------
+      float g = hash(gl_FragCoord.xy + fract(uTime) * 113.0);
+      col += (g - 0.5) * 0.022;
+
+      gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+    }
+  </script>
+
+  <script>
+  (function () {
+    "use strict";
+
+    var canvas = document.getElementById("mesh");
+    var body   = document.body;
+    var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    // -------- WebGL init with graceful fallback --------
+    var gl = null;
+    try {
+      var opts = { antialias: false, alpha: false, depth: false, stencil: false,
+                   premultipliedAlpha: false, preserveDrawingBuffer: false,
+                   powerPreference: "low-power", failIfMajorPerformanceCaveat: false };
+      gl = canvas.getContext("webgl", opts) || canvas.getContext("experimental-webgl", opts);
+    } catch (e) { gl = null; }
+
+    if (!gl) {
+      // WebGL unavailable → reveal the rich animated CSS gradient instead.
+      body.classList.add("no-webgl");
+      return;
+    }
+
+    function compile(type, src) {
+      var s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+        gl.deleteShader(s);
+        return null;
+      }
+      return s;
+    }
+
+    var vs = compile(gl.VERTEX_SHADER, document.getElementById("vert").textContent);
+    var fs = compile(gl.FRAGMENT_SHADER, document.getElementById("frag").textContent);
+    if (!vs || !fs) { body.classList.add("no-webgl"); return; }
+
+    var prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { body.classList.add("no-webgl"); return; }
+    gl.useProgram(prog);
+
+    // full-screen triangle (covers the quad with one tri — fewer verts)
+    var buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    var aPos = gl.getAttribLocation(prog, "aPos");
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+    var uRes  = gl.getUniformLocation(prog, "uRes");
+    var uTime = gl.getUniformLocation(prog, "uTime");
+
+    // -------- sizing: cap DPR at 2 for the backing store --------
+    function resize() {
+      var dpr = Math.min(window.devicePixelRatio || 1, 2);
+      var w = Math.max(1, Math.floor(window.innerWidth  * dpr));
+      var h = Math.max(1, Math.floor(window.innerHeight * dpr));
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+      gl.viewport(0, 0, w, h);
+      gl.uniform2f(uRes, w, h);
+    }
+    resize();
+    window.addEventListener("resize", resize);
+
+    // -------- render loop --------
+    var raf = null;
+    var start = performance.now();
+    var running = false;
+
+    function draw(now) {
+      gl.uniform1f(uTime, (now - start) / 1000);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    function frame(now) {
+      draw(now);
+      raf = requestAnimationFrame(frame);
+    }
+
+    function startLoop() {
+      if (running || reduce) return;
+      running = true;
+      raf = requestAnimationFrame(frame);
+    }
+    function stopLoop() {
+      running = false;
+      if (raf !== null) { cancelAnimationFrame(raf); raf = null; }
+    }
+
+    if (reduce) {
+      // Reduced motion → render exactly ONE gorgeous, still frame, then stop.
+      draw(start + 4200); // a hand-picked moment with a pleasing composition
+    } else {
+      startLoop();
+    }
+
+    // -------- lifecycle: pause off-screen, free context on teardown --------
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) stopLoop();
+      else if (!reduce) { start = performance.now() - (raf ? 0 : 0); startLoop(); }
+    });
+
+    function teardown() {
+      stopLoop();
+      window.removeEventListener("resize", resize);
+      var lose = gl.getExtension("WEBGL_lose_context");
+      if (lose) lose.loseContext();
+    }
+    window.addEventListener("pagehide", teardown);
+
+    // If the GPU drops the context, fall back to the CSS gradient.
+    canvas.addEventListener("webglcontextlost", function (ev) {
+      ev.preventDefault();
+      stopLoop();
+      body.classList.add("no-webgl");
+    });
+  })();
+  </script>
+
+  <!-- ===================== BOOT PROGRESS DRIVER (preview only) ===================== -->
+  <script>
+    // Standalone preview driver only — the real app drives --boot-fill / .done from React state.
+    (function () {
+      var root = document.documentElement;
+      var chips = [document.getElementById("chip-1"), document.getElementById("chip-2")];
+      var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      function set(v) { root.style.setProperty("--boot-fill", String(v)); }
+      set(0.18);
+      if (reduce) { set(0.94); chips.forEach(function (c) { c.classList.add("done"); }); return; }
+      setTimeout(function () { set(0.46); }, 700);
+      setTimeout(function () { set(0.72); chips[0].classList.add("done"); }, 1700);
+      setTimeout(function () { set(0.94); chips[1].classList.add("done"); }, 2900);
+    })();
+  </script>
+</body>
+</html>

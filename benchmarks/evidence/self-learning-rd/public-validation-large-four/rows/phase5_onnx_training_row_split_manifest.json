@@ -1,0 +1,120 @@
+{
+  "contextSplitFields": [
+    "datasetId",
+    "validationBucket",
+    "difficulty",
+    "scenario",
+    "poseBucket",
+    "mediaKind"
+  ],
+  "generatedAtUnix": 1781852366.034,
+  "input": {
+    "classCounts": {
+      "negative": 256,
+      "positive": 1024,
+      "total": 1280
+    },
+    "droppedInvalidRows": 0,
+    "droppedOtherModelRows": 0,
+    "rawRows": 1280,
+    "usableRows": 1280
+  },
+  "minPerClass": 5,
+  "minTrainingCount": 20,
+  "minValidationCount": 20,
+  "modelName": "antelopev2",
+  "privacy": {
+    "pathsIncluded": false,
+    "vectorsIncluded": false
+  },
+  "reportHash": "e9f6a08a400fcc9ff7e5fa86efea8bbf2194f55b48b894eb86d7d1da117ef931",
+  "requestedModelName": "antelopev2",
+  "schemaVersion": 1,
+  "scope": "phase5-onnx-training-row-split",
+  "sourceMetadata": {
+    "generatedAt": "2026-06-19T06:59:25Z",
+    "modelName": "antelopev2",
+    "notProductionTrainingData": true,
+    "publicBenchmarkOnly": true,
+    "schemaVersion": 1,
+    "scope": "phase5-onnx-training-public-benchmark-examples",
+    "sourceKind": "public-dataset-benchmark-labels",
+    "sourceReports": [
+      {
+        "classCounts": {
+          "negative": 64,
+          "positive": 256,
+          "total": 320
+        },
+        "datasetId": "calfw",
+        "labelsPath": "/Users/harshbishnoi/face/benchmarks/public-data/workspaces-large/public-benchmark-20260619-064459/validation-packs/public-dataset-runs/calfw-20260619-064459-461043/public-dataset-labels.json",
+        "pack": "antelopev2",
+        "reportPath": "/Users/harshbishnoi/face/benchmarks/public-data/workspaces-large/public-benchmark-20260619-064459/validation-packs/public-dataset-runs/calfw-20260619-064459-461043/public-dataset-benchmark.json",
+        "rowCount": 320,
+        "sourcePath": "/Users/harshbishnoi/face/benchmarks/public-data/workspaces-large/public-benchmark-20260619-064459/validation-packs/public-dataset-runs/model-comparison-calfw-20260619-064610-896084.json"
+      },
+      {
+        "classCounts": {
+          "negative": 64,
+          "positive": 256,
+          "total": 320
+        },
+        "datasetId": "cplfw",
+        "labelsPath": "/Users/harshbishnoi/face/benchmarks/public-data/workspaces-large/public-benchmark-20260619-064459/validation-packs/public-dataset-runs/cplfw-20260619-064610-897230/public-dataset-labels.json",
+        "pack": "antelopev2",
+        "reportPath": "/Users/harshbishnoi/face/benchmarks/public-data/workspaces-large/public-benchmark-20260619-064459/validation-packs/public-dataset-runs/cplfw-20260619-064610-897230/public-dataset-benchmark.json",
+        "rowCount": 320,
+        "sourcePath": "/Users/harshbishnoi/face/benchmarks/public-data/workspaces-large/public-benchmark-20260619-064459/validation-packs/public-dataset-runs/model-comparison-cplfw-20260619-064838-415350.json"
+      },
+      {
+        "classCounts": {
+          "negative": 64,
+          "positive": 256,
+          "total": 320
+        },
+        "datasetId": "agedb",
+        "labelsPath": "/Users/harshbishnoi/face/benchmarks/public-data/workspaces-large/public-benchmark-20260619-064459/validation-packs/public-dataset-runs/agedb-20260619-064838-418096/public-dataset-labels.json",
+        "pack": "antelopev2",
+        "reportPath": "/Users/harshbishnoi/face/benchmarks/public-data/workspaces-large/public-benchmark-20260619-064459/validation-packs/public-dataset-runs/agedb-20260619-064838-418096/public-dataset-benchmark.json",
+        "rowCount": 320,
+        "sourcePath": "/Users/harshbishnoi/face/benchmarks/public-data/workspaces-large/public-benchmark-20260619-064459/validation-packs/public-dataset-runs/model-comparison-agedb-20260619-065305-265324.json"
+      },
+      {
+        "classCounts": {
+          "negative": 64,
+          "positive": 256,
+          "total": 320
+        },
+        "datasetId": "fiw",
+        "labelsPath": "/Users/harshbishnoi/face/benchmarks/public-data/workspaces-large-fiw/public-benchmark-20260619-065555/validation-packs/public-dataset-runs/fiw-20260619-065555-462695/public-dataset-labels.json",
+        "pack": "antelopev2",
+        "reportPath": "/Users/harshbishnoi/face/benchmarks/public-data/workspaces-large-fiw/public-benchmark-20260619-065555/validation-packs/public-dataset-runs/fiw-20260619-065555-462695/public-dataset-benchmark.json",
+        "rowCount": 320,
+        "sourcePath": "/Users/harshbishnoi/face/benchmarks/public-data/workspaces-large-fiw/public-benchmark-20260619-065555/validation-packs/public-dataset-runs/model-comparison-fiw-20260619-065905-832957.json"
+      }
+    ],
+    "trainingUseAllowed": false
+  },
+  "sourcePath": "/Users/harshbishnoi/face/benchmarks/results/onnx-public-dataset-validation-large-four/rows/public-dataset-onnx-examples.json",
+  "sourceRowsHash": "6d65486e8f48c7dfd86fd78dede2a9dd095e058be402b1995fd9b6885f006c26",
+  "splitSaltHash": "957c5081b1dbd6f6487a05f4736d972490b049cc0c638a08c9f3b8b6b9c78edc",
+  "training": {
+    "classCounts": {
+      "negative": 192,
+      "positive": 768,
+      "total": 960
+    },
+    "path": "/Users/harshbishnoi/face/benchmarks/results/onnx-public-dataset-validation-large-four/rows/split/training-rows.json",
+    "rowsHash": "69f0538cc0b7ccbfa5eedd8929f8295763abe36a2cbd5ec9f1860acfb9c970e1"
+  },
+  "validation": {
+    "classCounts": {
+      "negative": 64,
+      "positive": 256,
+      "total": 320
+    },
+    "path": "/Users/harshbishnoi/face/benchmarks/results/onnx-public-dataset-validation-large-four/rows/split/validation-rows.json",
+    "rowsHash": "8af848e406dc8b441ef177e05e3e52ae54f942efe790d55a6763e51b57a5fdd3"
+  },
+  "validationFraction": 0.25
+}

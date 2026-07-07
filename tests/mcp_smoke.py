@@ -89,7 +89,22 @@ EXPECTED_TOOLS = {
     "accuracy_evaluation",
     "export_accuracy_labels",
     "import_accuracy_labels",
+    "export_training_examples",
+    "import_training_examples",
     "apply_calibration",
+    "calibration_learning_status",
+    "run_learning_jobs",
+    "reference_suggestion_status",
+    "stage_reference_suggestions",
+    "approve_reference_suggestion",
+    "reject_reference_suggestion",
+    "stage_calibration",
+    "promote_calibration",
+    "rollback_calibration",
+    "embedding_adapter_status",
+    "stage_embedding_adapter",
+    "promote_embedding_adapter",
+    "rollback_embedding_adapter",
     "privacy_report",
     "delete_face_data",
     "optimize_workspace",
@@ -131,13 +146,16 @@ async def expect_tool_error(session: ClientSession, tool_name: str, arguments: d
 async def smoke() -> None:
     root = Path.cwd()
     workspace = Path(tempfile.mkdtemp(prefix="crossage-mcp-smoke-")) / "workspace"
+    registry = str(workspace.parent / "registry")
     env = os.environ.copy()
     env.update(
         {
             "PYTHONPATH": str(root),
             "CROSSAGE_FORCE_FALLBACK": "1",
+            "VINTRACE_WORKSPACE": str(workspace),
             "CROSSAGE_WORKSPACE": str(workspace),
-            "CROSSAGE_REGISTRY_HOME": str(workspace.parent / "registry"),
+            "VINTRACE_REGISTRY_HOME": registry,
+            "CROSSAGE_REGISTRY_HOME": registry,
             # Security Phase 2: the MCP server now requires an operator token to
             # grant consent (MCP-02) and confines path inputs to approved roots
             # (MCP-03). The smoke test operates under the temp workspace's parent.
@@ -265,8 +283,26 @@ async def smoke() -> None:
             await expect_tool_error(session, "rename_person", {"old_name": "A", "new_name": "B"}, "confirm=True")
             await expect_tool_error(session, "purge_old_candidates", {"days": 1}, "confirm=True")
             await expect_tool_error(session, "delete_face_data", {}, "confirm=True")
+            # Deleting the audit log too needs the human-only operator token (MCP-07).
+            await expect_tool_error(
+                session,
+                "delete_face_data",
+                {"confirm": True, "include_audit": True},
+                "operator approval token",
+            )
             await expect_tool_error(session, "apply_calibration", {}, "confirm=True")
+            await expect_tool_error(session, "run_learning_jobs", {}, "confirm=True")
+            await expect_tool_error(session, "stage_reference_suggestions", {}, "confirm=True")
+            await expect_tool_error(session, "approve_reference_suggestion", {"artifact_id": "learn_missing"}, "confirm=True")
+            await expect_tool_error(session, "reject_reference_suggestion", {"artifact_id": "learn_missing"}, "confirm=True")
+            await expect_tool_error(session, "stage_calibration", {}, "confirm=True")
+            await expect_tool_error(session, "promote_calibration", {}, "confirm=True")
+            await expect_tool_error(session, "rollback_calibration", {}, "confirm=True")
+            await expect_tool_error(session, "stage_embedding_adapter", {}, "confirm=True")
+            await expect_tool_error(session, "promote_embedding_adapter", {}, "confirm=True")
+            await expect_tool_error(session, "rollback_embedding_adapter", {}, "confirm=True")
             await expect_tool_error(session, "import_accuracy_labels", {"labels": []}, "confirm=True")
+            await expect_tool_error(session, "import_training_examples", {"examples": []}, "confirm=True")
             await expect_tool_error(session, "export_accepted_media_bundle", {}, "confirm=True")
             await expect_tool_error(session, "optimize_workspace", {}, "confirm=True")
             await expect_tool_error(session, "enforce_storage_budget", {}, "confirm=True")

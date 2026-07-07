@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from functools import lru_cache
 import json
+import logging
+import math
 import os
 from pathlib import Path
 import sys
@@ -30,9 +32,67 @@ class SafetyAssessment:
     heuristic_score: float | None = None
     threshold: float = 0.0
     labels: dict[str, float] = field(default_factory=dict)
+    # Multi-level models (e.g. Freepik neutral/low/medium/high) report the dominant
+    # level so the UI can separate "suggestive" from "explicit"; "" for 2-class models.
+    level: str = ""
 
 
-def assess_image_safety(path: Path, threshold: float = 0.58, image: Image.Image | None = None) -> SafetyAssessment:
+def nsfw_probability_from_levels(probs: Any, level_names: Any, sensitive_min_level: Any) -> float:
+    """Sensitive probability from an ordered (least→most severe) level distribution:
+    the mass at/above ``sensitive_min_level``. Unknown/empty min → only the most
+    severe level counts. Used for multi-level classifiers like Freepik."""
+    values = [float(p) for p in probs]
+    names = [str(n).strip().lower() for n in level_names]
+    if not values or len(values) != len(names):
+        return 0.0
+    target = str(sensitive_min_level or "").strip().lower()
+    start = names.index(target) if target in names else len(names) - 1
+    return float(sum(values[start:]))
+
+
+def dominant_level(probs: Any, level_names: Any) -> str:
+    """The most probable level name (argmax); "" when inputs don't line up."""
+    values = [float(p) for p in probs]
+    names = list(level_names)
+    if not values or len(values) != len(names):
+        return ""
+    best = max(range(len(values)), key=lambda i: values[i])
+    return str(names[best])
+
+
+def apply_safe_mode_override(stored_sensitive: Any, override: Any) -> bool:
+    """The effective sensitivity for an item: a user override (True/False) wins;
+    ``None`` falls back to the classifier's stored verdict."""
+    if override is None:
+        return bool(stored_sensitive)
+    return bool(override)
+
+
+_OVERRIDE_CLEAR = {"", "clear", "none", "reset", "auto", "default"}
+_OVERRIDE_TRUE = {"true", "1", "yes", "on", "sensitive", "flag", "flagged"}
+_OVERRIDE_FALSE = {"false", "0", "no", "off", "safe", "not_sensitive", "notsensitive", "unflag", "allow"}
+
+
+def normalize_override_value(value: Any) -> "bool | None":
+    """Parse a command param into True / False / None. None means *clear the
+    override* (fall back to the classifier). Unrecognized text also clears."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in _OVERRIDE_CLEAR:
+        return None
+    if text in _OVERRIDE_TRUE:
+        return True
+    if text in _OVERRIDE_FALSE:
+        return False
+    return None
+
+
+def assess_image_safety(path: Path, threshold: float = 0.58, image: Image.Image | None = None, temperature: float = 1.0) -> SafetyAssessment:
     image = image or load_image(path)
     heuristic = _assess_image_safety_heuristic(image, threshold)
     if _safety_engine_mode() == "heuristic":
@@ -41,7 +101,7 @@ def assess_image_safety(path: Path, threshold: float = 0.58, image: Image.Image 
     if model is None:
         return heuristic
     try:
-        return model.assess(image, threshold, heuristic)
+        return model.assess(image, threshold, heuristic, temperature)
     except Exception as exc:
         return SafetyAssessment(
             sensitive=heuristic.sensitive,
@@ -78,6 +138,52 @@ def safety_model_report() -> dict[str, Any]:
             "reason": "No local ONNX safety model was found.",
         }
     return _spec_report(spec)
+
+
+def calibrate_safety_temperature(labeled: Any) -> dict[str, Any]:
+    """Fit the Safe Mode temperature from local labeled images (res.md Stage 1b).
+
+    ``labeled`` is an iterable of ``(path, label)`` where ``label`` is truthy for
+    sensitive/NSFW. Runs the ONNX model per image to get canonical [not, nsfw]
+    logit pairs, then fits a single T that minimizes NLL. Returns the fitted T +
+    before/after NLL and counts; nothing is persisted here (the caller stores
+    ``config.safe_mode_temperature``)."""
+    from crossage_fr.ingest.safety_calibration import fit_temperature, temperature_nll
+
+    model = _load_safety_model()
+    if model is None:
+        return {"ok": False, "reason": "No local ONNX safety model is available to calibrate.", "temperature": 1.0, "sampleCount": 0}
+    pairs: list[list[float]] = []
+    labels: list[int] = []
+    for entry in labeled:
+        try:
+            path, label = entry
+            image = load_image(Path(path))
+            pairs.append(model.nsfw_logit_pair(image))
+            labels.append(1 if bool(label) else 0)
+        except Exception:
+            continue
+    positives = sum(labels)
+    negatives = len(labels) - positives
+    if positives < 2 or negatives < 2:
+        return {
+            "ok": False,
+            "reason": "Label at least two sensitive and two non-sensitive images to calibrate.",
+            "temperature": 1.0,
+            "sampleCount": len(pairs),
+            "positives": positives,
+            "negatives": negatives,
+        }
+    temperature = fit_temperature(pairs, labels)
+    return {
+        "ok": True,
+        "temperature": float(temperature),
+        "sampleCount": len(pairs),
+        "positives": positives,
+        "negatives": negatives,
+        "nllBefore": temperature_nll(pairs, labels, 1.0),
+        "nllAfter": temperature_nll(pairs, labels, temperature),
+    }
 
 
 def _assess_image_safety_heuristic(image: Image.Image, threshold: float) -> SafetyAssessment:
@@ -230,6 +336,10 @@ class _SafetyModelSpec:
     interpolation: str
     threshold_hint: str
     expected_sha256: str = ""
+    # Multi-level classifiers (Freepik neutral/low/medium/high): ordered level names
+    # least→most severe + the minimum level counted as sensitive. Empty for 2-class.
+    levels: tuple[str, ...] = ()
+    sensitive_min_level: str = ""
 
 
 class _OnnxSafetyModel:
@@ -238,24 +348,49 @@ class _OnnxSafetyModel:
         self.session = _session_for_model(str(spec.path), _model_stat_token(spec.path))
         self.input_name = self.session.get_inputs()[0].name
 
-    def assess(self, image: Image.Image, threshold: float, heuristic: SafetyAssessment) -> SafetyAssessment:
-        logits = np.asarray(self.session.run(None, {self.input_name: self._preprocess(image)})[0])
-        if logits.ndim > 1:
-            logits = logits[0]
-        logits = logits.astype(np.float32).reshape(-1)
+    def assess(self, image: Image.Image, threshold: float, heuristic: SafetyAssessment, temperature: float = 1.0) -> SafetyAssessment:
+        logits = self._logits(image)
+        # Stage 1b: temperature scaling (T fit per-user). T=1 leaves the raw model
+        # unchanged; T>1 softens over-confident scores before thresholding.
+        if temperature and math.isfinite(temperature) and temperature > 0 and temperature != 1.0:
+            logits = logits / np.float32(temperature)
         probabilities = _softmax(logits)
-        nsfw_score = float(probabilities[self.spec.nsfw_index])
-        labels = {
-            self.spec.labels[index] if index < len(self.spec.labels) else f"class_{index}": float(value)
-            for index, value in enumerate(probabilities)
-        }
+        prob_list = [float(v) for v in probabilities]
+        level = ""
+        if self.spec.levels and len(prob_list) == len(self.spec.levels):
+            # Multi-level classifier (e.g. Freepik neutral/low/medium/high): the gate
+            # score is the mass at/above the minimum sensitive level; expose the
+            # dominant level so the UI can separate suggestive from explicit.
+            nsfw_score = nsfw_probability_from_levels(prob_list, self.spec.levels, self.spec.sensitive_min_level)
+            level = dominant_level(prob_list, self.spec.levels)
+            labels = {name: prob_list[index] for index, name in enumerate(self.spec.levels)}
+        else:
+            # 2-class softmax. Bound the configured NSFW index against the model's
+            # ACTUAL output size — a mismatched/tampered manifest would otherwise
+            # IndexError or read the wrong class and bypass the gate.
+            n = int(probabilities.shape[0])
+            idx = int(self.spec.nsfw_index)
+            if n == 0:
+                nsfw_score = 0.0
+            else:
+                if not (0 <= idx < n):
+                    logging.getLogger(__name__).warning(
+                        "Safety model %s: nsfw_index %d is out of range for %d output class(es); clamping.",
+                        self.spec.model_name, idx, n,
+                    )
+                    idx = min(max(idx, 0), n - 1)
+                nsfw_score = float(probabilities[idx])
+            labels = {
+                self.spec.labels[index] if index < len(self.spec.labels) else f"class_{index}": float(value)
+                for index, value in enumerate(probabilities)
+            }
         labels["exposed_skin_guard"] = heuristic.score
         combined_score = max(nsfw_score, heuristic.score)
         guard_text = " plus exposed-skin guard" if heuristic.score >= threshold and nsfw_score < threshold else ""
         return SafetyAssessment(
             sensitive=combined_score >= threshold,
             score=combined_score,
-            reason=f"ML Safe Mode score from {self.spec.model_name}{guard_text}",
+            reason=f"ML Safe Mode score from {self.spec.model_name}{guard_text}" + (f"; level: {level}" if level else ""),
             skin_ratio=heuristic.skin_ratio,
             lower_skin_ratio=heuristic.lower_skin_ratio,
             largest_region_ratio=heuristic.largest_region_ratio,
@@ -265,7 +400,26 @@ class _OnnxSafetyModel:
             heuristic_score=heuristic.score,
             threshold=threshold,
             labels=labels,
+            level=level,
         )
+
+    def _logits(self, image: Image.Image) -> np.ndarray:
+        logits = np.asarray(self.session.run(None, {self.input_name: self._preprocess(image)})[0])
+        if logits.ndim > 1:
+            logits = logits[0]
+        return logits.astype(np.float32).reshape(-1)
+
+    def nsfw_logit_pair(self, image: Image.Image) -> list[float]:
+        # Canonical 2-vector [not_nsfw, nsfw] for calibration, so label 1 == nsfw
+        # regardless of the model's own class ordering (spec.nsfw_index).
+        logits = self._logits(image)
+        n = int(logits.shape[0])
+        if n == 0:
+            return [0.0, 0.0]
+        idx = min(max(int(self.spec.nsfw_index), 0), n - 1)
+        nsfw = float(logits[idx])
+        others = [float(logits[i]) for i in range(n) if i != idx]
+        return [max(others) if others else 0.0, nsfw]
 
     def report(self) -> dict[str, Any]:
         return _spec_report(self.spec)
@@ -416,10 +570,14 @@ def _safety_model_dirs() -> list[Path]:
 
 def _model_preference(path: Path) -> tuple[int, str]:
     name = path.name.lower()
-    if "marqo" in name:
+    # Freepik leads the independent hard-data benchmark; installing it is a
+    # deliberate accuracy upgrade, so prefer it over the bundled classifiers.
+    if "freepik" in name:
         return (0, name)
-    if "adamcodd" in name or "vit_base_nsfw" in name:
+    if "marqo" in name:
         return (1, name)
+    if "adamcodd" in name or "vit_base_nsfw" in name:
+        return (2, name)
     return (9, name)
 
 
@@ -447,6 +605,8 @@ def _spec_for_model(path: Path) -> _SafetyModelSpec:
         interpolation=str(manifest.get("interpolation") or ("bicubic" if "marqo" in name else "bilinear")),
         threshold_hint=str(manifest.get("thresholdHint") or "Use app Safe Mode threshold profiles; calibrate on local labels."),
         expected_sha256=str(manifest.get("sha256") or "").strip().lower(),
+        levels=tuple(str(level).strip().lower() for level in (manifest.get("levels") or ()) if str(level).strip()),
+        sensitive_min_level=str(manifest.get("sensitiveMinLevel") or "").strip().lower(),
     )
 
 

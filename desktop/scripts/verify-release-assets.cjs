@@ -125,10 +125,53 @@ async function downloadAndHash(url, fileName, redirectCount = 0) {
   });
 }
 
-function assetDigestSha(asset) {
-  const value = String(asset.digest || "");
-  const match = value.match(/^sha256:([a-f0-9]{64})$/i);
-  return match ? match[1].toLowerCase() : "";
+function downloadBuffer(url, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    https.get(url, { headers: { "User-Agent": "vintrace-release-verifier" } }, (response) => {
+      const location = resolveRedirect(url, response.headers);
+      if (location && [301, 302, 303, 307, 308].includes(response.statusCode || 0)) {
+        response.resume();
+        if (redirectCount >= 5) {
+          reject(new Error(`Too many redirects while downloading ${url}`));
+          return;
+        }
+        resolve(downloadBuffer(location, redirectCount + 1));
+        return;
+      }
+      if ((response.statusCode || 0) >= 400) {
+        response.resume();
+        reject(new Error(`Download ${url} failed with ${response.statusCode}`));
+        return;
+      }
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve(Buffer.concat(chunks)));
+      response.on("error", reject);
+    }).on("error", reject);
+  });
+}
+
+// The release's SHA256SUMS.txt is the real integrity manifest. GitHub's API
+// asset objects have NO `digest` field, so the previous asset.digest-based
+// checks were a silent no-op — parse the published checksums instead.
+function parseChecksums(text) {
+  const map = new Map();
+  for (const line of String(text).split(/\r?\n/)) {
+    const match = line.match(/^([a-f0-9]{64})[ \t]+[*]?(.+?)\s*$/i);
+    if (match) map.set(path.basename(match[2]).toLowerCase(), match[1].toLowerCase());
+  }
+  return map;
+}
+
+// Origin proof: an Ed25519 detached signature over the exact SHA256SUMS.txt
+// bytes. Verified only when a release public key is configured; prevents a
+// release-endpoint compromise from swapping binary + checksums together.
+function verifyChecksumSignature(checksumBytes, signatureBytes, publicKeyPem) {
+  try {
+    return crypto.verify(null, checksumBytes, crypto.createPublicKey(publicKeyPem), signatureBytes);
+  } catch {
+    return false;
+  }
 }
 
 function assetByPattern(assets, pattern) {
@@ -167,10 +210,38 @@ async function main() {
     add("sbom asset exists", Boolean(sbomAsset), sbomAsset?.name || "missing vintrace-sbom.json");
     add("provenance asset exists", Boolean(provenanceAsset), provenanceAsset?.name || "missing vintrace-provenance.json");
   }
+
+  // Download and parse SHA256SUMS.txt — the actual integrity manifest.
+  let checksumMap = new Map();
+  if (checksumAsset) {
+    try {
+      const checksumBytes = await downloadBuffer(checksumAsset.browser_download_url);
+      checksumMap = parseChecksums(checksumBytes.toString("utf8"));
+      add("SHA256SUMS.txt parsed", checksumMap.size > 0, `${checksumMap.size} checksum entrie(s)`);
+      // Origin proof: require a valid signature over SHA256SUMS.txt when a
+      // release public key is configured (VINTRACE_RELEASE_PUBKEY -> PEM path).
+      const pubKeyPath = process.env.VINTRACE_RELEASE_PUBKEY || "";
+      if (pubKeyPath) {
+        const sigAsset = assetByPattern(assets, /^SHA256SUMS\.txt\.sig$/i);
+        if (!sigAsset) {
+          add("SHA256SUMS signature present", false, "missing SHA256SUMS.txt.sig (release public key configured)");
+        } else {
+          const sigBytes = await downloadBuffer(sigAsset.browser_download_url);
+          const pubKeyPem = fs.readFileSync(pubKeyPath, "utf8");
+          add("SHA256SUMS signature valid", verifyChecksumSignature(checksumBytes, sigBytes, pubKeyPem), "Ed25519 over SHA256SUMS.txt");
+        }
+      }
+    } catch (error) {
+      add("SHA256SUMS.txt parsed", false, error.message || String(error));
+    }
+  } else if (options.requireReleaseMetadata) {
+    add("SHA256SUMS.txt parsed", false, "missing SHA256SUMS.txt");
+  }
+
   if (installer) {
     const minimumSize = isMac ? 50 * 1024 * 1024 : 80 * 1024 * 1024;
     add("installer size is sane", installer.size >= minimumSize, `${installer.name}: ${installer.size} bytes`, { size: installer.size });
-    add("installer digest present", Boolean(assetDigestSha(installer)), installer.digest || "missing sha256 digest");
+    add("installer listed in SHA256SUMS", checksumMap.has(String(installer.name).toLowerCase()), installer.name);
     const head = await headRequest(installer.browser_download_url);
     add("installer download is public", [200, 302].includes(head.statusCode || 0), `${installer.browser_download_url} -> ${head.statusCode}`);
   }
@@ -179,10 +250,11 @@ async function main() {
     add("metadata download is public", [200, 302].includes(head.statusCode || 0), `${metadata.browser_download_url} -> ${head.statusCode}`);
   }
   if (options.full) {
-    for (const asset of [installer, metadata, updater, checksumAsset, sbomAsset, provenanceAsset].filter(Boolean)) {
-      const expected = assetDigestSha(asset);
+    // Verify each installer/updater/metadata artifact against its SHA256SUMS entry.
+    for (const asset of [installer, metadata, updater].filter(Boolean)) {
+      const expected = checksumMap.get(String(asset.name).toLowerCase());
       if (!expected) {
-        add(`sha256 ${asset.name}`, false, "asset digest missing");
+        add(`sha256 ${asset.name}`, false, "not listed in SHA256SUMS.txt");
         continue;
       }
       const actual = await downloadAndHash(asset.browser_download_url, asset.name);

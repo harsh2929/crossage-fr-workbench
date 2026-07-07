@@ -1,0 +1,199 @@
+{
+  "generatedAtUnix": 1781850356.714,
+  "missingTargets": [],
+  "reportHash": "7fce771f35149b145c03b69e1373e782497933ba0cd1efc8f249e14983cb7c89",
+  "requiredTargets": [
+    "macos-arm64",
+    "macos-x64",
+    "windows-x64",
+    "linux-x64"
+  ],
+  "schemaVersion": 1,
+  "scope": "phase5-onnx-training-runtime-study",
+  "sourceErrors": [],
+  "sourceFiles": [
+    {
+      "exists": true,
+      "path": "benchmarks/evidence/self-learning-rd/matrix-27802462328/fragments/linux-x64/phase5_runtime_study_fragment.json",
+      "sha256": "1d253a6a13973631c934aca55d901dcd918d728f557a557841d30b25b7e1baf3",
+      "sizeBytes": 1206,
+      "targets": [
+        "linux-x64"
+      ]
+    },
+    {
+      "exists": true,
+      "path": "benchmarks/evidence/self-learning-rd/matrix-27802462328/fragments/macos-arm64/phase5_runtime_study_fragment.json",
+      "sha256": "d576b63d3c3cec8160f38c4fbfe9da08a640ab7218d50acd88b7c0baf2328f93",
+      "sizeBytes": 1246,
+      "targets": [
+        "macos-arm64"
+      ]
+    },
+    {
+      "exists": true,
+      "path": "benchmarks/evidence/self-learning-rd/matrix-27802462328/fragments/macos-x64/phase5_runtime_study_fragment.json",
+      "sha256": "e6e944d22ca98dc946881ed8d7ba93050fe5ffe5b052a515b5a729c3d5320ff6",
+      "sizeBytes": 1241,
+      "targets": [
+        "macos-x64"
+      ]
+    },
+    {
+      "exists": true,
+      "path": "benchmarks/evidence/self-learning-rd/matrix-27802462328/fragments/windows-x64/phase5_runtime_study_fragment.json",
+      "sha256": "4f9b54636690614ff05a48975047c33d12bb89b432607c03e25872c8af20eb9f",
+      "sizeBytes": 1240,
+      "targets": [
+        "windows-x64"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "source": "benchmarks/evidence/self-learning-rd/matrix-27802462328/fragments/linux-x64/phase5_runtime_study_fragment.json",
+      "target": "linux-x64"
+    },
+    {
+      "source": "benchmarks/evidence/self-learning-rd/matrix-27802462328/fragments/macos-arm64/phase5_runtime_study_fragment.json",
+      "target": "macos-arm64"
+    },
+    {
+      "source": "benchmarks/evidence/self-learning-rd/matrix-27802462328/fragments/macos-x64/phase5_runtime_study_fragment.json",
+      "target": "macos-x64"
+    },
+    {
+      "source": "benchmarks/evidence/self-learning-rd/matrix-27802462328/fragments/windows-x64/phase5_runtime_study_fragment.json",
+      "target": "windows-x64"
+    }
+  ],
+  "status": "complete",
+  "targets": [
+    {
+      "artifactCount": 5,
+      "artifactGenerationStatus": "complete",
+      "blockers": [],
+      "currentHost": true,
+      "failureModes": [
+        "artifact-tamper",
+        "cancelled",
+        "disk-full",
+        "missing-training-runtime",
+        "out-of-memory",
+        "thermal-throttle"
+      ],
+      "featureFlag": "VINTRACE_EXPERIMENTAL_ONNX_TRAINING",
+      "gpuAvailable": true,
+      "measuredAtUnix": 1781837690.807,
+      "missingArtifacts": [],
+      "packageSizeBytes": 591665508,
+      "performanceTier": "low",
+      "primaryProvider": "CoreMLExecutionProvider",
+      "providers": [
+        "CoreMLExecutionProvider",
+        "CPUExecutionProvider"
+      ],
+      "status": "pass",
+      "target": "macos-arm64",
+      "trainingDurationMs": 14,
+      "trainingJobDurationMs": 8.405,
+      "trainingJobStatus": "complete",
+      "trainingPackageAvailable": true,
+      "trainingRuntimeAvailable": true
+    },
+    {
+      "artifactCount": 5,
+      "artifactGenerationStatus": "complete",
+      "blockers": [],
+      "currentHost": true,
+      "failureModes": [
+        "artifact-tamper",
+        "cancelled",
+        "disk-full",
+        "missing-training-runtime",
+        "out-of-memory",
+        "thermal-throttle"
+      ],
+      "featureFlag": "VINTRACE_EXPERIMENTAL_ONNX_TRAINING",
+      "gpuAvailable": false,
+      "measuredAtUnix": 1781837717.088,
+      "missingArtifacts": [],
+      "packageSizeBytes": 739657692,
+      "performanceTier": "low",
+      "primaryProvider": "CPUExecutionProvider",
+      "providers": [
+        "CoreMLExecutionProvider",
+        "CPUExecutionProvider"
+      ],
+      "status": "pass",
+      "target": "macos-x64",
+      "trainingDurationMs": 26,
+      "trainingJobDurationMs": 12.354,
+      "trainingJobStatus": "complete",
+      "trainingPackageAvailable": true,
+      "trainingRuntimeAvailable": true
+    },
+    {
+      "artifactCount": 5,
+      "artifactGenerationStatus": "complete",
+      "blockers": [],
+      "currentHost": true,
+      "failureModes": [
+        "artifact-tamper",
+        "cancelled",
+        "disk-full",
+        "missing-training-runtime",
+        "out-of-memory",
+        "thermal-throttle"
+      ],
+      "featureFlag": "VINTRACE_EXPERIMENTAL_ONNX_TRAINING",
+      "gpuAvailable": false,
+      "measuredAtUnix": 1781837757.693,
+      "missingArtifacts": [],
+      "packageSizeBytes": 648195711,
+      "performanceTier": "low",
+      "primaryProvider": "CPUExecutionProvider",
+      "providers": [
+        "CPUExecutionProvider"
+      ],
+      "status": "pass",
+      "target": "windows-x64",
+      "trainingDurationMs": 50,
+      "trainingJobDurationMs": 18.704,
+      "trainingJobStatus": "complete",
+      "trainingPackageAvailable": true,
+      "trainingRuntimeAvailable": true
+    },
+    {
+      "artifactCount": 5,
+      "artifactGenerationStatus": "complete",
+      "blockers": [],
+      "currentHost": true,
+      "failureModes": [
+        "artifact-tamper",
+        "cancelled",
+        "disk-full",
+        "missing-training-runtime",
+        "out-of-memory",
+        "thermal-throttle"
+      ],
+      "featureFlag": "VINTRACE_EXPERIMENTAL_ONNX_TRAINING",
+      "gpuAvailable": false,
+      "measuredAtUnix": 1781837719.089,
+      "missingArtifacts": [],
+      "packageSizeBytes": 1327049623,
+      "performanceTier": "low",
+      "primaryProvider": "CPUExecutionProvider",
+      "providers": [
+        "CPUExecutionProvider"
+      ],
+      "status": "pass",
+      "target": "linux-x64",
+      "trainingDurationMs": 17,
+      "trainingJobDurationMs": 13.247,
+      "trainingJobStatus": "complete",
+      "trainingPackageAvailable": true,
+      "trainingRuntimeAvailable": true
+    }
+  ]
+}

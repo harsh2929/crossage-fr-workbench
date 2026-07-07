@@ -87,7 +87,9 @@ def main() -> None:
     os.environ["CROSSAGE_FORCE_FALLBACK"] = "1"
     count = max(1, int(os.environ.get("VINTRACE_SCALE_BENCH_FILES", "100000")))
     root = Path(tempfile.mkdtemp(prefix="vintrace-scale-bench-"))
-    os.environ["CROSSAGE_REGISTRY_HOME"] = str(root / "registry")
+    registry = str(root / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
     api = DesktopApi(root / "workspace")
     assert_low_and_high_profile_selection()
     seed_ms = seed_scan_manifest(api, count)
