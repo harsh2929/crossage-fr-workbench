@@ -6622,6 +6622,18 @@ run("Photos route is lazy-loaded out of the initial renderer chunk", () => {
   assert.match(appSource, /<Suspense fallback=\{<PhotosRouteFallback uiText=\{uiText\} \/>\}>/);
 });
 
+run("MCP agents settings panel is extracted from App", () => {
+  const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
+  const panelSource = fs.readFileSync(path.join(ROOT, "src/shell/McpAgentsPanel.tsx"), "utf8");
+  assert.match(appSource, /import \{ McpAgentsPanel \} from "\.\/shell\/McpAgentsPanel";/);
+  assert.match(appSource, /<McpAgentsPanel copyText=\{props\.copyText\} \/>/);
+  assert.doesNotMatch(appSource, /function McpAgentsPanel/);
+  assert.match(panelSource, /export function McpAgentsPanel/);
+  assert.match(panelSource, /getMcpConnectionInfo\(\)/);
+  assert.match(panelSource, /onMcpHttpStatus/);
+  assert.match(panelSource, /revealOrBuildMcpBundle/);
+});
+
 run("photo virtual grid windows visible bands with overscan", () => {
   const layout = virtualGridMod.buildPhotoVirtualGridLayout(
     Array.from({ length: 12 }, (_, index) => ({ kind: "item", key: `i:${index}`, index, item: { width: 100, height: 100 } })),
