@@ -11881,20 +11881,31 @@ export function PhotosView(props: {
     }
     if (!selectedItems.length) return;
     const nextFavorite = selectedItems.some((item) => !item.favorite);
+    const selectedSourceSet = new Set(selectedItems.map((item) => item.sourcePath));
     setSavingMetadata(true);
     setMetadataError("");
     try {
-      for (const item of selectedItems) {
-        await updatePhotoAssetMetadata({
+      const result = await updatePhotoAssetsMetadata({
+        label: nextFavorite ? uiText("Marked selected favorites") : uiText("Removed selected favorites"),
+        items: selectedItems.map((item) => ({
           sourcePath: item.sourcePath,
           assetId: item.assetId || "",
           favorite: nextFavorite,
-        });
-      }
+        })),
+      });
+      const favoriteBySource = new Map<string, boolean>();
+      (result.value?.items || []).forEach((value) => {
+        const sourcePath = String(value.sourcePath || "").trim();
+        if (!sourcePath) return;
+        favoriteBySource.set(sourcePath, Boolean(value.favorite ?? nextFavorite));
+      });
       setItems((current) => current.map((item) => (
-        selectedSources.has(item.sourcePath) ? { ...item, favorite: nextFavorite } : item
+        selectedSourceSet.has(item.sourcePath)
+          ? { ...item, favorite: favoriteBySource.get(item.sourcePath) ?? nextFavorite }
+          : item
       )));
       await loadFolders();
+      await loadPhotoOperations();
     } catch (error) {
       setMetadataError(error instanceof Error ? error.message : String(error));
     } finally {

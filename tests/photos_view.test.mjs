@@ -6326,6 +6326,18 @@ run("Photos video time updates stay out of parent render state", () => {
   assert.doesNotMatch(keydownEffect[0], /lightboxVideoCurrentMs/);
 });
 
+run("Photos bulk favorite shortcut uses batch metadata update", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  const block = source.match(/async function toggleSelectedFavorites\(\) \{[\s\S]*?\n  \}\n\n  async function hideSelectedShortcut/);
+  assert.ok(block, "toggleSelectedFavorites should exist");
+  assert.match(block[0], /await updatePhotoAssetsMetadata\(\{/);
+  assert.match(block[0], /items: selectedItems\.map\(\(item\) => \(\{/);
+  assert.match(block[0], /result\.value\?\.items/);
+  assert.match(block[0], /await loadPhotoOperations\(\)/);
+  assert.doesNotMatch(block[0], /for \(const item of selectedItems\)/);
+  assert.doesNotMatch(block[0], /updatePhotoAssetMetadata\(\{/);
+});
+
 run("Photos lightbox viewed events patch recent rail without reloading folders", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
   assert.match(source, /const patchRecentActivityFolder = useCallback/);
