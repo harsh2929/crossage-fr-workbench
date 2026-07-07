@@ -1436,6 +1436,22 @@ button:not(:disabled):active {
   justify-content: flex-end;
 }
 
+.prompt-form {
+  display: grid;
+  gap: 12px;
+}
+
+.prompt-form input {
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  color: var(--control-text);
+  font: inherit;
+  height: 36px;
+  min-width: 0;
+  padding: 0 10px;
+}
+
 .photos-confirm-backdrop {
   z-index: 1200;
 }

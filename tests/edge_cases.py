@@ -512,6 +512,10 @@ def assert_static_app_contracts() -> None:
     assert 'document.documentElement.dir = language === "ar" ? "rtl" : "ltr"' in app_tsx
     assert "setImperativeLanguage(language)" in app_tsx
     assert "window.crossAge.setAppLanguage" in app_tsx
+    assert "function PromptHost()" in app_tsx
+    assert "<PromptHost />" in app_tsx
+    assert 'if (window.crossAge) {\n    return defaultValue;' not in app_tsx
+    assert 'const oldRoot = await promptUi("Old folder path to replace", "");' in app_tsx
     assert "setNoticeMessage(" in app_tsx
     assert "setErrorNotice(error" in app_tsx
     assert "formatErrorMessage={formatErrorMessage}" in app_tsx

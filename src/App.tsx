@@ -323,7 +323,14 @@ type ConfirmRequest = {
   resolve: (confirmed: boolean) => void;
 };
 
+type PromptRequest = {
+  message: string;
+  defaultValue: string;
+  resolve: (value: string | null) => void;
+};
+
 let confirmController: ((request: ConfirmRequest) => void) | null = null;
+let promptController: ((request: PromptRequest) => void) | null = null;
 
 function requestConfirm(finalMessage: string): Promise<boolean> {
   // Fall back to the native dialog if the host isn't mounted yet (very early
@@ -340,14 +347,20 @@ function confirmDialog(message: string): Promise<boolean> {
   return requestConfirm(localizeImperativeText(message));
 }
 
-function promptUi(message: string, defaultValue = "") {
-  if (window.crossAge) {
-    return defaultValue;
+function requestPrompt(finalMessage: string, defaultValue = ""): Promise<string | null> {
+  if (!promptController) {
+    return Promise.resolve(window.prompt(finalMessage, defaultValue));
   }
+  return new Promise<string | null>((resolve) => {
+    promptController?.({ message: finalMessage, defaultValue, resolve });
+  });
+}
+
+function promptUi(message: string, defaultValue = ""): Promise<string | null> {
   try {
-    return window.prompt(localizeImperativeText(message), defaultValue);
+    return requestPrompt(localizeImperativeText(message), defaultValue);
   } catch {
-    return defaultValue;
+    return Promise.resolve(null);
   }
 }
 
@@ -5032,7 +5045,7 @@ export default function App() {
   }
 
   async function relinkWorkspacePaths() {
-    const oldRoot = promptUi("Old folder path to replace", "");
+    const oldRoot = await promptUi("Old folder path to replace", "");
     if (!oldRoot?.trim()) {
       setNotice({ tone: "warn", text: "Enter the old folder path first." });
       return;
@@ -5502,13 +5515,13 @@ export default function App() {
     writeScanQueue(state?.workspace, trimmed);
   }
 
-  function saveCurrentScanSource() {
+  async function saveCurrentScanSource() {
     const folder = scanFolder.trim();
     if (!folder) {
       setNotice({ tone: "warn", text: "Choose a folder before saving it." });
       return;
     }
-    const label = promptUi("Name this scan source", basename(folder) || "Saved source")?.trim();
+    const label = (await promptUi("Name this scan source", basename(folder) || "Saved source"))?.trim();
     if (!label) return;
     const now = Date.now();
     const existing = savedScanSources.filter((source) => source.path !== folder);
@@ -7148,6 +7161,7 @@ export default function App() {
           />
         )}
         <ConfirmHost />
+        <PromptHost />
       </AppShell>
   );
 }
@@ -7348,6 +7362,56 @@ function ConfirmHost() {
           {localizeImperativeText("Continue")}
         </button>
       </div>
+    </ModalFrame>
+  );
+}
+
+function PromptHost() {
+  const [request, setRequest] = useState<PromptRequest | null>(null);
+  const [value, setValue] = useState("");
+
+  useEffect(() => {
+    promptController = (next) => setRequest(next);
+    return () => {
+      promptController = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (request) setValue(request.defaultValue);
+  }, [request]);
+
+  if (!request) return null;
+
+  const settle = (nextValue: string | null) => {
+    request.resolve(nextValue);
+    setRequest(null);
+  };
+
+  return (
+    <ModalFrame titleId="prompt-dialog-title" className="confirm-sheet" onEscape={() => settle(null)}>
+      <form
+        className="prompt-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          settle(value);
+        }}
+      >
+        <h2 id="prompt-dialog-title">{request.message}</h2>
+        <input
+          data-autofocus="true"
+          value={value}
+          onChange={(event) => setValue(event.currentTarget.value)}
+        />
+        <div className="confirm-actions">
+          <button className="secondary" type="button" onClick={() => settle(null)}>
+            {localizeImperativeText("Cancel")}
+          </button>
+          <button className="primary" type="submit">
+            {localizeImperativeText("Continue")}
+          </button>
+        </div>
+      </form>
     </ModalFrame>
   );
 }
@@ -11280,9 +11344,9 @@ function ReviewView(props: {
     writeSavedReviewViews(props.state.workspace, sorted);
   }
 
-  function saveCurrentReviewView() {
+  async function saveCurrentReviewView() {
     const defaultLabel = `${reviewLane === "all" ? "All matches" : reviewSummary.reviewLanes.find((lane) => lane.key === reviewLane)?.label ?? "Review view"}${statusFilter === "all" ? "" : `, ${reviewStatusLabel(statusFilter)}`}`;
-    const label = promptUi("Name this review view", defaultLabel)?.trim();
+    const label = (await promptUi("Name this review view", defaultLabel))?.trim();
     if (!label) return;
     const now = Date.now();
     const existing = savedViews.filter((view) => view.label.toLowerCase() !== label.toLowerCase());
