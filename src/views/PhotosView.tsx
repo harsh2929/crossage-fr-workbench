@@ -2538,6 +2538,35 @@ export function PhotosView(props: {
   photoDateViewModeRef.current = photoDateViewMode;
   const activeDateBucketKeyRef = useRef(activeDateBucketKey);
   activeDateBucketKeyRef.current = activeDateBucketKey;
+  const activeDateBucketScopeSignature = useMemo(() => [
+    activeId,
+    sort,
+    debouncedSearchQuery,
+    keywordFilter,
+    mediaKindFilter,
+    favoriteOnly ? "1" : "0",
+    editedOnly ? "1" : "0",
+    notInAlbumOnly ? "1" : "0",
+    personFilter,
+    statusFilter,
+    minQualityFilter,
+    dateFromFilter,
+    dateToFilter,
+    sourceFilter,
+    fileTypeFilter,
+    duplicateOnly ? "1" : "0",
+    locationFilter,
+    photoNearbyFilterKey(nearbyFilter),
+    cameraFilter,
+    albumFilter,
+    visibilityFilter,
+    petReviewKindFilter,
+    groupViewMode,
+    photoDateViewMode,
+    activeLibraryRoot,
+    activeLibraryRootProfileId,
+  ].join("\u0001"), [activeId, sort, debouncedSearchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, groupViewMode, photoDateViewMode, activeLibraryRoot, activeLibraryRootProfileId]);
+  const activeDateBucketScopeSignatureRef = useRef("");
   const foldersFnRef = useRef(listPhotoFolders);
   foldersFnRef.current = listPhotoFolders;
   const itemsFnRef = useRef(listPhotoFolderItems);
@@ -3800,8 +3829,17 @@ export function PhotosView(props: {
       clearLockedSensitiveItems();
       return;
     }
+    const showingDateBucketOverview = photoDateViewMode !== "all" && !activeDateBucketKey;
+    const staleDateBucketSelection = photoDateViewMode !== "all"
+      && Boolean(activeDateBucketKey)
+      && Boolean(activeDateBucketScopeSignatureRef.current)
+      && activeDateBucketScopeSignatureRef.current !== activeDateBucketScopeSignature;
+    if (showingDateBucketOverview || staleDateBucketSelection) {
+      setLoading(false);
+      return;
+    }
     loadPage(activeId, 0, sort, debouncedSearchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, cameraFilter, albumFilter, visibilityFilter);
-  }, [activeId, sort, debouncedSearchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, groupViewMode, activeDateBucketKey, activeLibraryRoot, activeLibraryRootProfileId, sensitiveCollectionLocked, clearLockedSensitiveItems, loadPage, gridReloadToken]);
+  }, [activeId, sort, debouncedSearchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, groupViewMode, photoDateViewMode, activeDateBucketKey, activeDateBucketScopeSignature, activeLibraryRoot, activeLibraryRootProfileId, sensitiveCollectionLocked, clearLockedSensitiveItems, loadPage, gridReloadToken]);
 
   useEffect(() => {
     setActiveDateBucketKey("");
@@ -7256,6 +7294,12 @@ export function PhotosView(props: {
     }
   }
 
+  function selectActiveDateBucket(bucketKey: string) {
+    const cleanBucketKey = String(bucketKey || "").trim();
+    activeDateBucketScopeSignatureRef.current = cleanBucketKey ? activeDateBucketScopeSignature : "";
+    setActiveDateBucketKey(cleanBucketKey);
+  }
+
   function openLibrarySearchItem(item: PhotoLibrarySearchItem) {
     setLibrarySearchActiveIndex(-1);
     setSelectedSources(new Set());
@@ -7291,7 +7335,7 @@ export function PhotosView(props: {
         : "days";
       setActiveId("all");
       setPhotoDateViewMode(mode);
-      setActiveDateBucketKey(item.dateBucketKey);
+      selectActiveDateBucket(item.dateBucketKey);
       updatePhotoSearchQuery("");
       return;
     }
@@ -27584,7 +27628,7 @@ export function PhotosView(props: {
                   type="button"
                   key={bucket.key}
                   className="photo-date-bucket-card"
-                  onClick={() => setActiveDateBucketKey(bucket.key)}
+                  onClick={() => selectActiveDateBucket(bucket.key)}
                 >
                   <span className="photo-date-bucket-cover">
                     {bucket.coverUrl ? (

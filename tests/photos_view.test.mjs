@@ -6349,6 +6349,25 @@ run("Photos burst-frame fetch effect ignores unrelated item map churn", () => {
   assert.doesNotMatch(dependencies[1], /photoItemsBySourcePath/);
 });
 
+run("Photos date bucket changes do not double-fetch stale grid pages", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  assert.match(source, /const activeDateBucketScopeSignature = useMemo\(\(\) => \[/);
+  assert.match(source, /const activeDateBucketScopeSignatureRef = useRef\(""\);/);
+  assert.match(source, /function selectActiveDateBucket\(bucketKey: string\) \{/);
+  assert.match(source, /activeDateBucketScopeSignatureRef\.current = cleanBucketKey \? activeDateBucketScopeSignature : "";/);
+  assert.match(source, /onClick=\{\(\) => selectActiveDateBucket\(bucket\.key\)\}/);
+  assert.doesNotMatch(source, /onClick=\{\(\) => setActiveDateBucketKey\(bucket\.key\)\}/);
+  const gridReloadEffect = source.match(/useEffect\(\(\) => \{\s*setItems\(\[\]\);[\s\S]*?loadPage\(activeId, 0, sort, debouncedSearchQuery,[\s\S]*?\}, \[[^\]]+\]\);/);
+  assert.ok(gridReloadEffect, "automatic grid reload effect should exist");
+  assert.match(gridReloadEffect[0], /const showingDateBucketOverview = photoDateViewMode !== "all" && !activeDateBucketKey;/);
+  assert.match(gridReloadEffect[0], /const staleDateBucketSelection = photoDateViewMode !== "all"[\s\S]*activeDateBucketScopeSignatureRef\.current !== activeDateBucketScopeSignature;/);
+  assert.match(gridReloadEffect[0], /if \(showingDateBucketOverview \|\| staleDateBucketSelection\) \{\s*setLoading\(false\);\s*return;\s*\}/);
+  const dependencies = gridReloadEffect[0].match(/\}, \[([^\]]+)\]\);$/);
+  assert.ok(dependencies, "grid reload dependencies should be parseable");
+  assert.match(dependencies[1], /photoDateViewMode/);
+  assert.match(dependencies[1], /activeDateBucketScopeSignature/);
+});
+
 run("Photos lightbox viewed events patch recent rail without reloading folders", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
   assert.match(source, /const patchRecentActivityFolder = useCallback/);
