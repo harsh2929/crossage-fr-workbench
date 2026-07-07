@@ -6328,6 +6328,16 @@ run("Photos heavy derived rows use stable label helpers", () => {
   assert.ok(dateBucketCardsBlock, "date bucket cards memo should depend on stable itemLabel");
 });
 
+run("Photos manual collections do not coerce Newest back to Custom order", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  const sortEffect = source.match(/useEffect\(\(\) => \{\s*if \(!activeAlbumIsManual && !activeMemoryUserCreated && sort === "manual"\) \{[\s\S]*?\}, \[activeAlbumIsManual, activeMemoryUserCreated, sort\]\);/);
+  assert.ok(sortEffect, "manual-sort guard effect should exist");
+  assert.match(sortEffect[0], /setSort\("newest"\)/);
+  assert.doesNotMatch(sortEffect[0], /sort === "newest"[\s\S]*setSort\("manual"\)/);
+  assert.match(source, /\(activeAlbumIsManual \|\| activeMemoryUserCreated\) && <option value="manual">/);
+  assert.match(source, /<option value="newest">\{uiText\("Newest"\)\}<\/option>/);
+});
+
 run("Safe Mode review dashboard honors sensitive collection unlock before listing flagged photos", () => {
   const reviewSource = fs.readFileSync(path.join(ROOT, "src/views/SafeModeReview.tsx"), "utf8");
   const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");

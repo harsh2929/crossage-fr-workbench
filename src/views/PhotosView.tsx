@@ -7808,9 +7808,7 @@ export function PhotosView(props: {
   }, [timelineRows.length, thumbnailSize, thumbnailAspectMode, activeId, activeDateBucketKey]);
 
   useEffect(() => {
-    if ((activeAlbumIsManual || activeMemoryUserCreated) && sort === "newest") {
-      setSort("manual");
-    } else if (!activeAlbumIsManual && !activeMemoryUserCreated && sort === "manual") {
+    if (!activeAlbumIsManual && !activeMemoryUserCreated && sort === "manual") {
       setSort("newest");
     }
   }, [activeAlbumIsManual, activeMemoryUserCreated, sort]);
