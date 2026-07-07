@@ -11608,6 +11608,7 @@ class WorkspaceDb:
         photo_people_rows = undo_payload.get("photoPeopleRows", [])
         restored = 0
         missing = 0
+        reindex_asset_ids: set[str] = set()
         for item in (candidate_rows if isinstance(candidate_rows, list) else []):
             if not isinstance(item, dict):
                 continue
@@ -11686,6 +11687,7 @@ class WorkspaceDb:
                     str(item.get("updatedAt", "") or now_iso()),
                 ),
             )
+            reindex_asset_ids.add(asset_id)
             restored += 1
         self._restore_photo_person_profile_snapshot(
             person_name=old_person,
@@ -11698,6 +11700,8 @@ class WorkspaceDb:
                 snapshot=undo_payload.get("targetProfile", {}) if isinstance(undo_payload.get("targetProfile", {}), dict) else {},
                 conn=conn,
             )
+        for asset_id in sorted(reindex_asset_ids):
+            self._index_photo_asset(asset_id, conn)
         return {"restored": restored, "missing": missing}
 
     def _blocked_pair_snapshot(
@@ -20268,10 +20272,24 @@ class WorkspaceDb:
             return {"peopleRows": 0, "profileMoved": False, "profileMerged": False}
 
         now = now_iso()
+        affected_asset_ids = [
+            str(row["asset_id"] or "")
+            for row in conn.execute(
+                """
+                SELECT DISTINCT asset_id
+                FROM photo_asset_people
+                WHERE LOWER(person_name) = LOWER(?)
+                """,
+                (old_person,),
+            ).fetchall()
+            if str(row["asset_id"] or "")
+        ]
         updated_people = conn.execute(
             "UPDATE photo_asset_people SET person_name = ?, updated_at = ? WHERE LOWER(person_name) = LOWER(?)",
             (new_person, now, old_person),
         ).rowcount
+        for asset_id in affected_asset_ids:
+            self._index_photo_asset(asset_id, conn)
 
         old_profile = self.photo_person_profile(old_person, conn)
         target_profile = self.photo_person_profile(new_person, conn)

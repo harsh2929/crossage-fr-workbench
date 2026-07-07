@@ -13021,12 +13021,26 @@ def test_photo_person_rename_merges_profiles_and_photo_index() -> None:
             "albumKind": "smart",
             "rules": {"op": "all", "conditions": [{"field": "person", "operator": "is", "value": "Alice"}]},
         })
+
+        def indexed_people_for_alice() -> str:
+            with api.project.db.connect() as conn:
+                row = conn.execute(
+                    "SELECT people FROM photo_search_fts WHERE asset_id = ?",
+                    (alice_asset["assetId"],),
+                ).fetchone()
+                return str(row["people"] or "") if row else ""
+
+        assert indexed_people_for_alice() == "Alice"
         alice_cache = api.project.db.photo_smart_album_materialization_cache(alice_smart_album["albumId"])
         assert alice_cache["sourcePaths"] == [alice], alice_cache
         assert api._photo_smart_album_materialized_cache(alice_smart_album) is not None
         api.project.db.rename_photo_person_profile("Alice", "Alicia")
         assert api._photo_smart_album_materialized_cache(alice_smart_album) is None
+        assert indexed_people_for_alice() == "Alicia"
+        assert alice_asset["assetId"] in api.project.db.search_photo_asset_ids("Alicia", limit=5)
         api.project.db.rename_photo_person_profile("Alicia", "Alice")
+        assert indexed_people_for_alice() == "Alice"
+        assert alice_asset["assetId"] not in api.project.db.search_photo_asset_ids("Alicia", limit=5)
 
         rename_result = api.handle("rename_person", {"oldName": "Alice", "newName": "Bob"})
         renamed = rename_result["renamed"]
@@ -13067,6 +13081,7 @@ def test_photo_person_rename_merges_profiles_and_photo_index() -> None:
 
         people = api.project.db.list_photo_asset_people(alice_asset["assetId"])
         assert people and people[0]["personName"] == "Bob", people
+        assert indexed_people_for_alice() == "Bob"
         bob_page = api.list_photo_folder_items({"folderId": "person:Bob", "sort": "filename", "previewBudget": 0})
         assert {item["sourcePath"] for item in bob_page["items"]} == {alice, bob}, bob_page["items"]
 
@@ -13085,6 +13100,7 @@ def test_photo_person_rename_merges_profiles_and_photo_index() -> None:
         assert api.project.candidates["a1"].person_name == "Alice"
         restored_people = api.project.db.list_photo_asset_people(alice_asset["assetId"])
         assert restored_people and restored_people[0]["personName"] == "Alice", restored_people
+        assert indexed_people_for_alice() == "Alice"
     print("ok photo person rename merges profiles + photo index")
 
 
