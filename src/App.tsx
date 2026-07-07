@@ -231,9 +231,7 @@ import {
 } from "./lib/calibrationArtifacts";
 import { computeScannedCounts, countExcludedBranches, excludeNode, includeNode } from "./lib/folderTreeSelection";
 import { filterPeople, groupReferencesByPerson, type Person } from "./lib/peopleGrouping";
-import SafeModeReview from "./views/SafeModeReview";
 import { AppShell } from "./shell/AppShell";
-import { McpAgentsPanel } from "./shell/McpAgentsPanel";
 import { Sidebar } from "./shell/Sidebar";
 import { StatusRow } from "./shell/StatusRow";
 import {
@@ -251,7 +249,9 @@ import {
 } from "./shell/navModel";
 
 const PhotosView = lazy(() => import("./views/PhotosView").then((module) => ({ default: module.PhotosView })));
-import { SearchView } from "./shell/SearchView";
+const SearchView = lazy(() => import("./shell/SearchView").then((module) => ({ default: module.SearchView })));
+const McpAgentsPanel = lazy(() => import("./shell/McpAgentsPanel").then((module) => ({ default: module.McpAgentsPanel })));
+const SafeModeReview = lazy(() => import("./views/SafeModeReview"));
 import { SectionTabs } from "./shell/SectionTabs";
 import { useSaveSettle } from "./shell/useSaveSettle";
 import { useThrottledCountRoll } from "./shell/useCountRoll";
@@ -6805,7 +6805,7 @@ export default function App() {
           />
         )}
         {showPhotosBody && (
-          <Suspense fallback={<PhotosRouteFallback uiText={uiText} />}>
+          <Suspense fallback={<RouteFallback uiText={uiText} label="Loading Photos" />}>
             <PhotosView
               key="photos-main"
               initialActiveId={photosTabActiveId ?? "all"}
@@ -6979,12 +6979,14 @@ export default function App() {
           </Suspense>
         )}
         {!workspaceLocked && activeTab === "search" && (
-          <SearchView
-            searchPhotoLibrary={searchPhotoLibrary}
-            semanticSearchPhotos={semanticSearchPhotos}
-            t={t}
-            uiText={uiText}
-          />
+          <Suspense fallback={<RouteFallback uiText={uiText} label="Loading Search" />}>
+            <SearchView
+              searchPhotoLibrary={searchPhotoLibrary}
+              semanticSearchPhotos={semanticSearchPhotos}
+              t={t}
+              uiText={uiText}
+            />
+          </Suspense>
         )}
         {!workspaceLocked && activeTab === "settings" && settings && (
           <SettingsView
@@ -7221,11 +7223,11 @@ function WorkspaceLockGate({
   );
 }
 
-function PhotosRouteFallback({ uiText }: { uiText: (text: string) => string }) {
+function RouteFallback({ uiText, label }: { uiText: (text: string) => string; label: string }) {
   return (
     <section className="photos-route-loading" role="status" aria-busy="true">
       <Loader2 className="spin" size={18} aria-hidden="true" />
-      <span>{uiText("Loading Photos")}</span>
+      <span>{uiText(label)}</span>
     </section>
   );
 }
@@ -12779,7 +12781,11 @@ function SettingsView(props: {
     Boolean(props.state.candidateWindow?.truncated && props.state.counts.reviewed > 0);
   return (
     <section className="page-grid">
-      {props.section === "agents" && <McpAgentsPanel copyText={props.copyText} />}
+      {props.section === "agents" && (
+        <Suspense fallback={<RouteFallback uiText={props.uiText} label="Loading AI Agents" />}>
+          <McpAgentsPanel copyText={props.copyText} />
+        </Suspense>
+      )}
       {props.section === "general" && (<>
       <div className="panel settings-panel primary-settings">
         <div className="panel-title"><SlidersHorizontal size={18} /> Matching choices</div>
@@ -12945,14 +12951,18 @@ function SettingsView(props: {
                 <ShieldAlert size={16} /> {props.uiText("Review...")}
               </button>
             </label>
-            <SafeModeReview
-              open={safeReviewOpen}
-              onClose={() => setSafeReviewOpen(false)}
-              invoke={window.crossAge.invoke}
-              getSensitiveAuthStatus={props.getSensitiveAuthStatus}
-              authenticateSensitiveAccess={props.authenticateSensitiveAccess}
-              uiText={props.uiText}
-            />
+            {safeReviewOpen && (
+              <Suspense fallback={<RouteFallback uiText={props.uiText} label="Loading Safe Mode review" />}>
+                <SafeModeReview
+                  open={safeReviewOpen}
+                  onClose={() => setSafeReviewOpen(false)}
+                  invoke={window.crossAge.invoke}
+                  getSensitiveAuthStatus={props.getSensitiveAuthStatus}
+                  authenticateSensitiveAccess={props.authenticateSensitiveAccess}
+                  uiText={props.uiText}
+                />
+              </Suspense>
+            )}
             <label className="switch-row">
               <span>
                 <strong>Zero-admittance (strict)</strong>

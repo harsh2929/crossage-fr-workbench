@@ -6622,7 +6622,20 @@ run("Photos route is lazy-loaded out of the initial renderer chunk", () => {
   const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
   assert.match(appSource, /const PhotosView = lazy\(\(\) => import\("\.\/views\/PhotosView"\)/);
   assert.doesNotMatch(appSource, /import \{ PhotosView \} from "\.\/views\/PhotosView"/);
-  assert.match(appSource, /<Suspense fallback=\{<PhotosRouteFallback uiText=\{uiText\} \/>\}>/);
+  assert.match(appSource, /<Suspense fallback=\{<RouteFallback uiText=\{uiText\} label="Loading Photos" \/>\}>/);
+});
+
+run("Secondary routes and sensitive settings panels are lazy-loaded", () => {
+  const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
+  assert.match(appSource, /const SearchView = lazy\(\(\) => import\("\.\/shell\/SearchView"\)/);
+  assert.match(appSource, /const McpAgentsPanel = lazy\(\(\) => import\("\.\/shell\/McpAgentsPanel"\)/);
+  assert.match(appSource, /const SafeModeReview = lazy\(\(\) => import\("\.\/views\/SafeModeReview"\)\)/);
+  assert.doesNotMatch(appSource, /import \{ SearchView \} from "\.\/shell\/SearchView"/);
+  assert.doesNotMatch(appSource, /import \{ McpAgentsPanel \} from "\.\/shell\/McpAgentsPanel"/);
+  assert.doesNotMatch(appSource, /import SafeModeReview from "\.\/views\/SafeModeReview"/);
+  assert.match(appSource, /<Suspense fallback=\{<RouteFallback uiText=\{uiText\} label="Loading Search" \/>\}>/);
+  assert.match(appSource, /<Suspense fallback=\{<RouteFallback uiText=\{props\.uiText\} label="Loading AI Agents" \/>\}>/);
+  assert.match(appSource, /safeReviewOpen && \(\s*<Suspense fallback=\{<RouteFallback uiText=\{props\.uiText\} label="Loading Safe Mode review" \/>\}>/);
 });
 
 run("i18n locale bundles are loaded on demand", () => {
@@ -6644,7 +6657,7 @@ run("i18n locale bundles are loaded on demand", () => {
 run("MCP agents settings panel is extracted from App", () => {
   const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
   const panelSource = fs.readFileSync(path.join(ROOT, "src/shell/McpAgentsPanel.tsx"), "utf8");
-  assert.match(appSource, /import \{ McpAgentsPanel \} from "\.\/shell\/McpAgentsPanel";/);
+  assert.match(appSource, /const McpAgentsPanel = lazy\(\(\) => import\("\.\/shell\/McpAgentsPanel"\)/);
   assert.match(appSource, /<McpAgentsPanel copyText=\{props\.copyText\} \/>/);
   assert.doesNotMatch(appSource, /function McpAgentsPanel/);
   assert.match(panelSource, /export function McpAgentsPanel/);
