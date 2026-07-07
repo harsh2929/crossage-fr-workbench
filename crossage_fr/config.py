@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, fields as dataclass_fields
+from datetime import datetime, timezone
 from pathlib import Path
 import copy
 import json
@@ -131,8 +132,17 @@ THRESHOLD_FIELD_NAMES = {item.name for item in dataclass_fields(Thresholds)}
 
 
 def archive_corrupt_file(path: Path) -> None:
+    target = path.with_suffix(".corrupt.json")
+    if target.exists():
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        for index in range(1000):
+            suffix = f".corrupt-{stamp}" if index == 0 else f".corrupt-{stamp}-{index}"
+            candidate = path.with_name(f"{path.stem}{suffix}.json")
+            if not candidate.exists():
+                target = candidate
+                break
     try:
-        path.replace(path.with_suffix(".corrupt.json"))
+        path.replace(target)
     except OSError:
         pass
 
@@ -305,8 +315,12 @@ def load_config(path: Path) -> RuntimeConfig:
     if not path.exists():
         return RuntimeConfig()
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return RuntimeConfig()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
         archive_corrupt_file(path)
         return RuntimeConfig()
     if not isinstance(data, dict):

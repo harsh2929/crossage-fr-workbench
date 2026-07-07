@@ -117,6 +117,14 @@ def assert_config_round_trip_and_invalid_shape() -> None:
     recovered = load_config(bad_path)
     assert recovered.safe_mode is True
     assert (root / "bad-config.corrupt.json").exists()
+    assert (root / "bad-config.corrupt.json").read_text(encoding="utf-8") == "{not json"
+    bad_path.write_text("{still not json", encoding="utf-8")
+    recovered = load_config(bad_path)
+    assert recovered.safe_mode is True
+    corrupt_archives = sorted(root.glob("bad-config.corrupt*.json"))
+    assert len(corrupt_archives) == 2
+    assert (root / "bad-config.corrupt.json").read_text(encoding="utf-8") == "{not json"
+    assert any(path.name.startswith("bad-config.corrupt-") for path in corrupt_archives)
 
     unsafe_path = root / "unsafe-config.json"
     unsafe_path.write_text(json.dumps({"safe_mode": False, "cluster_min_size": 1, "unknown_future_field": "kept-out"}), encoding="utf-8")
@@ -149,6 +157,24 @@ def assert_config_round_trip_and_invalid_shape() -> None:
     assert recovered.safe_mode is False
     assert recovered.cluster_min_size == 2
     assert not (root / "oversized-config.corrupt.json").exists()
+
+    transient_path = root / "transient-config.json"
+    transient_path.write_text(json.dumps({"safe_mode": False}), encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def fail_transient_read(self: Path, *args, **kwargs):
+        if self == transient_path:
+            raise OSError("temporary read failure")
+        return original_read_text(self, *args, **kwargs)
+
+    try:
+        Path.read_text = fail_transient_read
+        recovered = load_config(transient_path)
+    finally:
+        Path.read_text = original_read_text
+    assert recovered.safe_mode is True
+    assert transient_path.exists()
+    assert not (root / "transient-config.corrupt.json").exists()
 
 
 def assert_safe_mode_override_schema_migrates_and_private_delete_clears() -> None:
