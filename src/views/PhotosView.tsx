@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject, type WheelEvent as ReactWheelEvent } from "react";
 import {
   AlertTriangle,
   Archive,
@@ -334,6 +334,7 @@ const PHOTO_GRID_GAP = 8;
 const PHOTO_GRID_HEADER_HEIGHT = 28;
 const PHOTO_GRID_OVERSCAN = 720;
 const PHOTO_GRID_SEARCH_DEBOUNCE_MS = 220;
+const PHOTO_VIDEO_TIME_UI_THROTTLE_MS = 250;
 const MANUAL_ALBUM_ORDER_PAGE_LIMIT = 500;
 const PINNED_PHOTO_RAIL_IDS_KEY = "vintrace.photos.pinnedRailIds";
 const COLLAPSED_PHOTO_RAIL_SECTIONS_KEY = "vintrace.photos.collapsedRailSections";
@@ -365,6 +366,128 @@ const SAVED_PHOTO_FILTERS_KEY = "vintrace.photos.savedFilters";
 const PHOTO_PLACE_MAP_CLUSTER_RADII = [10, 7, 4, 0] as const;
 const PHOTO_NEARBY_RADIUS_OPTIONS = ["5", "25", "100"] as const;
 const PHOTO_STATUS_FILTERS: CandidateStatus[] = ["pending", "accepted", "uncertain", "rejected"];
+
+type PhotoLightboxVideoControlsProps = {
+  videoRef: RefObject<HTMLVideoElement | null>;
+  sourceKey: string;
+  durationMs: number;
+  paused: boolean;
+  muted: boolean;
+  isLivePhoto: boolean;
+  uiText: (source: string) => string;
+  onTogglePlayback: () => void | Promise<void>;
+  onToggleMuted: () => void;
+  onScrub: (nextMs: number) => void;
+};
+
+function photoVideoCurrentMs(video: HTMLVideoElement | null): number {
+  if (!video || !Number.isFinite(video.currentTime) || video.currentTime <= 0) return 0;
+  return Math.max(0, Math.round(video.currentTime * 1000));
+}
+
+function photoVideoDurationMs(video: HTMLVideoElement | null): number {
+  if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return 0;
+  return Math.max(0, Math.round(video.duration * 1000));
+}
+
+const PhotoLightboxVideoControls = memo(function PhotoLightboxVideoControls({
+  videoRef,
+  sourceKey,
+  durationMs,
+  paused,
+  muted,
+  isLivePhoto,
+  uiText,
+  onTogglePlayback,
+  onToggleMuted,
+  onScrub,
+}: PhotoLightboxVideoControlsProps) {
+  const [currentMs, setCurrentMs] = useState(0);
+  const currentMsRef = useRef(0);
+  const lastUiUpdateAtRef = useRef(0);
+
+  const syncCurrentTime = useCallback((force = false) => {
+    const nextMs = photoVideoCurrentMs(videoRef.current);
+    const now = typeof performance === "undefined" ? Date.now() : performance.now();
+    if (!force
+      && now - lastUiUpdateAtRef.current < PHOTO_VIDEO_TIME_UI_THROTTLE_MS
+      && Math.abs(nextMs - currentMsRef.current) < 1000) {
+      return;
+    }
+    lastUiUpdateAtRef.current = now;
+    if (nextMs === currentMsRef.current) return;
+    currentMsRef.current = nextMs;
+    setCurrentMs(nextMs);
+  }, [videoRef]);
+
+  useEffect(() => {
+    currentMsRef.current = 0;
+    lastUiUpdateAtRef.current = 0;
+    setCurrentMs(0);
+    syncCurrentTime(true);
+    const video = videoRef.current;
+    if (!video) return;
+    const onTimeUpdate = () => syncCurrentTime(false);
+    const onTimeJump = () => syncCurrentTime(true);
+    video.addEventListener("timeupdate", onTimeUpdate);
+    video.addEventListener("seeking", onTimeJump);
+    video.addEventListener("seeked", onTimeJump);
+    video.addEventListener("loadedmetadata", onTimeJump);
+    return () => {
+      video.removeEventListener("timeupdate", onTimeUpdate);
+      video.removeEventListener("seeking", onTimeJump);
+      video.removeEventListener("seeked", onTimeJump);
+      video.removeEventListener("loadedmetadata", onTimeJump);
+    };
+  }, [sourceKey, syncCurrentTime, videoRef]);
+
+  const scrubMaxMs = Math.max(durationMs, currentMs, 0);
+  const currentLabel = formatDuration(currentMs) || "0s";
+  const durationLabel = formatDuration(durationMs) || uiText("Unknown");
+
+  return (
+    <>
+      <button
+        type="button"
+        className="secondary compact-action"
+        onClick={() => void onTogglePlayback()}
+        aria-label={paused ? uiText(isLivePhoto ? "Play Live Photo" : "Play video") : uiText(isLivePhoto ? "Pause Live Photo" : "Pause video")}
+      >
+        {paused ? <Play size={14} /> : <Pause size={14} />}
+        <span>{paused ? uiText(isLivePhoto ? "Play Live" : "Play") : uiText("Pause")}</span>
+      </button>
+      <label>
+        <span className="photos-video-time">{currentLabel}</span>
+        <input
+          type="range"
+          min={0}
+          max={scrubMaxMs}
+          step={250}
+          value={Math.min(currentMs, scrubMaxMs)}
+          onChange={(event) => {
+            const nextMs = Number(event.currentTarget.value);
+            currentMsRef.current = nextMs;
+            lastUiUpdateAtRef.current = typeof performance === "undefined" ? Date.now() : performance.now();
+            setCurrentMs(nextMs);
+            onScrub(nextMs);
+          }}
+          disabled={scrubMaxMs <= 0}
+          aria-label={uiText("Scrub video")}
+        />
+        <span className="photos-video-time">{durationLabel}</span>
+      </label>
+      <button
+        type="button"
+        className="secondary compact-action"
+        onClick={onToggleMuted}
+        aria-label={muted ? uiText("Unmute video") : uiText("Mute video")}
+      >
+        {muted ? <VolumeX size={14} /> : <Volume2 size={14} />}
+        <span>{muted ? uiText("Unmute") : uiText("Mute")}</span>
+      </button>
+    </>
+  );
+});
 
 type PhotoRailDisplayPreferenceKey =
   | "showUtilityCollections"
@@ -2217,7 +2340,6 @@ export function PhotosView(props: {
   const [lightboxShowingOriginal, setLightboxShowingOriginal] = useState(false);
   const [lightboxVideoPaused, setLightboxVideoPaused] = useState(true);
   const [lightboxVideoMuted, setLightboxVideoMuted] = useState(() => shouldMuteAutoplayPhotoVideo(photoSettings));
-  const [lightboxVideoCurrentMs, setLightboxVideoCurrentMs] = useState(0);
   const [lightboxVideoDurationMs, setLightboxVideoDurationMs] = useState(0);
   const [lightboxBurstFrameItems, setLightboxBurstFrameItems] = useState<PhotoItem[]>([]);
   const [lightboxBurstFrameLoading, setLightboxBurstFrameLoading] = useState(false);
@@ -2327,6 +2449,8 @@ export function PhotosView(props: {
   const lightboxImageRef = useRef<HTMLImageElement | null>(null);
   const currentLightboxSourceRef = useRef("");
   const lightboxVideoRef = useRef<HTMLVideoElement | null>(null);
+  const lightboxVideoCurrentMsRef = useRef(0);
+  const lightboxVideoDurationMsRef = useRef(0);
   const lightboxCloseRef = useRef<HTMLButtonElement | null>(null);
   const lightboxInfoRef = useRef<HTMLDivElement | null>(null);
   const lightboxTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -3798,7 +3922,8 @@ export function PhotosView(props: {
     setLightboxPan({ x: 0, y: 0 });
     setLightboxDragging(false);
     setLightboxVideoPaused(true);
-    setLightboxVideoCurrentMs(0);
+    lightboxVideoCurrentMsRef.current = 0;
+    lightboxVideoDurationMsRef.current = 0;
     setLightboxVideoDurationMs(0);
     setVideoFrameExportError("");
     lightboxDragRef.current = null;
@@ -3983,7 +4108,7 @@ export function PhotosView(props: {
     // `items` is intentionally omitted: the effect body reads `lightItem`
     // (derived from items[lightbox]), which already triggers re-registration
     // when the grid changes, so listing `items` too was redundant churn.
-  }, [lightbox, lightItem, imageRotateDegrees, imageStraightenDegrees, imageManualCropEnabled, imageManualCropBox, imageCropAspect, imageAdjustments, imageFilterPreset, imageFilterIntensity, imageMarkupOpen, imageMarkupAnnotationsDraft, imageRetouchOpen, imageRetouchSpotsDraft, imageFlipHorizontal, imageFlipVertical, photoEditStackSaving, videoRotateDegrees, videoCropAspect, videoTrimEndMs, videoTrimStartMs, lightboxVideoDurationMs, lightboxVideoCurrentMs]);
+  }, [lightbox, lightItem, imageRotateDegrees, imageStraightenDegrees, imageManualCropEnabled, imageManualCropBox, imageCropAspect, imageAdjustments, imageFilterPreset, imageFilterIntensity, imageMarkupOpen, imageMarkupAnnotationsDraft, imageRetouchOpen, imageRetouchSpotsDraft, imageFlipHorizontal, imageFlipVertical, photoEditStackSaving, videoRotateDegrees, videoCropAspect, videoTrimEndMs, videoTrimStartMs, lightboxVideoDurationMs]);
 
   useEffect(() => {
     if (lightbox === null || !pendingInfoFocusRef.current) return;
@@ -6015,9 +6140,7 @@ export function PhotosView(props: {
       ? `${uiText("Manual poster")} ${lightItemVideoPosterTimestampLabel}`
       : uiText("Generated poster");
   const lightboxVideoDurationDisplayMs = lightboxVideoDurationMs || (lightItemIsVideo ? numberFromUnknown(lightItem?.durationMs) : 0) || 0;
-  const lightboxVideoScrubMaxMs = Math.max(lightboxVideoDurationDisplayMs, lightboxVideoCurrentMs, 0);
-  const lightboxVideoCurrentLabel = formatDuration(lightboxVideoCurrentMs) || "0s";
-  const lightboxVideoDurationLabel = formatDuration(lightboxVideoDurationDisplayMs) || uiText("Unknown");
+  const lightboxVideoScrubMaxMs = Math.max(lightboxVideoDurationDisplayMs, lightboxVideoCurrentMsRef.current, 0);
   const videoTrimEffectiveEndMs = videoTrimEndMs || lightboxVideoScrubMaxMs;
   const videoTrimRangeValid = Boolean(lightItemIsVideo && !lightItemMissing && videoTrimEffectiveEndMs - videoTrimStartMs >= 250);
   const videoTrimRangeLabel = `${formatDuration(videoTrimStartMs) || "0s"}-${formatDuration(videoTrimEffectiveEndMs) || uiText("Unknown")}`;
@@ -12755,19 +12878,26 @@ export function PhotosView(props: {
     }
   }
 
+  function captureLightboxVideoPosition(video = lightboxVideoRef.current) {
+    const currentMs = photoVideoCurrentMs(video);
+    const durationMs = photoVideoDurationMs(video);
+    lightboxVideoCurrentMsRef.current = currentMs;
+    lightboxVideoDurationMsRef.current = durationMs;
+    return { currentMs, durationMs };
+  }
+
   function syncLightboxVideoState(video = lightboxVideoRef.current) {
     if (!video) {
-      setLightboxVideoPaused(true);
-      setLightboxVideoCurrentMs(0);
-      setLightboxVideoDurationMs(0);
+      lightboxVideoCurrentMsRef.current = 0;
+      lightboxVideoDurationMsRef.current = 0;
+      setLightboxVideoPaused((current) => (current ? current : true));
+      setLightboxVideoDurationMs((current) => (current === 0 ? current : 0));
       return;
     }
-    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
-    const current = Number.isFinite(video.currentTime) && video.currentTime > 0 ? video.currentTime : 0;
-    setLightboxVideoPaused(video.paused);
-    setLightboxVideoMuted(video.muted);
-    setLightboxVideoCurrentMs(Math.round(current * 1000));
-    setLightboxVideoDurationMs(Math.round(duration * 1000));
+    const { durationMs } = captureLightboxVideoPosition(video);
+    setLightboxVideoPaused((current) => (current === video.paused ? current : video.paused));
+    setLightboxVideoMuted((current) => (current === video.muted ? current : video.muted));
+    setLightboxVideoDurationMs((current) => (current === durationMs ? current : durationMs));
   }
 
   function pauseLightboxVideoElement(video: HTMLVideoElement | null) {
@@ -12887,7 +13017,7 @@ export function PhotosView(props: {
 
   function currentLightboxVideoPositionMs() {
     const video = lightboxVideoRef.current;
-    return Math.max(0, Math.round((video && Number.isFinite(video.currentTime) ? video.currentTime * 1000 : lightboxVideoCurrentMs) || 0));
+    return Math.max(0, Math.round((video && Number.isFinite(video.currentTime) ? video.currentTime * 1000 : lightboxVideoCurrentMsRef.current) || 0));
   }
 
   function markVideoTrimStart() {
@@ -14429,7 +14559,7 @@ export function PhotosView(props: {
       return;
     }
     const video = lightboxVideoRef.current;
-    const timestampMs = Math.max(0, Math.round((video && Number.isFinite(video.currentTime) ? video.currentTime * 1000 : lightboxVideoCurrentMs) || 0));
+    const timestampMs = Math.max(0, Math.round((video && Number.isFinite(video.currentTime) ? video.currentTime * 1000 : lightboxVideoCurrentMsRef.current) || 0));
     setVideoPosterSaving(true);
     setVideoFrameExportError("");
     try {
@@ -14483,7 +14613,7 @@ export function PhotosView(props: {
       return;
     }
     const video = lightboxVideoRef.current;
-    const timestampMs = Math.max(0, Math.round((video && Number.isFinite(video.currentTime) ? video.currentTime * 1000 : lightboxVideoCurrentMs) || 0));
+    const timestampMs = Math.max(0, Math.round((video && Number.isFinite(video.currentTime) ? video.currentTime * 1000 : lightboxVideoCurrentMsRef.current) || 0));
     setLiveKeyPhotoSaving(true);
     setVideoFrameExportError("");
     try {
@@ -27835,7 +27965,7 @@ export function PhotosView(props: {
                 aria-label={uiText(lightItemIsLivePhoto ? "Live Photo motion preview" : "Video preview")}
                 onLoadedMetadata={(event) => syncLightboxVideoState(event.currentTarget)}
                 onDurationChange={(event) => syncLightboxVideoState(event.currentTarget)}
-                onTimeUpdate={(event) => syncLightboxVideoState(event.currentTarget)}
+                onTimeUpdate={(event) => captureLightboxVideoPosition(event.currentTarget)}
                 onPlay={(event) => syncLightboxVideoState(event.currentTarget)}
                 onPause={(event) => syncLightboxVideoState(event.currentTarget)}
                 onVolumeChange={(event) => syncLightboxVideoState(event.currentTarget)}
@@ -28200,38 +28330,18 @@ export function PhotosView(props: {
           )}
           {lightItemUsesVideoControls && !lightItemMissing && lightboxVideoSourceUrl && (
             <div className="photos-lightbox-video-controls" onClick={(event) => event.stopPropagation()}>
-              <button
-                type="button"
-                className="secondary compact-action"
-                onClick={() => void toggleLightboxVideoPlayback()}
-                aria-label={lightboxVideoPaused ? uiText(lightItemIsLivePhoto ? "Play Live Photo" : "Play video") : uiText(lightItemIsLivePhoto ? "Pause Live Photo" : "Pause video")}
-              >
-                {lightboxVideoPaused ? <Play size={14} /> : <Pause size={14} />}
-                <span>{lightboxVideoPaused ? uiText(lightItemIsLivePhoto ? "Play Live" : "Play") : uiText("Pause")}</span>
-              </button>
-              <label>
-                <span className="photos-video-time">{lightboxVideoCurrentLabel}</span>
-                <input
-                  type="range"
-                  min={0}
-                  max={lightboxVideoScrubMaxMs}
-                  step={250}
-                  value={Math.min(lightboxVideoCurrentMs, lightboxVideoScrubMaxMs)}
-                  onChange={(event) => scrubLightboxVideo(Number(event.currentTarget.value))}
-                  disabled={lightboxVideoScrubMaxMs <= 0}
-                  aria-label={uiText("Scrub video")}
-                />
-                <span className="photos-video-time">{lightboxVideoDurationLabel}</span>
-              </label>
-              <button
-                type="button"
-                className="secondary compact-action"
-                onClick={toggleLightboxVideoMuted}
-                aria-label={lightboxVideoMuted ? uiText("Unmute video") : uiText("Mute video")}
-              >
-                {lightboxVideoMuted ? <VolumeX size={14} /> : <Volume2 size={14} />}
-                <span>{lightboxVideoMuted ? uiText("Unmute") : uiText("Mute")}</span>
-              </button>
+              <PhotoLightboxVideoControls
+                videoRef={lightboxVideoRef}
+                sourceKey={currentLightboxSource}
+                durationMs={lightboxVideoDurationDisplayMs}
+                paused={lightboxVideoPaused}
+                muted={lightboxVideoMuted}
+                isLivePhoto={lightItemIsLivePhoto}
+                uiText={uiText}
+                onTogglePlayback={toggleLightboxVideoPlayback}
+                onToggleMuted={toggleLightboxVideoMuted}
+                onScrub={scrubLightboxVideo}
+              />
               <button
                 type="button"
                 className="secondary compact-action"

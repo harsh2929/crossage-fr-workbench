@@ -6312,6 +6312,20 @@ run("Photos grid page limit stays within the preview generation budget", () => {
   assert.doesNotMatch(source, /const PREVIEW_BUDGET = 64;/);
 });
 
+run("Photos video time updates stay out of parent render state", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  assert.match(source, /const PhotoLightboxVideoControls = memo\(function PhotoLightboxVideoControls/);
+  assert.match(source, /const lightboxVideoCurrentMsRef = useRef\(0\);/);
+  assert.match(source, /video\.addEventListener\("timeupdate", onTimeUpdate\)/);
+  assert.match(source, /onTimeUpdate=\{\(event\) => captureLightboxVideoPosition\(event\.currentTarget\)\}/);
+  assert.doesNotMatch(source, /const \[lightboxVideoCurrentMs, setLightboxVideoCurrentMs\]/);
+  assert.doesNotMatch(source, /setLightboxVideoCurrentMs/);
+  assert.doesNotMatch(source, /onTimeUpdate=\{\(event\) => syncLightboxVideoState\(event\.currentTarget\)\}/);
+  const keydownEffect = source.match(/window\.addEventListener\("keydown", onKey\);[\s\S]*?`items` is intentionally omitted[\s\S]*?\}, \[[^\]]+\]\);/);
+  assert.ok(keydownEffect, "lightbox keydown effect should exist");
+  assert.doesNotMatch(keydownEffect[0], /lightboxVideoCurrentMs/);
+});
+
 run("Photos lightbox viewed events patch recent rail without reloading folders", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
   assert.match(source, /const patchRecentActivityFolder = useCallback/);
