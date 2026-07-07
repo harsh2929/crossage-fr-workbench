@@ -6847,7 +6847,7 @@ class WorkspaceDb:
             if not source_path:
                 continue
             try:
-                payload = json.loads(str(row[24] or "{}"))
+                payload = json.loads(str(row[26] or "{}"))
             except json.JSONDecodeError:
                 payload = {}
             if not isinstance(payload, dict):
@@ -6859,7 +6859,7 @@ class WorkspaceDb:
                 media_kind=str(row[15] or "image"),
                 duration_ms=int(row[21]) if row[21] is not None else None,
                 capture_date=str(payload.get("capture_date") or ""),
-                added_at=str(row[23] or ""),
+                added_at=str(row[25] or ""),
                 metadata={
                     "source": "review_candidate",
                     "candidateSourcePath": str(row[1] or ""),

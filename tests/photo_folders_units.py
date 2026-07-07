@@ -15164,31 +15164,40 @@ def test_photo_saved_filters_workspace_crud() -> None:
         api.project.db.record_scan_file("run1", harbor, _sig(harbor), "completed", phase="processed")
         api.project.db.record_scan_file("run1", quiet, _sig(quiet), "completed", phase="processed")
         api.update_photo_asset_metadata({"sourcePath": str(harbor), "title": "Harbor sunset", "favorite": True})
-        first = api.save_photo_saved_filter({
-            "name": "Harbor favorites",
-            "description": "Pinned local Photos rail filter",
-            "filters": {"searchQuery": "Harbor", "favoriteOnly": True},
-            "rules": {
-                "query": "Harbor",
-                "favoriteOnly": True,
-                "op": "all",
-                "conditions": [
-                    {"field": "query", "operator": "contains", "value": "Harbor"},
-                    {"field": "favorite", "operator": "is", "value": True},
-                ],
-            },
-        })
-        assert first["filterId"].startswith("filter_"), first
-        assert first["name"] == "Harbor favorites", first
-        assert first["filters"]["favoriteOnly"] is True, first
-        assert first["rules"]["query"] == "Harbor", first
-        assert first["count"] == 1, first
-        assert "Harbor sunset" in first["previewSamples"], first
-        assert "favorites" in first["ruleSummary"], first
-        listed = api.list_photo_saved_filters({})["filters"]
-        assert [row["filterId"] for row in listed] == [first["filterId"]], listed
-        assert listed[0]["count"] == 1, listed
-        assert "Harbor sunset" in listed[0]["previewSamples"], listed
+        original_album_items = api._photo_album_items
+
+        def fail_full_saved_filter_materialization(album: dict[str, Any]) -> list[dict[str, Any]]:
+            raise AssertionError(f"saved filter preview materialized full album {album.get('albumId')!r}")
+
+        api._photo_album_items = fail_full_saved_filter_materialization  # type: ignore[method-assign]
+        try:
+            first = api.save_photo_saved_filter({
+                "name": "Harbor favorites",
+                "description": "Pinned local Photos rail filter",
+                "filters": {"searchQuery": "Harbor", "favoriteOnly": True},
+                "rules": {
+                    "query": "Harbor",
+                    "favoriteOnly": True,
+                    "op": "all",
+                    "conditions": [
+                        {"field": "query", "operator": "contains", "value": "Harbor"},
+                        {"field": "favorite", "operator": "is", "value": True},
+                    ],
+                },
+            })
+            assert first["filterId"].startswith("filter_"), first
+            assert first["name"] == "Harbor favorites", first
+            assert first["filters"]["favoriteOnly"] is True, first
+            assert first["rules"]["query"] == "Harbor", first
+            assert first["count"] == 1, first
+            assert "Harbor sunset" in first["previewSamples"], first
+            assert "favorites" in first["ruleSummary"], first
+            listed = api.list_photo_saved_filters({})["filters"]
+            assert [row["filterId"] for row in listed] == [first["filterId"]], listed
+            assert listed[0]["count"] == 1, listed
+            assert "Harbor sunset" in listed[0]["previewSamples"], listed
+        finally:
+            api._photo_album_items = original_album_items  # type: ignore[method-assign]
 
         second = api.save_photo_saved_filter({
             "name": "Loose edits",

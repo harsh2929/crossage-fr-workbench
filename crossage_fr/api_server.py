@@ -8290,6 +8290,39 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{label} must be JSON serializable.") from exc
 
+    def _photo_smart_album_count_and_sample(
+        self,
+        album: dict[str, Any],
+        *,
+        sample_limit: int = 3,
+        sort: str = "newest",
+    ) -> tuple[int, list[dict[str, Any]]] | None:
+        if str(album.get("albumKind", "smart") or "smart") != "smart":
+            return None
+        clean_limit = max(0, min(24, int(sample_limit or 0)))
+        criteria = self._photo_smart_album_sql_criteria(album)
+        if criteria is not None:
+            page = self._photo_smart_album_sql_page_for_criteria(
+                criteria,
+                offset=0,
+                limit=max(1, clean_limit),
+                sort=sort,
+            )
+            assets = page.get("assets", []) if isinstance(page.get("assets", []), list) else []
+            return int(page.get("total", 0) or 0), self._photo_entries_for_assets(assets[:clean_limit])
+
+        source_paths = self._photo_smart_album_materialized_source_paths(album)
+        if source_paths is not None:
+            return (
+                len(source_paths),
+                self._photo_entries_for_materialized_source_paths(source_paths[:clean_limit]),
+            )
+
+        entries = self._photo_smart_album_entries_sql_union(album, sort=sort)
+        if entries is None:
+            return None
+        return len(entries), entries[:clean_limit]
+
     def _photo_saved_filter_preview(self, saved_filter: dict[str, Any]) -> dict[str, Any]:
         rules = self._clean_album_rules(saved_filter.get("rules", {}))
         album = {
@@ -8302,7 +8335,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "rules": rules,
             "coverSourcePath": "",
         }
-        items = self._photo_album_items(album) if rules else []
+        count = 0
+        items: list[dict[str, Any]] = []
+        if rules:
+            preview = self._photo_smart_album_count_and_sample(album, sample_limit=3, sort="newest")
+            if preview is None:
+                items = self._photo_album_items(album)
+                self._photo_save_smart_album_materialization(album, items)
+                count = len(items)
+            else:
+                count, items = preview
         sample_titles: list[str] = []
         for item in items[:3]:
             source = str(item.get("sourcePath", "") or "")
@@ -8312,7 +8354,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 sample_titles.append(title)
         return {
             **saved_filter,
-            "count": len(items),
+            "count": count,
             "ruleSummary": self._photo_album_rule_summary(rules),
             "previewSamples": sample_titles,
         }
