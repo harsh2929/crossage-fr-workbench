@@ -263,7 +263,8 @@ import { initBootBackground } from "./lib/bootBackground";
 import { formatErrorMessage, formatUiMessage, languageOptions, localizeDom, normalizeLanguage, translate, translateUiText } from "./i18n";
 import type { LanguageCode, TranslationKey, UiMessageKey } from "./i18n";
 
-type UiMessageValues = Record<string, string | number>;
+type UiMessageValue = string | number | { text: string | number; localize: true };
+type UiMessageValues = Record<string, UiMessageValue>;
 type NoticeState = { tone: "ok" | "warn" | "error"; text: string; messageKey?: UiMessageKey; values?: UiMessageValues; errorCode?: string; action?: string };
 
 const languageStorageKey = "vintrace:language";
@@ -1976,11 +1977,24 @@ export default function App() {
   const t = useMemo(() => (key: TranslationKey, values?: Record<string, string | number>) => translate(language, key, values), [language]);
   const uiText = useMemo(() => (source: string) => translateUiText(language, source), [language]);
 
+  function localizeUiMessageValue(text: string | number): UiMessageValue {
+    return { text, localize: true };
+  }
+
+  function formatUiMessageValues(values: UiMessageValues): Record<string, string | number> {
+    return Object.fromEntries(
+      Object.entries(values).map(([name, value]) => {
+        if (value && typeof value === "object" && "localize" in value) {
+          const text = value.text;
+          return [name, typeof text === "string" ? uiText(text) : text];
+        }
+        return [name, value];
+      })
+    ) as Record<string, string | number>;
+  }
+
   function uiMessage(key: UiMessageKey, values: UiMessageValues = {}) {
-    const localizedValues = Object.fromEntries(
-      Object.entries(values).map(([name, value]) => [name, typeof value === "string" ? uiText(value) : value])
-    );
-    return formatUiMessage(language, key, localizedValues);
+    return formatUiMessage(language, key, formatUiMessageValues(values));
   }
 
   function setNoticeMessage(tone: NoticeState["tone"], messageKey: UiMessageKey, values: UiMessageValues, fallback: string) {
@@ -2069,15 +2083,15 @@ export default function App() {
         pendingRoots.add(root);
         return;
       }
-      for (const current of pendingRoots) {
-        const currentNode = current as Node;
-        const targetNode = target as Node;
-        if (current === root || current === target || currentNode.contains(targetNode)) {
+      const targetNode = target as Node;
+      for (let ancestor: Node | null = targetNode; ancestor; ancestor = ancestor.parentNode) {
+        if (pendingRoots.has(ancestor as ParentNode)) {
           return;
         }
+        if (ancestor === root) break;
       }
       for (const current of [...pendingRoots]) {
-        if ((target as Node).contains(current as Node)) {
+        if (targetNode.contains(current as Node)) {
           pendingRoots.delete(current);
         }
       }
@@ -2111,7 +2125,6 @@ export default function App() {
       for (const mutation of mutations) {
         if (mutation.type === "childList") {
           enqueueLocalizationRoot(mutation.target);
-          mutation.addedNodes.forEach(enqueueLocalizationRoot);
         } else if (mutation.type === "attributes") {
           enqueueLocalizationRoot(mutation.target);
         } else if (mutation.type === "characterData") {
@@ -4201,7 +4214,7 @@ export default function App() {
     });
     const added = result.added ?? 0;
     const skipped = skippedSummary(result.errors?.length ?? 0);
-    setNoticeMessage("ok", "notice.savedFacePhotosAdded", { count: added, skipped }, `Added ${added} saved face photo${added === 1 ? "" : "s"}.${skipped}`);
+    setNoticeMessage("ok", "notice.savedFacePhotosAdded", { count: added, skipped: localizeUiMessageValue(skipped) }, `Added ${added} saved face photo${added === 1 ? "" : "s"}.${skipped}`);
   }
 
   async function enrollAgeGroups() {
@@ -4223,7 +4236,7 @@ export default function App() {
     const added = result.added ?? 0;
     const skipped = skippedSummary(result.errors?.length ?? 0);
     const groupCount = result.value?.groups ?? groups.length;
-    setNoticeMessage("ok", "notice.savedFacePhotosAddedAcrossAges", { count: added, groups: groupCount, skipped }, `Added ${added} saved face photo${added === 1 ? "" : "s"} across ${groupCount} age folder${groupCount === 1 ? "" : "s"}.${skipped}`);
+    setNoticeMessage("ok", "notice.savedFacePhotosAddedAcrossAges", { count: added, groups: groupCount, skipped: localizeUiMessageValue(skipped) }, `Added ${added} saved face photo${added === 1 ? "" : "s"} across ${groupCount} age folder${groupCount === 1 ? "" : "s"}.${skipped}`);
   }
 
   async function scan() {
@@ -4282,7 +4295,7 @@ export default function App() {
       setNoticeMessage("warn", "notice.scanCancelled", { processed }, `Scan cancelled after ${processed} file(s). Resume will skip completed files.`);
       return;
     }
-    setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped, protected: protectedText }, `Found ${found} possible match${found === 1 ? "" : "es"}.${skipped}${protectedText}`);
+    setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped: localizeUiMessageValue(skipped), protected: localizeUiMessageValue(protectedText) }, `Found ${found} possible match${found === 1 ? "" : "es"}.${skipped}${protectedText}`);
   }
 
   async function resumeLastScan() {
@@ -4314,7 +4327,7 @@ export default function App() {
     });
     const found = result.added ?? 0;
     const skipped = result.metrics?.manifestSkipped ? ` Skipped ${result.metrics.manifestSkipped} completed file(s).` : "";
-    setNoticeMessage("ok", "notice.resumeComplete", { count: found, skipped }, `Resume complete. Found ${found} possible match${found === 1 ? "" : "es"}.${skipped}`);
+    setNoticeMessage("ok", "notice.resumeComplete", { count: found, skipped: localizeUiMessageValue(skipped) }, `Resume complete. Found ${found} possible match${found === 1 ? "" : "es"}.${skipped}`);
   }
 
   async function restartLastScan() {
@@ -4349,7 +4362,7 @@ export default function App() {
     const found = result.added ?? 0;
     const protectedText = protectedSummary(Number(result.metrics?.safeFiltered || 0));
     setDismissedRecoveryRunId(String(latest?.run_id || latest?.runId || ""));
-    setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped: "", protected: protectedText }, `Restart complete. Found ${found} possible match${found === 1 ? "" : "es"}.${protectedText}`);
+    setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped: "", protected: localizeUiMessageValue(protectedText) }, `Restart complete. Found ${found} possible match${found === 1 ? "" : "es"}.${protectedText}`);
   }
 
   async function scanCameraFrame(dataUrl: string): Promise<CameraScanResult> {
@@ -4376,7 +4389,7 @@ export default function App() {
         : !hasReferences
           ? "Add a person when you want to match it."
           : "Confirm permission when you want to match it.";
-      setNoticeMessage("ok", "notice.cameraSavedNext", { nextStep }, `Camera photo saved. ${nextStep}`);
+      setNoticeMessage("ok", "notice.cameraSavedNext", { nextStep: localizeUiMessageValue(nextStep) }, `Camera photo saved. ${nextStep}`);
       return { ...saved, added: 0, errors: [], matched: false };
     }
 
@@ -4387,7 +4400,7 @@ export default function App() {
     const found = result.added ?? 0;
     const skipped = skippedSummary(result.errors?.length ?? 0);
     const protectedText = protectedSummary(Number(result.metrics?.safeFiltered || 0));
-    setNoticeMessage("ok", "notice.cameraSavedMatches", { count: found, skipped, protected: protectedText }, `Camera photo saved. Found ${found} possible match${found === 1 ? "" : "es"}.${skipped}${protectedText}`);
+    setNoticeMessage("ok", "notice.cameraSavedMatches", { count: found, skipped: localizeUiMessageValue(skipped), protected: localizeUiMessageValue(protectedText) }, `Camera photo saved. Found ${found} possible match${found === 1 ? "" : "es"}.${skipped}${protectedText}`);
     return { ...saved, added: result.added ?? 0, errors: result.errors ?? [], matched: true };
   }
 
@@ -4663,7 +4676,7 @@ export default function App() {
       const result = await invoke<CommandResult>("Scanning opened files", "scan_paths", { paths: payload.paths, source: "system", ...compatibilityParams });
       const protectedText = protectedSummary(Number(result.metrics?.safeFiltered || 0));
       const found = result.added ?? 0;
-      setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped: "", protected: protectedText }, `Found ${found} possible match${found === 1 ? "" : "es"}.${protectedText}`);
+      setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped: "", protected: localizeUiMessageValue(protectedText) }, `Found ${found} possible match${found === 1 ? "" : "es"}.${protectedText}`);
     }
   }
 
@@ -4685,7 +4698,7 @@ export default function App() {
     const result = await invoke<CommandResult>("Scanning received files", "scan_paths", { paths: payload.paths, source: "system", ...compatibilityParams });
     const protectedText = protectedSummary(Number(result.metrics?.safeFiltered || 0));
     const found = result.added ?? 0;
-    setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped: " from received files.", protected: protectedText }, `Found ${found} possible match${found === 1 ? "" : "es"} from received files.${protectedText}`);
+    setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped: localizeUiMessageValue(" from received files."), protected: localizeUiMessageValue(protectedText) }, `Found ${found} possible match${found === 1 ? "" : "es"} from received files.${protectedText}`);
   }
 
   // External IPC can arrive between a render commit and React effects. Keep the

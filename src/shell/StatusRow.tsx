@@ -3,11 +3,13 @@
 import { AlertCircle, Check, Loader2, X } from "lucide-react";
 import type { LanguageCode, TranslationKey, UiMessageKey } from "../i18n";
 
+type UiMessageValue = string | number | { text: string | number; localize: true };
+
 interface ShellNotice {
   tone: "ok" | "warn" | "error";
   text: string;
   messageKey?: UiMessageKey;
-  values?: Record<string, string | number>;
+  values?: Record<string, UiMessageValue>;
   errorCode?: string;
   action?: string;
 }
@@ -21,7 +23,7 @@ interface StatusRowProps {
   notice: ShellNotice | null;
   language: LanguageCode;
   formatErrorMessage: (language: LanguageCode, code: string | null | undefined, fallback: string, action?: string) => string;
-  uiMessage: (key: UiMessageKey, values?: Record<string, string | number>) => string;
+  uiMessage: (key: UiMessageKey, values?: Record<string, UiMessageValue>) => string;
   t: (key: TranslationKey) => string;
   isDemoMode: boolean;
 }

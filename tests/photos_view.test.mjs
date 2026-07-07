@@ -6494,6 +6494,33 @@ run("Photos manual collections do not coerce Newest back to Custom order", () =>
   assert.match(source, /<option value="newest">\{uiText\("Newest"\)\}<\/option>/);
 });
 
+run("App UI messages preserve raw interpolation values", () => {
+  const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
+  const statusRowSource = fs.readFileSync(path.join(ROOT, "src/shell/StatusRow.tsx"), "utf8");
+  const messageBlock = appSource.match(/function localizeUiMessageValue[\s\S]*?function setNoticeMessage/);
+  assert.ok(messageBlock, "uiMessage value formatter block should exist");
+  assert.match(appSource, /type UiMessageValue = string \| number \| \{ text: string \| number; localize: true \};/);
+  assert.match(messageBlock[0], /typeof text === "string" \? uiText\(text\) : text/);
+  assert.match(messageBlock[0], /return \[name, value\];/);
+  assert.doesNotMatch(messageBlock[0], /typeof value === "string" \? uiText\(value\) : value/);
+  assert.match(appSource, /setNoticeMessage\("ok", "notice\.backupCreated", \{ name: basename\(value\.zipPath\), bytes: formatBytes\(value\.bytes\) \}/);
+  assert.match(appSource, /confirmDialogMessage\("dialog\.deletePerson", \{ person: personName \}/);
+  assert.match(appSource, /skipped: localizeUiMessageValue\(skipped\)/);
+  assert.match(statusRowSource, /type UiMessageValue = string \| number \| \{ text: string \| number; localize: true \};/);
+  assert.match(statusRowSource, /uiMessage: \(key: UiMessageKey, values\?: Record<string, UiMessageValue>\) => string;/);
+});
+
+run("App DOM localization skips English and batches mutation roots", () => {
+  const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
+  const effectBlock = appSource.match(/useEffect\(\(\) => \{\s*if \(language === "en"\) return;[\s\S]*?observer\.observe\(root, \{[\s\S]*?\}\);\s*return \(\) => \{[\s\S]*?\};\s*\}, \[language\]\);/);
+  assert.ok(effectBlock, "DOM localization effect should exist");
+  assert.match(effectBlock[0], /if \(language === "en"\) return;/);
+  assert.match(effectBlock[0], /for \(let ancestor: Node \| null = targetNode; ancestor; ancestor = ancestor\.parentNode\)/);
+  assert.match(effectBlock[0], /pendingRoots\.has\(ancestor as ParentNode\)/);
+  assert.match(effectBlock[0], /enqueueLocalizationRoot\(mutation\.target\);/);
+  assert.doesNotMatch(effectBlock[0], /mutation\.addedNodes\.forEach\(enqueueLocalizationRoot\)/);
+});
+
 run("Safe Mode review dashboard honors sensitive collection unlock before listing flagged photos", () => {
   const reviewSource = fs.readFileSync(path.join(ROOT, "src/views/SafeModeReview.tsx"), "utf8");
   const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
