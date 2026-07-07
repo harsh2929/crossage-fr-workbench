@@ -11015,6 +11015,49 @@ def test_photo_places_folders_group_visible_locations_and_hide_private_locations
     print("ok photo places folders group visible locations + hide private locations")
 
 
+def test_photo_places_listing_avoids_full_asset_hydration() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        beach_one = str(base / "place-hydration-one.jpg")
+        beach_two = str(base / "place-hydration-two.jpg")
+        api.project.db.create_scan_run("run1", "label", "manual", str(base))
+        for path in (beach_one, beach_two):
+            api.project.db.record_scan_file("run1", Path(path), _sig(Path(path)), "completed", phase="processed")
+
+        for path in (beach_one, beach_two):
+            api.update_photo_asset_metadata(
+                {
+                    "sourcePath": path,
+                    "locationOverride": {"label": "Santa Cruz", "latitude": "36.9741", "longitude": "-122.0308"},
+                }
+            )
+        with api.project.db.connect() as conn:
+            status = api.project.db.ensure_photo_location_index(conn)
+            assert status["locationCount"] == 2, status
+
+        original_photo_asset_row = api.project.db._photo_asset_row
+
+        def fail_full_asset_hydration(_row: Any) -> dict[str, Any]:
+            raise AssertionError("list_photo_places should not hydrate full photo asset rows")
+
+        api.project.db._photo_asset_row = fail_full_asset_hydration  # type: ignore[method-assign]
+        try:
+            with api.project.db.connect() as conn:
+                places = api.project.db.list_photo_places(conn=conn)
+        finally:
+            api.project.db._photo_asset_row = original_photo_asset_row  # type: ignore[method-assign]
+
+        assert len(places) == 1, places
+        assert places[0]["name"] == "Santa Cruz", places
+        assert places[0]["count"] == 2, places
+        assert set(places[0]["assetIds"]) == {
+            str(api.project.db.photo_asset_by_path(beach_one)["assetId"]),
+            str(api.project.db.photo_asset_by_path(beach_two)["assetId"]),
+        }, places
+    print("ok photo places listing avoids full asset hydration")
+
+
 def test_photo_exif_metadata_feeds_asset_fields_and_places() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -18590,6 +18633,7 @@ if __name__ == "__main__":
     test_photo_duplicate_group_dismissal_persists_across_rebuilds()
     test_photo_utility_profiles_cover_set_clear_and_validate_membership()
     test_photo_places_folders_group_visible_locations_and_hide_private_locations()
+    test_photo_places_listing_avoids_full_asset_hydration()
     test_photo_exif_metadata_feeds_asset_fields_and_places()
     test_photo_reverse_geocode_preview_apply_and_privacy_gate()
     test_photo_reverse_geocode_provider_endpoint_policy_and_attribution()

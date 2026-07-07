@@ -13965,7 +13965,8 @@ class WorkspaceDb:
         source_where_sql = " AND " + " AND ".join(source_filter_where) if source_filter_where else ""
         rows = conn.execute(
             f"""
-            SELECT a.*, m.location_override_json,
+            SELECT a.asset_id, a.source_path, a.metadata_json, a.capture_date, a.added_at,
+                m.location_override_json,
                 l.latitude AS indexed_latitude,
                 l.longitude AS indexed_longitude,
                 l.source AS indexed_source,
@@ -13983,7 +13984,7 @@ class WorkspaceDb:
             """,
             source_filter_args,
         ).fetchall()
-        parsed_rows: list[tuple[sqlite3.Row, dict[str, Any], dict[str, Any]]] = []
+        parsed_rows: list[tuple[sqlite3.Row, dict[str, Any], dict[str, Any], str, str]] = []
         anchors: list[dict[str, str]] = []
         for row in rows:
             try:
@@ -13992,15 +13993,23 @@ class WorkspaceDb:
                 raw_location = {}
             if not isinstance(raw_location, dict):
                 raw_location = {}
-            asset = self._photo_asset_row(row)
-            asset_metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
-            parsed_rows.append((row, raw_location, asset_metadata))
+            try:
+                asset_metadata = json.loads(str(row["metadata_json"] or "{}"))
+            except json.JSONDecodeError:
+                asset_metadata = {}
+            if not isinstance(asset_metadata, dict):
+                asset_metadata = {}
+            source_path = str(row["source_path"] or "")
+            asset_id = str(row["asset_id"] or "") or self._photo_asset_id(source_path)
+            if not asset_id or not source_path:
+                continue
+            parsed_rows.append((row, raw_location, asset_metadata, asset_id, source_path))
             user_location = self._photo_place_location(raw_location)
             if user_location and user_location.get("label") and user_location.get("latitude") and user_location.get("longitude"):
                 anchors.append(user_location)
         groups: dict[str, dict[str, Any]] = {}
         source_rank = {"exif": 0, "inferred": 1, "user": 2}
-        for row, raw_location, asset_metadata in parsed_rows:
+        for row, raw_location, asset_metadata, asset_id, source_path in parsed_rows:
             place_location = self._photo_place_location(raw_location)
             location_source = "user"
             if not place_location:
@@ -14022,11 +14031,6 @@ class WorkspaceDb:
                         place_location = inferred_location
                         location_source = "inferred"
             if not place_location:
-                continue
-            asset = self._photo_asset_row(row)
-            asset_id = str(asset.get("assetId", "") or "")
-            source_path = str(asset.get("sourcePath", "") or "")
-            if not asset_id or not source_path:
                 continue
             key = place_location["key"]
             group = groups.get(key)
