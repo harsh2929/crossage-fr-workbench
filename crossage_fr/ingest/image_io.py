@@ -99,6 +99,13 @@ BROWSER_RENDERABLE_IMAGE_EXTENSIONS = {
     ".ico",
 }
 
+JPEG_IMAGE_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".jpe",
+    ".jfif",
+}
+
 _IMAGE_OPENERS_REGISTERED = False
 
 
@@ -280,17 +287,34 @@ def _load_raw_image(path: Path) -> Image.Image:
         raise ImageLoadError(f"Could not load RAW/DNG image {path}: {exc}") from exc
 
 
-def load_image(path: Path) -> Image.Image:
+def _load_pillow_image(path: Path, draft_size: tuple[int, int] | None = None) -> Image.Image:
     register_image_openers()
-    if path.suffix.lower() in RAW_IMAGE_EXTENSIONS:
-        return _load_raw_image(path)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(path) as image:
+                if draft_size is not None and path.suffix.lower() in JPEG_IMAGE_EXTENSIONS:
+                    try:
+                        image.draft("RGB", draft_size)
+                    except Exception:
+                        pass
                 return _to_rgb(_representative_frame(image))
     except Exception as exc:
         raise ImageLoadError(f"Could not load image {path}: {exc}") from exc
+
+
+def load_image(path: Path) -> Image.Image:
+    if path.suffix.lower() in RAW_IMAGE_EXTENSIONS:
+        return _load_raw_image(path)
+    return _load_pillow_image(path)
+
+
+def _load_preview_image(path: Path, max_edge: int) -> Image.Image:
+    if path.suffix.lower() in RAW_IMAGE_EXTENSIONS:
+        return _load_raw_image(path)
+    preview_edge = max(128, int(max_edge))
+    draft_edge = max(preview_edge * 2, preview_edge)
+    return _load_pillow_image(path, draft_size=(draft_edge, draft_edge))
 
 
 def needs_browser_preview(path: Path) -> bool:
@@ -303,8 +327,9 @@ def needs_browser_preview(path: Path) -> bool:
 # and decoded at full multi-megapixel resolution. 768px is sharp enough for human
 # face comparison while cutting decode/memory by ~20-40x on typical originals.
 def write_preview_image(source: Path, target: Path, max_edge: int = 768, quality: int = 84) -> Path:
-    image = load_image(source)
-    image.thumbnail((max(128, max_edge), max(128, max_edge)), Image.Resampling.LANCZOS)
+    preview_edge = max(128, max_edge)
+    image = _load_preview_image(source, preview_edge)
+    image.thumbnail((preview_edge, preview_edge), Image.Resampling.LANCZOS)
     target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_suffix(target.suffix + ".tmp")
     image.save(temp, format="JPEG", quality=quality, optimize=True, progressive=True)

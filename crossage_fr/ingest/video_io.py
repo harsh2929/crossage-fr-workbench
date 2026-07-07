@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.util
 from pathlib import Path
 import hashlib
 import json
@@ -287,11 +288,7 @@ def sample_video_frames(
 
 
 def _cv2_available() -> bool:
-    try:
-        import cv2  # noqa: F401
-    except Exception:
-        return False
-    return True
+    return importlib.util.find_spec("cv2") is not None
 
 
 def _require_cv2():

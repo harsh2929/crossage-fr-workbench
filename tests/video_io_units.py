@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 import subprocess
 import tempfile
@@ -67,6 +68,36 @@ def test_ffmpeg_frame_sampling_uses_workspace_temp_and_safe_move() -> None:
         assert all(sample.path.parent.parent == output_root for sample in samples), samples
 
 
+def test_video_decoder_report_does_not_import_cv2_for_availability() -> None:
+    seen: list[str] = []
+    original_find_spec = video_io.importlib.util.find_spec
+    original_import = builtins.__import__
+
+    def fake_find_spec(name: str, *args, **kwargs):  # type: ignore[no-untyped-def]
+        seen.append(name)
+        if name == "cv2":
+            return object()
+        return original_find_spec(name, *args, **kwargs)
+
+    def blocked_import(name: str, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if name == "cv2":
+            raise AssertionError("video_decoder_report imported cv2 on the startup path")
+        return original_import(name, *args, **kwargs)
+
+    try:
+        video_io.importlib.util.find_spec = fake_find_spec  # type: ignore[assignment]
+        builtins.__import__ = blocked_import  # type: ignore[assignment]
+        assert video_io._cv2_available() is True  # noqa: SLF001 - targeted regression.
+        report = video_io.video_decoder_report()
+    finally:
+        video_io.importlib.util.find_spec = original_find_spec  # type: ignore[assignment]
+        builtins.__import__ = original_import  # type: ignore[assignment]
+
+    assert "cv2" in seen
+    assert report["opencvAvailable"] is True
+
+
 if __name__ == "__main__":
     test_ffmpeg_frame_sampling_uses_workspace_temp_and_safe_move()
+    test_video_decoder_report_does_not_import_cv2_for_availability()
     print("all video_io_units tests passed")

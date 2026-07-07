@@ -68,7 +68,7 @@ def assert_platform_edges() -> None:
                 provider_names, provider_options = split_provider_config(selected)
                 assert provider_names[0] == "CoreMLExecutionProvider"
                 assert provider_options is not None
-                assert provider_options[0]["RequireStaticInputShapes"] == "1"
+                assert provider_options[0]["RequireStaticInputShapes"] == "0"
                 assert provider_options[0]["ModelCacheDirectory"]
 
     with patch("crossage_fr.platform_detect.available_onnx_providers", return_value=["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]):

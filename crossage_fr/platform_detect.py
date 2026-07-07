@@ -214,7 +214,7 @@ def get_providers(platform_key: str) -> list[Any]:
         coreml_options = {
             "ModelFormat": "MLProgram",
             "MLComputeUnits": "ALL",
-            "RequireStaticInputShapes": "1",
+            "RequireStaticInputShapes": "0",
             "EnableOnSubgraphs": "0",
         }
         cache_dir = _cache_dir("coreml")
