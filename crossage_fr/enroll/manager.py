@@ -105,6 +105,16 @@ except ValueError:
     SCAN_STATE_CHECKPOINT_SECONDS = 20.0
 
 try:
+    SCAN_PROGRESS_THROTTLE_SECONDS = max(0.05, float(os.environ.get("CROSSAGE_SCAN_PROGRESS_THROTTLE_SECONDS", "0.10")))
+except ValueError:
+    SCAN_PROGRESS_THROTTLE_SECONDS = 0.10
+
+try:
+    SCAN_PROGRESS_THROTTLE_FILES = max(1, int(os.environ.get("CROSSAGE_SCAN_PROGRESS_THROTTLE_FILES", "25")))
+except ValueError:
+    SCAN_PROGRESS_THROTTLE_FILES = 25
+
+try:
     CANDIDATE_JSON_SNAPSHOT_LIMIT = max(0, int(os.environ.get("CROSSAGE_CANDIDATE_JSON_SNAPSHOT_LIMIT", "50000")))
 except ValueError:
     CANDIDATE_JSON_SNAPSHOT_LIMIT = 50_000
@@ -183,6 +193,8 @@ class ProjectState:
         self._loaded_candidate_payloads: dict[str, dict[str, Any]] = {}
         self._candidate_dirty_ids: set[str] = set()
         self._candidate_deleted_ids: set[str] = set()
+        self._last_scan_progress_emit_at: dict[str, float] = {}
+        self._last_scan_progress_processed: dict[str, int] = {}
         self.load()
         self._ensure_generated_dir_sentinel(self.previews_path)
         self._ensure_generated_dir_sentinel(self.video_frames_path)
@@ -9171,6 +9183,25 @@ class ProjectState:
     ) -> None:
         if on_progress is None:
             return
+        if phase in {"started", "complete", "cancelled", "error"}:
+            self._last_scan_progress_emit_at.clear()
+            self._last_scan_progress_processed.clear()
+        if phase in {"processing", "processed"}:
+            processed = int(metrics.get("processed", 0) or 0)
+            total = int(metrics.get("total", 0) or 0)
+            now = time.monotonic()
+            last_at = self._last_scan_progress_emit_at.get(phase, 0.0)
+            last_processed = self._last_scan_progress_processed.get(phase, -SCAN_PROGRESS_THROTTLE_FILES)
+            should_emit = (
+                processed <= 1
+                or (total > 0 and processed >= total)
+                or processed - last_processed >= SCAN_PROGRESS_THROTTLE_FILES
+                or now - last_at >= SCAN_PROGRESS_THROTTLE_SECONDS
+            )
+            if not should_emit:
+                return
+            self._last_scan_progress_emit_at[phase] = now
+            self._last_scan_progress_processed[phase] = processed
         on_progress({"phase": phase, **metrics, **extra})
 
     def _read_json_array(self, path: Path) -> list[dict[str, object]]:

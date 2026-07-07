@@ -4497,6 +4497,42 @@ def assert_scan_cancel_and_resume_manifest() -> None:
     assert added2 >= 0
 
 
+def assert_scan_progress_noisy_phases_are_throttled() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-progress-throttle-"))
+    project = ProjectState(root / "workspace")
+    events: list[dict[str, object]] = []
+    now = [100.0]
+    original_monotonic = manager_module.time.monotonic
+    manager_module.time.monotonic = lambda: now[0]
+    metrics = {"total": 100, "processed": 0, "added": 0, "errors": 0}
+    try:
+        project._emit_scan_progress(events.append, "started", metrics)
+        metrics["processed"] = 1
+        project._emit_scan_progress(events.append, "processing", metrics, current_path="/tmp/one.jpg")
+        metrics["processed"] = 2
+        project._emit_scan_progress(events.append, "processing", metrics, current_path="/tmp/two.jpg")
+        project._emit_scan_progress(events.append, "candidate", metrics, current_path="/tmp/two.jpg")
+
+        now[0] += manager_module.SCAN_PROGRESS_THROTTLE_SECONDS + 0.01
+        metrics["processed"] = 3
+        project._emit_scan_progress(events.append, "processing", metrics, current_path="/tmp/three.jpg")
+        metrics["processed"] = 4
+        project._emit_scan_progress(events.append, "processed", metrics, current_path="/tmp/four.jpg")
+        metrics["processed"] = 5
+        project._emit_scan_progress(events.append, "processed", metrics, current_path="/tmp/five.jpg")
+        metrics["processed"] = 4 + manager_module.SCAN_PROGRESS_THROTTLE_FILES
+        project._emit_scan_progress(events.append, "processed", metrics, current_path="/tmp/chunk.jpg")
+        metrics["processed"] = 100
+        project._emit_scan_progress(events.append, "processed", metrics, current_path="/tmp/final.jpg")
+        project._emit_scan_progress(events.append, "complete", metrics)
+    finally:
+        manager_module.time.monotonic = original_monotonic
+    phases = [event["phase"] for event in events]
+    assert phases == ["started", "processing", "candidate", "processing", "processed", "processed", "processed", "complete"], phases
+    assert [event.get("current_path") for event in events if event["phase"] == "processing"] == ["/tmp/one.jpg", "/tmp/three.jpg"]
+    assert events[-1]["phase"] == "complete"
+
+
 def assert_vector_store_persists_reference_index() -> None:
     root = Path(tempfile.mkdtemp(prefix="crossage-edge-vector-store-"))
     index_path = root / "vectors.npz"
@@ -6164,6 +6200,7 @@ def main() -> None:
     assert_synthetic_video_decoder_suite()
     assert_accuracy_validation_pack()
     assert_scan_cancel_and_resume_manifest()
+    assert_scan_progress_noisy_phases_are_throttled()
     assert_vector_store_persists_reference_index()
     assert_stale_candidate_manifest_is_reprocessed()
     assert_model_governance_metadata()
