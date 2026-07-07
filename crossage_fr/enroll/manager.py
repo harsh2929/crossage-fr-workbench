@@ -20,7 +20,7 @@ from typing import Callable, Any
 
 from crossage_fr.config import RuntimeConfig, Thresholds, archive_corrupt_file, load_config, save_config
 from crossage_fr.cluster import cluster_vectors
-from crossage_fr.crypto import DecryptionError, backup_passphrase, decrypt_bytes, encrypt_bytes, is_encrypted
+from crossage_fr.crypto import DecryptionError, backup_passphrase, decrypt_bytes, encrypt_file, is_encrypted
 from crossage_fr.embed import EmbeddingEngine
 from crossage_fr.ingest import ImageLoadError, VideoLoadError, image_record_for_path, iter_image_paths, load_image, sample_video_frames
 from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, RAW_IMAGE_EXTENSIONS, sha256_file, write_preview_image
@@ -4381,7 +4381,15 @@ class ProjectState:
         encrypted = False
         passphrase = backup_passphrase()
         if passphrase:
-            backup_path.write_bytes(encrypt_bytes(backup_path.read_bytes(), passphrase))
+            encrypted_temp = backup_path.with_name(f".{backup_path.name}.enc.tmp")
+            try:
+                encrypt_file(backup_path, encrypted_temp, passphrase)
+                os.replace(encrypted_temp, backup_path)
+            finally:
+                try:
+                    encrypted_temp.unlink()
+                except OSError:
+                    pass
             encrypted = True
         self._append_audit(
             {

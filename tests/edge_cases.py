@@ -520,6 +520,9 @@ def assert_static_app_contracts() -> None:
     assert "unmatched_paths: set[Path]" in enroll_manager
     assert "image_path in unmatched_paths" in enroll_manager
     assert "any(row[0] == image_path for row in unmatched)" not in enroll_manager
+    assert "encrypt_file(backup_path, encrypted_temp, passphrase)" in enroll_manager
+    assert "os.replace(encrypted_temp, backup_path)" in enroll_manager
+    assert "write_bytes(encrypt_bytes(backup_path.read_bytes()" not in enroll_manager
 
     release_workflow = (root / ".github" / "workflows" / "windows-release.yml").read_text(encoding="utf-8")
     assert "release_tag" in release_workflow

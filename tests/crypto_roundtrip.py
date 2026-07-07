@@ -6,12 +6,15 @@ Run: PYTHONPATH=. .venv/bin/python tests/crypto_roundtrip.py
 from __future__ import annotations
 
 import os
+import tempfile
+from pathlib import Path
 
 from crossage_fr.crypto import (
     DecryptionError,
     MAGIC,
     backup_passphrase,
     decrypt_bytes,
+    encrypt_file,
     encrypt_bytes,
     is_encrypted,
 )
@@ -23,6 +26,18 @@ def test_round_trip() -> None:
     assert is_encrypted(blob) and blob.startswith(MAGIC)
     assert not is_encrypted(data)
     assert decrypt_bytes(blob, "correct horse battery staple") == data
+
+
+def test_file_round_trip_streams_same_format() -> None:
+    data = os.urandom(131_123) + b"vintrace streaming backup payload"
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp) / "plain.zip"
+        target = Path(tmp) / "encrypted.zip"
+        source.write_bytes(data)
+        encrypt_file(source, target, "streaming-passphrase", chunk_size=4096)
+        blob = target.read_bytes()
+    assert is_encrypted(blob) and blob.startswith(MAGIC)
+    assert decrypt_bytes(blob, "streaming-passphrase") == data
 
 
 def test_wrong_passphrase_fails() -> None:
@@ -79,6 +94,7 @@ def test_backup_passphrase_env() -> None:
 
 def main() -> None:
     test_round_trip()
+    test_file_round_trip_streams_same_format()
     test_wrong_passphrase_fails()
     test_tamper_is_detected()
     test_unique_salts_and_nonces()

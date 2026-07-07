@@ -17,8 +17,10 @@ block and the opt-in backup encryption path.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
@@ -58,6 +60,25 @@ def encrypt_bytes(data: bytes, passphrase: str) -> bytes:
     key = _derive_key(passphrase, salt)
     ciphertext = AESGCM(key).encrypt(nonce, data, MAGIC)  # MAGIC as associated data
     return MAGIC + bytes([_VERSION]) + salt + nonce + ciphertext
+
+
+def encrypt_file(source: Path, target: Path, passphrase: str, chunk_size: int = 1024 * 1024) -> None:
+    if not passphrase:
+        raise ValueError("A non-empty passphrase is required to encrypt.")
+    salt = os.urandom(_SALT_LEN)
+    nonce = os.urandom(_NONCE_LEN)
+    key = _derive_key(passphrase, salt)
+    encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
+    encryptor.authenticate_additional_data(MAGIC)
+    with source.open("rb") as src, target.open("wb") as dst:
+        dst.write(MAGIC + bytes([_VERSION]) + salt + nonce)
+        while True:
+            chunk = src.read(max(1, int(chunk_size)))
+            if not chunk:
+                break
+            dst.write(encryptor.update(chunk))
+        dst.write(encryptor.finalize())
+        dst.write(encryptor.tag)
 
 
 def decrypt_bytes(blob: bytes, passphrase: str) -> bytes:
