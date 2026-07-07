@@ -60,6 +60,13 @@ def dominant_level(probs: Any, level_names: Any) -> str:
     return str(names[best])
 
 
+def _logsumexp(values: list[float]) -> float:
+    if not values:
+        return -1.0e9
+    peak = max(values)
+    return float(peak + math.log(sum(math.exp(value - peak) for value in values)))
+
+
 def apply_safe_mode_override(stored_sensitive: Any, override: Any) -> bool:
     """The effective sensitivity for an item: a user override (True/False) wins;
     ``None`` falls back to the classifier's stored verdict."""
@@ -438,11 +445,19 @@ class _OnnxSafetyModel:
 
     def nsfw_logit_pair(self, image: Image.Image) -> list[float]:
         # Canonical 2-vector [not_nsfw, nsfw] for calibration, so label 1 == nsfw
-        # regardless of the model's own class ordering (spec.nsfw_index).
+        # regardless of the model's own class ordering. Multi-level models use
+        # the same at/above-sensitive-level reduction as deployed scoring.
         logits = self._logits(image)
         n = int(logits.shape[0])
         if n == 0:
             return [0.0, 0.0]
+        if self.spec.levels and len(self.spec.levels) == n:
+            names = [str(name).strip().lower() for name in self.spec.levels]
+            target = str(self.spec.sensitive_min_level or "").strip().lower()
+            start = names.index(target) if target in names else n - 1
+            not_sensitive = [float(logits[i]) for i in range(0, start)]
+            sensitive = [float(logits[i]) for i in range(start, n)]
+            return [_logsumexp(not_sensitive), _logsumexp(sensitive)]
         idx = min(max(int(self.spec.nsfw_index), 0), n - 1)
         nsfw = float(logits[idx])
         others = [float(logits[i]) for i in range(n) if i != idx]

@@ -106,6 +106,52 @@ check("calibration emits per-image processing progress", sum(1 for event in cali
 check("calibration emits per-image processed progress", sum(1 for event in calibration_events if event["phase"] == "processed") == 5)
 check("calibration complete progress carries final counts", calibration_events[-1]["accepted"] == 4 and calibration_events[-1]["failed"] == 1)
 
+
+def safety_model_for_logits(spec: safety_module._SafetyModelSpec, logits: list[float]):
+    model = object.__new__(safety_module._OnnxSafetyModel)
+    model.spec = spec
+    model._logits = lambda _image: safety_module.np.asarray(logits, dtype=safety_module.np.float32)
+    return model
+
+
+freepik_spec = safety_module._SafetyModelSpec(
+    path=Path("freepik-test.onnx"),
+    model_name="freepik-test",
+    source="test",
+    license="test",
+    input_size=448,
+    labels=("sfw", "nsfw"),
+    nsfw_index=1,
+    mean=(0.5, 0.5, 0.5),
+    std=(0.5, 0.5, 0.5),
+    interpolation="bilinear",
+    threshold_hint="test",
+    levels=("neutral", "low", "medium", "high"),
+    sensitive_min_level="medium",
+)
+freepik_pair = safety_model_for_logits(freepik_spec, [0.0, 4.0, 5.0, 6.0]).nsfw_logit_pair(None)
+expected_not = math.log(math.exp(0.0) + math.exp(4.0))
+expected_sensitive = 5.0 + math.log1p(math.exp(1.0))
+check("multi-level calibration groups non-sensitive levels", approx(freepik_pair[0], expected_not, 1e-5))
+check("multi-level calibration groups sensitive levels", approx(freepik_pair[1], expected_sensitive, 1e-5))
+check("multi-level calibration does not use low class as sensitive", freepik_pair[1] > 6.0 and not approx(freepik_pair[1], 4.0))
+
+binary_spec = safety_module._SafetyModelSpec(
+    path=Path("binary-test.onnx"),
+    model_name="binary-test",
+    source="test",
+    license="test",
+    input_size=384,
+    labels=("sfw", "nsfw", "other"),
+    nsfw_index=1,
+    mean=(0.5, 0.5, 0.5),
+    std=(0.5, 0.5, 0.5),
+    interpolation="bilinear",
+    threshold_hint="test",
+)
+binary_pair = safety_model_for_logits(binary_spec, [1.0, 3.0, 2.0]).nsfw_logit_pair(None)
+check("binary calibration keeps nsfw_index semantics", binary_pair == [2.0, 3.0])
+
 with tempfile.TemporaryDirectory() as tmp:
     registry = str(Path(tmp) / "registry")
     os.environ["VINTRACE_REGISTRY_HOME"] = registry
