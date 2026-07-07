@@ -1946,6 +1946,17 @@ run("managed import destination selector is wired into import params", () => {
   assert.match(source, /uiText\("Destination"\)[\s\S]{0,80}importManagedRootLabel/);
 });
 
+run("Review group finder caps rendered thumbnail results", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
+  assert.match(source, /const GROUP_RESULT_RENDER_CAP = 80;/);
+  assert.match(source, /const visibleGroupResults = useMemo\(\(\) => groupResults\.slice\(0, GROUP_RESULT_RENDER_CAP\), \[groupResults\]\);/);
+  assert.match(source, /const hiddenGroupResultCount = groupResults\.length - visibleGroupResults\.length;/);
+  assert.match(source, /\{groupResults\.length \? visibleGroupResults\.map\(\(row\) => \(/);
+  assert.match(source, /Copy results for the full list/);
+  assert.match(source, /const lines = groupResults\.map\(\(row, index\) => \(/);
+  assert.doesNotMatch(source, /\{groupResults\.length \? groupResults\.map\(\(row\) => \(/);
+});
+
 await (async () => {
   const record = await settingsMod.createPhotoSensitivePasscodeRecord("4931", "fixedSalt_01");
   const settings = settingsMod.normalizePhotoLocalSettings({

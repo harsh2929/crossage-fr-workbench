@@ -10773,6 +10773,9 @@ function BackgroundJobCenter({
 
 // M13: cap on how many person chips render at once in the group finder.
 const PEOPLE_CHIP_CAP = 60;
+// Group result rows each mount a media thumbnail. Keep copy/count backed by the
+// full result set, but bound the rows rendered in Review.
+const GROUP_RESULT_RENDER_CAP = 80;
 
 // M4: small session-scoped store for the review filter context (kept separate
 // from workspace recognition state; cleared on app restart like other UI prefs).
@@ -10996,6 +10999,8 @@ function ReviewView(props: {
       .filter((row) => selected.every((person) => row.people.includes(person)))
       .sort((a, b) => b.people.length - a.people.length || b.bestScore - a.bestScore || a.label.localeCompare(b.label));
   }, [candidatesByPath, groupMinPeople, selectedPeople]);
+  const visibleGroupResults = useMemo(() => groupResults.slice(0, GROUP_RESULT_RENDER_CAP), [groupResults]);
+  const hiddenGroupResultCount = groupResults.length - visibleGroupResults.length;
 
   const reviewSummary = useMemo(() => {
     const groupedCandidateIds = new Set(
@@ -11601,7 +11606,7 @@ function ReviewView(props: {
           </button>
         </div>
         <div className="group-results">
-          {groupResults.length ? groupResults.map((row) => (
+          {groupResults.length ? visibleGroupResults.map((row) => (
             <button
               key={row.sourcePath}
               className="group-result-row"
@@ -11631,6 +11636,11 @@ function ReviewView(props: {
               label="No group photos found"
               detail={selectedPeople.size ? "Scan photos where the selected people appear together." : "Choose people or raise the minimum to find photos with 2, 3, or more matched people."}
             />
+          )}
+          {hiddenGroupResultCount > 0 && (
+            <span className="compact group-result-overflow">
+              Showing first {visibleGroupResults.length} of {groupResults.length}. Copy results for the full list.
+            </span>
           )}
         </div>
       </div>
