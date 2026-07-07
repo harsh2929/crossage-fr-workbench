@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from contextlib import redirect_stdout
 from copy import deepcopy
 from dataclasses import asdict
@@ -23,6 +24,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import traceback
 import unicodedata
 import zipfile
@@ -90,6 +92,22 @@ try:
     ANALYZE_TIME_BUDGET_MS = max(1_000, int(os.environ.get("CROSSAGE_ANALYZE_TIME_BUDGET_MS", "15000")))
 except ValueError:
     ANALYZE_TIME_BUDGET_MS = 15_000
+
+try:
+    PHOTO_REVERSE_GEOCODE_HTTP_WORKERS = max(
+        1,
+        min(4, int(os.environ.get("CROSSAGE_REVERSE_GEOCODE_HTTP_WORKERS", "2"))),
+    )
+except ValueError:
+    PHOTO_REVERSE_GEOCODE_HTTP_WORKERS = 2
+
+try:
+    PHOTO_REVERSE_GEOCODE_HTTP_TIMEOUT_SECONDS = max(
+        0.25,
+        min(8.0, float(os.environ.get("CROSSAGE_REVERSE_GEOCODE_HTTP_TIMEOUT_SECONDS", "8"))),
+    )
+except ValueError:
+    PHOTO_REVERSE_GEOCODE_HTTP_TIMEOUT_SECONDS = 8.0
 
 try:
     PHOTO_SMART_ALBUM_SCALE_WARNING_ASSETS = max(1_000, int(os.environ.get("CROSSAGE_PHOTO_SMART_ALBUM_SCALE_WARNING_ASSETS", "1000")))
@@ -465,6 +483,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         self._last_resource_status_at = 0.0
         self._last_resource_status: dict[str, Any] = {}
         self._photo_reverse_geocode_cache: dict[str, dict[str, Any]] = {}
+        self._photo_reverse_geocode_http_executor: ThreadPoolExecutor | None = None
+        self._photo_reverse_geocode_http_jobs: dict[str, Future[dict[str, Any]]] = {}
+        self._photo_reverse_geocode_http_lock = threading.Lock()
         self._photo_reverse_geocode_provider = None
         self._startup("ready", "Backend ready")
 
@@ -31123,6 +31144,97 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             payload, provider="offline-gazetteer", latitude=latitude, longitude=longitude
         )
 
+    def _photo_reverse_geocode_foreground_wait_seconds(self) -> float:
+        try:
+            wait_ms = float(os.environ.get("CROSSAGE_REVERSE_GEOCODE_FOREGROUND_WAIT_MS", "0"))
+        except ValueError:
+            wait_ms = 0.0
+        return max(0.0, min(2.0, wait_ms / 1000.0))
+
+    def _photo_reverse_geocode_http_executor_instance(self) -> ThreadPoolExecutor:
+        executor = getattr(self, "_photo_reverse_geocode_http_executor", None)
+        if executor is None:
+            executor = ThreadPoolExecutor(
+                max_workers=PHOTO_REVERSE_GEOCODE_HTTP_WORKERS,
+                thread_name_prefix="reverse-geocode",
+            )
+            self._photo_reverse_geocode_http_executor = executor
+        return executor
+
+    def _photo_reverse_geocode_http_pending_result(self, latitude: float, longitude: float) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "pending": True,
+            "blocked": False,
+            "reason": "lookup-pending",
+            "message": "Place lookup is still running.",
+            "latitude": self._photo_coordinate_text(latitude),
+            "longitude": self._photo_coordinate_text(longitude),
+            "provider": "nominatim",
+            "attribution": "© OpenStreetMap contributors",
+        }
+
+    def _photo_reverse_geocode_http_request(
+        self,
+        *,
+        url: str,
+        user_agent: str,
+        latitude: float,
+        longitude: float,
+    ) -> dict[str, Any]:
+        request = Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": user_agent,
+            },
+        )
+        with urlopen(request, timeout=PHOTO_REVERSE_GEOCODE_HTTP_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return self._photo_reverse_geocode_normalize_result(
+            payload,
+            provider="nominatim",
+            latitude=latitude,
+            longitude=longitude,
+        )
+
+    def _photo_reverse_geocode_http_lookup(
+        self,
+        *,
+        url: str,
+        user_agent: str,
+        latitude: float,
+        longitude: float,
+    ) -> dict[str, Any]:
+        job_key = f"{url}\n{user_agent}"
+        future: Future[dict[str, Any]]
+        with self._photo_reverse_geocode_http_lock:
+            jobs = self._photo_reverse_geocode_http_jobs
+            future = jobs.get(job_key)  # type: ignore[assignment]
+            if future is None:
+                future = self._photo_reverse_geocode_http_executor_instance().submit(
+                    self._photo_reverse_geocode_http_request,
+                    url=url,
+                    user_agent=user_agent,
+                    latitude=latitude,
+                    longitude=longitude,
+                )
+                jobs[job_key] = future
+
+        wait_seconds = self._photo_reverse_geocode_foreground_wait_seconds()
+        if not future.done() and wait_seconds <= 0:
+            return self._photo_reverse_geocode_http_pending_result(latitude, longitude)
+        try:
+            result = future.result(timeout=wait_seconds if wait_seconds > 0 else 0)
+        except TimeoutError:
+            return self._photo_reverse_geocode_http_pending_result(latitude, longitude)
+        finally:
+            if future.done():
+                with self._photo_reverse_geocode_http_lock:
+                    if self._photo_reverse_geocode_http_jobs.get(job_key) is future:
+                        self._photo_reverse_geocode_http_jobs.pop(job_key, None)
+        return result
+
     def _photo_reverse_geocode_provider_lookup(self, latitude: float, longitude: float) -> dict[str, Any]:
         provider = getattr(self, "_photo_reverse_geocode_provider", None)
         if callable(provider):
@@ -31164,18 +31276,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if email:
             query["email"] = email
         url = self._photo_reverse_geocode_endpoint_url(query)
-        request = Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": user_agent,
-            },
-        )
-        with urlopen(request, timeout=8) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        return self._photo_reverse_geocode_normalize_result(
-            payload,
-            provider="nominatim",
+        return self._photo_reverse_geocode_http_lookup(
+            url=url,
+            user_agent=user_agent,
             latitude=latitude,
             longitude=longitude,
         )
@@ -31191,6 +31294,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             cached["cached"] = True
             return cached
         result = self._photo_reverse_geocode_provider_lookup(latitude, longitude)
+        if bool(result.get("pending", False)):
+            result["cached"] = False
+            return result
         cache[cache_key] = {key: value for key, value in result.items() if key != "raw"}
         if len(cache) > 256:
             oldest_key = next(iter(cache))
@@ -31327,6 +31433,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "skipped": 0,
             "skippedReasons": {},
         }
+        if bool(response.get("pending", False)):
+            return response
         if not apply_lookup:
             return response
         targets = self._photo_reverse_geocode_targets(params, primary_asset)

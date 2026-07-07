@@ -10524,6 +10524,21 @@ export function PhotosView(props: {
     return latitude !== null && longitude !== null ? { latitude, longitude } : null;
   }
 
+  async function reverseGeocodePhotoLocationSettled(params: Record<string, unknown>) {
+    let value: PhotoReverseGeocodeResult = {
+      ok: false,
+      pending: true,
+      message: uiText("Place lookup is still running."),
+    };
+    for (let attempt = 0; attempt < 18; attempt += 1) {
+      const result = await reverseGeocodePhotoLocation(params);
+      value = result.value || { ok: false };
+      if (!value.pending) return value;
+      await new Promise((resolve) => window.setTimeout(resolve, Math.min(200 + attempt * 150, 1000)));
+    }
+    return value;
+  }
+
   async function lookupLightboxPlaceName(item: PhotoItem, apply = false) {
     const coordinates = lightboxLookupCoordinates(item);
     setReverseGeocodeScope("lightbox");
@@ -10539,14 +10554,13 @@ export function PhotosView(props: {
     }
     setReverseGeocodeLoading(true);
     try {
-      const result = await reverseGeocodePhotoLocation({
+      const value = await reverseGeocodePhotoLocationSettled({
         sourcePath: item.sourcePath,
         assetId: item.assetId || "",
         latitude: coordinates.latitude,
         longitude: coordinates.longitude,
         apply,
       });
-      const value = result.value || { ok: false };
       setReverseGeocodeResult(value);
       if (!value.ok) {
         setReverseGeocodeError(value.message || uiText("Place lookup failed."));
@@ -10590,13 +10604,12 @@ export function PhotosView(props: {
     }
     setReverseGeocodeLoading(true);
     try {
-      const result = await reverseGeocodePhotoLocation({
+      const value = await reverseGeocodePhotoLocationSettled({
         latitude,
         longitude,
         assetIds,
         apply,
       });
-      const value = result.value || { ok: false };
       setReverseGeocodeResult(value);
       if (!value.ok) {
         setReverseGeocodeError(value.message || uiText("Place lookup failed."));

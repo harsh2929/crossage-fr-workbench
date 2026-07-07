@@ -6416,6 +6416,21 @@ def assert_examination_report() -> None:
     print("  examination report ok")
 
 
+def assert_reverse_geocode_http_is_job_based() -> None:
+    root = Path(__file__).resolve().parents[1]
+    api_server = (root / "crossage_fr" / "api_server.py").read_text(encoding="utf-8")
+    photos_view = (root / "src" / "views" / "PhotosView.tsx").read_text(encoding="utf-8")
+    provider_block = api_server.split("def _photo_reverse_geocode_provider_lookup", 1)[1].split(
+        "def _photo_reverse_geocode_lookup", 1
+    )[0]
+    assert "urlopen(" not in provider_block
+    assert "ThreadPoolExecutor" in api_server
+    assert "_photo_reverse_geocode_http_jobs" in api_server
+    assert '"lookup-pending"' in api_server
+    assert "reverseGeocodePhotoLocationSettled" in photos_view
+    print("  reverse geocode HTTP job dispatch ok")
+
+
 def main() -> None:
     assert_corrupt_workspace_recovery()
     assert_corrupt_sqlite_startup_recovery()
@@ -6473,6 +6488,7 @@ def main() -> None:
     assert_high_audit_ui_regressions()
     assert_vector_store_edges()
     assert_backend_json_rpc_errors()
+    assert_reverse_geocode_http_is_job_based()
     assert_structured_backend_error_codes()
     assert_release_hardening_diagnostics()
     assert_support_bundle_redaction_is_strict()

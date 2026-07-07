@@ -479,6 +479,7 @@ export interface PhotoPlace {
 
 export interface PhotoReverseGeocodeResult {
   ok: boolean;
+  pending?: boolean;
   blocked?: boolean;
   reason?: string;
   message?: string;

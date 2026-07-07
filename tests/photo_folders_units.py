@@ -24,6 +24,8 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import threading
+from time import monotonic, sleep
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -11569,6 +11571,7 @@ def test_photo_reverse_geocode_provider_endpoint_policy_and_attribution() -> Non
         "CROSSAGE_REVERSE_GEOCODE_EMAIL",
         "CROSSAGE_REVERSE_GEOCODE_ENDPOINT",
         "CROSSAGE_REVERSE_GEOCODE_FIXTURE_JSON",
+        "CROSSAGE_REVERSE_GEOCODE_FOREGROUND_WAIT_MS",
         "CROSSAGE_REVERSE_GEOCODE_LANGUAGE",
         "CROSSAGE_REVERSE_GEOCODE_PROVIDER",
         "CROSSAGE_REVERSE_GEOCODE_USER_AGENT",
@@ -11606,6 +11609,7 @@ def test_photo_reverse_geocode_provider_endpoint_policy_and_attribution() -> Non
                 os.environ.pop(key, None)
             api_server_module.urlopen = fake_urlopen
             os.environ["CROSSAGE_REVERSE_GEOCODE_ENDPOINT"] = "http://127.0.0.1:8765/reverse"
+            os.environ["CROSSAGE_REVERSE_GEOCODE_FOREGROUND_WAIT_MS"] = "1000"
             os.environ["CROSSAGE_REVERSE_GEOCODE_LANGUAGE"] = "fr"
             os.environ["CROSSAGE_REVERSE_GEOCODE_EMAIL"] = "photos@example.test"
             os.environ["CROSSAGE_REVERSE_GEOCODE_USER_AGENT"] = "VintraceReverseGeocodeTest/1.0"
@@ -11618,7 +11622,7 @@ def test_photo_reverse_geocode_provider_endpoint_policy_and_attribution() -> Non
             assert preview["cached"] is False, preview
             assert len(requests) == 1, requests
             request, timeout = requests[0]
-            assert timeout == 8, timeout
+            assert timeout == api_server_module.PHOTO_REVERSE_GEOCODE_HTTP_TIMEOUT_SECONDS, timeout
             parsed = urlparse(request.full_url)
             assert parsed.scheme == "http" and parsed.hostname == "127.0.0.1", request.full_url
             query = parse_qs(parsed.query)
@@ -11653,6 +11657,89 @@ def test_photo_reverse_geocode_provider_endpoint_policy_and_attribution() -> Non
                 else:
                     os.environ[key] = value
     print("ok reverse geocode provider endpoint policy and attribution")
+
+
+def test_photo_reverse_geocode_http_lookup_runs_outside_rpc_loop() -> None:
+    env_keys = [
+        "CROSSAGE_REVERSE_GEOCODE_ENDPOINT",
+        "CROSSAGE_REVERSE_GEOCODE_FIXTURE_JSON",
+        "CROSSAGE_REVERSE_GEOCODE_FOREGROUND_WAIT_MS",
+        "CROSSAGE_REVERSE_GEOCODE_PROVIDER",
+    ]
+    old_env = {key: os.environ.get(key) for key in env_keys}
+    original_urlopen = api_server_module.urlopen
+
+    class FakeReverseGeocodeResponse:
+        def __enter__(self) -> "FakeReverseGeocodeResponse":
+            return self
+
+        def __exit__(self, *_exc: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"label": "Worker Harbor"}).encode("utf-8")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        api.save_photo_library_settings({"localSettings": {"noNetworkIntelligence": False}})
+        entered = threading.Event()
+        release = threading.Event()
+        requests: list[tuple[Any, float]] = []
+
+        def slow_urlopen(request: Any, timeout: float = 0) -> FakeReverseGeocodeResponse:
+            requests.append((request, timeout))
+            entered.set()
+            if not release.wait(1.5):
+                raise AssertionError("test did not release reverse geocode worker")
+            return FakeReverseGeocodeResponse()
+
+        try:
+            for key in env_keys:
+                os.environ.pop(key, None)
+            os.environ["CROSSAGE_REVERSE_GEOCODE_ENDPOINT"] = "http://127.0.0.1:8765/reverse"
+            os.environ["CROSSAGE_REVERSE_GEOCODE_PROVIDER"] = "nominatim"
+            api_server_module.urlopen = slow_urlopen
+
+            started = monotonic()
+            pending = api.reverse_geocode_photo_location({"latitude": 36.974067, "longitude": -122.018078})
+            elapsed = monotonic() - started
+            assert elapsed < 0.5, elapsed
+            assert pending["ok"] is False, pending
+            assert pending["pending"] is True, pending
+            assert pending["reason"] == "lookup-pending", pending
+            assert pending["cached"] is False, pending
+            assert entered.wait(1.0), "worker did not start"
+            assert len(requests) == 1, requests
+
+            duplicate_pending = api.reverse_geocode_photo_location({"latitude": 36.974067, "longitude": -122.018078})
+            assert duplicate_pending["pending"] is True, duplicate_pending
+            assert len(requests) == 1, requests
+
+            release.set()
+            resolved: dict[str, Any] = {}
+            for _ in range(30):
+                resolved = api.reverse_geocode_photo_location({"latitude": 36.974067, "longitude": -122.018078})
+                if not resolved.get("pending"):
+                    break
+                sleep(0.05)
+            assert resolved["ok"] is True, resolved
+            assert resolved["label"] == "Worker Harbor", resolved
+            assert resolved["cached"] is False, resolved
+            assert len(requests) == 1, requests
+
+            cached = api.reverse_geocode_photo_location({"latitude": 36.974067, "longitude": -122.018078})
+            assert cached["ok"] is True, cached
+            assert cached["cached"] is True, cached
+            assert len(requests) == 1, requests
+        finally:
+            release.set()
+            api_server_module.urlopen = original_urlopen
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+    print("ok reverse geocode HTTP lookup runs outside RPC loop")
 
 
 def test_photo_places_infer_local_labels_for_nearby_gps_only_assets() -> None:
@@ -18993,6 +19080,7 @@ if __name__ == "__main__":
     test_photo_exif_metadata_feeds_asset_fields_and_places()
     test_photo_reverse_geocode_preview_apply_and_privacy_gate()
     test_photo_reverse_geocode_provider_endpoint_policy_and_attribution()
+    test_photo_reverse_geocode_http_lookup_runs_outside_rpc_loop()
     test_photo_places_infer_local_labels_for_nearby_gps_only_assets()
     test_photo_trips_group_date_ranges_and_location_movement()
     test_photo_memories_generate_local_collections()
