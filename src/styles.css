@@ -19262,6 +19262,19 @@ input[type="range"] {
 /* ── Toast-host (Wave 0 substrate) ─────────────────────────────────────────
    One global bottom-right stack of transient notices. Entrance composes from
    the motion tokens; reduced-motion is neutralised by the master block. */
+.toast-live-region {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .toast-host {
   position: fixed;
   right: 20px;

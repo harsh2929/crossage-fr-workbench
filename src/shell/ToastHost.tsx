@@ -3,7 +3,7 @@
 // useToast().notify({ tone, message }) with past-tense, count-bearing copy
 // ("Saved face photos added: 12."); the host handles stacking, auto-dismiss,
 // accessibility, and the toast-notice entrance (motion tokens, reduced-motion aware).
-import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { AlertCircle, AlertTriangle, Check, Loader2, X } from "lucide-react";
 import { createToast, toastReducer, type Toast, type ToastInput, type ToastTone } from "../lib/toast";
 
@@ -87,40 +87,66 @@ const TONE_ICON: Record<ToastTone, typeof Check> = {
 /** The visual overlay. Render once, near the app root, inside <ToastProvider>. */
 export function ToastHost() {
   const { toasts, dismiss } = useToast();
-  if (toasts.length === 0) return null;
+  const [politeAnnouncement, setPoliteAnnouncement] = useState("");
+  const [assertiveAnnouncement, setAssertiveAnnouncement] = useState("");
+  const announcedToastIdRef = useRef("");
+  const announcementTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestToast = toasts[toasts.length - 1] || null;
+
+  useEffect(() => {
+    if (!latestToast || latestToast.id === announcedToastIdRef.current) return;
+    if (announcementTimerRef.current) clearTimeout(announcementTimerRef.current);
+    announcementTimerRef.current = setTimeout(() => {
+      announcedToastIdRef.current = latestToast.id;
+      if (latestToast.tone === "error") {
+        setPoliteAnnouncement("");
+        setAssertiveAnnouncement(latestToast.message);
+      } else {
+        setAssertiveAnnouncement("");
+        setPoliteAnnouncement(latestToast.message);
+      }
+      announcementTimerRef.current = null;
+    }, 50);
+    return () => {
+      if (announcementTimerRef.current) {
+        clearTimeout(announcementTimerRef.current);
+        announcementTimerRef.current = null;
+      }
+    };
+  }, [latestToast?.id, latestToast?.message, latestToast?.tone]);
+
   return (
-    <div className="toast-host" role="region" aria-label="Notifications">
-      {toasts.map((toast) => {
-        const Icon = TONE_ICON[toast.tone];
-        const isError = toast.tone === "error";
-        return (
-          <div
-            key={toast.id}
-            className={`toast ${toast.tone}`}
-            role={isError ? "alert" : "status"}
-            aria-live={isError ? "assertive" : "polite"}
-            aria-atomic="true"
-          >
-            <Icon size={16} className={toast.tone === "busy" ? "spin" : undefined} aria-hidden="true" />
-            <span className="toast-message">{toast.message}</span>
-            {toast.actionLabel && toast.onAction && (
-              <button
-                type="button"
-                className="toast-action"
-                onClick={() => {
-                  toast.onAction?.();
-                  dismiss(toast.id);
-                }}
-              >
-                {toast.actionLabel}
-              </button>
-            )}
-            <button type="button" className="toast-dismiss" onClick={() => dismiss(toast.id)} aria-label="Dismiss notification">
-              <X size={14} aria-hidden="true" />
-            </button>
-          </div>
-        );
-      })}
-    </div>
+    <>
+      <div className="toast-live-region" role="status" aria-live="polite" aria-atomic="true">{politeAnnouncement}</div>
+      <div className="toast-live-region" role="alert" aria-live="assertive" aria-atomic="true">{assertiveAnnouncement}</div>
+      {toasts.length > 0 && (
+        <div className="toast-host" role="region" aria-label="Notifications">
+          {toasts.map((toast) => {
+            const Icon = TONE_ICON[toast.tone];
+            return (
+              <div key={toast.id} className={`toast ${toast.tone}`}>
+                <Icon size={16} className={toast.tone === "busy" ? "spin" : undefined} aria-hidden="true" />
+                <span className="toast-message">{toast.message}</span>
+                {toast.actionLabel && toast.onAction && (
+                  <button
+                    type="button"
+                    className="toast-action"
+                    onClick={() => {
+                      toast.onAction?.();
+                      dismiss(toast.id);
+                    }}
+                  >
+                    {toast.actionLabel}
+                  </button>
+                )}
+                <button type="button" className="toast-dismiss" onClick={() => dismiss(toast.id)} aria-label="Dismiss notification">
+                  <X size={14} aria-hidden="true" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </>
   );
 }

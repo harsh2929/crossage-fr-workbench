@@ -9,6 +9,8 @@ import esbuild from "esbuild";
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const outFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "toast-")), "toast.mjs");
+const toastHostSource = fs.readFileSync(path.join(ROOT, "src/shell/ToastHost.tsx"), "utf8");
+const stylesSource = fs.readFileSync(path.join(ROOT, "src/styles.css"), "utf8");
 esbuild.buildSync({
   entryPoints: [path.join(ROOT, "src/lib/toast.ts")],
   bundle: true,
@@ -80,6 +82,20 @@ run("clear empties the stack", () => {
   const a = mod.createToast({ tone: "ok", message: "A" }, 0, 1);
   const state = mod.toastReducer(mod.toastReducer([], { type: "push", toast: a }), { type: "clear" });
   assert.deepStrictEqual(state, []);
+});
+
+run("ToastHost announces through persistent offscreen live regions", () => {
+  assert.match(toastHostSource, /const \[politeAnnouncement, setPoliteAnnouncement\] = useState\(""\);/);
+  assert.match(toastHostSource, /const \[assertiveAnnouncement, setAssertiveAnnouncement\] = useState\(""\);/);
+  assert.match(toastHostSource, /className="toast-live-region" role="status" aria-live="polite" aria-atomic="true"/);
+  assert.match(toastHostSource, /className="toast-live-region" role="alert" aria-live="assertive" aria-atomic="true"/);
+  assert.match(toastHostSource, /setTimeout\(\(\) => \{[\s\S]*latestToast\.tone === "error"/);
+  const visualLoop = toastHostSource.match(/\{toasts\.map\(\(toast\) => \{[\s\S]*?\}\)\}/);
+  assert.ok(visualLoop, "visual toast map should exist");
+  assert.match(visualLoop[0], /<div key=\{toast\.id\} className=\{`toast \$\{toast\.tone\}`\}>/);
+  assert.doesNotMatch(visualLoop[0], /role=\{isError \? "alert" : "status"\}/);
+  assert.doesNotMatch(visualLoop[0], /aria-live=\{isError \? "assertive" : "polite"\}/);
+  assert.match(stylesSource, /\.toast-live-region \{[\s\S]*clip-path: inset\(50%\);/);
 });
 
 console.log("\nall toast tests passed");
