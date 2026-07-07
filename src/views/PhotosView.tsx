@@ -8338,23 +8338,34 @@ export function PhotosView(props: {
   }
 
   async function clearAlbumCover(folder: PhotoFolder) {
-    await savePhotoAlbum({
-      albumId: folder.albumId,
-      name: folder.name,
-      albumKind: folder.albumKind || "smart",
-      description: folder.description || "",
-      includePeople: folder.includePeople || [],
-      excludePeople: folder.excludePeople || [],
-      rules: folder.rules || {},
-      coverSourcePath: "",
-      folderId: folder.folderId || "",
-    });
-    await loadFolders();
+    if (props.busy || savingAlbum) return;
+    setSavingAlbum(true);
+    setAlbumError("");
+    try {
+      await savePhotoAlbum({
+        albumId: folder.albumId,
+        name: folder.name,
+        albumKind: folder.albumKind || "smart",
+        description: folder.description || "",
+        includePeople: folder.includePeople || [],
+        excludePeople: folder.excludePeople || [],
+        rules: folder.rules || {},
+        coverSourcePath: "",
+        folderId: folder.folderId || "",
+      });
+      await loadFolders();
+      notifyToast({ tone: "ok", message: uiText("Album cover cleared.") });
+    } catch (error) {
+      setAlbumError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSavingAlbum(false);
+    }
   }
 
   async function setAlbumCover(item: PhotoItem) {
-    if (!activeAlbum) return;
+    if (!activeAlbum || props.busy || savingAlbum) return;
     setSavingAlbum(true);
+    setAlbumError("");
     try {
       await savePhotoAlbum({
         albumId: activeAlbum.albumId,
@@ -8369,6 +8380,8 @@ export function PhotosView(props: {
       });
       await loadFolders();
       notifyToast({ tone: "ok", message: uiText("Album cover updated.") });
+    } catch (error) {
+      setAlbumError(error instanceof Error ? error.message : String(error));
     } finally {
       setSavingAlbum(false);
     }
@@ -11186,7 +11199,11 @@ export function PhotosView(props: {
   }
 
   async function saveSuggestion(suggestion: PhotoAlbumSuggestion) {
+    const suggestionKey = suggestion.id || suggestion.name;
+    if (props.busy || savingAlbum) return;
     setSavingAlbum(true);
+    setSavingSuggestionId(suggestionKey);
+    setAlbumError("");
     try {
       const result = await savePhotoAlbum({
         name: suggestion.name,
@@ -11201,8 +11218,12 @@ export function PhotosView(props: {
       await loadFolders();
       await loadSuggestions();
       if (value.albumId) setActiveId(`album:${String(value.albumId)}`);
+      notifyToast({ tone: "ok", message: `${uiText("Created album")} "${suggestion.name}".` });
+    } catch (error) {
+      setAlbumError(error instanceof Error ? error.message : String(error));
     } finally {
       setSavingAlbum(false);
+      setSavingSuggestionId((current) => (current === suggestionKey ? "" : current));
     }
   }
 
@@ -19454,15 +19475,7 @@ export function PhotosView(props: {
                   <button
                     type="button"
                     className="secondary compact-action"
-                    onClick={async () => {
-                      const key = suggestion.id || suggestion.name;
-                      setSavingSuggestionId(key);
-                      try {
-                        await saveSuggestion(suggestion);
-                      } finally {
-                        setSavingSuggestionId("");
-                      }
-                    }}
+                    onClick={() => void saveSuggestion(suggestion)}
                     disabled={props.busy || savingAlbum || savingSuggestionId === (suggestion.id || suggestion.name)}
                   >
                     <Images size={14} />
@@ -31085,7 +31098,7 @@ export function PhotosView(props: {
                   type="button"
                   className="secondary compact-action"
                   onClick={() => void setAlbumCover(lightItem)}
-                  disabled={savingAlbum}
+                  disabled={props.busy || savingAlbum}
                 >
                   <Check size={16} />
                   <span>{uiText("Use as cover")}</span>

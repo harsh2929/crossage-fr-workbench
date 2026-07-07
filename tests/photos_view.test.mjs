@@ -6368,6 +6368,33 @@ run("Photos date bucket changes do not double-fetch stale grid pages", () => {
   assert.match(dependencies[1], /activeDateBucketScopeSignature/);
 });
 
+run("Photos album cover and suggestion saves surface failures", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  const clearCoverBlock = source.match(/async function clearAlbumCover\(folder: PhotoFolder\) \{[\s\S]*?\n  \}\n\n  async function setAlbumCover/);
+  assert.ok(clearCoverBlock, "clearAlbumCover should exist");
+  assert.match(clearCoverBlock[0], /if \(props\.busy \|\| savingAlbum\) return;/);
+  assert.match(clearCoverBlock[0], /setAlbumError\(""\);/);
+  assert.match(clearCoverBlock[0], /catch \(error\) \{\s*setAlbumError/);
+  assert.match(clearCoverBlock[0], /finally \{\s*setSavingAlbum\(false\);/);
+
+  const setCoverBlock = source.match(/async function setAlbumCover\(item: PhotoItem\) \{[\s\S]*?\n  \}\n\n  async function savePersonProfilePatch/);
+  assert.ok(setCoverBlock, "setAlbumCover should exist");
+  assert.match(setCoverBlock[0], /if \(!activeAlbum \|\| props\.busy \|\| savingAlbum\) return;/);
+  assert.match(setCoverBlock[0], /setAlbumError\(""\);/);
+  assert.match(setCoverBlock[0], /catch \(error\) \{\s*setAlbumError/);
+  assert.match(setCoverBlock[0], /finally \{\s*setSavingAlbum\(false\);/);
+
+  const suggestionBlock = source.match(/async function saveSuggestion\(suggestion: PhotoAlbumSuggestion\) \{[\s\S]*?\n  \}\n\n  async function saveActiveSearchAsSmartAlbum/);
+  assert.ok(suggestionBlock, "saveSuggestion should exist");
+  assert.match(suggestionBlock[0], /setSavingSuggestionId\(suggestionKey\);/);
+  assert.match(suggestionBlock[0], /setAlbumError\(""\);/);
+  assert.match(suggestionBlock[0], /catch \(error\) \{\s*setAlbumError/);
+  assert.match(suggestionBlock[0], /setSavingSuggestionId\(\(current\) => \(current === suggestionKey \? "" : current\)\);/);
+  assert.doesNotMatch(source, /setSavingSuggestionId\(key\);[\s\S]*?await saveSuggestion\(suggestion\);[\s\S]*?setSavingSuggestionId\(""\);/);
+  assert.match(source, /onClick=\{\(\) => void saveSuggestion\(suggestion\)\}/);
+  assert.match(source, /disabled=\{props\.busy \|\| savingAlbum\}/);
+});
+
 run("Photos lightbox viewed events patch recent rail without reloading folders", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
   assert.match(source, /const patchRecentActivityFolder = useCallback/);
