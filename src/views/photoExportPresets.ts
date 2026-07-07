@@ -1010,7 +1010,14 @@ export function upsertPhotoExportPreset(
   if (!name) return normalizePhotoExportPresetList(presets);
   const now = cleanText(draft.now, new Date().toISOString());
   const requestedId = cleanId(draft.id);
-  const existing = presets.find((preset) => preset.id === requestedId || preset.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+  const normalizedPresets = normalizePhotoExportPresetList(presets);
+  const nameKey = name.toLocaleLowerCase();
+  const existingById = requestedId ? normalizedPresets.find((preset) => preset.id === requestedId) : undefined;
+  const existingByName = normalizedPresets.find((preset) => preset.name.toLocaleLowerCase() === nameKey);
+  if (existingById && existingByName && existingByName.id !== existingById.id) {
+    return normalizedPresets;
+  }
+  const existing = existingById || existingByName;
   const next: PhotoExportPreset = {
     id: requestedId || existing?.id || `export-preset:${now.replace(/[^0-9]+/g, "").slice(0, 14)}:${name.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
     name,
@@ -1018,7 +1025,13 @@ export function upsertPhotoExportPreset(
     updatedAt: now,
     settings: normalizePhotoExportPresetSettings(draft.settings),
   };
-  return normalizePhotoExportPresetList([next, ...presets.filter((preset) => preset.id !== next.id && preset.name.toLocaleLowerCase() !== name.toLocaleLowerCase())]);
+  return normalizePhotoExportPresetList([
+    next,
+    ...normalizedPresets.filter((preset) => (
+      preset.id !== next.id
+      && (!existingByName || existingById || preset.name.toLocaleLowerCase() !== nameKey)
+    )),
+  ]);
 }
 
 export function deletePhotoExportPreset(presets: PhotoExportPreset[], presetId: string): PhotoExportPreset[] {

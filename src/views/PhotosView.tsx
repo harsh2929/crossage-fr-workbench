@@ -17511,7 +17511,7 @@ export function PhotosView(props: {
       const saved = normalizePhotoSlideshowProject(result.value) || upsertPhotoSlideshowProject(photoSlideshowProjects, draft)[0];
       const next = commitPhotoSlideshowProjects([
         saved,
-        ...photoSlideshowProjects.filter((project) => project.id !== saved.id && project.name.toLocaleLowerCase() !== saved.name.toLocaleLowerCase()),
+        ...photoSlideshowProjects.filter((project) => project.id !== saved.id),
       ]);
       applyPhotoSlideshowProject(next.find((project) => project.id === saved.id) || saved);
     } catch (error) {

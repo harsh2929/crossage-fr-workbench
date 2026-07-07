@@ -25,6 +25,7 @@ export type PhotoSlideshowCaptionWrap = "auto" | "single-line" | "two-line" | "m
 export type PhotoSlideshowTitleCardLayout = "center" | "lower-third" | "left";
 export type PhotoSlideshowTitleCardFontScale = "compact" | "regular" | "large";
 export const PHOTO_SLIDESHOW_CAPTION_LIMIT = 8;
+export const PHOTO_SLIDESHOW_PROJECT_LIMIT = 30;
 
 export interface PhotoSlideshowCaptionRegion {
   x: number;
@@ -1138,7 +1139,7 @@ export function normalizePhotoSlideshowProject(value: unknown): PhotoSlideshowPr
   };
 }
 
-export function normalizePhotoSlideshowProjectList(values: unknown, limit = 30): PhotoSlideshowProject[] {
+export function normalizePhotoSlideshowProjectList(values: unknown, limit = Number.POSITIVE_INFINITY): PhotoSlideshowProject[] {
   const parsed = Array.isArray(values) ? values : [];
   const seen = new Set<string>();
   const projects: PhotoSlideshowProject[] = [];
@@ -1264,7 +1265,17 @@ export function upsertPhotoSlideshowProject(
   if (!name || !sourcePaths.length) return normalizePhotoSlideshowProjectList(projects);
   const now = cleanText(draft.now, new Date().toISOString());
   const requestedId = cleanId(draft.id);
-  const existing = projects.find((project) => project.id === requestedId || project.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+  const normalizedProjects = normalizePhotoSlideshowProjectList(projects);
+  const nameKey = name.toLocaleLowerCase();
+  const existingById = requestedId ? normalizedProjects.find((project) => project.id === requestedId) : undefined;
+  const existingByName = normalizedProjects.find((project) => project.name.toLocaleLowerCase() === nameKey);
+  if (existingById && existingByName && existingByName.id !== existingById.id) {
+    return normalizedProjects;
+  }
+  const existing = existingById || existingByName;
+  if (!existing && normalizedProjects.length >= PHOTO_SLIDESHOW_PROJECT_LIMIT) {
+    return normalizedProjects;
+  }
   const next = normalizePhotoSlideshowProject({
     id: requestedId || existing?.id || `slideshow:${now.replace(/[^0-9]+/g, "").slice(0, 14)}:${name.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
     name,
@@ -1308,10 +1319,13 @@ export function upsertPhotoSlideshowProject(
     createdAt: existing?.createdAt || now,
     updatedAt: now,
   });
-  if (!next) return normalizePhotoSlideshowProjectList(projects);
+  if (!next) return normalizedProjects;
   return normalizePhotoSlideshowProjectList([
     next,
-    ...projects.filter((project) => project.id !== next.id && project.name.toLocaleLowerCase() !== name.toLocaleLowerCase()),
+    ...normalizedProjects.filter((project) => (
+      project.id !== next.id
+      && (!existingByName || existingById || project.name.toLocaleLowerCase() !== nameKey)
+    )),
   ]);
 }
 

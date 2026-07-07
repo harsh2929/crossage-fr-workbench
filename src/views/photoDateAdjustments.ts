@@ -16,18 +16,22 @@ export function shiftPhotoDateByDays(value: unknown, offsetDays: unknown): strin
   const raw = String(value || "").trim();
   const days = parsePhotoDateOffsetDays(offsetDays);
   if (!raw || !days || !/^\d{4}-\d{2}-\d{2}([T ].*)?$/.test(raw)) return "";
-  const dateOnly = raw.length <= 10;
-  const parsed = new Date(dateOnly ? `${raw}T00:00:00Z` : normalizeIsoLikeDate(raw));
-  if (!Number.isFinite(parsed.getTime())) return "";
-  const shifted = new Date(parsed.getTime() + days * MS_PER_DAY);
-  const iso = shifted.toISOString();
-  return dateOnly ? iso.slice(0, 10) : iso;
+  const match = raw.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2})(?::(\d{2})(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?)?$/i);
+  if (!match) return "";
+  const shiftedDate = shiftPhotoDateText(match[1], days);
+  if (!shiftedDate) return "";
+  if (!match[2]) return shiftedDate;
+  const seconds = match[3] || "00";
+  const fraction = match[4] || "";
+  const zone = normalizePhotoTimezoneOffset(match[5] || "");
+  return `${shiftedDate}T${match[2]}:${seconds}${fraction}${zone}`;
 }
 
-function normalizeIsoLikeDate(value: string): string {
-  const normalized = value.replace(" ", "T");
-  if (/[zZ]$/.test(normalized) || /[+-]\d{2}:?\d{2}$/.test(normalized)) return normalized;
-  return `${normalized}Z`;
+function shiftPhotoDateText(date: string, days: number): string {
+  const parsed = new Date(`${date}T00:00:00Z`);
+  if (!Number.isFinite(parsed.getTime())) return "";
+  const shifted = new Date(parsed.getTime() + days * MS_PER_DAY);
+  return shifted.toISOString().slice(0, 10);
 }
 
 export function splitPhotoDateTimeOverride(value: unknown): PhotoDateTimeDraft {

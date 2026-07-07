@@ -1049,6 +1049,21 @@ run("photo export presets upsert by name and delete by id", () => {
   assert.strictEqual(updated[0].id, first[0].id);
   assert.strictEqual(updated[0].settings.includeXmp, true);
   assert.strictEqual(updated[0].settings.layout, "flat");
+  const withSecond = exportPresetsMod.upsertPhotoExportPreset(updated, {
+    name: "Web",
+    settings: firstSettings,
+    now: "2026-06-21T02:00:00.000Z",
+  });
+  assert.strictEqual(withSecond.length, 2);
+  const collision = exportPresetsMod.upsertPhotoExportPreset(withSecond, {
+    id: updated[0].id,
+    name: "Web",
+    settings: firstSettings,
+    now: "2026-06-21T03:00:00.000Z",
+  });
+  assert.strictEqual(collision.length, 2);
+  assert.strictEqual(collision.find((preset) => preset.id === updated[0].id)?.name, "archive");
+  assert.strictEqual(collision.find((preset) => preset.name === "Web")?.settings.includeMetadata, true);
   assert.deepStrictEqual(exportPresetsMod.deletePhotoExportPreset(updated, updated[0].id), []);
 });
 
@@ -5369,9 +5384,10 @@ run("photo date adjustments shift date-only values by whole days", () => {
   assert.strictEqual(dateAdjustmentsMod.shiftPhotoDateByDays("2026-01-01", -1), "2025-12-31");
 });
 
-run("photo date adjustments preserve ISO-like times as UTC output", () => {
-  assert.strictEqual(dateAdjustmentsMod.shiftPhotoDateByDays("2026-06-20T09:30:00Z", -2), "2026-06-18T09:30:00.000Z");
-  assert.strictEqual(dateAdjustmentsMod.shiftPhotoDateByDays("2026-06-20 09:30:00", 1), "2026-06-21T09:30:00.000Z");
+run("photo date adjustments preserve ISO-like wall time and timezone", () => {
+  assert.strictEqual(dateAdjustmentsMod.shiftPhotoDateByDays("2026-06-20T09:30:00Z", -2), "2026-06-18T09:30:00Z");
+  assert.strictEqual(dateAdjustmentsMod.shiftPhotoDateByDays("2026-06-20 09:30:00", 1), "2026-06-21T09:30:00");
+  assert.strictEqual(dateAdjustmentsMod.shiftPhotoDateByDays("2024-05-01T01:00:00+05:30", 1), "2024-05-02T01:00:00+05:30");
 });
 
 run("photo date adjustment inputs clamp and reject invalid dates", () => {
@@ -6050,7 +6066,42 @@ run("photo slideshow projects upsert by name and delete by id", () => {
   assert.strictEqual(updated[0].transitionEffect, "cut");
   assert.strictEqual(updated[0].transitionDurationMs, 0);
   assert.deepStrictEqual(updated[0].timelineItems, [{ sourcePath: "/c.jpg", durationMs: 8750, motion: "slow-zoom" }]);
+  const withSecond = slideshowProjectsMod.upsertPhotoSlideshowProject(updated, {
+    name: "Trip show",
+    sourcePaths: ["/d.jpg"],
+    now: "2026-06-24T02:00:00.000Z",
+  });
+  assert.strictEqual(withSecond.length, 2);
+  const collision = slideshowProjectsMod.upsertPhotoSlideshowProject(withSecond, {
+    id: updated[0].id,
+    name: "Trip show",
+    sourcePaths: ["/e.jpg"],
+    now: "2026-06-24T03:00:00.000Z",
+  });
+  assert.strictEqual(collision.length, 2);
+  assert.strictEqual(collision.find((project) => project.id === updated[0].id)?.name, "favorites show");
+  assert.deepStrictEqual(collision.find((project) => project.name === "Trip show")?.sourcePaths, ["/d.jpg"]);
   assert.strictEqual(slideshowProjectsMod.deletePhotoSlideshowProject(updated, updated[0].id).length, 0);
+});
+
+run("photo slideshow project cap preserves existing projects and blocks overflow saves", () => {
+  const rawProjects = Array.from({ length: slideshowProjectsMod.PHOTO_SLIDESHOW_PROJECT_LIMIT + 1 }, (_, index) => ({
+    id: `slideshow:existing-${index}`,
+    name: `Existing ${index}`,
+    sourcePaths: [`/${index}.jpg`],
+    updatedAt: `2026-06-${String((index % 28) + 1).padStart(2, "0")}T00:00:00.000Z`,
+  }));
+  const preserved = slideshowProjectsMod.normalizePhotoSlideshowProjectList(rawProjects);
+  assert.strictEqual(preserved.length, slideshowProjectsMod.PHOTO_SLIDESHOW_PROJECT_LIMIT + 1);
+  const capped = slideshowProjectsMod.normalizePhotoSlideshowProjectList(rawProjects, slideshowProjectsMod.PHOTO_SLIDESHOW_PROJECT_LIMIT);
+  assert.strictEqual(capped.length, slideshowProjectsMod.PHOTO_SLIDESHOW_PROJECT_LIMIT);
+  const overflow = slideshowProjectsMod.upsertPhotoSlideshowProject(capped, {
+    name: "Overflow show",
+    sourcePaths: ["/overflow.jpg"],
+    now: "2026-06-30T00:00:00.000Z",
+  });
+  assert.strictEqual(overflow.length, slideshowProjectsMod.PHOTO_SLIDESHOW_PROJECT_LIMIT);
+  assert.strictEqual(overflow.some((project) => project.name === "Overflow show"), false);
 });
 
 run("photo slideshow theme templates normalize upsert and delete", () => {
