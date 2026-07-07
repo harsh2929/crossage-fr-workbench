@@ -271,7 +271,7 @@ import { formatPhotoLocationCoordinate, photoLocationFromClientPoint, photoLocat
 import { buildPhotoPlaceMapClusters, buildPhotoPlaceMapDensityCells, buildPhotoPlaceMapPoints, buildPhotoPlaceMapRadiusOverlay, nearbyPhotoPlaces, nearbyPhotoPlacesWithinRadius, parsePhotoPlaceCoordinate } from "./photoPlacesMap";
 import { photoPeopleMatchCorrectionCandidateIds } from "./photoPeopleMatchSelection";
 import { buildPhotoQrActions, buildPhotoQrRegions, type PhotoQrAction, type PhotoQrRegion } from "./photoQrActions";
-import { buildPhotoRailSections, filterPhotoRailFolders, isSensitivePhotoScope, movePhotoRailItem, movePhotoRailItemToPosition, moveVisiblePhotoRailSection, moveVisiblePhotoRailSectionToPosition, normalizePhotoRailSectionOrder, photoRailAlbumTreeDepth, photoRailSectionSupportsItemOrder, planPhotoRailAlbumTreeDrop, type PhotoRailAlbumTreeDropPlacement, type PhotoRailItemOrder, type PhotoRailSectionId } from "./photoRailVisibility";
+import { buildPhotoRailAlbumTreeDepthMap, buildPhotoRailSections, filterPhotoRailFolders, isSensitivePhotoScope, movePhotoRailItem, movePhotoRailItemToPosition, moveVisiblePhotoRailSection, moveVisiblePhotoRailSectionToPosition, normalizePhotoRailSectionOrder, photoRailSectionSupportsItemOrder, planPhotoRailAlbumTreeDrop, type PhotoRailAlbumTreeDropPlacement, type PhotoRailItemOrder, type PhotoRailSectionId } from "./photoRailVisibility";
 import { containRenderRect, clampUnitBox, toUnitBox, formatDetectionLabel } from "./safetyOverlay";
 import { initialSensitiveUnlocked, sensitiveSessionLockTimeoutMs, shouldRelockOnLeave, sensitiveUnlockRequirements } from "./sensitiveCollections";
 import { buildPhotoConsolidationHistoryRows, buildPhotoRepairIssues, photoRepairHistoryEventDetails, photoRepairIssueActionLabel, type PhotoConsolidationHistoryRow, type PhotoRepairIssue } from "./photoRepairCenter";
@@ -21816,6 +21816,7 @@ export function PhotosView(props: {
             const sectionOrderIndex = visibleRailSectionOrder.indexOf(section.id);
             const canMoveSection = section.id !== "pinned" && sectionOrderIndex >= 0;
             const sectionDropActive = railSectionDrag?.targetId === section.id && railSectionDrag.valid;
+            const albumTreeDepths = section.id === "albums" ? buildPhotoRailAlbumTreeDepthMap(section.folders) : null;
             const sectionClass = [
               "photo-rail-section",
               railSectionDrag?.draggedId === section.id ? "dragging" : "",
@@ -21917,7 +21918,7 @@ export function PhotosView(props: {
                       if (albumAncestors.some((folderId) => effectiveCollapsedAlbumFolders.has(folderId))) return null;
                       const albumFolderCollapsed = Boolean(albumFolderId && effectiveCollapsedAlbumFolders.has(albumFolderId));
                       const albumFolderHasChildren = Boolean(albumFolderId && section.folders.some((item) => albumTreeParentId(item) === albumFolderId));
-                      const railDepth = section.id === "albums" ? photoRailAlbumTreeDepth(folder, section.folders) : 0;
+                      const railDepth = albumTreeDepths?.get(folder.id) || 0;
                       const railItemOrderIndex = section.folders.findIndex((item) => item.id === folder.id);
                       const namedPeopleFolders = section.id === "people" ? section.folders.filter((item) => item.kind === "person") : [];
                       const savedGroupFolders = section.id === "people" ? section.folders.filter((item) => savedPeopleGroupId(item)) : [];

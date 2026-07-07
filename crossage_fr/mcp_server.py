@@ -643,6 +643,7 @@ def analyze_folder(folder: str) -> dict[str, Any]:
 @safe_tool()
 def probe_video_file(path: str) -> dict[str, Any]:
     """Probe one video file for decoder support, dimensions, frame count, and duration."""
+    _require_mcp_consent()
     resolved = _assert_allowed_path(path)
     extension_ok = resolved.suffix.lower() in VIDEO_EXTENSIONS
     if not extension_ok:

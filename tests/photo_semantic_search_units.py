@@ -212,9 +212,44 @@ def test_semantic_search_indexes_full_library_without_candidate_cap() -> None:
         se.encode_image_path_cached = orig_image  # type: ignore[assignment]
 
 
+def test_siglip_text_queries_are_truncated_to_model_limit() -> None:
+    long_ids = list(range(se._TEXT_MAX_TOKENS + 37))
+    seen: dict[str, object] = {}
+
+    class Encoded:
+        ids = long_ids
+
+    class FakeTokenizer:
+        def encode(self, text: str) -> Encoded:
+            seen["text"] = text
+            return Encoded()
+
+    class FakeTextSession:
+        def run(self, _outputs: list[str], feed: dict[str, np.ndarray]) -> list[np.ndarray]:
+            ids = feed["input_ids"]
+            seen["shape"] = ids.shape
+            seen["ids"] = ids[0].tolist()
+            if ids.shape[1] > se._TEXT_MAX_TOKENS:
+                raise AssertionError("long SigLIP text query reached ONNX unbounded")
+            return [np.asarray([[3.0, 4.0]], dtype=np.float32)]
+
+    model = se._SemanticModel.__new__(se._SemanticModel)
+    model.tokenizer = FakeTokenizer()
+    model.text = FakeTextSession()
+    model._text_in = "input_ids"
+    model._text_out = "pooler_output"
+
+    vec = model.encode_text("  Mixed CASE long query  ")
+    assert seen["text"] == "mixed case long query"
+    assert seen["shape"] == (1, se._TEXT_MAX_TOKENS), seen
+    assert seen["ids"] == list(range(se._TEXT_MAX_TOKENS)), seen
+    assert np.allclose(vec, np.asarray([0.6, 0.8], dtype=np.float32)), vec
+
+
 if __name__ == "__main__":
     test_semantic_search_unavailable_without_model_offline()
     test_semantic_search_aligns_text_and_image_offline()
     test_semantic_search_command_ranks_library_offline()
     test_semantic_search_indexes_full_library_without_candidate_cap()
+    test_siglip_text_queries_are_truncated_to_model_limit()
     print("all photo_semantic_search_units tests passed")

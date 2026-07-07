@@ -4479,6 +4479,17 @@ run("buildPhotoRailSections nests album folders and contained smart albums", () 
   assert.deepStrictEqual(smartSection.folders.map((folder) => folder.id), ["album:loose-smart"]);
   assert.strictEqual(railMod.photoRailAlbumTreeDepth(folders[3], albumsSection.folders), 1);
   assert.strictEqual(railMod.photoRailAlbumTreeDepth(folders[6], albumsSection.folders), 2);
+  const depthMap = railMod.buildPhotoRailAlbumTreeDepthMap(albumsSection.folders);
+  assert.deepStrictEqual(
+    albumsSection.folders.map((folder) => [folder.id, depthMap.get(folder.id)]),
+    [
+      ["albumFolder:f1", 0],
+      ["albumFolder:f2", 1],
+      ["album:child-manual", 2],
+      ["album:folder-smart", 1],
+      ["album:manual-root", 0],
+    ],
+  );
 });
 
 run("planPhotoRailAlbumTreeDrop supports inside and sibling moves without cycles", () => {

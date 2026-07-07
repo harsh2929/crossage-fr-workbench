@@ -260,13 +260,16 @@ export function buildPhotoRailSections<T extends PhotoRailFolderLike>(
   return pinnedFolders.length ? [{ id: "pinned", folders: pinnedFolders }, ...sections] : sections;
 }
 
-export function photoRailAlbumTreeDepth(folder: PhotoRailFolderLike, folders: PhotoRailFolderLike[]): number {
-  if (folder.kind === "album" && !folder.folderId) return 0;
-  const byFolderId = new Map(
+function photoRailAlbumFolderMap(folders: PhotoRailFolderLike[]): Map<string, PhotoRailFolderLike> {
+  return new Map(
     folders
       .filter((item) => item.kind === "albumFolder")
       .map((item) => [String(item.folderId || item.id.replace(/^albumFolder:/, "")), item])
   );
+}
+
+function photoRailAlbumTreeDepthFromMap(folder: PhotoRailFolderLike, byFolderId: Map<string, PhotoRailFolderLike>): number {
+  if (folder.kind === "album" && !folder.folderId) return 0;
   let depth = folder.kind === "album" && folder.folderId ? 1 : 0;
   let parentId = folder.kind === "album" ? String(folder.folderId || "") : String(folder.parentFolderId || "");
   const seen = new Set<string>();
@@ -278,6 +281,15 @@ export function photoRailAlbumTreeDepth(folder: PhotoRailFolderLike, folders: Ph
     parentId = String(parent.parentFolderId || "");
   }
   return Math.max(0, Math.min(depth, 5));
+}
+
+export function buildPhotoRailAlbumTreeDepthMap(folders: PhotoRailFolderLike[]): Map<string, number> {
+  const byFolderId = photoRailAlbumFolderMap(folders);
+  return new Map(folders.map((folder) => [folder.id, photoRailAlbumTreeDepthFromMap(folder, byFolderId)]));
+}
+
+export function photoRailAlbumTreeDepth(folder: PhotoRailFolderLike, folders: PhotoRailFolderLike[]): number {
+  return photoRailAlbumTreeDepthFromMap(folder, photoRailAlbumFolderMap(folders));
 }
 
 export function photoRailAlbumFolderKey(folder: PhotoRailFolderLike): string {

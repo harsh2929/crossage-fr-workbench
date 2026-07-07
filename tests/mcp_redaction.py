@@ -9,6 +9,8 @@ Phase-1/3 residual fixes (Wave 1):
 - MCP-04 basename leak: path redaction must mask absolute paths AND media
   filenames embedded *inside* free-text fields (error/audit messages), not only
   strings that start with a path separator.
+- MCP video probing must require consent before path probing or decoder work,
+  matching the image assessment tool.
 
 Run: PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/mcp_redaction.py
 """
@@ -143,6 +145,41 @@ def test_scan_tools_are_async_and_report_progress_from_worker_thread() -> None:
     assert LEAK_NAME not in str(events)
 
 
+def test_probe_video_requires_consent_before_path_or_decoder_work() -> None:
+    original_api = mcp._api
+    original_assert_allowed_path = mcp._assert_allowed_path
+    original_probe_video = mcp.probe_video
+
+    class FakeApi:
+        consent_on_file = False
+
+    def fail_path_check(_path: str) -> Path:
+        raise AssertionError("path was checked before consent")
+
+    def fail_probe_video(_path: Path) -> dict:
+        raise AssertionError("video decoder ran before consent")
+
+    mcp._api = lambda: FakeApi()  # type: ignore[assignment]
+    mcp._assert_allowed_path = fail_path_check  # type: ignore[assignment]
+    mcp.probe_video = fail_probe_video  # type: ignore[assignment]
+    try:
+        async def exercise() -> None:
+            await mcp.probe_video_file("/private/family-trip.mov")
+
+        try:
+            anyio.run(exercise)
+            raise AssertionError("probe_video_file should require consent")
+        except ValueError as exc:
+            message = str(exc)
+            assert "Consent is required" in message, message
+            assert "path was checked" not in message, message
+            assert "video decoder ran" not in message, message
+    finally:
+        mcp._api = original_api  # type: ignore[assignment]
+        mcp._assert_allowed_path = original_assert_allowed_path  # type: ignore[assignment]
+        mcp.probe_video = original_probe_video  # type: ignore[assignment]
+
+
 def test_rate_limiter_token_bucket() -> None:
     # Burst of 3, refilling 1 token/sec, with a deterministic injected clock.
     limiter = mcp._RateLimiter(capacity=3, refill_per_sec=1.0)
@@ -169,6 +206,7 @@ def main() -> None:
     test_exception_text_redacted_before_mcp_framework_sees_it()
     test_safe_tool_redacts_exceptions_at_the_central_wrapper()
     test_scan_tools_are_async_and_report_progress_from_worker_thread()
+    test_probe_video_requires_consent_before_path_or_decoder_work()
     test_rate_limiter_token_bucket()
     print("mcp redaction + model integrity ok")
 
