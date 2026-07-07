@@ -5553,13 +5553,22 @@ def assert_candidate_media_actions() -> None:
     assert guarded["value"]["items"][0]["reason"] == "source_is_also_a_saved_person_photo"
     assert reference_source.exists()
     assert "cand_ref_guard" in api.project.candidates
-    history = api.handle("media_action_history", {"limit": 10})
-    assert history["items"]
-    assert any(item["canRestore"] for item in history["items"])
-    guarded_history = next(item for item in history["items"] if item["manifestPath"] == guarded["value"]["manifestPath"])
-    assert guarded_history["canRetry"] is True
-    retried = api.handle("retry_media_action", {"manifestPath": guarded["value"]["manifestPath"]})
-    assert retried["value"]["counts"]["skipped"] == 1
+    original_read_audit_rows = api.project._read_audit_rows
+
+    def fail_full_audit_read() -> list[dict[str, object]]:
+        raise AssertionError("media action history should tail recent audit rows, not parse the full audit log")
+
+    api.project._read_audit_rows = fail_full_audit_read  # type: ignore[method-assign]
+    try:
+        history = api.handle("media_action_history", {"limit": 10})
+        assert history["items"]
+        assert any(item["canRestore"] for item in history["items"])
+        guarded_history = next(item for item in history["items"] if item["manifestPath"] == guarded["value"]["manifestPath"])
+        assert guarded_history["canRetry"] is True
+        retried = api.handle("retry_media_action", {"manifestPath": guarded["value"]["manifestPath"]})
+        assert retried["value"]["counts"]["skipped"] == 1
+    finally:
+        api.project._read_audit_rows = original_read_audit_rows  # type: ignore[method-assign]
 
     cancel_a = media / "cancel-a.jpg"
     cancel_b = media / "cancel-b.jpg"

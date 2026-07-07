@@ -5306,7 +5306,7 @@ class ProjectState:
         limit = max(1, min(100, int(limit)))
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
-        for event in reversed(self._read_audit_rows()):
+        for event in self._iter_audit_rows_reverse():
             if event.get("action") != "manage_candidate_media":
                 continue
             manifest_value = str(event.get("manifest_path", "")).strip()
@@ -5350,6 +5350,38 @@ class ProjectState:
             if len(rows) >= limit:
                 break
         return {"items": rows, "total": len(rows)}
+
+    def _iter_audit_rows_reverse(self, chunk_size: int = 65536) -> Iterable[dict[str, Any]]:
+        if not self.audit_path.exists():
+            return
+        try:
+            with self.audit_path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                position = handle.tell()
+                pending = b""
+                while position > 0:
+                    read_size = min(max(1024, int(chunk_size)), position)
+                    position -= read_size
+                    handle.seek(position)
+                    chunk = handle.read(read_size)
+                    lines = (chunk + pending).splitlines()
+                    if position > 0:
+                        pending = lines[0] if lines else chunk + pending
+                        lines = lines[1:]
+                    else:
+                        pending = b""
+                    for raw in reversed(lines):
+                        stripped = raw.strip()
+                        if not stripped:
+                            continue
+                        try:
+                            value = json.loads(stripped.decode("utf-8"))
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            continue
+                        if isinstance(value, dict):
+                            yield value
+        except OSError:
+            return
 
     def restore_media_action(self, manifest_path: Path) -> dict[str, Any]:
         manifest = self._read_media_action_manifest(manifest_path)
