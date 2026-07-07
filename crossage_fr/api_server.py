@@ -50,6 +50,17 @@ from crossage_fr.workspace_registry import resolve_workspace, write_active_works
 from crossage_fr.benchmarks.public_dataset import PublicDatasetBenchmarkMixin
 
 
+SQLITE_IN_CLAUSE_CHUNK_SIZE = 800
+
+
+def _sqlite_in_chunks(values: list[str]) -> Iterable[list[str]]:
+    chunk_size = max(1, int(SQLITE_IN_CLAUSE_CHUNK_SIZE))
+    for start in range(0, len(values), chunk_size):
+        chunk = values[start:start + chunk_size]
+        if chunk:
+            yield chunk
+
+
 try:
     VERIFY_CANDIDATE_BATCH_LIMIT = max(25, int(os.environ.get("CROSSAGE_VERIFY_CANDIDATE_BATCH_LIMIT", "500")))
 except ValueError:
@@ -9997,15 +10008,15 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 def count_scoped_asset_rows(table_name: str) -> int:
                     if not scoped_ids:
                         return 0
-                    placeholders = ",".join("?" for _ in scoped_ids)
-                    try:
+                    total_rows = 0
+                    for chunk in _sqlite_in_chunks(scoped_ids):
+                        placeholders = ",".join("?" for _ in chunk)
                         row = conn.execute(
                             f"SELECT COUNT(*) AS n FROM {table_name} WHERE asset_id IN ({placeholders})",
-                            scoped_ids,
+                            tuple(chunk),
                         ).fetchone()
-                    except sqlite3.OperationalError:
-                        return 0
-                    return int(row["n"] if row else 0)
+                        total_rows += int(row["n"] if row else 0)
+                    return total_rows
 
                 counts["metadataRows"] = count_scoped_asset_rows("photo_asset_metadata")
                 counts["keywordAssignments"] = count_scoped_asset_rows("photo_asset_keywords")
@@ -10543,37 +10554,74 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             orphan_scope_args: list[Any] = []
             if library_root_filter:
                 if scoped_asset_ids:
-                    placeholders = ",".join("?" for _ in scoped_asset_ids)
-                    orphan_scope_sql = f" AND p.asset_id IN ({placeholders})"
                     orphan_scope_args = sorted(scoped_asset_ids)
                 else:
                     orphan_scope_sql = " AND 1 = 0"
-            orphan_rows = conn.execute(
-                f"""
-                SELECT i.album_id, i.asset_id
-                FROM photo_album_items AS i
-                LEFT JOIN photo_albums AS a ON a.album_id = i.album_id
-                LEFT JOIN photo_assets AS p ON p.asset_id = i.asset_id
-                WHERE (a.album_id IS NULL OR p.asset_id IS NULL)
-                    {orphan_scope_sql}
-                ORDER BY i.album_id ASC, i.asset_id ASC
-                LIMIT ?
-                """,
-                (*orphan_scope_args, sample_limit),
-            ).fetchall()
-            total_orphans = conn.execute(
-                f"""
-                SELECT COUNT(*) AS n
-                FROM photo_album_items AS i
-                LEFT JOIN photo_albums AS a ON a.album_id = i.album_id
-                LEFT JOIN photo_assets AS p ON p.asset_id = i.asset_id
-                WHERE (a.album_id IS NULL OR p.asset_id IS NULL)
-                    {orphan_scope_sql}
-                """,
-                tuple(orphan_scope_args),
-            ).fetchone()
-            counts["orphanAlbumItems"] = int(total_orphans["n"] if total_orphans else 0)
-            samples["orphanAlbumItems"] = [dict(row) for row in orphan_rows]
+            if library_root_filter and orphan_scope_args:
+                orphan_count = 0
+                orphan_samples: list[dict[str, Any]] = []
+                for chunk in _sqlite_in_chunks(orphan_scope_args):
+                    placeholders = ",".join("?" for _ in chunk)
+                    scoped_orphan_sql = f" AND p.asset_id IN ({placeholders})"
+                    total_orphans = conn.execute(
+                        f"""
+                        SELECT COUNT(*) AS n
+                        FROM photo_album_items AS i
+                        LEFT JOIN photo_albums AS a ON a.album_id = i.album_id
+                        LEFT JOIN photo_assets AS p ON p.asset_id = i.asset_id
+                        WHERE (a.album_id IS NULL OR p.asset_id IS NULL)
+                            {scoped_orphan_sql}
+                        """,
+                        tuple(chunk),
+                    ).fetchone()
+                    orphan_count += int(total_orphans["n"] if total_orphans else 0)
+                    if len(orphan_samples) < sample_limit:
+                        rows = conn.execute(
+                            f"""
+                            SELECT i.album_id, i.asset_id
+                            FROM photo_album_items AS i
+                            LEFT JOIN photo_albums AS a ON a.album_id = i.album_id
+                            LEFT JOIN photo_assets AS p ON p.asset_id = i.asset_id
+                            WHERE (a.album_id IS NULL OR p.asset_id IS NULL)
+                                {scoped_orphan_sql}
+                            ORDER BY i.album_id ASC, i.asset_id ASC
+                            LIMIT ?
+                            """,
+                            (*chunk, sample_limit),
+                        ).fetchall()
+                        orphan_samples.extend(dict(row) for row in rows)
+                counts["orphanAlbumItems"] = orphan_count
+                samples["orphanAlbumItems"] = sorted(
+                    orphan_samples,
+                    key=lambda row: (str(row.get("album_id", "")), str(row.get("asset_id", ""))),
+                )[:sample_limit]
+            else:
+                orphan_rows = conn.execute(
+                    f"""
+                    SELECT i.album_id, i.asset_id
+                    FROM photo_album_items AS i
+                    LEFT JOIN photo_albums AS a ON a.album_id = i.album_id
+                    LEFT JOIN photo_assets AS p ON p.asset_id = i.asset_id
+                    WHERE (a.album_id IS NULL OR p.asset_id IS NULL)
+                        {orphan_scope_sql}
+                    ORDER BY i.album_id ASC, i.asset_id ASC
+                    LIMIT ?
+                    """,
+                    (*orphan_scope_args, sample_limit),
+                ).fetchall()
+                total_orphans = conn.execute(
+                    f"""
+                    SELECT COUNT(*) AS n
+                    FROM photo_album_items AS i
+                    LEFT JOIN photo_albums AS a ON a.album_id = i.album_id
+                    LEFT JOIN photo_assets AS p ON p.asset_id = i.asset_id
+                    WHERE (a.album_id IS NULL OR p.asset_id IS NULL)
+                        {orphan_scope_sql}
+                    """,
+                    tuple(orphan_scope_args),
+                ).fetchone()
+                counts["orphanAlbumItems"] = int(total_orphans["n"] if total_orphans else 0)
+                samples["orphanAlbumItems"] = [dict(row) for row in orphan_rows]
 
         def check(check_id: str, label: str, ok: bool, detail: str, *, severity: str = "error", count: int = 0) -> dict[str, Any]:
             return {

@@ -2498,6 +2498,76 @@ def test_photo_library_backup_check_respects_library_root_scope() -> None:
     print("ok Photos backup readiness scopes asset-derived checks to the active library root")
 
 
+def test_photo_library_backup_check_chunks_scoped_asset_queries() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        scoped_root = base / "chunked-library"
+        scoped_root.mkdir()
+        photos = []
+        for index in range(5):
+            photo = scoped_root / f"chunked-{index}.jpg"
+            _write_exif_photo(photo)
+            photos.append(str(photo))
+        imported = api.import_photos({
+            "sourcePaths": photos,
+            "storageMode": "referenced",
+            "sourceLabel": "Chunked backup root",
+        })
+        asset_ids: list[str] = []
+        for index, source_path in enumerate(imported["importedPaths"]):
+            asset = api.project.db.photo_asset_by_path(source_path)
+            assert asset, source_path
+            asset_id = str(asset["assetId"])
+            asset_ids.append(asset_id)
+            api.update_photo_asset_metadata({
+                "assetId": asset_id,
+                "title": f"Chunked {index}",
+                "keywords": [f"chunked-{index}"],
+            })
+
+        album = api.save_photo_album({"name": "Chunked manual", "albumKind": "manual"})
+        api.add_photo_album_items({"albumId": album["albumId"], "sourcePaths": imported["importedPaths"]})
+        with api.project.db.connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO photo_asset_people(asset_id, candidate_id, person_name, status, score, quality, band, updated_at)
+                VALUES(?, ?, 'Chunked Person', 'accepted', 0.99, 0.95, 'manual assignment', '2026-06-20T00:00:00Z')
+                """,
+                [(asset_id, f"chunked-person-{index}") for index, asset_id in enumerate(asset_ids)],
+            )
+        raw_conn = sqlite3.connect(str(api.project.db.path))
+        try:
+            raw_conn.execute("PRAGMA foreign_keys = OFF")
+            raw_conn.executemany(
+                "INSERT INTO photo_album_items(album_id, asset_id, position, added_at) VALUES(?, ?, ?, ?)",
+                [
+                    ("missing-chunked-album", asset_ids[1], 100, "2026-06-20T00:00:00Z"),
+                    ("missing-chunked-album", asset_ids[3], 101, "2026-06-20T00:00:00Z"),
+                ],
+            )
+            raw_conn.commit()
+        finally:
+            raw_conn.close()
+
+        original_chunk_size = api_server_module.SQLITE_IN_CLAUSE_CHUNK_SIZE
+        api_server_module.SQLITE_IN_CLAUSE_CHUNK_SIZE = 2
+        try:
+            result = api.photo_library_backup_check({"sampleLimit": 10, "libraryRoot": str(scoped_root.resolve())})
+        finally:
+            api_server_module.SQLITE_IN_CLAUSE_CHUNK_SIZE = original_chunk_size
+
+        counts = result["counts"]
+        assert counts["assets"] == 5, counts
+        assert counts["metadataRows"] == 5, counts
+        assert counts["keywordAssignments"] == 5, counts
+        assert counts["peopleLinks"] == 5, counts
+        assert counts["albumItems"] == 7, counts
+        assert counts["orphanAlbumItems"] == 2, counts
+        assert {row["asset_id"] for row in result["samples"]["orphanAlbumItems"]} == {asset_ids[1], asset_ids[3]}, result
+    print("ok Photos backup readiness chunks scoped asset-id queries")
+
+
 def test_photo_library_backup_check_reports_managed_root_profile_drift() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -17967,6 +18037,7 @@ if __name__ == "__main__":
     test_photo_consolidation_migrates_video_review_candidate_media_paths_and_undo()
     test_photo_library_backup_check_reports_local_readiness()
     test_photo_library_backup_check_respects_library_root_scope()
+    test_photo_library_backup_check_chunks_scoped_asset_queries()
     test_photo_library_backup_check_reports_managed_root_profile_drift()
     test_photo_root_profile_writes_block_duplicate_and_managed_overlap()
     test_photo_library_root_status_reports_overlap_and_symlink_alias()
