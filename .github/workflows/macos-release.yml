@@ -128,13 +128,13 @@ jobs:
             dist/vintrace-sbom.json
             dist/vintrace-provenance.json
 
-      - name: Publish unsigned macOS installer to GitHub Release
+      - name: Stage unsigned macOS installer in draft GitHub Release
         if: ${{ inputs.release_tag != '' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.release_tag }}
           name: Vintrace ${{ inputs.release_tag }}
-          draft: ${{ inputs.draft }}
+          draft: true
           prerelease: ${{ inputs.prerelease }}
           fail_on_unmatched_files: true
           files: |
@@ -146,8 +146,24 @@ jobs:
             dist/vintrace-sbom.json
             dist/vintrace-provenance.json
 
-      - name: Verify published release assets
+      - name: Verify staged release assets
         if: ${{ inputs.release_tag != '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run release:verify -- --repo "${{ github.repository }}" --tag "${{ inputs.release_tag }}" --platform darwin --full --require-release-metadata
+        run: npm run release:verify -- --repo "${{ github.repository }}" --tag "${{ inputs.release_tag }}" --platform darwin --full --require-release-metadata --allow-draft
+
+      - name: Publish verified GitHub Release
+        if: ${{ inputs.release_tag != '' && inputs.draft == false }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = `${{ inputs.release_tag }}`;
+            const { data: release } = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+            await github.rest.repos.updateRelease({
+              owner,
+              repo,
+              release_id: release.id,
+              draft: false,
+              prerelease: ${{ inputs.prerelease }}
+            });

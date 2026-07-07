@@ -536,11 +536,17 @@ def assert_static_app_contracts() -> None:
     assert "dist/latest*.yml" in release_workflow
     assert "contents: write" in release_workflow
     assert "npm run release:verify" in release_workflow
+    assert "Stage installer in draft GitHub Release" in release_workflow
+    assert "--allow-draft" in release_workflow
+    assert "Publish verified GitHub Release" in release_workflow
     mac_workflow = (root / ".github" / "workflows" / "macos-release.yml").read_text(encoding="utf-8")
     assert "macOS Unsigned Release" in mac_workflow
     assert "npm run dist:mac:unsigned" in mac_workflow
     assert "Vintrace-macOS-Unsigned" in mac_workflow
     assert "npm run release:verify" in mac_workflow
+    assert "Stage unsigned macOS installer in draft GitHub Release" in mac_workflow
+    assert "--allow-draft" in mac_workflow
+    assert "Publish verified GitHub Release" in mac_workflow
 
     i18n = (root / "src" / "i18n.ts").read_text(encoding="utf-8")
     for code in ('"en"', '"zh"', '"es"', '"fr"', '"ar"', '"hi"', '"ja"'):
@@ -3526,6 +3532,10 @@ def assert_static_app_contracts() -> None:
     assert "SHA256SUMS.txt" in mac_workflow
     assert "--require-release-metadata" in windows_workflow
     assert "--require-release-metadata" in mac_workflow
+    assert "--allow-draft" in windows_workflow
+    assert "--allow-draft" in mac_workflow
+    package_checker = (root / "desktop" / "scripts" / "check-package-artifacts.cjs").read_text(encoding="utf-8")
+    assert "packaged backend checksum" in package_checker
     assert {
         "get_project_state",
         "mark_consent",

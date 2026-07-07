@@ -162,6 +162,34 @@ run("release artifact checksums include only top-level release files", () => {
   }
 });
 
+run("release workflows verify drafts before publishing", () => {
+  const verifierSource = fs.readFileSync(path.join(__dirname, "..", "desktop", "scripts", "verify-release-assets.cjs"), "utf8");
+  assert.ok(verifierSource.includes("allowDraft"));
+  assert.ok(verifierSource.includes("--allow-draft"));
+  assert.ok(verifierSource.includes("draft release accepted for staged verification"));
+  assert.ok(verifierSource.includes("application/octet-stream"));
+  assert.ok(verifierSource.includes("installer staged download is authenticated"));
+  for (const workflow of ["windows-release.yml", "macos-release.yml"]) {
+    const source = fs.readFileSync(path.join(__dirname, "..", ".github", "workflows", workflow), "utf8");
+    assert.ok(source.includes("draft: true"), workflow);
+    assert.ok(source.includes("--allow-draft"), workflow);
+    assert.ok(source.includes("Verify staged release assets"), workflow);
+    assert.ok(source.includes("Publish verified GitHub Release"), workflow);
+    assert.ok(source.includes("actions/github-script@v7"), workflow);
+  }
+});
+
+run("backend packaging gate verifies sidecar checksum manifest", () => {
+  const builder = fs.readFileSync(path.join(__dirname, "..", "desktop", "scripts", "build-backend.cjs"), "utf8");
+  assert.ok(builder.includes("crossage-backend.sha256"));
+  assert.ok(builder.includes("crossage-backend-manifest.json"));
+  assert.ok(builder.includes("sha256File(exePath)"));
+  const checker = fs.readFileSync(path.join(__dirname, "..", "desktop", "scripts", "check-package-artifacts.cjs"), "utf8");
+  assert.ok(checker.includes("backendChecksumStatus"));
+  assert.ok(checker.includes("packaged backend checksum"));
+  assert.ok(checker.includes("sha256File(path.join(backendDist, backendExecutablePath))"));
+});
+
 run("localization checker scans SafeModeReview and gates uncovered literals", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "desktop", "scripts", "check-localization.cjs"), "utf8");
   assert.ok(source.includes("SafeModeReview.tsx"));

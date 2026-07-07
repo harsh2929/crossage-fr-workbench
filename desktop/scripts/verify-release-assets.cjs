@@ -13,7 +13,8 @@ const options = {
   tag: process.env.VINTRACE_RELEASE_TAG || "",
   platform: process.env.VINTRACE_PACKAGE_PLATFORM || process.platform,
   full: false,
-  requireReleaseMetadata: process.env.VINTRACE_REQUIRE_RELEASE_METADATA === "1"
+  requireReleaseMetadata: process.env.VINTRACE_REQUIRE_RELEASE_METADATA === "1",
+  allowDraft: process.env.VINTRACE_RELEASE_ALLOW_DRAFT === "1"
 };
 
 for (let index = 0; index < args.length; index += 1) {
@@ -24,6 +25,7 @@ for (let index = 0; index < args.length; index += 1) {
   else if (arg === "--full") options.full = true;
   else if (arg === "--metadata-only") options.full = false;
   else if (arg === "--require-release-metadata") options.requireReleaseMetadata = true;
+  else if (arg === "--allow-draft") options.allowDraft = true;
 }
 
 const checks = [];
@@ -62,6 +64,21 @@ function githubRequest(url, redirectCount = 0) {
   });
 }
 
+function assetDownloadUrl(asset) {
+  return options.allowDraft && asset?.url ? asset.url : asset?.browser_download_url;
+}
+
+function assetDownloadHeaders(asset) {
+  const headers = {
+    "Accept": options.allowDraft && asset?.url ? "application/octet-stream" : "*/*",
+    "User-Agent": "vintrace-release-verifier"
+  };
+  if (process.env.GITHUB_TOKEN && options.allowDraft && asset?.url) {
+    headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  }
+  return headers;
+}
+
 function headRequest(url, redirectCount = 0) {
   return new Promise((resolve, reject) => {
     const request = https.request(url, { method: "HEAD", headers: { "User-Agent": "vintrace-release-verifier" } }, (response) => {
@@ -84,11 +101,11 @@ function resolveRedirect(url, headers) {
   return location ? new URL(location, url).toString() : "";
 }
 
-async function downloadAndHash(url, fileName, redirectCount = 0) {
+async function downloadAndHash(url, fileName, redirectCount = 0, headers = { "User-Agent": "vintrace-release-verifier" }) {
   const tempPath = path.join(os.tmpdir(), `vintrace-release-${process.pid}-${fileName.replace(/[^a-z0-9_.-]/gi, "_")}`);
   const hash = crypto.createHash("sha256");
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: { "User-Agent": "vintrace-release-verifier" } }, async (response) => {
+    https.get(url, { headers }, async (response) => {
       const location = resolveRedirect(url, response.headers);
       if (location && [301, 302, 303, 307, 308].includes(response.statusCode || 0)) {
         response.resume();
@@ -97,7 +114,7 @@ async function downloadAndHash(url, fileName, redirectCount = 0) {
           return;
         }
         try {
-          const result = await downloadAndHash(location, fileName, redirectCount + 1);
+          const result = await downloadAndHash(location, fileName, redirectCount + 1, { "User-Agent": "vintrace-release-verifier" });
           resolve(result);
         } catch (error) {
           reject(error);
@@ -125,9 +142,9 @@ async function downloadAndHash(url, fileName, redirectCount = 0) {
   });
 }
 
-function downloadBuffer(url, redirectCount = 0) {
+function downloadBuffer(url, redirectCount = 0, headers = { "User-Agent": "vintrace-release-verifier" }) {
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: { "User-Agent": "vintrace-release-verifier" } }, (response) => {
+    https.get(url, { headers }, (response) => {
       const location = resolveRedirect(url, response.headers);
       if (location && [301, 302, 303, 307, 308].includes(response.statusCode || 0)) {
         response.resume();
@@ -135,7 +152,7 @@ function downloadBuffer(url, redirectCount = 0) {
           reject(new Error(`Too many redirects while downloading ${url}`));
           return;
         }
-        resolve(downloadBuffer(location, redirectCount + 1));
+        resolve(downloadBuffer(location, redirectCount + 1, { "User-Agent": "vintrace-release-verifier" }));
         return;
       }
       if ((response.statusCode || 0) >= 400) {
@@ -201,7 +218,14 @@ async function main() {
   const sbomAsset = assetByPattern(assets, /^vintrace-sbom\.json$/i);
   const provenanceAsset = assetByPattern(assets, /^vintrace-provenance\.json$/i);
 
-  add("release is published", !release.draft, release.draft ? "draft release" : "published release", { url: release.html_url });
+  add(
+    options.allowDraft ? "release exists for staged verification" : "release is published",
+    options.allowDraft || !release.draft,
+    release.draft
+      ? (options.allowDraft ? "draft release accepted for staged verification" : "draft release")
+      : "published release",
+    { url: release.html_url, draft: Boolean(release.draft) }
+  );
   add("installer asset exists", Boolean(installer), installer?.name || `missing ${isMac ? ".dmg" : ".exe"}`);
   add("update metadata exists", Boolean(metadata), metadata?.name || "missing latest*.yml");
   add("delta/update companion exists", Boolean(updater), updater?.name || `missing ${isMac ? ".zip" : ".blockmap"}`);
@@ -215,7 +239,7 @@ async function main() {
   let checksumMap = new Map();
   if (checksumAsset) {
     try {
-      const checksumBytes = await downloadBuffer(checksumAsset.browser_download_url);
+      const checksumBytes = await downloadBuffer(assetDownloadUrl(checksumAsset), 0, assetDownloadHeaders(checksumAsset));
       checksumMap = parseChecksums(checksumBytes.toString("utf8"));
       add("SHA256SUMS.txt parsed", checksumMap.size > 0, `${checksumMap.size} checksum entrie(s)`);
       // Origin proof: require a valid signature over SHA256SUMS.txt when a
@@ -226,7 +250,7 @@ async function main() {
         if (!sigAsset) {
           add("SHA256SUMS signature present", false, "missing SHA256SUMS.txt.sig (release public key configured)");
         } else {
-          const sigBytes = await downloadBuffer(sigAsset.browser_download_url);
+          const sigBytes = await downloadBuffer(assetDownloadUrl(sigAsset), 0, assetDownloadHeaders(sigAsset));
           const pubKeyPem = fs.readFileSync(pubKeyPath, "utf8");
           add("SHA256SUMS signature valid", verifyChecksumSignature(checksumBytes, sigBytes, pubKeyPem), "Ed25519 over SHA256SUMS.txt");
         }
@@ -242,12 +266,20 @@ async function main() {
     const minimumSize = isMac ? 50 * 1024 * 1024 : 80 * 1024 * 1024;
     add("installer size is sane", installer.size >= minimumSize, `${installer.name}: ${installer.size} bytes`, { size: installer.size });
     add("installer listed in SHA256SUMS", checksumMap.has(String(installer.name).toLowerCase()), installer.name);
-    const head = await headRequest(installer.browser_download_url);
-    add("installer download is public", [200, 302].includes(head.statusCode || 0), `${installer.browser_download_url} -> ${head.statusCode}`);
+    if (options.allowDraft) {
+      add("installer staged download is authenticated", Boolean(installer.url), installer.name);
+    } else {
+      const head = await headRequest(installer.browser_download_url);
+      add("installer download is public", [200, 302].includes(head.statusCode || 0), `${installer.browser_download_url} -> ${head.statusCode}`);
+    }
   }
   if (metadata) {
-    const head = await headRequest(metadata.browser_download_url);
-    add("metadata download is public", [200, 302].includes(head.statusCode || 0), `${metadata.browser_download_url} -> ${head.statusCode}`);
+    if (options.allowDraft) {
+      add("metadata staged download is authenticated", Boolean(metadata.url), metadata.name);
+    } else {
+      const head = await headRequest(metadata.browser_download_url);
+      add("metadata download is public", [200, 302].includes(head.statusCode || 0), `${metadata.browser_download_url} -> ${head.statusCode}`);
+    }
   }
   if (options.full) {
     // Verify each installer/updater/metadata artifact against its SHA256SUMS entry.
@@ -257,7 +289,7 @@ async function main() {
         add(`sha256 ${asset.name}`, false, "not listed in SHA256SUMS.txt");
         continue;
       }
-      const actual = await downloadAndHash(asset.browser_download_url, asset.name);
+      const actual = await downloadAndHash(assetDownloadUrl(asset), asset.name, 0, assetDownloadHeaders(asset));
       add(`sha256 ${asset.name}`, actual === expected, actual === expected ? expected : `${actual} != ${expected}`);
     }
   }
@@ -271,6 +303,7 @@ async function main() {
     platform: options.platform,
     full: options.full,
     requireReleaseMetadata: options.requireReleaseMetadata,
+    allowDraft: options.allowDraft,
     releaseUrl: release.html_url,
     assets: assets.map((asset) => ({
       name: asset.name,
@@ -294,6 +327,7 @@ main().catch((error) => {
     platform: options.platform,
     full: options.full,
     requireReleaseMetadata: options.requireReleaseMetadata,
+    allowDraft: options.allowDraft,
     checks
   }, null, 2));
   process.exit(1);

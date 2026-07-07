@@ -1,4 +1,5 @@
 const { spawnSync } = require("child_process");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
@@ -9,6 +10,22 @@ const venvPython =
     : path.join(root, ".venv", "bin", "python3");
 const python = fs.existsSync(venvPython) ? venvPython : process.platform === "win32" ? "python" : "python3";
 const outputDir = path.join(root, "backend-dist");
+
+function sha256File(file) {
+  const hash = crypto.createHash("sha256");
+  const handle = fs.openSync(file, "r");
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    while (true) {
+      const read = fs.readSync(handle, buffer, 0, buffer.length, null);
+      if (!read) break;
+      hash.update(buffer.subarray(0, read));
+    }
+  } finally {
+    fs.closeSync(handle);
+  }
+  return hash.digest("hex");
+}
 const meanShapeLookup = spawnSync(
   python,
   [
@@ -101,6 +118,20 @@ try {
     console.error(`[build-backend] PyInstaller output missing or empty: ${exePath}`);
     process.exit(1);
   }
+  const relativeExePath = path.relative(outputDir, exePath).replace(/\\/g, "/");
+  const digest = sha256File(exePath);
+  const manifest = {
+    generatedAt: new Date().toISOString(),
+    executable: relativeExePath,
+    bytes: stat.size,
+    sha256: digest
+  };
+  fs.writeFileSync(path.join(outputDir, "crossage-backend.sha256"), `${digest}  ${relativeExePath}\n`, "utf8");
+  fs.writeFileSync(
+    path.join(outputDir, "crossage-backend-manifest.json"),
+    `${JSON.stringify(manifest, null, 2)}\n`,
+    "utf8"
+  );
 } catch (error) {
   console.error(`[build-backend] PyInstaller did not produce ${exePath}: ${error.message}`);
   process.exit(1);
