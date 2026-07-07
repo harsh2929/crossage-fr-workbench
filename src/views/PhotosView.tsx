@@ -1095,6 +1095,12 @@ type PhotoContextMenuItem = {
   onSelect: () => void | Promise<void>;
 };
 
+const identityPhotoUiText = (source: string) => source;
+
+function photoFileName(sourcePath: string): string {
+  return sourcePath.split(/[\\/]/).filter(Boolean).pop() || sourcePath;
+}
+
 const PHOTO_IMPORT_SOURCE_OPTIONS: Array<{ kind: PhotoImportSourceKind; label: string }> = [
   { kind: "folder", label: "Files/folders" },
   { kind: "camera", label: "Camera/device" },
@@ -1696,7 +1702,7 @@ export function PhotosView(props: {
     people,
     copyText
   } = props;
-  const uiText = props.uiText ?? ((source: string) => source);
+  const uiText = props.uiText ?? identityPhotoUiText;
   const formatCount = props.formatNumber ?? ((value: number) => value.toLocaleString());
   const externalEditorFavorites = externalEditors.filter((editor) => editor.editorPath);
   const preferredExternalEditorPath = lastExternalEditorPath || externalEditorFavorites[0]?.editorPath || "";
@@ -5415,8 +5421,11 @@ export function PhotosView(props: {
     }),
     [folders, activeAlbum]
   );
-  const fileName = (sourcePath: string) => sourcePath.split(/[\\/]/).filter(Boolean).pop() || sourcePath;
-  const itemLabel = (item: PhotoItem, index: number) => item.title?.trim() || fileName(item.sourcePath) || `${uiText("photo")} ${formatCount(index + 1)}`;
+  const fileName = photoFileName;
+  const itemLabel = useCallback(
+    (item: PhotoItem, index: number) => item.title?.trim() || fileName(item.sourcePath) || `${uiText("photo")} ${formatCount(index + 1)}`,
+    [fileName, formatCount, uiText],
+  );
   const photoItemsBySourcePath = useMemo(() => {
     const bySourcePath = new Map<string, PhotoItem>();
     items.forEach((item) => {

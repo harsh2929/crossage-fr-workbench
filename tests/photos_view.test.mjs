@@ -6314,6 +6314,20 @@ run("Photos lightbox viewed events patch recent rail without reloading folders",
   assert.doesNotMatch(viewedEventBlock[0], /loadFolders\(/);
 });
 
+run("Photos heavy derived rows use stable label helpers", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  assert.match(source, /function photoFileName\(sourcePath: string\): string/);
+  assert.match(source, /const identityPhotoUiText = \(source: string\) => source;/);
+  assert.match(source, /const uiText = props\.uiText \?\? identityPhotoUiText;/);
+  assert.match(source, /const fileName = photoFileName;/);
+  assert.match(source, /const itemLabel = useCallback\(/);
+  assert.doesNotMatch(source, /const fileName = \(sourcePath: string\)/);
+  const duplicateGroupsBlock = source.match(/const duplicateReviewGroups = useMemo[\s\S]*?\[fileName, items, selectedSourcePaths\]\s*\);/);
+  assert.ok(duplicateGroupsBlock, "duplicate review groups memo should remain explicit about stable fileName");
+  const dateBucketCardsBlock = source.match(/const dateBucketCards = useMemo<PhotoDateBucketCard\[\]>\([\s\S]*?\[dateBucketLoaded, dateBucketLoadError, dateBucketLoading, dateBucketRows, itemLabel, items, localDateBuckets, photoDateViewMode\]\s*\);/);
+  assert.ok(dateBucketCardsBlock, "date bucket cards memo should depend on stable itemLabel");
+});
+
 run("Safe Mode review dashboard honors sensitive collection unlock before listing flagged photos", () => {
   const reviewSource = fs.readFileSync(path.join(ROOT, "src/views/SafeModeReview.tsx"), "utf8");
   const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
