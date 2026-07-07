@@ -27755,7 +27755,7 @@ export function PhotosView(props: {
                   {band.rows.map((row) => {
                     const item = row.item;
                     const itemMissing = Boolean(item.missingAt);
-                    const url = itemMissing ? "" : item.previewUrl || item.sourceUrl;
+                    const url = itemMissing ? "" : item.previewUrl || "";
                     const label = itemLabel(item, row.index);
                     const checked = selectedSources.has(item.sourcePath);
                     const burstStackCount = Math.max(0, Number(item.burstStack?.count || 0) || 0);

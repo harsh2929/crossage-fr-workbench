@@ -6333,6 +6333,14 @@ run("Photos grid page limit stays within the preview generation budget", () => {
   assert.doesNotMatch(source, /const PREVIEW_BUDGET = 64;/);
 });
 
+run("Photos grid thumbnails do not fall back to full-size originals", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  const gridBlock = source.match(/photoVirtualWindow\.visibleBands\.map\(\(band\) => \{[\s\S]*?<span className="photo-tile-fallback">/);
+  assert.ok(gridBlock, "virtualized photo grid tile block should exist");
+  assert.match(gridBlock[0], /const url = itemMissing \? "" : item\.previewUrl \|\| "";/);
+  assert.doesNotMatch(gridBlock[0], /item\.previewUrl \|\| item\.sourceUrl/);
+});
+
 run("Photos video time updates stay out of parent render state", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
   assert.match(source, /const PhotoLightboxVideoControls = memo\(function PhotoLightboxVideoControls/);
