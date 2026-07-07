@@ -5820,9 +5820,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             cleaned.append((str(field or ""), str(label or field or "Metadata"), text))
         return cleaned
 
-    def _photo_utility_classifier_term_matches_text(self, text: Any, term: Any) -> bool:
-        normalized = re.sub(r"[^a-z0-9]+", " ", str(text or "").casefold()).strip()
-        clean_term = re.sub(r"[^a-z0-9]+", " ", str(term or "").casefold()).strip()
+    def _photo_utility_classifier_normalized_text(self, value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+    def _photo_utility_classifier_term_matches_normalized(self, normalized: str, clean_term: str) -> bool:
         if not normalized or not clean_term:
             return False
         padded = f" {normalized} "
@@ -5830,6 +5831,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if " " in clean_term:
             return f" {clean_term} " in padded
         return f" {clean_term} " in padded or clean_term in {compact, compact[:len(clean_term)]}
+
+    def _photo_utility_classifier_term_matches_text(self, text: Any, term: Any) -> bool:
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(text or "").casefold()).strip()
+        clean_term = re.sub(r"[^a-z0-9]+", " ", str(term or "").casefold()).strip()
+        return self._photo_utility_classifier_term_matches_normalized(normalized, clean_term)
 
     def _clean_photo_utility_classifier_review(self, value: Any) -> dict[str, Any]:
         review = value if isinstance(value, dict) else {}
@@ -5918,6 +5924,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             metadata=metadata,
             asset_metadata=asset_metadata,
         )
+        normalized_fields = [
+            (field, label, value, self._photo_utility_classifier_normalized_text(value))
+            for field, label, value in fields
+        ]
+        joined_text = " ".join(value for _field, _label, value in fields if str(value or "").strip())
+        joined_normalized = self._photo_utility_classifier_normalized_text(joined_text)
 
         def clip(value: Any) -> str:
             text = re.sub(r"\s+", " ", str(value or "")).strip()
@@ -5925,10 +5937,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
         for term in classifier.get("terms", ()):
             clean_term = re.sub(r"\s+", " ", str(term or "").strip())
-            if not clean_term:
+            normalized_term = self._photo_utility_classifier_normalized_text(clean_term)
+            if not normalized_term:
                 continue
-            for field, label, value in fields:
-                if self._photo_utility_classifier_term_matches_text(value, clean_term):
+            for field, label, value, normalized_value in normalized_fields:
+                if self._photo_utility_classifier_term_matches_normalized(normalized_value, normalized_term):
                     review_action = self._photo_utility_classifier_review_action(
                         classifier_id=str(classifier_id or ""),
                         field=field,
@@ -5950,12 +5963,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     if review_action == "confirmed":
                         evidence["reviewAction"] = "confirmed"
                     return evidence
-            joined_text = self._photo_utility_classifier_text(
-                source_path=source_path,
-                metadata=metadata,
-                asset_metadata=asset_metadata,
-            )
-            if self._photo_utility_classifier_term_matches_text(joined_text, clean_term):
+            if self._photo_utility_classifier_term_matches_normalized(joined_normalized, normalized_term):
                 review_action = self._photo_utility_classifier_review_action(
                     classifier_id=str(classifier_id or ""),
                     field="metadata",

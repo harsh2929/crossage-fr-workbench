@@ -9600,6 +9600,33 @@ def test_photo_live_photo_motion_export_and_key_photo() -> None:
     print("ok Live Photo motion export and key photo controls")
 
 
+def test_photo_utility_classifier_reuses_precomputed_metadata_text() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        calls = 0
+        original = api._photo_utility_classifier_field_values
+
+        def counted_field_values(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        api._photo_utility_classifier_field_values = counted_field_values  # type: ignore[method-assign]
+        try:
+            evidence = api._photo_utility_classifier_match_evidence(
+                classifier_id="utility:receipts",
+                source_path=str(Path(tmp) / "plain.jpg"),
+                metadata={"title": "Cafe image"},
+                asset_metadata={"ocrText": "Cafe tab with total due 19.50"},
+            )
+        finally:
+            api._photo_utility_classifier_field_values = original  # type: ignore[method-assign]
+        assert evidence is not None, evidence
+        assert evidence["term"] == "total due", evidence
+        assert calls == 1, calls
+    print("ok utility classifier reuses precomputed metadata text")
+
+
 def test_photo_local_utility_classifiers_documents_receipts_qr_handwriting_illustrations_landmarks_sensitive() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -18334,6 +18361,7 @@ if __name__ == "__main__":
     test_photo_burst_stacks_detect_native_metadata_identifiers()
     test_photo_burst_stacks_import_xmp_golden_fixture_metadata()
     test_photo_live_photo_motion_export_and_key_photo()
+    test_photo_utility_classifier_reuses_precomputed_metadata_text()
     test_photo_local_utility_classifiers_documents_receipts_qr_handwriting_illustrations_landmarks_sensitive()
     test_photo_local_qr_decoder_populates_metadata_utility_and_search()
     test_photo_qr_decoder_does_not_open_network_sockets()
