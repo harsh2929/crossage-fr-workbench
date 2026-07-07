@@ -13401,6 +13401,20 @@ class WorkspaceDb:
                         conn=conn,
                     )
                 restored += 1
+        if restored <= 0 and (items if isinstance(items, list) else []):
+            row = conn.execute(
+                "SELECT * FROM photo_operation_journal WHERE operation_id = ?",
+                (str(operation.get("operationId", "")),),
+            ).fetchone()
+            pending = self._photo_operation_row(row)
+            return {
+                "undone": False,
+                "blocked": True,
+                "operation": pending,
+                "restored": restored,
+                "missing": missing,
+                "missingOriginals": missing_originals,
+            }
         undone_at = now_iso()
         conn.execute(
             "UPDATE photo_operation_journal SET undone_at = ? WHERE operation_id = ?",

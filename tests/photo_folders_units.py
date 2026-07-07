@@ -17807,6 +17807,18 @@ def test_photo_export_move_records_undoable_file_move() -> None:
         missing_asset = api.project.db.photo_asset_by_path(str(photo))
         assert missing_asset and missing_asset["missingAt"], missing_asset
 
+        photo.write_bytes(b"local blocker")
+        blocked_undo = api.undo_photo_operation({"operationId": moved["operation"]["operationId"]})
+        assert blocked_undo["undone"] is False, blocked_undo
+        assert blocked_undo["blocked"] is True, blocked_undo
+        assert blocked_undo["restored"] == 0, blocked_undo
+        assert blocked_undo["missing"] == 1, blocked_undo
+        assert blocked_undo["operation"]["canUndo"] is True, blocked_undo
+        assert blocked_undo["operation"]["undoneAt"] == "", blocked_undo
+        assert photo.exists(), blocked_undo
+        assert moved_target.exists(), blocked_undo
+
+        photo.unlink()
         undo = api.undo_photo_operation({"operationId": moved["operation"]["operationId"]})
         assert undo["undone"] is True, undo
         assert undo["restored"] == 1, undo
