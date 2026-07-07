@@ -3637,6 +3637,117 @@ class WorkspaceDb:
         clean_scope.setdefault("budgetLimit", 1000)
         return self.enqueue_photo_indexing_job("search", clean_scope, conn)
 
+    @staticmethod
+    def _first_photo_slideshow_value(record: dict[str, Any], *keys: str) -> Any:
+        for key in keys:
+            if key in record:
+                return record.get(key)
+        return None
+
+    @classmethod
+    def _clean_photo_slideshow_caption_region(cls, value: Any) -> dict[str, float] | None:
+        record = value if isinstance(value, dict) else None
+        pair = value if isinstance(value, (list, tuple)) else None
+        raw_x = cls._first_photo_slideshow_value(record, "x", "left", "l") if record else pair[0] if pair and len(pair) > 0 else None
+        raw_y = cls._first_photo_slideshow_value(record, "y", "top", "t") if record else pair[1] if pair and len(pair) > 1 else None
+        raw_width = cls._first_photo_slideshow_value(record, "width", "w") if record else pair[2] if pair and len(pair) > 2 else None
+        raw_height = cls._first_photo_slideshow_value(record, "height", "h") if record else pair[3] if pair and len(pair) > 3 else None
+        raw_right = cls._first_photo_slideshow_value(record, "right", "r") if record else None
+        raw_bottom = cls._first_photo_slideshow_value(record, "bottom", "b") if record else None
+        try:
+            parsed_x = float(raw_x)
+            parsed_y = float(raw_y)
+            parsed_width = float(raw_width) if raw_width is not None else float("nan")
+            parsed_height = float(raw_height) if raw_height is not None else float("nan")
+            parsed_right = float(raw_right) if raw_right is not None else float("nan")
+            parsed_bottom = float(raw_bottom) if raw_bottom is not None else float("nan")
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed_width) and math.isfinite(parsed_right):
+            parsed_width = parsed_right - parsed_x
+        if not math.isfinite(parsed_height) and math.isfinite(parsed_bottom):
+            parsed_height = parsed_bottom - parsed_y
+        if not all(math.isfinite(item) for item in (parsed_x, parsed_y, parsed_width, parsed_height)):
+            return None
+        max_value = max(abs(parsed_x), abs(parsed_y), abs(parsed_width), abs(parsed_height))
+        unit = str(cls._first_photo_slideshow_value(record, "unit", "units", "coordinateUnit", "coordinateSpace") if record else "").strip().lower()
+        scale = 100.0 if "normal" in unit or "relative" in unit or unit == "fraction" or max_value <= 1.5 else 1.0
+        left = max(0.0, min(100.0, parsed_x * scale))
+        top = max(0.0, min(100.0, parsed_y * scale))
+        right = max(left, min(100.0, (parsed_x + parsed_width) * scale))
+        bottom = max(top, min(100.0, (parsed_y + parsed_height) * scale))
+        width = right - left
+        height = bottom - top
+        if width < 1.0 or height < 1.0:
+            return None
+        return {
+            "x": round(left, 1),
+            "y": round(top, 1),
+            "width": round(width, 1),
+            "height": round(height, 1),
+        }
+
+    @staticmethod
+    def _clean_photo_slideshow_region_slot(value: Any) -> str:
+        slot = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+        aliases = {
+            "caption": "primary",
+            "main": "primary",
+            "body": "primary",
+            "primary-caption": "primary",
+            "subtitle": "context",
+            "subhead": "context",
+            "collection": "context",
+            "label": "context",
+            "source-label": "context",
+            "count": "counter",
+            "page": "counter",
+            "number": "counter",
+            "slide-number": "counter",
+            "slide-counter": "counter",
+            "heading": "title",
+            "headline": "title",
+            "project-title": "title",
+            "origin": "source",
+            "album": "source",
+            "memory": "source",
+            "source-name": "source",
+            "slide": "chapter",
+            "chapter-label": "chapter",
+            "cue": "chapter",
+        }
+        slot = aliases.get(slot, slot)
+        return slot if slot in {"primary", "context", "counter", "title", "source", "chapter"} else ""
+
+    @classmethod
+    def _clean_photo_slideshow_region_map(cls, value: Any) -> dict[str, dict[str, float]]:
+        regions: dict[str, dict[str, float]] = {}
+
+        def assign(slot_value: Any, region_value: Any) -> None:
+            slot = cls._clean_photo_slideshow_region_slot(slot_value)
+            if not slot:
+                return
+            region = cls._clean_photo_slideshow_caption_region(region_value)
+            if region:
+                regions[slot] = region
+
+        if isinstance(value, list):
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                assign(
+                    cls._first_photo_slideshow_value(item, "slot", "id", "key", "name", "regionSlot"),
+                    cls._first_photo_slideshow_value(item, "region", "captionRegion", "bounds", "box", "frame", "rect") or item,
+                )
+            return regions
+        if not isinstance(value, dict):
+            return regions
+        for slot in ("primary", "context", "counter", "title", "source", "chapter"):
+            assign(slot, value.get(slot))
+        for key, region_value in value.items():
+            assign(key, region_value)
+        return regions
+
     def photo_indexing_job(self, job_id: str, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
         if conn is None:
             with self.connect() as local_conn:
@@ -3861,99 +3972,7 @@ class WorkspaceDb:
                 parsed /= 100.0
             return max(minimum, min(maximum, parsed))
 
-        def clean_caption_region(raw_value: Any) -> dict[str, float] | None:
-            record = raw_value if isinstance(raw_value, dict) else None
-            pair = raw_value if isinstance(raw_value, list) else None
-            raw_x = first_setting_value(record, "x", "left", "l") if record else pair[0] if pair and len(pair) > 0 else None
-            raw_y = first_setting_value(record, "y", "top", "t") if record else pair[1] if pair and len(pair) > 1 else None
-            raw_width = first_setting_value(record, "width", "w") if record else pair[2] if pair and len(pair) > 2 else None
-            raw_height = first_setting_value(record, "height", "h") if record else pair[3] if pair and len(pair) > 3 else None
-            raw_right = first_setting_value(record, "right", "r") if record else None
-            raw_bottom = first_setting_value(record, "bottom", "b") if record else None
-            try:
-                parsed_x = float(raw_x)
-                parsed_y = float(raw_y)
-                parsed_width = float(raw_width) if raw_width is not None else float("nan")
-                parsed_height = float(raw_height) if raw_height is not None else float("nan")
-                parsed_right = float(raw_right) if raw_right is not None else float("nan")
-                parsed_bottom = float(raw_bottom) if raw_bottom is not None else float("nan")
-            except (TypeError, ValueError):
-                return None
-            if not math.isfinite(parsed_width) and math.isfinite(parsed_right):
-                parsed_width = parsed_right - parsed_x
-            if not math.isfinite(parsed_height) and math.isfinite(parsed_bottom):
-                parsed_height = parsed_bottom - parsed_y
-            if not all(math.isfinite(value) for value in (parsed_x, parsed_y, parsed_width, parsed_height)):
-                return None
-            max_value = max(abs(parsed_x), abs(parsed_y), abs(parsed_width), abs(parsed_height))
-            unit = str(first_setting_value(record, "unit", "units", "coordinateUnit", "coordinateSpace") if record else "").strip().lower()
-            scale = 100.0 if unit in {"normalized", "relative", "fraction"} or max_value <= 1.5 else 1.0
-            left = max(0.0, min(100.0, parsed_x * scale))
-            top = max(0.0, min(100.0, parsed_y * scale))
-            right = max(left, min(100.0, (parsed_x + parsed_width) * scale))
-            bottom = max(top, min(100.0, (parsed_y + parsed_height) * scale))
-            width = right - left
-            height = bottom - top
-            if width < 1.0 or height < 1.0:
-                return None
-            return {
-                "x": round(left, 1),
-                "y": round(top, 1),
-                "width": round(width, 1),
-                "height": round(height, 1),
-            }
-
-        def clean_region_slot(raw_value: Any) -> str:
-            slot = str(raw_value or "").strip().lower().replace("_", "-").replace(" ", "-")
-            aliases = {
-                "caption": "primary",
-                "main": "primary",
-                "body": "primary",
-                "subtitle": "context",
-                "subhead": "context",
-                "collection": "context",
-                "label": "context",
-                "count": "counter",
-                "page": "counter",
-                "number": "counter",
-                "heading": "title",
-                "headline": "title",
-                "origin": "source",
-                "album": "source",
-                "memory": "source",
-                "slide": "chapter",
-                "cue": "chapter",
-            }
-            slot = aliases.get(slot, slot)
-            return slot if slot in {"primary", "context", "counter", "title", "source", "chapter"} else ""
-
-        def clean_region_map(raw_value: Any) -> dict[str, dict[str, float]]:
-            regions: dict[str, dict[str, float]] = {}
-
-            def assign(slot_value: Any, region_value: Any) -> None:
-                slot = clean_region_slot(slot_value)
-                if not slot:
-                    return
-                region = clean_caption_region(region_value)
-                if region:
-                    regions[slot] = region
-
-            if isinstance(raw_value, list):
-                for item in raw_value:
-                    if not isinstance(item, dict):
-                        continue
-                    assign(
-                        first_setting_value(item, "slot", "id", "key", "name", "regionSlot"),
-                        first_setting_value(item, "region", "captionRegion", "bounds", "box", "frame", "rect") or item,
-                    )
-                return regions
-            if not isinstance(raw_value, dict):
-                return regions
-            for slot in ("primary", "context", "counter", "title", "source", "chapter"):
-                assign(slot, raw_value.get(slot))
-            for key, region_value in raw_value.items():
-                assign(key, region_value)
-            return regions
+        clean_region_map = self._clean_photo_slideshow_region_map
 
         def clean_caption_preset(raw_value: Any) -> str:
             preset = str(raw_value if raw_value is not None else "auto").strip().lower().replace("_", "-").replace(" ", "-")
@@ -4322,113 +4341,6 @@ class WorkspaceDb:
         if theme_template_caption_preset not in {"auto", "lower-third", "title-subtitle", "split-story", "gallery-labels", "cinema-bars"}:
             theme_template_caption_preset = "auto"
 
-        def first_template_value(record: dict[str, Any], *keys: str) -> Any:
-            for key in keys:
-                if key in record:
-                    return record.get(key)
-            return None
-
-        def clean_template_caption_region(value: Any) -> dict[str, float] | None:
-            record = value if isinstance(value, dict) else None
-            pair = value if isinstance(value, list) else None
-            raw_x = first_template_value(record or {}, "x", "left", "l") if record else pair[0] if pair and len(pair) > 0 else None
-            raw_y = first_template_value(record or {}, "y", "top", "t") if record else pair[1] if pair and len(pair) > 1 else None
-            raw_width = first_template_value(record or {}, "width", "w") if record else pair[2] if pair and len(pair) > 2 else None
-            raw_height = first_template_value(record or {}, "height", "h") if record else pair[3] if pair and len(pair) > 3 else None
-            raw_right = first_template_value(record or {}, "right", "r") if record else None
-            raw_bottom = first_template_value(record or {}, "bottom", "b") if record else None
-            try:
-                parsed_x = float(raw_x)
-                parsed_y = float(raw_y)
-                parsed_width = float(raw_width) if raw_width is not None else float("nan")
-                parsed_height = float(raw_height) if raw_height is not None else float("nan")
-                parsed_right = float(raw_right) if raw_right is not None else float("nan")
-                parsed_bottom = float(raw_bottom) if raw_bottom is not None else float("nan")
-            except (TypeError, ValueError):
-                return None
-            if not math.isfinite(parsed_width) and math.isfinite(parsed_right):
-                parsed_width = parsed_right - parsed_x
-            if not math.isfinite(parsed_height) and math.isfinite(parsed_bottom):
-                parsed_height = parsed_bottom - parsed_y
-            if not all(math.isfinite(item) for item in (parsed_x, parsed_y, parsed_width, parsed_height)):
-                return None
-            max_value = max(abs(parsed_x), abs(parsed_y), abs(parsed_width), abs(parsed_height))
-            unit = str(first_template_value(record or {}, "unit", "units", "coordinateUnit", "coordinateSpace") or "").lower()
-            scale = 100.0 if "normal" in unit or "relative" in unit or unit == "fraction" or max_value <= 1.5 else 1.0
-            left = max(0.0, min(100.0, parsed_x * scale))
-            top = max(0.0, min(100.0, parsed_y * scale))
-            right = max(left, min(100.0, (parsed_x + parsed_width) * scale))
-            bottom = max(top, min(100.0, (parsed_y + parsed_height) * scale))
-            width = right - left
-            height = bottom - top
-            if width < 1.0 or height < 1.0:
-                return None
-            return {
-                "x": round(left, 1),
-                "y": round(top, 1),
-                "width": round(width, 1),
-                "height": round(height, 1),
-            }
-
-        def clean_template_region_slot(value: Any) -> str:
-            slot = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
-            aliases = {
-                "caption": "primary",
-                "main": "primary",
-                "body": "primary",
-                "primary-caption": "primary",
-                "subtitle": "context",
-                "subhead": "context",
-                "collection": "context",
-                "label": "context",
-                "source-label": "context",
-                "count": "counter",
-                "page": "counter",
-                "number": "counter",
-                "slide-number": "counter",
-                "slide-counter": "counter",
-                "heading": "title",
-                "headline": "title",
-                "project-title": "title",
-                "origin": "source",
-                "album": "source",
-                "memory": "source",
-                "source-name": "source",
-                "slide": "chapter",
-                "chapter-label": "chapter",
-                "cue": "chapter",
-            }
-            slot = aliases.get(slot, slot)
-            return slot if slot in {"primary", "context", "counter", "title", "source", "chapter"} else ""
-
-        def clean_template_region_map(value: Any) -> dict[str, dict[str, float]]:
-            regions: dict[str, dict[str, float]] = {}
-
-            def assign(slot_value: Any, region_value: Any) -> None:
-                slot = clean_template_region_slot(slot_value)
-                if not slot:
-                    return
-                region = clean_template_caption_region(region_value)
-                if region:
-                    regions[slot] = region
-
-            if isinstance(value, list):
-                for item in value:
-                    if not isinstance(item, dict):
-                        continue
-                    assign(
-                        first_template_value(item, "slot", "id", "key", "name", "regionSlot"),
-                        first_template_value(item, "region", "captionRegion", "bounds", "box", "frame", "rect") or item,
-                    )
-                return regions
-            if not isinstance(value, dict):
-                return regions
-            for slot in ("primary", "context", "counter", "title", "source", "chapter"):
-                assign(slot, value.get(slot))
-            for key, region_value in value.items():
-                assign(key, region_value)
-            return regions
-
         def clean_template_percent(raw_value: Any, default: int = 100) -> int:
             try:
                 parsed = int(round(float(raw_value if raw_value is not None else default)))
@@ -4659,44 +4571,7 @@ class WorkspaceDb:
             wrap = aliases.get(wrap, wrap)
             return wrap if wrap in {"auto", "single-line", "two-line", "multi-line"} else "auto"
 
-        def clean_caption_region(value: Any) -> dict[str, float] | None:
-            record = value if isinstance(value, dict) else {}
-            pair = value if isinstance(value, list) else []
-            def number(raw: Any) -> float | None:
-                try:
-                    parsed = float(raw)
-                except (TypeError, ValueError):
-                    return None
-                return parsed if math.isfinite(parsed) else None
-            x = number(record.get("x", record.get("left", record.get("l"))) if record else (pair[0] if len(pair) > 0 else None))
-            y = number(record.get("y", record.get("top", record.get("t"))) if record else (pair[1] if len(pair) > 1 else None))
-            width = number(record.get("width", record.get("w")) if record else (pair[2] if len(pair) > 2 else None))
-            height = number(record.get("height", record.get("h")) if record else (pair[3] if len(pair) > 3 else None))
-            right = number(record.get("right", record.get("r")) if record else None)
-            bottom = number(record.get("bottom", record.get("b")) if record else None)
-            if width is None and x is not None and right is not None:
-                width = right - x
-            if height is None and y is not None and bottom is not None:
-                height = bottom - y
-            if x is None or y is None or width is None or height is None:
-                return None
-            max_value = max(abs(x), abs(y), abs(width), abs(height))
-            unit = str(record.get("unit", record.get("units", record.get("coordinateUnit", record.get("coordinateSpace", "")))) if record else "").lower()
-            scale = 100.0 if "normal" in unit or "relative" in unit or unit == "fraction" or max_value <= 1.5 else 1.0
-            left = max(0.0, min(100.0, x * scale))
-            top = max(0.0, min(100.0, y * scale))
-            clean_right = max(left, min(100.0, (x + width) * scale))
-            clean_bottom = max(top, min(100.0, (y + height) * scale))
-            clean_width = clean_right - left
-            clean_height = clean_bottom - top
-            if clean_width < 1.0 or clean_height < 1.0:
-                return None
-            return {
-                "x": round(left, 1),
-                "y": round(top, 1),
-                "width": round(clean_width, 1),
-                "height": round(clean_height, 1),
-            }
+        clean_caption_region = self._clean_photo_slideshow_caption_region
 
         def first_value(record: dict[str, Any], *keys: str) -> Any:
             for key in keys:
@@ -4758,64 +4633,7 @@ class WorkspaceDb:
                     captions.append(caption)
             return captions
 
-        def clean_region_slot(value: Any) -> str:
-            slot = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
-            aliases = {
-                "caption": "primary",
-                "main": "primary",
-                "body": "primary",
-                "primary-caption": "primary",
-                "subtitle": "context",
-                "subhead": "context",
-                "collection": "context",
-                "label": "context",
-                "source-label": "context",
-                "count": "counter",
-                "page": "counter",
-                "number": "counter",
-                "slide-number": "counter",
-                "slide-counter": "counter",
-                "heading": "title",
-                "headline": "title",
-                "project-title": "title",
-                "origin": "source",
-                "album": "source",
-                "memory": "source",
-                "source-name": "source",
-                "slide": "chapter",
-                "chapter-label": "chapter",
-                "cue": "chapter",
-            }
-            slot = aliases.get(slot, slot)
-            return slot if slot in {"primary", "context", "counter", "title", "source", "chapter"} else ""
-
-        def clean_region_map(value: Any) -> dict[str, dict[str, float]]:
-            regions: dict[str, dict[str, float]] = {}
-
-            def assign(slot_value: Any, region_value: Any) -> None:
-                slot = clean_region_slot(slot_value)
-                if not slot:
-                    return
-                region = clean_caption_region(region_value)
-                if region:
-                    regions[slot] = region
-
-            if isinstance(value, list):
-                for item in value:
-                    if not isinstance(item, dict):
-                        continue
-                    assign(
-                        first_value(item, "slot", "id", "key", "name", "regionSlot"),
-                        first_value(item, "region", "captionRegion", "bounds", "box", "frame", "rect") or item,
-                    )
-                return regions
-            if not isinstance(value, dict):
-                return regions
-            for slot in ("primary", "context", "counter", "title", "source", "chapter"):
-                assign(slot, value.get(slot))
-            for key, region_value in value.items():
-                assign(key, region_value)
-            return regions
+        clean_region_map = self._clean_photo_slideshow_region_map
 
         def clean_motion_keyframe_curve(value: Any) -> str | None:
             curve = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
@@ -5263,106 +5081,7 @@ class WorkspaceDb:
                     return record.get(key)
             return None
 
-        def clean_template_caption_region(value: Any) -> dict[str, float] | None:
-            record = value if isinstance(value, dict) else None
-            pair = value if isinstance(value, list) else None
-            raw_x = first_template_value(record or {}, "x", "left", "l") if record else pair[0] if pair and len(pair) > 0 else None
-            raw_y = first_template_value(record or {}, "y", "top", "t") if record else pair[1] if pair and len(pair) > 1 else None
-            raw_width = first_template_value(record or {}, "width", "w") if record else pair[2] if pair and len(pair) > 2 else None
-            raw_height = first_template_value(record or {}, "height", "h") if record else pair[3] if pair and len(pair) > 3 else None
-            raw_right = first_template_value(record or {}, "right", "r") if record else None
-            raw_bottom = first_template_value(record or {}, "bottom", "b") if record else None
-            try:
-                parsed_x = float(raw_x)
-                parsed_y = float(raw_y)
-                parsed_width = float(raw_width) if raw_width is not None else float("nan")
-                parsed_height = float(raw_height) if raw_height is not None else float("nan")
-                parsed_right = float(raw_right) if raw_right is not None else float("nan")
-                parsed_bottom = float(raw_bottom) if raw_bottom is not None else float("nan")
-            except (TypeError, ValueError):
-                return None
-            if not math.isfinite(parsed_width) and math.isfinite(parsed_right):
-                parsed_width = parsed_right - parsed_x
-            if not math.isfinite(parsed_height) and math.isfinite(parsed_bottom):
-                parsed_height = parsed_bottom - parsed_y
-            if not all(math.isfinite(item) for item in (parsed_x, parsed_y, parsed_width, parsed_height)):
-                return None
-            max_value = max(abs(parsed_x), abs(parsed_y), abs(parsed_width), abs(parsed_height))
-            unit = str(first_template_value(record or {}, "unit", "units", "coordinateUnit", "coordinateSpace") or "").lower()
-            scale = 100.0 if "normal" in unit or "relative" in unit or unit == "fraction" or max_value <= 1.5 else 1.0
-            left = max(0.0, min(100.0, parsed_x * scale))
-            top = max(0.0, min(100.0, parsed_y * scale))
-            right = max(left, min(100.0, (parsed_x + parsed_width) * scale))
-            bottom = max(top, min(100.0, (parsed_y + parsed_height) * scale))
-            width = right - left
-            height = bottom - top
-            if width < 1.0 or height < 1.0:
-                return None
-            return {
-                "x": round(left, 1),
-                "y": round(top, 1),
-                "width": round(width, 1),
-                "height": round(height, 1),
-            }
-
-        def clean_template_region_slot(value: Any) -> str:
-            slot = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
-            aliases = {
-                "caption": "primary",
-                "main": "primary",
-                "body": "primary",
-                "primary-caption": "primary",
-                "subtitle": "context",
-                "subhead": "context",
-                "collection": "context",
-                "label": "context",
-                "source-label": "context",
-                "count": "counter",
-                "page": "counter",
-                "number": "counter",
-                "slide-number": "counter",
-                "slide-counter": "counter",
-                "heading": "title",
-                "headline": "title",
-                "project-title": "title",
-                "origin": "source",
-                "album": "source",
-                "memory": "source",
-                "source-name": "source",
-                "slide": "chapter",
-                "chapter-label": "chapter",
-                "cue": "chapter",
-            }
-            slot = aliases.get(slot, slot)
-            return slot if slot in {"primary", "context", "counter", "title", "source", "chapter"} else ""
-
-        def clean_template_region_map(value: Any) -> dict[str, dict[str, float]]:
-            regions: dict[str, dict[str, float]] = {}
-
-            def assign(slot_value: Any, region_value: Any) -> None:
-                slot = clean_template_region_slot(slot_value)
-                if not slot:
-                    return
-                region = clean_template_caption_region(region_value)
-                if region:
-                    regions[slot] = region
-
-            if isinstance(value, list):
-                for item in value:
-                    if not isinstance(item, dict):
-                        continue
-                    assign(
-                        first_template_value(item, "slot", "id", "key", "name", "regionSlot"),
-                        first_template_value(item, "region", "captionRegion", "bounds", "box", "frame", "rect") or item,
-                    )
-                return regions
-            if not isinstance(value, dict):
-                return regions
-            for slot in ("primary", "context", "counter", "title", "source", "chapter"):
-                assign(slot, value.get(slot))
-            for key, region_value in value.items():
-                assign(key, region_value)
-            return regions
+        clean_template_region_map = self._clean_photo_slideshow_region_map
 
         def clean_template_percent(raw_value: Any, default: int = 100) -> int:
             try:

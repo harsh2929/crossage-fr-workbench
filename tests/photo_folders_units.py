@@ -12524,6 +12524,88 @@ def test_photo_memories_generate_event_and_holiday_collections() -> None:
     print("ok photo memories generate local event and holiday collections")
 
 
+def test_photo_slideshow_caption_region_cleaning_is_shared() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = WorkspaceDb(Path(tmp) / "workspace.db")
+        alpha = "/library/slideshow-alpha.jpg"
+        beta = "/library/slideshow-beta.jpg"
+        raw_region_map = [
+            {
+                "slot": "primary-caption",
+                "region": {"left": 0.1, "top": 0.2, "right": 0.5, "bottom": 0.4, "unit": "normalized"},
+            },
+            {"slot": "slide-number", "bounds": [12, 5, 18, 9]},
+            {"slot": "source-label", "captionRegion": {"x": 10, "y": 80, "w": 30, "h": 12}},
+            {
+                "slot": "chapter-label",
+                "rect": {"x": 0.25, "y": 0.7, "width": 0.2, "height": 0.1, "coordinateSpace": "relative"},
+            },
+            {"slot": "ignored", "region": {"x": 0, "y": 0, "width": 0.001, "height": 0.001, "unit": "fraction"}},
+        ]
+        expected_map = {
+            "primary": {"x": 10.0, "y": 20.0, "width": 40.0, "height": 20.0},
+            "counter": {"x": 12.0, "y": 5.0, "width": 18.0, "height": 9.0},
+            "context": {"x": 10.0, "y": 80.0, "width": 30.0, "height": 12.0},
+            "chapter": {"x": 25.0, "y": 70.0, "width": 20.0, "height": 10.0},
+        }
+
+        memory = db._clean_photo_user_memory(
+            {
+                "memoryId": "user:regions",
+                "name": "Region Memory",
+                "sourcePaths": [alpha, beta],
+                "movieSettings": {"themeTemplateRegionMap": raw_region_map},
+            }
+        )
+        assert memory is not None
+        assert memory["movieSettings"]["themeTemplateRegionMap"] == expected_map
+
+        project = db._clean_photo_slideshow_project(
+            {
+                "id": "slideshow:regions",
+                "name": "Region Project",
+                "sourcePaths": [alpha, beta],
+                "themeTemplateRegionMap": raw_region_map,
+                "timelineItems": [
+                    {
+                        "sourcePath": alpha,
+                        "captionText": "Alpha",
+                        "captionRegion": {"left": 0.1, "top": 0.2, "right": 0.5, "bottom": 0.4, "unit": "normal"},
+                        "captions": [{"captionText": "Layer", "captionRegion": [0.2, 0.3, 0.25, 0.15]}],
+                    }
+                ],
+            }
+        )
+        assert project is not None
+        assert project["themeTemplateRegionMap"] == expected_map
+        assert project["timelineItems"][0]["captionRegion"] == expected_map["primary"]
+        assert project["timelineItems"][0]["captions"][0]["captionRegion"] == {
+            "x": 20.0,
+            "y": 30.0,
+            "width": 25.0,
+            "height": 15.0,
+        }
+
+        template = db._clean_photo_slideshow_theme_template(
+            {
+                "id": "template:regions",
+                "name": "Region Template",
+                "themeTemplateRegionMap": raw_region_map,
+            }
+        )
+        assert template is not None
+        assert template["themeTemplateRegionMap"] == expected_map
+
+        source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "store" / "workspace_db.py").read_text(encoding="utf-8")
+        region_helpers_start = source.index("    def _clean_photo_slideshow_caption_region(")
+        user_memory_start = source.index("    def _clean_photo_user_memory(")
+        slideshow_region_slice = source[region_helpers_start:user_memory_start]
+        assert "def _clean_photo_slideshow_region_map" in slideshow_region_slice
+        assert source.count("def clean_template_caption_region") == 0
+        assert source.count("def clean_caption_region") == 0
+    print("ok photo slideshow caption region cleaning is shared")
+
+
 def test_photo_slideshow_projects_workspace_crud() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -19474,6 +19556,7 @@ if __name__ == "__main__":
     test_photo_trips_group_date_ranges_and_location_movement()
     test_photo_memories_generate_local_collections()
     test_photo_memories_generate_event_and_holiday_collections()
+    test_photo_slideshow_caption_region_cleaning_is_shared()
     test_photo_slideshow_projects_workspace_crud()
     test_photo_slideshow_video_export_cleans_failed_bundle()
     test_folder_items_person_filter_and_dedupe()
