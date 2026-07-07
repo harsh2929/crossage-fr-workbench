@@ -10131,6 +10131,8 @@ function CameraScanner(props: {
                 "--petal-from-y": `${petal.fromY}%`,
                 "--petal-to-x": `${petal.toX}%`,
                 "--petal-to-y": `${petal.toY}%`,
+                "--petal-from-dx": `${petal.fromX - petal.toX}cqw`,
+                "--petal-from-dy": `${petal.fromY - petal.toY}cqh`,
                 "--petal-size": `${petal.size}px`,
                 "--petal-delay": `${petal.delay}s`,
                 "--petal-duration": `${petal.duration}s`,
