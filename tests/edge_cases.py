@@ -18,6 +18,7 @@ from crossage_fr.api_server import DesktopApi, structured_error
 from crossage_fr.config import MAX_CLUSTER_MIN_SIZE, RuntimeConfig, Thresholds, load_config, save_config
 from crossage_fr.enroll import manager as manager_module
 from crossage_fr.enroll import ProjectState
+from crossage_fr.ingest import safety as safety_module
 from crossage_fr.ingest.image_io import ImageLoadError, capture_date_with_provenance, load_image, sha256_file
 from crossage_fr.ingest.safety import SafetyAssessment
 from crossage_fr.ingest.video_io import VideoFrameSample, probe_video, sample_video_frames, video_decoder_report
@@ -214,6 +215,40 @@ def assert_safe_mode_flagged_list_is_paged_and_preview_budgeted() -> None:
     assert preview_create_flags == [True, False, False]
     assert result["items"][0]["previewPath"].endswith("one.jpg")
     assert result["items"][1]["previewPath"] == ""
+
+
+def assert_safe_mode_calibration_caps_examples_and_forwards_progress() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-safe-calibration-progress-"))
+    api = make_api(root / "workspace")
+    original_calibrate = safety_module.calibrate_safety_temperature
+    captured: dict[str, int] = {}
+    progress_events: list[dict[str, object]] = []
+
+    def fake_calibrate(labeled, progress=None):
+        rows = list(labeled)
+        captured["count"] = len(rows)
+        if progress:
+            progress({"phase": "started", "total": len(rows), "processed": 0})
+            progress({"phase": "complete", "total": len(rows), "processed": len(rows), "ok": False})
+        return {
+            "ok": False,
+            "temperature": 1.0,
+            "sampleCount": len(rows),
+            "positives": 0,
+            "negatives": len(rows),
+            "reason": "test",
+        }
+
+    examples = [{"path": f"/tmp/calibration-{index}.jpg", "sensitive": False} for index in range(4005)]
+    safety_module.calibrate_safety_temperature = fake_calibrate
+    try:
+        result = api._cmd_calibrate_safe_mode({"examples": examples}, progress=progress_events.append)
+    finally:
+        safety_module.calibrate_safety_temperature = original_calibrate
+    assert result["sampleCount"] == 4000
+    assert captured == {"count": 4000}
+    assert [event["phase"] for event in progress_events] == ["started", "complete"]
+    assert all(event["source"] == "safe_mode_calibration" for event in progress_events)
 
 
 def assert_invalid_project_rows_are_skipped() -> None:
@@ -4093,6 +4128,77 @@ def assert_heuristic_fallback_safety_is_not_cached() -> None:
     assert calls == 2
 
 
+def assert_safety_model_integrity_runs_only_on_cache_miss() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-safety-model-cache-"))
+    model_path = root / "safe-mode-test.onnx"
+    model_path.write_bytes(b"fake onnx payload")
+    spec = safety_module._SafetyModelSpec(  # noqa: SLF001 - regression test for loader cache semantics.
+        path=model_path,
+        model_name="cache-test",
+        source="test",
+        license="test",
+        input_size=224,
+        labels=("sfw", "nsfw"),
+        nsfw_index=1,
+        mean=(0.0, 0.0, 0.0),
+        std=(1.0, 1.0, 1.0),
+        interpolation="bilinear",
+        threshold_hint="test",
+        expected_sha256="abc123",
+    )
+    original_find = safety_module._find_safety_model
+    original_verify = safety_module._verify_model_integrity
+    original_model_class = safety_module._OnnxSafetyModel
+    original_token = safety_module._model_stat_token
+    original_cache = dict(safety_module._SAFETY_MODEL_CACHE)
+    token = {"value": (len(b"fake onnx payload"), 1)}
+    verify_calls = 0
+    created: list[object] = []
+
+    class FakeSafetyModel:
+        def __init__(self, loaded_spec):
+            self.spec = loaded_spec
+            created.append(self)
+
+    def fake_find_safety_model():
+        return spec
+
+    def fake_verify_model_integrity(loaded_spec):
+        nonlocal verify_calls
+        assert loaded_spec is spec
+        verify_calls += 1
+        return None
+
+    def fake_model_stat_token(path):
+        assert path == model_path
+        return token["value"]
+
+    safety_module._SAFETY_MODEL_CACHE.clear()
+    safety_module._find_safety_model = fake_find_safety_model
+    safety_module._verify_model_integrity = fake_verify_model_integrity
+    safety_module._OnnxSafetyModel = FakeSafetyModel
+    safety_module._model_stat_token = fake_model_stat_token
+    try:
+        first = safety_module._load_safety_model()
+        second = safety_module._load_safety_model()
+        assert first is second
+        assert verify_calls == 1
+        assert len(created) == 1
+
+        token["value"] = (len(b"fake onnx payload") + 1, 2)
+        third = safety_module._load_safety_model()
+        assert third is not first
+        assert verify_calls == 2
+        assert len(created) == 2
+    finally:
+        safety_module._find_safety_model = original_find
+        safety_module._verify_model_integrity = original_verify
+        safety_module._OnnxSafetyModel = original_model_class
+        safety_module._model_stat_token = original_token
+        safety_module._SAFETY_MODEL_CACHE.clear()
+        safety_module._SAFETY_MODEL_CACHE.update(original_cache)
+
+
 def assert_nested_exif_original_date_wins_over_ifd0_date() -> None:
     root = Path(tempfile.mkdtemp(prefix="crossage-edge-exif-nested-"))
     try:
@@ -6026,6 +6132,7 @@ def main() -> None:
     assert_config_round_trip_and_invalid_shape()
     assert_safe_mode_override_schema_migrates_and_private_delete_clears()
     assert_safe_mode_flagged_list_is_paged_and_preview_budgeted()
+    assert_safe_mode_calibration_caps_examples_and_forwards_progress()
     assert_invalid_project_rows_are_skipped()
     assert_command_validation_and_empty_inputs()
     assert_consent_workspace_registry_and_audit_pagination()
@@ -6046,6 +6153,7 @@ def main() -> None:
     assert_scan_candidates_survive_without_json_snapshot()
     assert_large_store_dedupe_uses_sqlite_lookup()
     assert_heuristic_fallback_safety_is_not_cached()
+    assert_safety_model_integrity_runs_only_on_cache_miss()
     assert_hashing_can_be_cancelled()
     assert_external_drive_discovery_edges()
     assert_mutating_file_is_deferred()

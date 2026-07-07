@@ -2384,6 +2384,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             self.project._append_audit({"action": "calibrate_safe_mode", "reset": True, "temperature": 1.0})
             return {"ok": True, "reset": True, "temperature": 1.0}
         labeled: list[tuple[str, bool]] = []
+        cap = 4000
         raw = params.get("examples", [])
         for item in raw if isinstance(raw, list) else []:
             if not isinstance(item, dict):
@@ -2392,9 +2393,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             if not path:
                 continue
             labeled.append((path, bool(item.get("sensitive", item.get("label", False)))))
+            if len(labeled) >= cap:
+                break
         # Folder form: pick a "sensitive examples" folder + a "safe examples"
         # folder; enumerate images server-side (capped so a huge tree can't hang).
-        cap = 4000
         for folder in params.get("folders", []) if isinstance(params.get("folders"), list) else []:
             if not isinstance(folder, dict):
                 continue
@@ -2411,7 +2413,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 continue
             if len(labeled) >= cap:
                 break
-        result = calibrate_safety_temperature(labeled)
+        calibration_progress = (
+            (lambda payload: progress({**payload, "source": "safe_mode_calibration"}))
+            if progress
+            else None
+        )
+        result = calibrate_safety_temperature(labeled, progress=calibration_progress)
         if result.get("ok"):
             self.project.config.safe_mode_temperature = float(result["temperature"])
             self.project.save()

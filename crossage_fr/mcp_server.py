@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import argparse
+import anyio
 import functools
 import hmac
 import json
@@ -356,12 +357,15 @@ def safe_tool(*tool_args: Any, **tool_kwargs: Any):
     # no individual tool can forget.
     def decorator(fn):
         @functools.wraps(fn)
-        def wrapper(*call_args: Any, **call_kwargs: Any):
-            try:
-                _assert_unlocked()
-                return _redact_tool_output(fn(*call_args, **call_kwargs))
-            except Exception as exc:
-                raise ValueError(_redacted_exception_message(exc)) from None
+        async def wrapper(*call_args: Any, **call_kwargs: Any):
+            def run_tool():
+                try:
+                    _assert_unlocked()
+                    return _redact_tool_output(fn(*call_args, **call_kwargs))
+                except Exception as exc:
+                    raise ValueError(_redacted_exception_message(exc)) from None
+
+            return await anyio.to_thread.run_sync(run_tool)
 
         return mcp.tool(*tool_args, **tool_kwargs)(wrapper)
 
@@ -387,9 +391,9 @@ def _progress_reporter(ctx: Context):
         processed = int(payload.get("processed") or 0)
         phase = str(payload.get("phase", "scanning")).replace("_", " ")
         current_path = str(payload.get("current_path", ""))
-        current_name = Path(current_path).name if current_path else ""
+        current_name = _scrub_text(Path(current_path).name, mask_filenames=True) if current_path else ""
         message = f"{phase}: {current_name}" if current_name else phase
-        ctx.report_progress(float(processed), float(total), message=message)
+        anyio.from_thread.run(lambda: ctx.report_progress(float(processed), float(total), message=message))
 
     return progress
 

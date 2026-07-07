@@ -140,7 +140,7 @@ def safety_model_report() -> dict[str, Any]:
     return _spec_report(spec)
 
 
-def calibrate_safety_temperature(labeled: Any) -> dict[str, Any]:
+def calibrate_safety_temperature(labeled: Any, progress: Any | None = None) -> dict[str, Any]:
     """Fit the Safe Mode temperature from local labeled images (res.md Stage 1b).
 
     ``labeled`` is an iterable of ``(path, label)`` where ``label`` is truthy for
@@ -150,40 +150,67 @@ def calibrate_safety_temperature(labeled: Any) -> dict[str, Any]:
     ``config.safe_mode_temperature``)."""
     from crossage_fr.ingest.safety_calibration import fit_temperature, temperature_nll
 
+    entries = list(labeled)
+
+    def emit(phase: str, processed: int, **extra: Any) -> None:
+        if progress is None:
+            return
+        progress({"phase": phase, "total": len(entries), "processed": processed, **extra})
+
+    emit("started", 0, accepted=0, failed=0)
     model = _load_safety_model()
     if model is None:
-        return {"ok": False, "reason": "No local ONNX safety model is available to calibrate.", "temperature": 1.0, "sampleCount": 0}
+        result = {"ok": False, "reason": "No local ONNX safety model is available to calibrate.", "temperature": 1.0, "sampleCount": 0}
+        emit("complete", 0, accepted=0, failed=0, ok=False)
+        return result
     pairs: list[list[float]] = []
     labels: list[int] = []
-    for entry in labeled:
+    failed = 0
+    for index, entry in enumerate(entries, 1):
+        path_text = ""
         try:
             path, label = entry
-            image = load_image(Path(path))
+            path_obj = Path(path)
+            path_text = str(path_obj)
+        except Exception:
+            failed += 1
+            emit("processed", index, accepted=len(pairs), failed=failed)
+            continue
+        emit("processing", index - 1, current_path=path_text, accepted=len(pairs), failed=failed)
+        try:
+            image = load_image(path_obj)
             pairs.append(model.nsfw_logit_pair(image))
             labels.append(1 if bool(label) else 0)
         except Exception:
-            continue
+            failed += 1
+        emit("processed", index, current_path=path_text, accepted=len(pairs), failed=failed)
     positives = sum(labels)
     negatives = len(labels) - positives
     if positives < 2 or negatives < 2:
-        return {
+        result = {
             "ok": False,
             "reason": "Label at least two sensitive and two non-sensitive images to calibrate.",
             "temperature": 1.0,
             "sampleCount": len(pairs),
             "positives": positives,
             "negatives": negatives,
+            "failed": failed,
         }
+        emit("complete", len(entries), accepted=len(pairs), failed=failed, ok=False)
+        return result
     temperature = fit_temperature(pairs, labels)
-    return {
+    result = {
         "ok": True,
         "temperature": float(temperature),
         "sampleCount": len(pairs),
         "positives": positives,
         "negatives": negatives,
+        "failed": failed,
         "nllBefore": temperature_nll(pairs, labels, 1.0),
         "nllAfter": temperature_nll(pairs, labels, temperature),
     }
+    emit("complete", len(entries), accepted=len(pairs), failed=failed, ok=True)
+    return result
 
 
 def _assess_image_safety_heuristic(image: Image.Image, threshold: float) -> SafetyAssessment:
@@ -498,19 +525,19 @@ def _load_safety_model() -> _OnnxSafetyModel | None:
         if _safety_engine_mode() == "model":
             raise RuntimeError("CROSSAGE_SAFE_MODE_ENGINE=model, but no ONNX safety model was found.")
         return None
-    integrity_error = _verify_model_integrity(spec)
-    if integrity_error:
-        # BRS-2: a tampered/corrupt model must not be used. In explicit `model`
-        # mode this is a hard error; otherwise fail CLOSED to the heuristic gate
-        # (assess_image_safety treats None as "use the heuristic"), so Safe Mode
-        # stays protective rather than trusting an unverified model.
-        if _safety_engine_mode() == "model":
-            raise RuntimeError(f"Safe Mode model integrity check failed: {integrity_error}")
-        return None
     size, mtime = _model_stat_token(spec.path)
     cache_key = (str(spec.path), size, mtime)
     model = _SAFETY_MODEL_CACHE.get(cache_key)
     if model is None:
+        integrity_error = _verify_model_integrity(spec)
+        if integrity_error:
+            # BRS-2: a tampered/corrupt model must not be used. In explicit `model`
+            # mode this is a hard error; otherwise fail CLOSED to the heuristic gate
+            # (assess_image_safety treats None as "use the heuristic"), so Safe Mode
+            # stays protective rather than trusting an unverified model.
+            if _safety_engine_mode() == "model":
+                raise RuntimeError(f"Safe Mode model integrity check failed: {integrity_error}")
+            return None
         if len(_SAFETY_MODEL_CACHE) >= 4:
             _SAFETY_MODEL_CACHE.clear()
         model = _OnnxSafetyModel(spec)

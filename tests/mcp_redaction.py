@@ -15,6 +15,8 @@ Run: PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/mcp_redaction
 
 from __future__ import annotations
 
+import anyio
+import inspect
 import json
 import tempfile
 from pathlib import Path
@@ -104,8 +106,41 @@ def test_exception_text_redacted_before_mcp_framework_sees_it() -> None:
 def test_safe_tool_redacts_exceptions_at_the_central_wrapper() -> None:
     source = Path(mcp.__file__).read_text(encoding="utf-8")
     block = source[source.index("def safe_tool("):source.index("def _agent_state(")]
+    assert "async def wrapper" in block
+    assert "anyio.to_thread.run_sync" in block
     assert "except Exception as exc" in block
     assert "raise ValueError(_redacted_exception_message(exc)) from None" in block
+
+
+def test_scan_tools_are_async_and_report_progress_from_worker_thread() -> None:
+    assert inspect.iscoroutinefunction(mcp.scan_folder), "scan_folder must not block the MCP event loop"
+    source = Path(mcp.__file__).read_text(encoding="utf-8")
+    block = source[source.index("def _progress_reporter("):source.index("@mcp.resource")]
+    assert "anyio.from_thread.run" in block
+    assert "ctx.report_progress(" not in block.replace("lambda: ctx.report_progress(", "")
+
+    events: list[tuple[float, float | None, str | None]] = []
+
+    class FakeContext:
+        async def report_progress(self, progress: float, total: float | None = None, message: str | None = None) -> None:
+            events.append((progress, total, message))
+
+    async def exercise() -> None:
+        reporter = mcp._progress_reporter(FakeContext())
+        await anyio.to_thread.run_sync(
+            lambda: reporter(
+                {
+                    "total": 4,
+                    "processed": 2,
+                    "phase": "processing",
+                    "current_path": LEAK_PATH,
+                }
+            )
+        )
+
+    anyio.run(exercise)
+    assert events == [(2.0, 4.0, "processing: [hidden]")]
+    assert LEAK_NAME not in str(events)
 
 
 def test_rate_limiter_token_bucket() -> None:
@@ -133,6 +168,7 @@ def main() -> None:
     test_hash_fields_redacted_in_tool_output()
     test_exception_text_redacted_before_mcp_framework_sees_it()
     test_safe_tool_redacts_exceptions_at_the_central_wrapper()
+    test_scan_tools_are_async_and_report_progress_from_worker_thread()
     test_rate_limiter_token_bucket()
     print("mcp redaction + model integrity ok")
 
