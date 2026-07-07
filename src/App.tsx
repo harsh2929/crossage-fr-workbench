@@ -509,8 +509,7 @@ function performanceTierLabel(value?: string) {
   return "Standard";
 }
 
-// Safe Mode threshold profiles (res.md Stage 1a) — mirrors crossage_fr/config.py.
-const SAFE_MODE_PROFILE_THRESHOLDS: Record<string, number> = {
+const DEFAULT_SAFE_MODE_PROFILE_THRESHOLDS: Record<string, number> = {
   privacy: 0.3,
   balanced: 0.5,
   permissive: 0.85,
@@ -6341,7 +6340,6 @@ export default function App() {
     };
     const wasDirty = settingsDirtyRef.current;
     settingsDirtyRef.current = false;
-    setSettings(nextSettings);
     try {
       await invoke<AppState>("Saving ignored files", "save_settings", settingsPayload(nextSettings));
       setNoticeMessage("ok", "notice.issueFilesIgnored", { count: uniquePaths.length }, `Ignored ${uniquePaths.length} file${uniquePaths.length === 1 ? "" : "s"} for future scans.`);
@@ -12896,12 +12894,17 @@ function SettingsView(props: {
   }
 
   const activePreset = settingsPresets.find((preset) => preset.key === props.settings.mode);
+  const safeModeProfileThresholds = {
+    privacy: finiteNumber(props.state.config.safeModeProfiles?.privacy, DEFAULT_SAFE_MODE_PROFILE_THRESHOLDS.privacy, 0, 1),
+    balanced: finiteNumber(props.state.config.safeModeProfiles?.balanced, DEFAULT_SAFE_MODE_PROFILE_THRESHOLDS.balanced, 0, 1),
+    permissive: finiteNumber(props.state.config.safeModeProfiles?.permissive, DEFAULT_SAFE_MODE_PROFILE_THRESHOLDS.permissive, 0, 1),
+  };
   const reviewVolume = props.settings.thresholds.likely >= 0.4 ? "Lower" : props.settings.thresholds.likely <= 0.24 ? "Higher" : "Moderate";
   const guardrail = !props.settings.safeMode
     ? "Off"
-    : props.settings.safeModeThreshold <= 0.5
+    : props.settings.safeModeThreshold <= safeModeProfileThresholds.balanced
       ? "Strict"
-      : props.settings.safeModeThreshold >= 0.62
+      : props.settings.safeModeThreshold >= ((safeModeProfileThresholds.balanced + safeModeProfileThresholds.permissive) / 2)
         ? "Light"
         : "Balanced";
   const modelPackages = props.state.modelSetup?.packages ?? [];
@@ -13080,8 +13083,8 @@ function SettingsView(props: {
                 onChange={(event) => {
                   const profile = event.currentTarget.value;
                   setCustomSettings(
-                    profile in SAFE_MODE_PROFILE_THRESHOLDS
-                      ? { safeModeProfile: profile, safeModeThreshold: SAFE_MODE_PROFILE_THRESHOLDS[profile] }
+                    profile in safeModeProfileThresholds
+                      ? { safeModeProfile: profile, safeModeThreshold: safeModeProfileThresholds[profile as keyof typeof safeModeProfileThresholds] }
                       : { safeModeProfile: "custom" }
                   );
                 }}

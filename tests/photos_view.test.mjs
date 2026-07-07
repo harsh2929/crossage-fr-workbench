@@ -6551,6 +6551,33 @@ run("App DOM localization skips English and batches mutation roots", () => {
   assert.doesNotMatch(effectBlock[0], /mutation\.addedNodes\.forEach\(enqueueLocalizationRoot\)/);
 });
 
+run("App Safe Mode profile thresholds use backend config as authority", () => {
+  const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
+  assert.match(appSource, /const DEFAULT_SAFE_MODE_PROFILE_THRESHOLDS: Record<string, number>/);
+  assert.match(appSource, /const safeModeProfileThresholds = \{/);
+  assert.match(appSource, /props\.state\.config\.safeModeProfiles\?\.privacy/);
+  assert.match(appSource, /props\.state\.config\.safeModeProfiles\?\.balanced/);
+  assert.match(appSource, /props\.state\.config\.safeModeProfiles\?\.permissive/);
+  assert.match(appSource, /safeModeThreshold: safeModeProfileThresholds\[profile as keyof typeof safeModeProfileThresholds\]/);
+  assert.doesNotMatch(appSource, /SAFE_MODE_PROFILE_THRESHOLDS\[profile\]/);
+});
+
+run("App ignore issue paths only changes visible draft after save succeeds", () => {
+  const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
+  const block = appSource.match(/async function ignoreIssuePaths\(paths: string\[\]\) \{[\s\S]*?\n  \}\n\n  function copySettingsProfile/);
+  assert.ok(block, "ignoreIssuePaths should exist");
+  assert.match(block[0], /const nextSettings: SettingsDraft = \{/);
+  assert.match(block[0], /settingsDirtyRef\.current = false;[\s\S]*await invoke<AppState>\("Saving ignored files", "save_settings", settingsPayload\(nextSettings\)\);/);
+  assert.match(block[0], /catch \{\s*settingsDirtyRef\.current = wasDirty;\s*\}/);
+  assert.doesNotMatch(block[0], /setSettings\(nextSettings\)/);
+});
+
+run("Photos safety explainer unavailable status shows backend reason", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  assert.match(source, /!explainResult\.available\s*\?\s*\(explainResult\.reason \? uiText\(explainResult\.reason\) : uiText\("No explainer model installed\. Add one in Settings/);
+  assert.doesNotMatch(source, /!explainResult\.available\s*\?\s*uiText\("No explainer model installed\. Add one in Settings/);
+});
+
 run("Safe Mode review dashboard honors sensitive collection unlock before listing flagged photos", () => {
   const reviewSource = fs.readFileSync(path.join(ROOT, "src/views/SafeModeReview.tsx"), "utf8");
   const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");

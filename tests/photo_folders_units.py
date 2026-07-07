@@ -18421,6 +18421,43 @@ def test_photo_rendered_export_preserves_source_icc_profile() -> None:
     print("ok rendered image export preserves and targets ICC profiles")
 
 
+def test_photo_target_color_profile_is_not_embedded_when_conversion_fails() -> None:
+    from PIL import Image, ImageCms
+
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        image = Image.new("RGB", (8, 6), (120, 70, 30))
+        target_profile = api._photo_export_srgb_profile_bytes()
+        output, profile = api._photo_export_apply_target_color_profile(
+            image,
+            source_icc_profile=b"not a valid profile",
+            target_color_profile="srgb",
+        )
+        assert output.tobytes() == image.tobytes()
+        assert profile == b"", profile
+
+        source_profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("LAB")).tobytes()
+        original_profile_to_profile = ImageCms.profileToProfile
+
+        def fail_profile_to_profile(*args, **kwargs):
+            raise RuntimeError("simulated color transform failure")
+
+        try:
+            ImageCms.profileToProfile = fail_profile_to_profile
+            output, profile = api._photo_export_apply_target_color_profile(
+                image,
+                source_icc_profile=source_profile,
+                target_color_profile="srgb",
+            )
+        finally:
+            ImageCms.profileToProfile = original_profile_to_profile
+
+        assert output.tobytes() == image.tobytes()
+        assert profile == source_profile, "failed conversion should preserve the source profile rather than embed the target"
+        assert profile != target_profile
+    print("ok failed ICC conversion does not embed the target profile")
+
+
 def test_photo_rendered_export_strip_location_omits_pixel_and_xmp_gps() -> None:
     from PIL import ExifTags, Image
 
@@ -19171,6 +19208,7 @@ if __name__ == "__main__":
     test_photo_rendered_video_export_applies_saved_edit_stack()
     test_photo_rendered_video_export_real_codec_matrix_when_ffmpeg_available()
     test_photo_rendered_export_preserves_source_icc_profile()
+    test_photo_target_color_profile_is_not_embedded_when_conversion_fails()
     test_photo_rendered_export_strip_location_omits_pixel_and_xmp_gps()
     test_photo_video_trim_export_with_quality_settings()
     test_photo_export_move_records_undoable_file_move()

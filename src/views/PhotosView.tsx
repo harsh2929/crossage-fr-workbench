@@ -31140,7 +31140,7 @@ export function PhotosView(props: {
                     : !explainResult
                     ? ""
                     : !explainResult.available
-                    ? uiText("No explainer model installed. Add one in Settings › Privacy & Safety.")
+                    ? (explainResult.reason ? uiText(explainResult.reason) : uiText("No explainer model installed. Add one in Settings › Privacy & Safety."))
                     : explainResult.detections.length === 0
                     ? uiText("No specific regions detected.")
                     : uiText("Highlighting detected regions.")}

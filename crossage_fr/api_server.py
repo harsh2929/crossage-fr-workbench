@@ -25761,9 +25761,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if source_bytes:
             try:
                 source_profile = ImageCms.ImageCmsProfile(BytesIO(source_bytes))
+            except Exception:
+                return image, b""
+            try:
                 converted = ImageCms.profileToProfile(rgb, source_profile, target_profile, outputMode="RGB")
             except Exception:
-                converted = rgb
+                return image, source_bytes if preserve_color_profile else b""
         elif target != "srgb":
             source_profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB"))
             converted = ImageCms.profileToProfile(rgb, source_profile, target_profile, outputMode="RGB")
