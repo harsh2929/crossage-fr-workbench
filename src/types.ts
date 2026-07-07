@@ -3066,32 +3066,20 @@ export interface CalibrationSummary {
 }
 
 export interface CalibrationLearningArtifact {
-  artifact_id?: string;
   artifactId?: string;
-  artifact_type?: string;
   artifactType?: string;
   status: ExtensibleStringUnion<"candidate" | "staged" | "promoted" | "rejected" | "rolled_back">;
-  model_name?: string;
   modelName?: string;
-  version_key?: string;
   versionKey?: string;
-  training_data_hash?: string;
   trainingDataHash?: string;
-  input_count?: number;
   inputCount?: number;
-  positive_count?: number;
   positiveCount?: number;
-  negative_count?: number;
   negativeCount?: number;
   metrics?: Record<string, unknown>;
   payload?: Record<string, unknown>;
-  artifact_hash?: string;
   artifactHash?: string;
-  parent_artifact_id?: string;
   parentArtifactId?: string;
-  created_at?: string;
   createdAt?: string;
-  promoted_at?: string | null;
   promotedAt?: string | null;
 }
 

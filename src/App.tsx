@@ -225,6 +225,12 @@ import type {
   SharePathsResult,
   UpdateStatus
 } from "./types";
+import {
+  normalizeCalibrationLearningResult,
+  normalizeCalibrationLearningStatus,
+  normalizeEmbeddingAdapterStatus,
+  normalizeLearningJobsResult,
+} from "./lib/calibrationArtifacts";
 import { computeScannedCounts, countExcludedBranches, excludeNode, includeNode } from "./lib/folderTreeSelection";
 import { filterPeople, groupReferencesByPerson, type Person } from "./lib/peopleGrouping";
 import SafeModeReview from "./views/SafeModeReview";
@@ -1427,24 +1433,23 @@ function basename(value: string | null | undefined) {
 }
 
 function calibrationArtifactId(artifact: CalibrationLearningArtifact | null | undefined) {
-  return String(artifact?.artifact_id || artifact?.artifactId || "");
+  return String(artifact?.artifactId || "");
 }
 
 function calibrationArtifactHash(artifact: CalibrationLearningArtifact | null | undefined) {
-  return String(artifact?.artifact_hash || artifact?.artifactHash || "");
+  return String(artifact?.artifactHash || "");
 }
 
 function calibrationArtifactCreatedAt(artifact: CalibrationLearningArtifact | null | undefined) {
-  return String(artifact?.created_at || artifact?.createdAt || "");
+  return String(artifact?.createdAt || "");
 }
 
 function calibrationArtifactModel(artifact: CalibrationLearningArtifact | null | undefined) {
-  return String(artifact?.model_name || artifact?.modelName || "");
+  return String(artifact?.modelName || "");
 }
 
-function calibrationArtifactCount(artifact: CalibrationLearningArtifact | null | undefined, snakeKey: keyof CalibrationLearningArtifact, camelKey: keyof CalibrationLearningArtifact) {
-  const fallback = finiteInteger(artifact?.[camelKey], 0, 0, Number.MAX_SAFE_INTEGER);
-  return finiteInteger(artifact?.[snakeKey], fallback, 0, Number.MAX_SAFE_INTEGER);
+function calibrationArtifactCount(artifact: CalibrationLearningArtifact | null | undefined, key: "inputCount" | "positiveCount" | "negativeCount") {
+  return finiteInteger(artifact?.[key], 0, 0, Number.MAX_SAFE_INTEGER);
 }
 
 function formatMediaTimestamp(value: number | null | undefined) {
@@ -5975,7 +5980,7 @@ export default function App() {
       {},
       { quiet: true }
     );
-    setCalibrationLearning(result);
+    setCalibrationLearning(normalizeCalibrationLearningStatus(result));
   }
 
   async function refreshEmbeddingAdapterStatus() {
@@ -5985,7 +5990,7 @@ export default function App() {
       {},
       { quiet: true }
     );
-    setEmbeddingAdapterLearning(result);
+    setEmbeddingAdapterLearning(normalizeEmbeddingAdapterStatus(result));
   }
 
   async function refreshSelfLearningRdStatus() {
@@ -6000,16 +6005,17 @@ export default function App() {
 
   async function stageCalibration() {
     const result = await invoke<CommandResult<CalibrationLearningResult>>("Staging calibration", "stage_calibration");
+    const value = normalizeCalibrationLearningResult(result.value);
     await refreshCalibrationLearningStatus();
     const labels = finiteInteger(
-      result.value?.payload?.labels,
-      calibrationArtifactCount(result.value?.artifact, "input_count", "inputCount"),
+      value.payload?.labels,
+      calibrationArtifactCount(value.artifact, "inputCount"),
       0,
       Number.MAX_SAFE_INTEGER
     );
     setNotice({
-      tone: result.value?.promotable === false || result.value?.status === "rejected" ? "warn" : "ok",
-      text: result.value?.status === "rejected"
+      tone: value.promotable === false || value.status === "rejected" ? "warn" : "ok",
+      text: value.status === "rejected"
         ? "Calibration feedback was evaluated and kept advisory because validation did not pass."
         : `Learned calibration staged${labels ? ` from ${formatNumber(Number(labels))} label${Number(labels) === 1 ? "" : "s"}` : ""}.`
     });
@@ -6018,17 +6024,18 @@ export default function App() {
   async function runLearningJobs() {
     if (!await confirmDialog("Run the local learning check now? It can stage a learned calibration artifact, but it will not apply it.")) return;
     const result = await invoke<CommandResult<LearningJobsResult>>("Running learning check", "run_learning_jobs");
+    const value = normalizeLearningJobsResult(result.value);
     if (result.state) {
       applyState(result.state);
     }
-    if (result.value?.status) {
-      setCalibrationLearning(result.value.status);
+    if (value.status) {
+      setCalibrationLearning(value.status);
     } else {
       await refreshCalibrationLearningStatus();
     }
     setNotice({
-      tone: result.value?.artifactCreated && result.value?.staged === false ? "warn" : "ok",
-      text: result.value?.reason || "Learning check complete."
+      tone: value.artifactCreated && value.staged === false ? "warn" : "ok",
+      text: value.reason || "Learning check complete."
     });
   }
 
@@ -6056,19 +6063,20 @@ export default function App() {
 
   async function stageEmbeddingAdapter() {
     const result = await invoke<CommandResult<CalibrationLearningResult>>("Staging embedding adapter", "stage_embedding_adapter");
+    const value = normalizeCalibrationLearningResult(result.value);
     if (result.state) {
       applyState(result.state);
     }
     await refreshEmbeddingAdapterStatus();
     const labels = finiteInteger(
-      result.value?.payload?.inputCount,
-      calibrationArtifactCount(result.value?.artifact, "input_count", "inputCount"),
+      value.payload?.inputCount,
+      calibrationArtifactCount(value.artifact, "inputCount"),
       0,
       Number.MAX_SAFE_INTEGER
     );
     setNotice({
-      tone: result.value?.promotable === false || result.value?.status === "rejected" ? "warn" : "ok",
-      text: result.value?.status === "rejected"
+      tone: value.promotable === false || value.status === "rejected" ? "warn" : "ok",
+      text: value.status === "rejected"
         ? "Adapter feedback was evaluated and kept advisory because validation did not pass."
         : `Embedding adapter staged${labels ? ` from ${formatNumber(Number(labels))} example${Number(labels) === 1 ? "" : "s"}` : ""}.`
     });
@@ -15176,7 +15184,7 @@ function AccuracyLabPanel({
         {latestArtifact ? (
           <div className="health-list">
             <span>Latest artifact {latestArtifactId || "unknown"}{calibrationArtifactModel(latestArtifact) ? ` for ${calibrationArtifactModel(latestArtifact)}` : ""}.</span>
-            <span>{formatNumber(calibrationArtifactCount(latestArtifact, "input_count", "inputCount"))} labels, {formatNumber(calibrationArtifactCount(latestArtifact, "positive_count", "positiveCount"))} matches, {formatNumber(calibrationArtifactCount(latestArtifact, "negative_count", "negativeCount"))} non-matches.</span>
+            <span>{formatNumber(calibrationArtifactCount(latestArtifact, "inputCount"))} labels, {formatNumber(calibrationArtifactCount(latestArtifact, "positiveCount"))} matches, {formatNumber(calibrationArtifactCount(latestArtifact, "negativeCount"))} non-matches.</span>
             {latestArtifactHash ? <span>Hash {latestArtifactHash.slice(0, 16)}... created {formatDateTime(calibrationArtifactCreatedAt(latestArtifact))}.</span> : null}
           </div>
         ) : (
@@ -15245,7 +15253,7 @@ function AccuracyLabPanel({
         {adapterLatestArtifact ? (
           <div className="health-list">
             <span>Latest adapter {adapterLatestArtifactId || "unknown"}{calibrationArtifactModel(adapterLatestArtifact) ? ` for ${calibrationArtifactModel(adapterLatestArtifact)}` : ""}.</span>
-            <span>{formatNumber(calibrationArtifactCount(adapterLatestArtifact, "input_count", "inputCount"))} examples, {formatNumber(calibrationArtifactCount(adapterLatestArtifact, "positive_count", "positiveCount"))} matches, {formatNumber(calibrationArtifactCount(adapterLatestArtifact, "negative_count", "negativeCount"))} non-matches.</span>
+            <span>{formatNumber(calibrationArtifactCount(adapterLatestArtifact, "inputCount"))} examples, {formatNumber(calibrationArtifactCount(adapterLatestArtifact, "positiveCount"))} matches, {formatNumber(calibrationArtifactCount(adapterLatestArtifact, "negativeCount"))} non-matches.</span>
             {adapterLatestArtifactHash ? <span>Hash {adapterLatestArtifactHash.slice(0, 16)}... created {formatDateTime(calibrationArtifactCreatedAt(adapterLatestArtifact))}.</span> : null}
           </div>
         ) : (

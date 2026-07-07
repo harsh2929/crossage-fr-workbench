@@ -37,4 +37,12 @@ assert.ok(
   "expected the formerly widened backend enum fields to use ExtensibleStringUnion",
 );
 
+const artifactInterface = typesSource.match(/export interface CalibrationLearningArtifact \{([\s\S]*?)\n\}/);
+assert.ok(artifactInterface, "CalibrationLearningArtifact interface should be present");
+assert.deepStrictEqual(
+  (artifactInterface[1].match(/\b[a-z]+_[a-z_]+\??:/g) || []),
+  [],
+  "CalibrationLearningArtifact should expose normalized camelCase fields only",
+);
+
 console.log("types literal-union contracts ok");
