@@ -107,6 +107,7 @@ const userGrantedExternalEditorPaths = new Set();
 const queryTrustedMediaPaths = new Set();
 let queryTrustedMediaPathsVersion = 0;
 let trustedMediaPathCache = null;
+let pathTrustGeneration = 0;
 const recentDiagnosticEvents = [];
 let workspaceLockUnlocked = true;
 let workspaceLockInitialized = false;
@@ -1701,7 +1702,10 @@ function invalidateTrustedMediaPathCache() {
   trustedMediaPathCache = null;
 }
 
-function grantQueryMediaPath(filePath) {
+function grantQueryMediaPath(filePath, trustGeneration = pathTrustGeneration) {
+  if (trustGeneration !== pathTrustGeneration) {
+    return;
+  }
   if (typeof filePath !== "string" || !filePath.trim()) {
     return;
   }
@@ -1727,6 +1731,7 @@ function grantQueryMediaPath(filePath) {
 // when switching workspaces (so prior-case access doesn't leak into the next).
 // The new workspace's paths are re-granted as its state loads.
 function clearPathTrust() {
+  pathTrustGeneration += 1;
   userGrantedPaths.clear();
   userGrantedExternalEditorPaths.clear();
   if (queryTrustedMediaPaths.size) {
@@ -2216,10 +2221,14 @@ function findPythonExecutable() {
   return process.platform === "win32" ? "python" : "python3";
 }
 
-function decorateState(value) {
+function decorateState(value, options = {}) {
   if (!value || typeof value !== "object") {
     return value;
   }
+  const trustGeneration = Number.isInteger(options.trustGeneration) ? options.trustGeneration : pathTrustGeneration;
+  const grantDecoratedMediaPath = (filePath) => {
+    grantQueryMediaPath(filePath, trustGeneration);
+  };
   const decoratePath = (item, key, outKey) => {
     if (item[key]) {
       item[outKey] = mediaUrlFor(item[key]);
@@ -2229,17 +2238,17 @@ function decorateState(value) {
   };
   const decorateCandidate = (item) => {
     const next = { ...item };
-    grantQueryMediaPath(next.sourcePath);
-    grantQueryMediaPath(next.mediaSourcePath);
-    grantQueryMediaPath(next.previewPath);
-    grantQueryMediaPath(next.bestRefPath);
-    grantQueryMediaPath(next.bestRefPreviewPath);
+    grantDecoratedMediaPath(next.sourcePath);
+    grantDecoratedMediaPath(next.mediaSourcePath);
+    grantDecoratedMediaPath(next.previewPath);
+    grantDecoratedMediaPath(next.bestRefPath);
+    grantDecoratedMediaPath(next.bestRefPreviewPath);
     if (next.assetMetadata && typeof next.assetMetadata === "object" && !Array.isArray(next.assetMetadata)) {
       const assetMetadata = { ...next.assetMetadata };
       if (assetMetadata.livePhoto && typeof assetMetadata.livePhoto === "object" && !Array.isArray(assetMetadata.livePhoto)) {
         const livePhoto = { ...assetMetadata.livePhoto };
-        grantQueryMediaPath(livePhoto.pairedVideoPath);
-        grantQueryMediaPath(livePhoto.keyPhotoPreviewPath);
+        grantDecoratedMediaPath(livePhoto.pairedVideoPath);
+        grantDecoratedMediaPath(livePhoto.keyPhotoPreviewPath);
         if (livePhoto.pairedVideoPath) {
           livePhoto.pairedVideoUrl = mediaUrlFor(livePhoto.pairedVideoPath);
         }
@@ -2254,7 +2263,7 @@ function decorateState(value) {
       next.mediaPairs = next.mediaPairs.map((pair) => {
         const mediaPair = pair && typeof pair === "object" && !Array.isArray(pair) ? { ...pair } : pair;
         if (mediaPair && typeof mediaPair === "object") {
-          grantQueryMediaPath(mediaPair.relatedSourcePath);
+          grantDecoratedMediaPath(mediaPair.relatedSourcePath);
         }
         return mediaPair;
       });
@@ -2313,14 +2322,14 @@ function decorateState(value) {
     // resolves over vintrace-media:// like any other preview.
     value.folders = value.folders.map((folder) => {
       const next = { ...folder };
-      grantQueryMediaPath(next.coverPreviewPath);
+      grantDecoratedMediaPath(next.coverPreviewPath);
       decoratePath(next, "coverPreviewPath", "coverPreviewUrl");
       return next;
     });
   } else if (Array.isArray(value.buckets)) {
     value.buckets = value.buckets.map((bucket) => {
       const next = { ...bucket };
-      grantQueryMediaPath(next.coverPreviewPath);
+      grantDecoratedMediaPath(next.coverPreviewPath);
       decoratePath(next, "coverPreviewPath", "coverPreviewUrl");
       return next;
     });
@@ -2330,8 +2339,8 @@ function decorateState(value) {
       items: Array.isArray(group.items)
         ? group.items.map((item) => {
           const next = { ...item };
-          grantQueryMediaPath(next.previewPath);
-          grantQueryMediaPath(next.coverPreviewPath);
+          grantDecoratedMediaPath(next.previewPath);
+          grantDecoratedMediaPath(next.coverPreviewPath);
           decoratePath(next, "previewPath", "previewUrl");
           decoratePath(next, "coverPreviewPath", "coverPreviewUrl");
           return next;
@@ -2952,7 +2961,7 @@ async function flushWatchQueue() {
       queued: watch.queue.size,
       scanning: false,
       message: `Processed ${processed} new file(s).${watch.dropped ? ` ${watch.dropped} file event(s) were deferred while the queue was full.` : ""}`,
-      result: result ? decorateState(result) : null
+      result: result || null
     });
     watch.dropped = 0;
   } catch (error) {
@@ -3335,11 +3344,14 @@ class PythonBackend {
           return;
         }
         if (message.event === "progress") {
+          const progressPending = this.pending.get(message.id);
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send("backend:progress", {
               id: message.id,
               name: message.name,
-              payload: decorateState(message.payload || {})
+              payload: decorateState(message.payload || {}, {
+                trustGeneration: progressPending ? progressPending.trustGeneration : -1
+              })
             });
           }
           return;
@@ -3351,11 +3363,13 @@ class PythonBackend {
         this.pending.delete(message.id);
         clearTimeout(pending.timer);
         if (message.ok) {
-          const result = decorateState(message.result);
-          if (result?.state) {
-            this.readyState = result.state;
-          } else if (result?.counts && result?.references && result?.candidates) {
-            this.readyState = result;
+          const result = decorateState(message.result, { trustGeneration: pending.trustGeneration });
+          if (pending.trustGeneration === pathTrustGeneration) {
+            if (result?.state) {
+              this.readyState = result.state;
+            } else if (result?.counts && result?.references && result?.candidates) {
+              this.readyState = result;
+            }
           }
           notifyForCommand(pending.command, result);
           pending.resolve(result);
@@ -3487,7 +3501,8 @@ class PythonBackend {
         reject(error);
       };
       const timer = setTimeout(fireWatchdog, BACKEND_STALL_TIMEOUT_MS);
-      this.pending.set(id, { resolve, reject, command, timer });
+      const trustGeneration = pathTrustGeneration;
+      this.pending.set(id, { resolve, reject, command, timer, trustGeneration });
       this.child.stdin.write(payload, "utf8", (error) => {
         if (error) {
           const pending = this.pending.get(id);

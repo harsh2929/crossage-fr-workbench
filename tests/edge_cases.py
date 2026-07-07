@@ -3308,7 +3308,8 @@ def assert_static_app_contracts() -> None:
     assert "Generated related media ignored." in photos_e2e
     assert "native_share_related_media" in photos_view
     assert "photos-related-media" in photos_view
-    assert "grantQueryMediaPath(mediaPair.relatedSourcePath)" in desktop_main
+    assert "grantDecoratedMediaPath(mediaPair.relatedSourcePath)" in desktop_main
+    assert "function grantQueryMediaPath(filePath, trustGeneration = pathTrustGeneration)" in desktop_main
     assert "__relatedMediaSharePaths" in photos_e2e
     assert "manual-related.dng" in photos_e2e
     assert "generated-pair.dng" in photos_e2e

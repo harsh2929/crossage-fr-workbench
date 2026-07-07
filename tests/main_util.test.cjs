@@ -89,6 +89,26 @@ function testBackendStdinErrorsAreHandled() {
   assert.match(spawnBlock, /this\.pending\.clear\(\);[\s\S]*?this\.readyPromise = null;[\s\S]*?this\.readyState = null;[\s\S]*?this\.child = null;/);
 }
 
+function testPathTrustGenerationGuardsStaleBackendResponses() {
+  const source = fs.readFileSync(path.join(__dirname, "..", "desktop", "main.cjs"), "utf8");
+  const decorateBlock = source.slice(source.indexOf("function decorateState"), source.indexOf("function redactLockedState"));
+  const spawnBlock = source.slice(source.indexOf("  _spawn() {"), source.indexOf("  async invoke("));
+  const invokeBlock = source.slice(source.indexOf("  async invoke("), source.indexOf("  handleCommandTimeout("));
+  const watchBlock = source.slice(source.indexOf("async function flushWatchQueue"), source.indexOf("function startFolderWatch"));
+  assert.match(source, /let pathTrustGeneration = 0;/);
+  assert.match(source, /function clearPathTrust\(\) \{[\s\S]*?pathTrustGeneration \+= 1;/);
+  assert.match(source, /function grantQueryMediaPath\(filePath, trustGeneration = pathTrustGeneration\) \{[\s\S]*?if \(trustGeneration !== pathTrustGeneration\) \{[\s\S]*?return;/);
+  assert.match(decorateBlock, /function decorateState\(value, options = \{\}\)/);
+  assert.match(decorateBlock, /const trustGeneration = Number\.isInteger\(options\.trustGeneration\) \? options\.trustGeneration : pathTrustGeneration;/);
+  assert.match(decorateBlock, /grantQueryMediaPath\(filePath, trustGeneration\);/);
+  assert.match(spawnBlock, /const progressPending = this\.pending\.get\(message\.id\);[\s\S]*?payload: decorateState\(message\.payload \|\| \{\}, \{[\s\S]*?trustGeneration: progressPending \? progressPending\.trustGeneration : -1/);
+  assert.match(spawnBlock, /const result = decorateState\(message\.result, \{ trustGeneration: pending\.trustGeneration \}\);/);
+  assert.match(spawnBlock, /if \(pending\.trustGeneration === pathTrustGeneration\) \{[\s\S]*?this\.readyState = result\.state;[\s\S]*?this\.readyState = result;/);
+  assert.match(invokeBlock, /const trustGeneration = pathTrustGeneration;[\s\S]*?this\.pending\.set\(id, \{ resolve, reject, command, timer, trustGeneration \}\);/);
+  assert.match(watchBlock, /result: result \|\| null/);
+  assert.doesNotMatch(watchBlock, /result: result \? decorateState\(result\) : null/);
+}
+
 function testCanonicalPathKey() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vintrace-canon-"));
   // case-fold on -> equal keys regardless of case
@@ -182,6 +202,7 @@ async function main() {
   testBackendRestartDelay();
   testPythonBackendStartRaceGuards();
   testBackendStdinErrorsAreHandled();
+  testPathTrustGenerationGuardsStaleBackendResponses();
   testCanonicalPathKey();
   testUniquePathBatch();
   testBuildTrustedMediaPathSet();
