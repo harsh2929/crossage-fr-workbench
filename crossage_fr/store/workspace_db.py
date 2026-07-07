@@ -2419,7 +2419,7 @@ class WorkspaceDb:
         suffix = Path(safe_name).suffix
         counter = 2
         while True:
-            candidate = root / f"{stem}-{counter}{suffix}"
+            candidate = target_root / f"{stem}-{counter}{suffix}"
             if not candidate.exists():
                 return candidate
             counter += 1
@@ -6565,6 +6565,7 @@ class WorkspaceDb:
         source_scan_run: str = "",
         metadata: dict[str, Any] | None = None,
         sidecar_metadata: dict[str, Any] | None = None,
+        refresh_index: bool = True,
     ) -> str:
         source = str(source_path or "").strip()
         if not source:
@@ -6711,7 +6712,8 @@ class WorkspaceDb:
             now=now,
         )
         self.replace_photo_object_tags_from_metadata(asset_id, next_metadata, conn, refresh_index=False)
-        self._index_photo_asset(asset_id, conn)
+        if refresh_index:
+            self._index_photo_asset(asset_id, conn)
         return asset_id
 
     def _upsert_photo_assets_from_candidate_params(self, rows: Iterable[tuple[Any, ...]], conn: sqlite3.Connection) -> int:
@@ -6740,6 +6742,7 @@ class WorkspaceDb:
                     "mediaSourcePath": str(row[16] or ""),
                     "captureDateProvenance": str(payload.get("capture_date_provenance") or ""),
                 },
+                refresh_index=False,
             )
             if not asset_id:
                 continue

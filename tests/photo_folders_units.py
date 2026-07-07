@@ -1103,6 +1103,24 @@ def test_import_aggregate_folders_expose_extended_session_history() -> None:
     print("ok import aggregate folders expose extended session history")
 
 
+def test_managed_import_collision_fallback_stays_in_relative_folder() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        db = WorkspaceDb(base / "workspace.db")
+        managed_root = base / "managed"
+        source = base / "source" / "Events" / "Day 1" / "nested import.jpg"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"new")
+        existing = managed_root / "Events" / "Day 1" / source.name
+        existing.parent.mkdir(parents=True)
+        existing.write_bytes(b"existing")
+
+        target = db._unique_managed_import_target(managed_root, source, Path("Events") / "Day 1")
+        assert target == managed_root / "Events" / "Day 1" / "nested import-2.jpg", target
+        assert target.parent == existing.parent, target
+    print("ok managed import collision fallback stays in relative folder")
+
+
 def test_photo_library_root_scope_filters_browse_dates_and_search() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -6069,6 +6087,39 @@ def test_candidate_persistence_backfills_photo_assets_and_people() -> None:
         db.delete_candidates(["v1"])
         assert db.list_photo_asset_people(video_asset["assetId"]) == []
     print("ok candidate persistence backfills photo assets + people")
+
+
+def test_candidate_ingest_indexes_once_after_people_rows() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        db = WorkspaceDb(base / "workspace.db")
+        image = str(base / "alice-once.jpg")
+        search_document_calls: list[str] = []
+        original_search_document = db._photo_asset_search_document
+
+        def counting_search_document(asset_id: str, conn: sqlite3.Connection) -> dict[str, str] | None:
+            search_document_calls.append(asset_id)
+            return original_search_document(asset_id, conn)
+
+        db._photo_asset_search_document = counting_search_document  # type: ignore[method-assign]
+        try:
+            count = db.upsert_candidates([
+                _candidate("once-1", "Alice", image, status="accepted", score=0.99, source_hash="hash-once")
+            ])
+        finally:
+            db._photo_asset_search_document = original_search_document  # type: ignore[method-assign]
+
+        assert count == 1, count
+        asset = db.photo_asset_by_path(image)
+        assert asset, asset
+        assert search_document_calls == [asset["assetId"]], search_document_calls
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT people FROM photo_search_fts WHERE asset_id = ?",
+                (asset["assetId"],),
+            ).fetchone()
+        assert row is not None and row["people"] == "Alice", row
+    print("ok candidate ingest indexes once after people rows")
 
 
 def test_all_photos_reads_candidate_backed_photo_assets_without_scan_manifest() -> None:
@@ -18149,6 +18200,7 @@ if __name__ == "__main__":
     test_photo_asset_page_materializes_filter_once_for_count_and_page()
     test_scan_runs_create_photo_import_sessions_and_import_folders()
     test_import_aggregate_folders_expose_extended_session_history()
+    test_managed_import_collision_fallback_stays_in_relative_folder()
     test_photo_library_root_scope_filters_browse_dates_and_search()
     test_explicit_photo_import_referenced_and_managed_modes()
     test_photo_import_access_guidance_for_apple_photos_and_protected_paths()
@@ -18211,6 +18263,7 @@ if __name__ == "__main__":
     test_photo_preview_rebuild_repairs_cached_previews()
     test_photo_library_preview_sweep_respects_library_root_scope()
     test_candidate_persistence_backfills_photo_assets_and_people()
+    test_candidate_ingest_indexes_once_after_people_rows()
     test_all_photos_reads_candidate_backed_photo_assets_without_scan_manifest()
     test_smart_album_people_rules_read_candidate_backed_photo_assets_without_scan_manifest()
     test_list_photo_assets_api_returns_people_and_media_filter()
