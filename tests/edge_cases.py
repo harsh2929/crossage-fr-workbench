@@ -5751,6 +5751,7 @@ def assert_review_and_settings_guards() -> None:
     assert fast["config"]["effectivePerformanceMode"] == "fast"
     assert fast["config"]["effectiveFaceDetectorSize"] <= 384
     assert fast["config"]["effectiveTwoPassScan"] is False
+    assert api._effective_engine_config().multi_scale_detect is False
     auto = api.handle("set_performance_mode", {"mode": "auto"})
     assert auto["config"]["performanceMode"] == "auto"
     assert auto["config"]["effectivePerformanceMode"] in {"fast", "balanced", "quality"}

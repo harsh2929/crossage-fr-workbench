@@ -557,6 +557,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         mode = self._effective_performance_mode()
         if mode == "fast":
             config.face_detector_size = min(int(config.face_detector_size), 384)
+            config.multi_scale_detect = False
             config.two_pass_scan = False
             config.verification_detector_size = config.face_detector_size
         elif mode == "balanced":
