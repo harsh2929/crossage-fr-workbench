@@ -284,6 +284,51 @@ def test_workspace_db_connection_pragmas_tune_cache_and_mmap() -> None:
     print("ok workspace DB connection tunes cache mmap and foreign keys")
 
 
+def test_workspace_db_scale_summary_uses_stat_keyed_cache() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        db = WorkspaceDb(base / "workspace.sqlite3")
+        db.create_scan_run("run1", "Scale cache", "unit", str(base), total=1)
+        db.record_scan_file("run1", base / "one.jpg", _sig(base / "one.jpg"), "completed", content_hash="hash1")
+
+        original_stat_key = db._scale_summary_stat_key
+        original_connect = db.connect
+        stable_key = (("workspace.sqlite3", 10, 20), ("workspace.sqlite3-wal", 30, 40), ("workspace.sqlite3-shm", 50, 60))
+        db._scale_summary_stat_key = lambda: stable_key  # type: ignore[method-assign]
+        try:
+            first = db.scale_summary()
+
+            def fail_connect():
+                raise AssertionError("stable scale_summary cache key should not reopen SQLite")
+
+            db.connect = fail_connect  # type: ignore[method-assign]
+            try:
+                cached = db.scale_summary()
+            finally:
+                db.connect = original_connect  # type: ignore[method-assign]
+            assert cached == first
+            cached["latestScan"]["run_id"] = "mutated"
+            assert db.scale_summary()["latestScan"]["run_id"] == "run1"
+
+            connect_calls = 0
+
+            def counting_connect():
+                nonlocal connect_calls
+                connect_calls += 1
+                return original_connect()
+
+            db.connect = counting_connect  # type: ignore[method-assign]
+            db._scale_summary_stat_key = lambda: (("workspace.sqlite3", 11, 21),)  # type: ignore[method-assign]
+            fresh = db.scale_summary()
+            assert connect_calls == 1
+            assert fresh["manifestFiles"] == 1
+            assert fresh["hashResumeEntries"] == 1
+        finally:
+            db.connect = original_connect  # type: ignore[method-assign]
+            db._scale_summary_stat_key = original_stat_key  # type: ignore[method-assign]
+    print("ok workspace DB scale summary uses stat-keyed cache")
+
+
 def _api(tmp: str) -> DesktopApi:
     base = Path(tmp)
     registry = str(base / "registry")
@@ -18762,6 +18807,7 @@ def test_photo_indexing_queue_does_not_open_network_sockets() -> None:
 
 if __name__ == "__main__":
     test_workspace_db_connection_pragmas_tune_cache_and_mmap()
+    test_workspace_db_scale_summary_uses_stat_keyed_cache()
     test_list_scan_media_dedupes_path_and_excludes_error_and_excluded()
     test_scan_media_creates_canonical_photo_assets()
     test_record_scan_file_batches_import_session_refresh()

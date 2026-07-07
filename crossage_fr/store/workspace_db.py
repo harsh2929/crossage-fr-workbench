@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+import copy
 import hashlib
 import html
 import json
@@ -79,6 +80,8 @@ class WorkspaceDb:
     def __init__(self, path: Path):
         self.path = path.expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._scale_summary_cache_key: tuple[tuple[str, int, int], ...] | None = None
+        self._scale_summary_cache_value: dict[str, Any] | None = None
         try:
             self._init_schema()
         except sqlite3.DatabaseError as exc:
@@ -119,6 +122,16 @@ class WorkspaceDb:
             conn.commit()
         finally:
             conn.close()
+
+    def _scale_summary_stat_key(self) -> tuple[tuple[str, int, int], ...]:
+        rows: list[tuple[str, int, int]] = []
+        for source in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
+            try:
+                stat = source.stat()
+                rows.append((source.name, int(stat.st_size), int(stat.st_mtime_ns)))
+            except OSError:
+                rows.append((source.name, -1, -1))
+        return tuple(rows)
 
     def _init_schema(self) -> None:
         with self.connect() as conn:
@@ -23743,6 +23756,9 @@ class WorkspaceDb:
         self._init_schema()
 
     def scale_summary(self) -> dict[str, Any]:
+        cache_key = self._scale_summary_stat_key()
+        if self._scale_summary_cache_key == cache_key and self._scale_summary_cache_value is not None:
+            return copy.deepcopy(self._scale_summary_cache_value)
         with self.connect() as conn:
             scan_files = int(conn.execute("SELECT COUNT(*) AS n FROM scan_files").fetchone()["n"])
             scan_runs = int(conn.execute("SELECT COUNT(*) AS n FROM scan_runs").fetchone()["n"])
@@ -23762,7 +23778,7 @@ class WorkspaceDb:
             db_bytes = os.path.getsize(self.path)
         except OSError:
             db_bytes = 0
-        return {
+        result = {
             "dbPath": str(self.path),
             "dbBytes": db_bytes,
             "scanRuns": scan_runs,
@@ -23776,3 +23792,6 @@ class WorkspaceDb:
             "reviewCandidateRows": review_candidates,
             "latestScan": dict(latest) if latest else None,
         }
+        self._scale_summary_cache_key = self._scale_summary_stat_key()
+        self._scale_summary_cache_value = copy.deepcopy(result)
+        return result
