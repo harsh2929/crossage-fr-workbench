@@ -6452,6 +6452,24 @@ run("Photos lightbox viewed events patch recent rail without reloading folders",
   assert.doesNotMatch(viewedEventBlock[0], /loadFolders\(/);
 });
 
+run("Photos rail rows reuse per-section indexes while rendering", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  const sectionBlock = source.match(/\{railSections\.map\(\(section\) => \{[\s\S]*?<ul className="photos-rail-list">[\s\S]*?\{section\.folders\.map\(\(folder\) => \{[\s\S]*?const rowMainClass = \[/);
+  assert.ok(sectionBlock, "rail section render block should exist");
+  assert.match(sectionBlock[0], /const albumTreeParentFolderIds = section\.id === "albums"[\s\S]*new Set\(section\.folders\.map\(\(folder\) => albumTreeParentId\(folder\)\)\.filter\(Boolean\)\)/);
+  assert.match(sectionBlock[0], /const albumTreeAncestorIdsByFolderId = section\.id === "albums"[\s\S]*new Map\(section\.folders\.map\(\(folder\) => \[folder\.id, albumTreeAncestorIds\(folder, section\.folders\)\]\)\)/);
+  assert.match(sectionBlock[0], /const folderIndexById = new Map\(section\.folders\.map\(\(folder, index\) => \[folder\.id, index\]\)\);/);
+  assert.match(sectionBlock[0], /const namedPeopleIndexById = new Map\(namedPeopleFolders\.map\(\(item, index\) => \[item\.id, index\]\)\);/);
+  assert.match(sectionBlock[0], /const albumAncestors = albumTreeAncestorIdsByFolderId\?\.get\(folder\.id\) \|\| \[\];/);
+  assert.match(sectionBlock[0], /const albumFolderHasChildren = Boolean\(albumFolderId && albumTreeParentFolderIds\?\.has\(albumFolderId\)\);/);
+  assert.match(sectionBlock[0], /const railItemOrderIndex = folderIndexById\.get\(folder\.id\) \?\? -1;/);
+  assert.match(sectionBlock[0], /const personRailItemOrderIndex = namedPeopleIndexById\.get\(folder\.id\) \?\? -1;/);
+  const rowLoop = sectionBlock[0].slice(sectionBlock[0].indexOf("{section.folders.map((folder) => {"));
+  assert.doesNotMatch(rowLoop, /section\.folders\.some\(\(item\) => albumTreeParentId/);
+  assert.doesNotMatch(rowLoop, /section\.folders\.findIndex\(\(item\) => item\.id === folder\.id\)/);
+  assert.doesNotMatch(rowLoop, /section\.folders\.filter\(\(item\) => item\.kind === "person"\)/);
+});
+
 run("Photos heavy derived rows use stable label helpers", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
   assert.match(source, /function photoFileName\(sourcePath: string\): string/);

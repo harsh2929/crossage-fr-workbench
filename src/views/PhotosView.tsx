@@ -22109,6 +22109,17 @@ export function PhotosView(props: {
             const canMoveSection = section.id !== "pinned" && sectionOrderIndex >= 0;
             const sectionDropActive = railSectionDrag?.targetId === section.id && railSectionDrag.valid;
             const albumTreeDepths = section.id === "albums" ? buildPhotoRailAlbumTreeDepthMap(section.folders) : null;
+            const albumTreeParentFolderIds = section.id === "albums"
+              ? new Set(section.folders.map((folder) => albumTreeParentId(folder)).filter(Boolean))
+              : null;
+            const albumTreeAncestorIdsByFolderId = section.id === "albums"
+              ? new Map(section.folders.map((folder) => [folder.id, albumTreeAncestorIds(folder, section.folders)]))
+              : null;
+            const folderIndexById = new Map(section.folders.map((folder, index) => [folder.id, index]));
+            const namedPeopleFolders = section.id === "people" ? section.folders.filter((item) => item.kind === "person") : [];
+            const savedGroupFolders = section.id === "people" ? section.folders.filter((item) => savedPeopleGroupId(item)) : [];
+            const namedPeopleIndexById = new Map(namedPeopleFolders.map((item, index) => [item.id, index]));
+            const savedGroupIndexById = new Map(savedGroupFolders.map((item, index) => [item.id, index]));
             const sectionClass = [
               "photo-rail-section",
               railSectionDrag?.draggedId === section.id ? "dragging" : "",
@@ -22206,16 +22217,14 @@ export function PhotosView(props: {
                       const pinned = pinnedRailIds.has(folder.id);
                       const isAlbumFolder = folder.kind === "albumFolder";
                       const albumFolderId = isAlbumFolder ? albumTreeItemId(folder) : "";
-                      const albumAncestors = section.id === "albums" ? albumTreeAncestorIds(folder, section.folders) : [];
+                      const albumAncestors = albumTreeAncestorIdsByFolderId?.get(folder.id) || [];
                       if (albumAncestors.some((folderId) => effectiveCollapsedAlbumFolders.has(folderId))) return null;
                       const albumFolderCollapsed = Boolean(albumFolderId && effectiveCollapsedAlbumFolders.has(albumFolderId));
-                      const albumFolderHasChildren = Boolean(albumFolderId && section.folders.some((item) => albumTreeParentId(item) === albumFolderId));
+                      const albumFolderHasChildren = Boolean(albumFolderId && albumTreeParentFolderIds?.has(albumFolderId));
                       const railDepth = albumTreeDepths?.get(folder.id) || 0;
-                      const railItemOrderIndex = section.folders.findIndex((item) => item.id === folder.id);
-                      const namedPeopleFolders = section.id === "people" ? section.folders.filter((item) => item.kind === "person") : [];
-                      const savedGroupFolders = section.id === "people" ? section.folders.filter((item) => savedPeopleGroupId(item)) : [];
-                      const personRailItemOrderIndex = namedPeopleFolders.findIndex((item) => item.id === folder.id);
-                      const savedGroupRailItemOrderIndex = savedGroupFolders.findIndex((item) => item.id === folder.id);
+                      const railItemOrderIndex = folderIndexById.get(folder.id) ?? -1;
+                      const personRailItemOrderIndex = namedPeopleIndexById.get(folder.id) ?? -1;
+                      const savedGroupRailItemOrderIndex = savedGroupIndexById.get(folder.id) ?? -1;
                       const canMovePersistentPersonItem = section.id === "people" && peopleSortMode === "manual" && folder.kind === "person" && namedPeopleFolders.length > 1 && personRailItemOrderIndex >= 0;
                       const canMovePersistentGroupItem = section.id === "people" && peopleSortMode === "manual" && Boolean(savedPeopleGroupId(folder)) && savedGroupFolders.length > 1 && savedGroupRailItemOrderIndex >= 0;
                       const canMoveLocalRailItem = photoRailSectionSupportsItemOrder(section.id) && section.folders.length > 1 && railItemOrderIndex >= 0;
