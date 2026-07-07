@@ -11,7 +11,7 @@ import sys
 from typing import Any
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 from crossage_fr.ingest.image_io import load_image, sha256_file
 from crossage_fr.runtime_env import env_flag, env_value
@@ -225,7 +225,7 @@ def _assess_image_safety_heuristic(image: Image.Image, threshold: float) -> Safe
     skin_mask = _skin_mask(prepared)
     skin_ratio = float(skin_mask.mean())
     lower_skin_ratio = float(skin_mask[skin_mask.shape[0] // 2 :, :].mean())
-    largest_region_ratio = _largest_region_ratio(skin_mask)
+    largest_region_ratio = _largest_region_ratio(skin_mask) if skin_ratio >= 0.42 else 0.0
     center_y = _skin_center_y(skin_mask)
     non_skin_ratio = 1.0 - skin_ratio
     portrait_bias = _portrait_bias(skin_mask, center_y)
@@ -267,9 +267,8 @@ def _assess_image_safety_heuristic(image: Image.Image, threshold: float) -> Safe
 
 
 def _prepare(image: Image.Image) -> Image.Image:
-    image = image.copy()
-    image.thumbnail((160, 160), Image.Resampling.BILINEAR)
-    return image.convert("RGB")
+    prepared = ImageOps.contain(image, (160, 160), Image.Resampling.BILINEAR)
+    return prepared if prepared.mode == "RGB" else prepared.convert("RGB")
 
 
 def _skin_mask(image: Image.Image) -> np.ndarray:

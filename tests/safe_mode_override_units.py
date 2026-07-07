@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import sys
 
+from PIL import Image
+
+from crossage_fr.ingest import safety as safety_module
 from crossage_fr.ingest.safety import apply_safe_mode_override, normalize_override_value
 
 
@@ -43,5 +46,55 @@ check("'not_sensitive' → False", normalize_override_value("not_sensitive") is 
 check("1 → True", normalize_override_value(1) is True)
 check("0 → False", normalize_override_value(0) is False)
 check("unknown text → None", normalize_override_value("banana") is None)
+
+original_copy = Image.Image.copy
+
+
+def fail_full_size_copy(self: Image.Image) -> Image.Image:
+    raise AssertionError("Safe Mode heuristic preview should not copy the full-resolution image")
+
+try:
+    Image.Image.copy = fail_full_size_copy  # type: ignore[assignment]
+    prepared = safety_module._prepare(Image.new("RGB", (2400, 1600), (120, 140, 170)))
+finally:
+    Image.Image.copy = original_copy  # type: ignore[assignment]
+
+check("heuristic prepare avoids full-size copy", prepared.mode == "RGB" and max(prepared.size) <= 160)
+
+original_largest_region_ratio = safety_module._largest_region_ratio
+
+
+def fail_largest_region(_mask) -> float:
+    raise AssertionError("Sparse Safe Mode masks should skip connected-component flood fill")
+
+try:
+    safety_module._largest_region_ratio = fail_largest_region  # type: ignore[assignment]
+    benign = safety_module._assess_image_safety_heuristic(
+        Image.new("RGB", (512, 512), (120, 150, 190)),
+        threshold=0.58,
+    )
+finally:
+    safety_module._largest_region_ratio = original_largest_region_ratio  # type: ignore[assignment]
+
+check("sparse skin masks skip region flood fill", benign.largest_region_ratio == 0.0)
+
+region_calls = 0
+
+
+def record_largest_region(_mask) -> float:
+    global region_calls
+    region_calls += 1
+    return 0.75
+
+try:
+    safety_module._largest_region_ratio = record_largest_region  # type: ignore[assignment]
+    dense = safety_module._assess_image_safety_heuristic(
+        Image.new("RGB", (512, 512), (210, 160, 130)),
+        threshold=0.58,
+    )
+finally:
+    safety_module._largest_region_ratio = original_largest_region_ratio  # type: ignore[assignment]
+
+check("dense skin masks still measure region size", region_calls == 1 and dense.largest_region_ratio == 0.75)
 
 print("\nall safe-mode-override tests passed")
