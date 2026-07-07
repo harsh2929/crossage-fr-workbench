@@ -2056,17 +2056,37 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def _cmd_stage_reference_suggestions(self, params, progress=None):
         limit = max(1, min(50, int(params.get("limit", 20) or 20)))
+        candidates = self.project.reference_suggestion_candidates(limit=limit * 4)
+
+        def emit(phase: str, processed: int, **extra: Any) -> None:
+            if progress:
+                progress({
+                    "phase": phase,
+                    "source": "reference_suggestions",
+                    "total": len(candidates),
+                    "processed": processed,
+                    **extra,
+                })
+
+        emit("started", 0, embedded=0, failed=0)
+        if not candidates:
+            result = self.project.stage_reference_suggestions({}, limit=limit)
+            emit("complete", 0, staged=int(result.get("staged", 0) or 0), embedded=0, failed=0)
+            return {"value": result, "state": self.state(preview_create_budget=0)}
         engine = self._engine_instance()
         embeddings: dict[str, EmbeddingResult] = {}
         embedding_errors: list[dict[str, str]] = []
-        for candidate in self.project.reference_suggestion_candidates(limit=limit * 4):
+        for index, candidate in enumerate(candidates, 1):
+            emit("processing", index - 1, candidateId=candidate.candidate_id, embedded=len(embeddings), failed=len(embedding_errors))
             try:
                 embeddings[candidate.candidate_id] = self._reference_suggestion_embedding(candidate, engine)
             except Exception as exc:
                 embedding_errors.append({"candidateId": candidate.candidate_id, "error": str(exc)})
+            emit("processed", index, candidateId=candidate.candidate_id, embedded=len(embeddings), failed=len(embedding_errors))
         result = self.project.stage_reference_suggestions(embeddings, limit=limit)
         if embedding_errors:
             result["embeddingErrors"] = embedding_errors[:20]
+        emit("complete", len(candidates), staged=int(result.get("staged", 0) or 0), embedded=len(embeddings), failed=len(embedding_errors))
         return {"value": result, "state": self.state(preview_create_budget=0)}
 
     def _cmd_approve_reference_suggestion(self, params, progress=None):

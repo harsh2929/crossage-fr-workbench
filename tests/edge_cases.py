@@ -4582,6 +4582,100 @@ def assert_verification_engine_is_deferred_and_cached() -> None:
         api_server_module.create_embedding_engine = original_create
 
 
+def assert_reference_suggestion_staging_reports_progress_and_defers_engine() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-reference-suggestion-progress-"))
+    api = make_api(root / "workspace")
+    engine_calls = 0
+    staged_payloads: list[dict[str, EmbeddingResult]] = []
+
+    def forbidden_engine():
+        raise AssertionError("engine should not load when no reference-suggestion candidates exist")
+
+    def fake_stage(embeddings, limit=20):
+        staged_payloads.append(dict(embeddings))
+        return {"staged": len(embeddings), "suggestions": [], "rejected": [], "skipped": [], "summary": {}}
+
+    original_candidates = api.project.reference_suggestion_candidates
+    original_stage = api.project.stage_reference_suggestions
+    original_engine = api._engine_instance
+    original_embedding = api._reference_suggestion_embedding
+    api.project.reference_suggestion_candidates = lambda limit=80: []  # type: ignore[method-assign]
+    api.project.stage_reference_suggestions = fake_stage  # type: ignore[method-assign]
+    api._engine_instance = forbidden_engine
+    no_work_events: list[dict[str, object]] = []
+    try:
+        no_work = api._cmd_stage_reference_suggestions({"limit": 3}, progress=no_work_events.append)
+    finally:
+        api.project.reference_suggestion_candidates = original_candidates  # type: ignore[method-assign]
+        api._engine_instance = original_engine
+    assert no_work["value"]["staged"] == 0
+    assert [event["phase"] for event in no_work_events] == ["started", "complete"]
+    assert staged_payloads[-1] == {}
+
+    candidates = [
+        ReviewCandidate(
+            candidate_id="cand_ref_progress_a",
+            source_path=str(root / "a.jpg"),
+            person_name="Person",
+            best_ref_id=None,
+            best_ref_path=None,
+            score=0.9,
+            band="likely",
+            quality=0.8,
+            model_name="test",
+            status="accepted",
+        ),
+        ReviewCandidate(
+            candidate_id="cand_ref_progress_b",
+            source_path=str(root / "b.jpg"),
+            person_name="Person",
+            best_ref_id=None,
+            best_ref_path=None,
+            score=0.8,
+            band="likely",
+            quality=0.7,
+            model_name="test",
+            status="accepted",
+        ),
+    ]
+
+    def fake_engine():
+        nonlocal engine_calls
+        engine_calls += 1
+        return object()
+
+    def fake_embedding(candidate, engine):
+        del engine
+        if candidate.candidate_id.endswith("_b"):
+            raise ValueError("synthetic embedding failure")
+        return EmbeddingResult(
+            vector=[1.0] + [0.0] * 511,
+            quality=0.9,
+            bbox=None,
+            model_name="test",
+        )
+
+    progress_events: list[dict[str, object]] = []
+    api.project.reference_suggestion_candidates = lambda limit=80: candidates  # type: ignore[method-assign]
+    api._engine_instance = fake_engine
+    api._reference_suggestion_embedding = fake_embedding
+    try:
+        result = api._cmd_stage_reference_suggestions({"limit": 3}, progress=progress_events.append)
+    finally:
+        api.project.reference_suggestion_candidates = original_candidates  # type: ignore[method-assign]
+        api.project.stage_reference_suggestions = original_stage  # type: ignore[method-assign]
+        api._engine_instance = original_engine
+        api._reference_suggestion_embedding = original_embedding
+    assert engine_calls == 1
+    assert result["value"]["staged"] == 1
+    assert result["value"]["embeddingErrors"][0]["candidateId"] == "cand_ref_progress_b"
+    assert set(staged_payloads[-1]) == {"cand_ref_progress_a"}
+    assert [event["phase"] for event in progress_events] == ["started", "processing", "processed", "processing", "processed", "complete"]
+    assert progress_events[-1]["embedded"] == 1
+    assert progress_events[-1]["failed"] == 1
+    assert all(event["source"] == "reference_suggestions" for event in progress_events)
+
+
 def assert_vector_store_persists_reference_index() -> None:
     root = Path(tempfile.mkdtemp(prefix="crossage-edge-vector-store-"))
     index_path = root / "vectors.npz"
@@ -6251,6 +6345,7 @@ def main() -> None:
     assert_scan_cancel_and_resume_manifest()
     assert_scan_progress_noisy_phases_are_throttled()
     assert_verification_engine_is_deferred_and_cached()
+    assert_reference_suggestion_staging_reports_progress_and_defers_engine()
     assert_vector_store_persists_reference_index()
     assert_stale_candidate_manifest_is_reprocessed()
     assert_model_governance_metadata()
