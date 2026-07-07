@@ -332,6 +332,7 @@ const COVER_PREVIEW_BUDGET = 32;
 const PHOTO_GRID_GAP = 8;
 const PHOTO_GRID_HEADER_HEIGHT = 28;
 const PHOTO_GRID_OVERSCAN = 720;
+const PHOTO_GRID_SEARCH_DEBOUNCE_MS = 220;
 const MANUAL_ALBUM_ORDER_PAGE_LIMIT = 500;
 const PINNED_PHOTO_RAIL_IDS_KEY = "vintrace.photos.pinnedRailIds";
 const COLLAPSED_PHOTO_RAIL_SECTIONS_KEY = "vintrace.photos.collapsedRailSections";
@@ -1717,6 +1718,7 @@ export function PhotosView(props: {
   const [total, setTotal] = useState(0);
   const [sort, setSort] = useState<PhotoSort>("newest");
   const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
   const [librarySearchResult, setLibrarySearchResult] = useState<PhotoLibrarySearchResult | null>(null);
   const [librarySearchLoading, setLibrarySearchLoading] = useState(false);
   const [librarySearchError, setLibrarySearchError] = useState("");
@@ -2351,6 +2353,14 @@ export function PhotosView(props: {
   sortRef.current = sort;
   const searchRef = useRef(searchQuery);
   searchRef.current = searchQuery;
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      setDebouncedSearchQuery(searchQuery);
+      return undefined;
+    }
+    const timeout = window.setTimeout(() => setDebouncedSearchQuery(searchQuery), PHOTO_GRID_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timeout);
+  }, [searchQuery]);
   const keywordFilterRef = useRef(keywordFilter);
   keywordFilterRef.current = keywordFilter;
   const mediaKindFilterRef = useRef(mediaKindFilter);
@@ -3632,12 +3642,12 @@ export function PhotosView(props: {
       clearLockedSensitiveItems();
       return;
     }
-    loadPage(activeId, 0, sort, searchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, cameraFilter, albumFilter, visibilityFilter);
-  }, [activeId, sort, searchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, groupViewMode, activeDateBucketKey, activeLibraryRoot, activeLibraryRootProfileId, sensitiveCollectionLocked, clearLockedSensitiveItems, loadPage, gridReloadToken]);
+    loadPage(activeId, 0, sort, debouncedSearchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, cameraFilter, albumFilter, visibilityFilter);
+  }, [activeId, sort, debouncedSearchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, groupViewMode, activeDateBucketKey, activeLibraryRoot, activeLibraryRootProfileId, sensitiveCollectionLocked, clearLockedSensitiveItems, loadPage, gridReloadToken]);
 
   useEffect(() => {
     setActiveDateBucketKey("");
-  }, [activeId, sort, searchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, groupViewMode, photoDateViewMode, activeLibraryRoot, activeLibraryRootProfileId]);
+  }, [activeId, sort, debouncedSearchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, groupViewMode, photoDateViewMode, activeLibraryRoot, activeLibraryRootProfileId]);
 
   useEffect(() => {
     if (photoDateViewMode === "all" || sensitiveCollectionLocked) {
@@ -3653,7 +3663,7 @@ export function PhotosView(props: {
     dateBucketsFnRef.current({
       folderId: activeId,
       mode: photoDateViewMode,
-      query: searchQuery,
+      query: debouncedSearchQuery,
       keyword: keywordFilter,
       mediaKind: mediaKindFilter,
       favoriteOnly,
@@ -3693,7 +3703,7 @@ export function PhotosView(props: {
     return () => {
       alive = false;
     };
-  }, [activeId, photoDateViewMode, searchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, groupViewMode, activeLibraryRoot, activeLibraryRootProfileId, dateBucketRefreshToken, sensitiveCollectionLocked, recordPhotoSearchIndexStatus]);
+  }, [activeId, photoDateViewMode, debouncedSearchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, groupViewMode, activeLibraryRoot, activeLibraryRootProfileId, dateBucketRefreshToken, sensitiveCollectionLocked, recordPhotoSearchIndexStatus]);
 
   useEffect(() => {
     if (sensitiveCollectionLocked) return;
@@ -3701,12 +3711,12 @@ export function PhotosView(props: {
     if (!node) return;
     const io = new IntersectionObserver((entries) => {
       if (entries[0]?.isIntersecting && !loading && hasMorePages({ loaded: items.length, total })) {
-        loadPage(activeId, nextOffset({ loaded: items.length }), sort, searchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, cameraFilter, albumFilter, visibilityFilter);
+        loadPage(activeId, nextOffset({ loaded: items.length }), sort, debouncedSearchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, cameraFilter, albumFilter, visibilityFilter);
       }
     });
     io.observe(node);
     return () => io.disconnect();
-  }, [activeId, items.length, total, loading, sort, searchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, activeDateBucketKey, sensitiveCollectionLocked, loadPage]);
+  }, [activeId, items.length, total, loading, sort, debouncedSearchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, activeDateBucketKey, sensitiveCollectionLocked, loadPage]);
 
   useEffect(() => {
     if (lightbox === null) return;

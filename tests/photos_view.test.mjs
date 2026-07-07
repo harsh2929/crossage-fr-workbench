@@ -6290,6 +6290,19 @@ run("Photos timeline rows avoid quadratic index lookups", () => {
   assert.doesNotMatch(timelineRowsBlock[0], /items\.indexOf\(item\)/);
 });
 
+run("Photos grid search reload is debounced before backend fetches", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  assert.match(source, /const PHOTO_GRID_SEARCH_DEBOUNCE_MS = 220;/);
+  assert.match(source, /const \[debouncedSearchQuery, setDebouncedSearchQuery\] = useState\(""\);/);
+  assert.match(source, /window\.setTimeout\(\(\) => setDebouncedSearchQuery\(searchQuery\), PHOTO_GRID_SEARCH_DEBOUNCE_MS\)/);
+  assert.match(source, /loadPage\(activeId, 0, sort, debouncedSearchQuery,/);
+  assert.match(source, /query: debouncedSearchQuery,/);
+  assert.match(source, /loadPage\(activeId, nextOffset\(\{ loaded: items\.length \}\), sort, debouncedSearchQuery,/);
+  const autoGridEffect = source.match(/useEffect\(\(\) => \{\s*setItems\(\[\]\);[\s\S]*?gridReloadToken\]\);/);
+  assert.ok(autoGridEffect, "automatic grid reload effect should exist");
+  assert.doesNotMatch(autoGridEffect[0], /loadPage\(activeId, 0, sort, searchQuery,/);
+});
+
 run("Safe Mode review dashboard honors sensitive collection unlock before listing flagged photos", () => {
   const reviewSource = fs.readFileSync(path.join(ROOT, "src/views/SafeModeReview.tsx"), "utf8");
   const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
