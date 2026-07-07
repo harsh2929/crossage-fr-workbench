@@ -80,6 +80,29 @@ def _project(tmp: Path) -> ProjectState:
     return project
 
 
+def test_audit_events_tails_recent_rows_without_full_parse() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        project = _project(Path(raw))
+        for index in range(20):
+            project._append_audit({"action": "unit_audit_tail", "index": index})
+
+        original_read_audit_rows = project._read_audit_rows
+
+        def fail_full_audit_read() -> list[dict[str, object]]:
+            raise AssertionError("audit_events must page from the audit log tail")
+
+        project._read_audit_rows = fail_full_audit_read  # type: ignore[method-assign]
+        try:
+            page = project.audit_events(limit=3, offset=2)
+        finally:
+            project._read_audit_rows = original_read_audit_rows  # type: ignore[method-assign]
+
+        assert page["limit"] == 3
+        assert page["offset"] == 2
+        assert page["total"] >= 20
+        assert [event["index"] for event in page["events"]] == [17, 16, 15]
+
+
 def test_review_status_persists_current_training_example() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -1076,6 +1099,7 @@ def test_stage_calibration_blocks_insufficient_or_regressed_feedback() -> None:
 
 
 def main() -> None:
+    test_audit_events_tails_recent_rows_without_full_parse()
     test_review_status_persists_current_training_example()
     test_bulk_review_learning_examples_share_one_db_transaction()
     test_accuracy_label_imports_share_one_db_transaction()

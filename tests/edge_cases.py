@@ -523,6 +523,8 @@ def assert_static_app_contracts() -> None:
     assert "encrypt_file(backup_path, encrypted_temp, passphrase)" in enroll_manager
     assert "os.replace(encrypted_temp, backup_path)" in enroll_manager
     assert "write_bytes(encrypt_bytes(backup_path.read_bytes()" not in enroll_manager
+    assert "for row in self._iter_audit_rows_reverse()" in enroll_manager
+    assert "recent: deque[dict[str, Any]] = deque(maxlen=offset + limit)" not in enroll_manager
 
     release_workflow = (root / ".github" / "workflows" / "windows-release.yml").read_text(encoding="utf-8")
     assert "release_tag" in release_workflow

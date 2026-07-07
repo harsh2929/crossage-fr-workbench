@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from collections import deque
 from collections.abc import Iterable
 from contextlib import contextmanager
 import csv
@@ -9190,26 +9189,16 @@ class ProjectState:
         offset = max(0, min(100_000, int(offset)))
         if not self.audit_path.exists():
             return {"events": [], "limit": limit, "offset": offset, "total": 0}
-        recent: deque[dict[str, Any]] = deque(maxlen=offset + limit)
-        total = 0
-        try:
-            with self.audit_path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    try:
-                        value = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(value, dict):
-                        total += 1
-                        recent.append(value)
-        except OSError:
-            return {"events": [], "limit": limit, "offset": offset, "total": 0}
-        rows = list(reversed(recent))
+        rows: list[dict[str, Any]] = []
+        for row in self._iter_audit_rows_reverse():
+            rows.append(row)
+            if len(rows) >= offset + limit:
+                break
         return {
             "events": rows[offset:offset + limit],
             "limit": limit,
             "offset": offset,
-            "total": total,
+            "total": self._audit_event_count(),
         }
 
     def _record_scan_run(
