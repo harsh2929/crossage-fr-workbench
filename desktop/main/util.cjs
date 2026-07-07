@@ -90,6 +90,32 @@ function canonicalPathKey(filePath, { caseFold = process.platform === "darwin" |
   return caseFold ? normalized.toLowerCase() : normalized;
 }
 
+async function filterStableWatchFiles(paths, waitForStableFile, concurrency = 8) {
+  if (!Array.isArray(paths) || !paths.length) {
+    return [];
+  }
+  if (typeof waitForStableFile !== "function") {
+    throw new TypeError("waitForStableFile must be a function");
+  }
+  const limit = Math.max(1, Math.min(paths.length, Math.floor(Number(concurrency) || 1)));
+  const accepted = new Array(paths.length).fill(false);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= paths.length) {
+        return;
+      }
+      if (await waitForStableFile(paths[index], index)) {
+        accepted[index] = true;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: limit }, worker));
+  return paths.filter((_, index) => accepted[index]);
+}
+
 module.exports = {
   writeJsonAtomic,
   readJsonObject,
@@ -101,4 +127,5 @@ module.exports = {
   safeRealpath,
   backendRestartDelayMs,
   canonicalPathKey,
+  filterStableWatchFiles,
 };

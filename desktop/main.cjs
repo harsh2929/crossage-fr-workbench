@@ -18,6 +18,7 @@ const {
   safeRealpath,
   backendRestartDelayMs,
   canonicalPathKey,
+  filterStableWatchFiles,
 } = require("./main/util.cjs");
 const { buildSystemPhotoSources } = require("./main/photo-sources.cjs");
 const { parseProtocolUrl } = require("./main/external-open.cjs");
@@ -115,6 +116,7 @@ const QUERY_TRUSTED_MEDIA_PATH_LIMIT = 20000;
 const BACKEND_TIMEOUT_KILL_GRACE_MS = Math.max(1000, Number.parseInt(process.env.CROSSAGE_BACKEND_TIMEOUT_KILL_GRACE_MS || "5000", 10) || 5000);
 const WATCH_MAX_QUEUE = Math.max(500, Number.parseInt(process.env.CROSSAGE_WATCH_MAX_QUEUE || "5000", 10) || 5000);
 const WATCH_SCAN_BATCH_SIZE = Math.max(25, Number.parseInt(process.env.CROSSAGE_WATCH_SCAN_BATCH_SIZE || "250", 10) || 250);
+const WATCH_STABLE_CONCURRENCY = Math.max(1, Math.min(64, Number.parseInt(process.env.CROSSAGE_WATCH_STABLE_CONCURRENCY || "8", 10) || 8));
 const WATCH_SWEEP_INTERVAL_MS = Math.max(10_000, Number.parseInt(process.env.CROSSAGE_WATCH_SWEEP_INTERVAL_MS || "45000", 10) || 45_000);
 const WATCH_SWEEP_DIR_BUDGET = Math.max(25, Number.parseInt(process.env.CROSSAGE_WATCH_SWEEP_DIR_BUDGET || "800", 10) || 800);
 const WATCH_SWEEP_FILE_BUDGET = Math.max(200, Number.parseInt(process.env.CROSSAGE_WATCH_SWEEP_FILE_BUDGET || "20000", 10) || 20_000);
@@ -2860,12 +2862,7 @@ async function flushWatchQueue() {
   watch.scanning = true;
   sendWatchEvent({ active: true, folder: watch.folder, queued: 0, scanning: true, message: `Scanning ${paths.length} new file(s).` });
   try {
-    const stable = [];
-    for (const filePath of paths) {
-      if (await waitForStableFile(filePath)) {
-        stable.push(filePath);
-      }
-    }
+    const stable = await filterStableWatchFiles(paths, waitForStableFile, WATCH_STABLE_CONCURRENCY);
     if (!stable.length) {
       sendWatchEvent({ active: true, folder: watch.folder, queued: watch.queue.size, scanning: false, message: "No complete media files found." });
       return;

@@ -107,14 +107,45 @@ function testCanonicalPathKey() {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
-testJsonAtomicRoundTrip();
-testMediaPathCodec();
-testEscapeHtml();
-testIsSubpath();
-testTimestampSlug();
-testSafeRealpath();
-testBackendRestartDelay();
-testPythonBackendStartRaceGuards();
-testBackendStdinErrorsAreHandled();
-testCanonicalPathKey();
-console.log("main util ok");
+async function testFilterStableWatchFilesConcurrency() {
+  const paths = ["a", "b", "drop-1", "c", "drop-2", "d", "e"];
+  let active = 0;
+  let maxActive = 0;
+  let calls = 0;
+  const stable = await util.filterStableWatchFiles(paths, async (value, index) => {
+    calls += 1;
+    assert.strictEqual(value, paths[index]);
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    active -= 1;
+    return !value.startsWith("drop");
+  }, 3);
+  assert.deepStrictEqual(stable, ["a", "b", "c", "d", "e"]);
+  assert.strictEqual(calls, paths.length);
+  assert.strictEqual(maxActive, 3);
+  await assert.rejects(
+    () => util.filterStableWatchFiles(["x"], null, 3),
+    /waitForStableFile must be a function/,
+  );
+}
+
+async function main() {
+  testJsonAtomicRoundTrip();
+  testMediaPathCodec();
+  testEscapeHtml();
+  testIsSubpath();
+  testTimestampSlug();
+  testSafeRealpath();
+  testBackendRestartDelay();
+  testPythonBackendStartRaceGuards();
+  testBackendStdinErrorsAreHandled();
+  testCanonicalPathKey();
+  await testFilterStableWatchFilesConcurrency();
+  console.log("main util ok");
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
