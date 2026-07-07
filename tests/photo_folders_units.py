@@ -5278,6 +5278,48 @@ def test_photo_recovered_failure_save_and_delete_actions() -> None:
     print("ok recovered import failure save/delete actions")
 
 
+def test_photo_import_failure_rerecord_preserves_first_failure_timestamp() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        source = str(Path(tmp) / "missing-again.jpg")
+        with api.project.db.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO photo_import_sessions(
+                    import_id, source_kind, storage_mode, source_label, root_path,
+                    status, started_at, completed_at, updated_at, imported_count, failed_count, metadata_json
+                ) VALUES(?, 'folder', 'referenced', 'Failure timestamp test', ?, 'completed', ?, ?, ?, 0, 1, '{}')
+                """,
+                (
+                    "import-preserve-created",
+                    str(Path(tmp)),
+                    "2026-07-07T00:00:00Z",
+                    "2026-07-07T00:00:00Z",
+                    "2026-07-07T00:00:00Z",
+                ),
+            )
+            api.project.db._record_photo_import_failure(
+                conn,
+                import_id="import-preserve-created",
+                source_path=source,
+                reason="first failure",
+            )
+            first = api.project.db.list_photo_import_failures(import_id="import-preserve-created", conn=conn)[0]
+            api.project.db._record_photo_import_failure(
+                conn,
+                import_id="import-preserve-created",
+                source_path=source,
+                reason="second failure",
+                recovered_path=str(Path(tmp) / "recovered.jpg"),
+            )
+            second = api.project.db.list_photo_import_failures(import_id="import-preserve-created", conn=conn)[0]
+        assert second["failureId"] == first["failureId"], second
+        assert second["reason"] == "second failure", second
+        assert second["recoveredPath"].endswith("recovered.jpg"), second
+        assert second["createdAt"] == first["createdAt"], (first, second)
+    print("ok photo import failure re-record preserves first failure timestamp")
+
+
 def test_photo_import_failure_retry_repairs_original_source() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -18461,6 +18503,7 @@ if __name__ == "__main__":
     test_photo_operation_journal_auto_prunes_after_record()
     test_photo_review_decision_records_operation_and_undo()
     test_photo_recovered_failure_save_and_delete_actions()
+    test_photo_import_failure_rerecord_preserves_first_failure_timestamp()
     test_photo_import_failure_retry_repairs_original_source()
     test_photo_recovered_orphan_scan_surfaces_unindexed_managed_files()
     test_photo_recovered_cleanup_policy_handles_stale_orphan_rows()

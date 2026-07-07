@@ -7768,8 +7768,7 @@ class WorkspaceDb:
             ) VALUES(?, ?, ?, ?, ?, ?)
             ON CONFLICT(import_id, source_path) DO UPDATE SET
                 reason=excluded.reason,
-                recovered_path=excluded.recovered_path,
-                created_at=excluded.created_at
+                recovered_path=excluded.recovered_path
             """,
             (
                 self._photo_import_failure_id(clean_import, clean_source),
