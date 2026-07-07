@@ -6216,6 +6216,15 @@ run("photo virtual grid chunks headers and item rows", () => {
   assert.strictEqual(layout.totalHeight, 140);
 });
 
+run("Photos timeline rows avoid quadratic index lookups", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  const timelineRowsBlock = source.match(/const timelineRows = useMemo[\s\S]*?\}, \[items, visibleDateItems\]\);/);
+  assert.ok(timelineRowsBlock, "timelineRows useMemo block should exist");
+  assert.match(timelineRowsBlock[0], /const indexByItem = new Map<PhotoItem, number>\(\)/);
+  assert.match(timelineRowsBlock[0], /indexBySourcePath\.get\(String\(item\.sourcePath \|\| ""\)\)/);
+  assert.doesNotMatch(timelineRowsBlock[0], /items\.indexOf\(item\)/);
+});
+
 run("photo virtual grid windows visible bands with overscan", () => {
   const layout = virtualGridMod.buildPhotoVirtualGridLayout(
     Array.from({ length: 12 }, (_, index) => ({ kind: "item", key: `i:${index}`, index, item: { width: 100, height: 100 } })),

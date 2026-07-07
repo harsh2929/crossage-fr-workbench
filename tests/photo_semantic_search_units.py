@@ -138,8 +138,83 @@ def test_semantic_search_command_ranks_library_offline() -> None:
         assert scores["red.png"] > scores["blue.png"], scores
 
 
+def test_semantic_search_indexes_full_library_without_candidate_cap() -> None:
+    import sys
+    sys.path.insert(0, "tests")
+    from photo_folders_units import _api
+
+    orig_report = se.semantic_model_report
+    orig_text = se.encode_text
+    orig_image = se.encode_image_path_cached
+    encode_calls = 0
+
+    def fake_report() -> dict:
+        return {"available": True, "engine": "fake", "modelName": "FakeSigLIP-test"}
+
+    def fake_text(_query: str) -> np.ndarray:
+        return np.asarray([1.0, 0.0], dtype=np.float32)
+
+    def fake_image(path: Path) -> np.ndarray:
+        nonlocal encode_calls
+        encode_calls += 1
+        return np.asarray([1.0, 0.0] if Path(path).stem == "img_604" else [0.0, 1.0], dtype=np.float32)
+
+    se.semantic_model_report = fake_report  # type: ignore[assignment]
+    se.encode_text = fake_text  # type: ignore[assignment]
+    se.encode_image_path_cached = fake_image  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            api = _api(tmp)
+            base = Path(tmp)
+            now = "2026-07-07T00:00:00Z"
+            rows = []
+            metadata_rows = []
+            for index in range(605):
+                path = base / f"img_{index:03}.jpg"
+                path.write_bytes(f"semantic fixture {index}".encode("utf-8"))
+                asset_id = f"asset-{index:03}"
+                rows.append((asset_id, str(path), "image", now, now))
+                metadata_rows.append((asset_id, now))
+            with api.project.db.connect() as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO photo_assets(asset_id, source_path, media_kind, added_at, updated_at)
+                    VALUES(?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+                conn.executemany(
+                    "INSERT INTO photo_asset_metadata(asset_id, updated_at) VALUES(?, ?)",
+                    metadata_rows,
+                )
+
+            out = api.semantic_search_photos({"query": "target beyond old cap", "limit": 3})
+            assert out["available"] is True, out
+            assert out["candidateCount"] == 605, out
+            assert out["scored"] == 605, out
+            assert out["dropped"] == 0, out
+            assert out["encoded"] == 605, out
+            assert Path(out["results"][0]["sourcePath"]).name == "img_604.jpg", out
+
+            def fail_reencode(_path: Path) -> np.ndarray:
+                raise AssertionError("semantic search re-encoded instead of using persisted embeddings")
+
+            se.encode_image_path_cached = fail_reencode  # type: ignore[assignment]
+            cached = api.semantic_search_photos({"query": "target beyond old cap", "limit": 3})
+            assert cached["candidateCount"] == 605, cached
+            assert cached["scored"] == 605, cached
+            assert cached["encoded"] == 0, cached
+            assert cached["cached"] == 605, cached
+            assert Path(cached["results"][0]["sourcePath"]).name == "img_604.jpg", cached
+    finally:
+        se.semantic_model_report = orig_report  # type: ignore[assignment]
+        se.encode_text = orig_text  # type: ignore[assignment]
+        se.encode_image_path_cached = orig_image  # type: ignore[assignment]
+
+
 if __name__ == "__main__":
     test_semantic_search_unavailable_without_model_offline()
     test_semantic_search_aligns_text_and_image_offline()
     test_semantic_search_command_ranks_library_offline()
+    test_semantic_search_indexes_full_library_without_candidate_cap()
     print("all photo_semantic_search_units tests passed")

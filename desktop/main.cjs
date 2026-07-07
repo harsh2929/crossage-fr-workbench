@@ -3181,7 +3181,7 @@ class PythonBackend {
   }
 
   start() {
-    if (this.readyPromise && this.child && !this.child.killed) {
+    if (this.readyPromise) {
       return this.readyPromise;
     }
     // EIPC-05: defer the respawn by a capped-exponential backoff after repeated
@@ -3240,6 +3240,9 @@ class PythonBackend {
         try {
           message = JSON.parse(line);
         } catch (error) {
+          return;
+        }
+        if (this.child !== child) {
           return;
         }
         if (message.ready) {
@@ -3309,9 +3312,10 @@ class PythonBackend {
         }
       });
       child.on("error", (error) => {
-        clearTimeout(timer);
-        this.readyPromise = null;
-        if (this.child === child) {
+        const activeChild = this.child === child;
+        if (activeChild) {
+          clearTimeout(timer);
+          this.readyPromise = null;
           this.child = null;
         }
         appendDiagnosticEvent({
@@ -3319,36 +3323,42 @@ class PythonBackend {
           level: "error",
           message: error.message,
           stack: diagnosticStack(error),
-          stderrTail: this.stderrTail
+          stderrTail: this.stderrTail,
+          stale: !activeChild
         });
-        reject(createAppError("E-BACKEND-START", error.message || "Python backend could not start.", { cause: error }));
+        if (activeChild) {
+          reject(createAppError("E-BACKEND-START", error.message || "Python backend could not start.", { cause: error }));
+        }
       });
       child.on("exit", (code) => {
         clearTimeout(timer);
+        const activeChild = this.child === child;
         // EIPC-05: count abnormal exits toward the crash-loop backoff, but only
         // for the CURRENT generation and only when this was not an intentional
         // shutdown — otherwise a stale child's late exit (or an app-quit kill)
         // pollutes the counter for a freshly spawned backend.
-        if (code !== 0 && this.child === child && !this.stopping) {
+        if (code !== 0 && activeChild && !this.stopping) {
           this.consecutiveFailures += 1;
         }
         const error = createAppError("E-BACKEND-EXIT", `Python backend exited with code ${code}.`, { exitCode: code });
-        for (const pending of this.pending.values()) {
-          clearTimeout(pending.timer);
-          pending.reject(error);
-        }
-        this.pending.clear();
-        lines.close();
-        this.readyPromise = null;
-        this.readyState = null;
-        if (this.child === child) {
+        if (activeChild) {
+          for (const pending of this.pending.values()) {
+            clearTimeout(pending.timer);
+            pending.reject(error);
+          }
+          this.pending.clear();
+          this.readyPromise = null;
+          this.readyState = null;
           this.child = null;
+          reject(error);
         }
+        lines.close();
         appendDiagnosticEvent({
           type: "backend_exited",
           level: code === 0 ? "info" : "error",
           exitCode: code,
-          stderrTail: this.stderrTail
+          stderrTail: this.stderrTail,
+          stale: !activeChild
         });
       });
       child.stderr.on("data", (chunk) => {

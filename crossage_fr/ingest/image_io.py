@@ -332,6 +332,22 @@ def average_hash(image: Image.Image) -> str:
     return f"{bits:016x}"
 
 
+def _exif_tag_map(image: Image.Image) -> dict[str, object]:
+    try:
+        exif = image.getexif()
+    except Exception:
+        exif = {}
+    tags = {ExifTags.TAGS.get(k, str(k)): v for k, v in exif.items()} if exif else {}
+    for ifd_id in (getattr(ExifTags.IFD, "Exif", 34665),):
+        try:
+            nested = exif.get_ifd(ifd_id) if exif else {}
+        except Exception:
+            nested = {}
+        if nested:
+            tags.update({ExifTags.TAGS.get(k, str(k)): v for k, v in nested.items()})
+    return tags
+
+
 def capture_date_with_provenance(path: Path, image: Image.Image) -> tuple[str | None, str]:
     """Return (capture_date_iso, provenance).
 
@@ -340,11 +356,7 @@ def capture_date_with_provenance(path: Path, image: Image.Image) -> tuple[str | 
     an age gap derived from it is meaningless, so downstream the uncertainty banner
     is suppressed unless provenance is "exif". provenance is "exif" | "mtime" | "none".
     """
-    try:
-        exif = image.getexif()
-    except Exception:
-        exif = {}
-    tags = {ExifTags.TAGS.get(k, str(k)): v for k, v in exif.items()}
+    tags = _exif_tag_map(image)
     for key in ("DateTimeOriginal", "DateTimeDigitized", "DateTime"):
         value = tags.get(key)
         if not value:

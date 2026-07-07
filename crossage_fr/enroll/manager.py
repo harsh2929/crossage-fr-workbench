@@ -18,7 +18,7 @@ import time
 import zipfile
 from typing import Callable, Any
 
-from crossage_fr.config import archive_corrupt_file, load_config, save_config
+from crossage_fr.config import RuntimeConfig, Thresholds, archive_corrupt_file, load_config, save_config
 from crossage_fr.cluster import cluster_vectors
 from crossage_fr.crypto import DecryptionError, backup_passphrase, decrypt_bytes, encrypt_bytes, is_encrypted
 from crossage_fr.embed import EmbeddingEngine
@@ -173,6 +173,14 @@ class ProjectState:
         self._excluded_dir_names_cache: set[str] = set()
         self._excluded_extensions_cache: set[str] = set()
         self._excluded_keywords_cache: tuple[tuple[str, str], ...] = ()
+        self._loaded_config_payload: dict[str, Any] = {}
+        self._loaded_consent: dict[str, Any] = {}
+        self._loaded_reference_ids: set[str] = set()
+        self._loaded_reference_payloads: dict[str, dict[str, Any]] = {}
+        self._reference_dirty_ids: set[str] = set()
+        self._reference_deleted_ids: set[str] = set()
+        self._loaded_candidate_ids: set[str] = set()
+        self._loaded_candidate_payloads: dict[str, dict[str, Any]] = {}
         self._candidate_dirty_ids: set[str] = set()
         self._candidate_deleted_ids: set[str] = set()
         self.load()
@@ -226,7 +234,9 @@ class ProjectState:
         self.references.clear()
         self.candidates.clear()
         self.scan_history.clear()
+        self._loaded_config_payload = asdict(self.config)
         self.consent = self._read_json_object(self.consent_path)
+        self._loaded_consent = dict(self.consent)
         if self.refs_path.exists():
             for row in self._read_json_array(self.refs_path):
                 try:
@@ -271,6 +281,12 @@ class ProjectState:
             self.vector_store.rebuild(ref_vectors)
             if ref_vectors:
                 self.vector_store.save(self.vector_index_path)
+        self._loaded_reference_ids = set(self.references.keys())
+        self._loaded_reference_payloads = {ref_id: asdict(ref) for ref_id, ref in self.references.items()}
+        self._reference_dirty_ids.clear()
+        self._reference_deleted_ids.clear()
+        self._loaded_candidate_ids = set(self.candidates.keys())
+        self._loaded_candidate_payloads = {candidate_id: asdict(candidate) for candidate_id, candidate in self.candidates.items()}
         self._candidate_dirty_ids.clear()
         self._candidate_deleted_ids.clear()
         self._ensure_candidate_index()
@@ -279,6 +295,135 @@ class ProjectState:
     def _invalidate_reference_indexes(self) -> None:
         self._reference_index_version += 1
         self._model_vector_store_cache.clear()
+
+    def _config_from_payload(self, payload: dict[str, Any], fallback: RuntimeConfig | None = None) -> RuntimeConfig:
+        try:
+            raw_thresholds = payload.get("thresholds", {}) if isinstance(payload.get("thresholds", {}), dict) else {}
+            body = {key: value for key, value in payload.items() if key != "thresholds"}
+            return RuntimeConfig(**body, thresholds=Thresholds(**raw_thresholds))
+        except (TypeError, ValueError):
+            return fallback or self.config
+
+    def _three_way_dict_merge(
+        self,
+        baseline: dict[str, Any],
+        disk: dict[str, Any],
+        local: dict[str, Any],
+    ) -> dict[str, Any]:
+        merged = dict(local)
+        for key, disk_value in disk.items():
+            baseline_has = key in baseline
+            local_has = key in local
+            baseline_value = baseline.get(key)
+            local_value = local.get(key)
+            if isinstance(baseline_value, dict) and isinstance(disk_value, dict) and isinstance(local_value, dict):
+                merged[key] = self._three_way_dict_merge(baseline_value, disk_value, local_value)
+            elif (local_has and local_value == baseline_value) or (not local_has and not baseline_has):
+                merged[key] = disk_value
+        return merged
+
+    def _merged_config_for_save(self) -> RuntimeConfig:
+        local_payload = asdict(self.config)
+        disk_payload = asdict(load_config(self.config_path)) if self.config_path.exists() else {}
+        merged_payload = self._three_way_dict_merge(self._loaded_config_payload, disk_payload, local_payload)
+        return self._config_from_payload(merged_payload, self.config)
+
+    def _merged_consent_for_save(self) -> dict[str, Any]:
+        disk_consent = self._read_json_object(self.consent_path)
+        return self._three_way_dict_merge(self._loaded_consent, disk_consent, self.consent)
+
+    def _reference_rows_from_disk(self) -> dict[str, ReferenceFace]:
+        rows: dict[str, ReferenceFace] = {}
+        if not self.refs_path.exists():
+            return rows
+        for row in self._read_json_array(self.refs_path):
+            try:
+                ref = ReferenceFace(**row)
+            except TypeError:
+                continue
+            if valid_reference(ref):
+                rows[ref.ref_id] = ref
+        return rows
+
+    def _merged_references_for_save(
+        self,
+        *,
+        dirty_ids: set[str],
+        deleted_ids: set[str],
+    ) -> dict[str, ReferenceFace]:
+        merged = self._reference_rows_from_disk()
+        for ref_id in self._loaded_reference_ids | deleted_ids:
+            if ref_id in self.references and ref_id not in deleted_ids:
+                continue
+            disk_ref = merged.get(ref_id)
+            disk_payload = asdict(disk_ref) if disk_ref is not None else None
+            if ref_id in deleted_ids or disk_payload == self._loaded_reference_payloads.get(ref_id):
+                merged.pop(ref_id, None)
+        for ref_id, ref in self.references.items():
+            if ref_id in deleted_ids:
+                continue
+            payload = asdict(ref)
+            if (
+                ref_id in dirty_ids
+                or ref_id not in self._loaded_reference_ids
+                or payload != self._loaded_reference_payloads.get(ref_id)
+            ):
+                merged[ref_id] = ref
+        return merged
+
+    def _candidate_rows_from_disk(self) -> dict[str, ReviewCandidate]:
+        rows: dict[str, ReviewCandidate] = {}
+        if not self.candidates_path.exists():
+            return rows
+        for row in self._read_json_array(self.candidates_path):
+            try:
+                candidate = ReviewCandidate(**row)
+            except TypeError:
+                continue
+            if valid_candidate(candidate):
+                rows[candidate.candidate_id] = candidate
+        return rows
+
+    def _merged_candidates_for_snapshot(
+        self,
+        *,
+        dirty_ids: set[str],
+        deleted_ids: set[str],
+    ) -> dict[str, ReviewCandidate]:
+        merged = self._candidate_rows_from_disk()
+        for candidate_id in self._loaded_candidate_ids | deleted_ids:
+            if candidate_id in self.candidates and candidate_id not in deleted_ids:
+                continue
+            disk_candidate = merged.get(candidate_id)
+            disk_payload = asdict(disk_candidate) if disk_candidate is not None else None
+            if candidate_id in deleted_ids or disk_payload == self._loaded_candidate_payloads.get(candidate_id):
+                merged.pop(candidate_id, None)
+        for candidate_id, candidate in self.candidates.items():
+            if candidate_id in deleted_ids:
+                continue
+            payload = asdict(candidate)
+            if (
+                candidate_id in dirty_ids
+                or candidate_id not in self._loaded_candidate_ids
+                or payload != self._loaded_candidate_payloads.get(candidate_id)
+            ):
+                merged[candidate_id] = candidate
+        return merged
+
+    def _merged_scan_history_for_save(self) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in [*self.scan_history, *self._read_json_array(self.scan_history_path)]:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("runId", "") or "") or json.dumps(row, sort_keys=True, default=str)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(row)
+            if len(merged) >= 80:
+                break
+        return merged
 
     def _model_family_key(self, model_name: str) -> str:
         value = str(model_name or "").strip().lower()
@@ -352,17 +497,42 @@ class ProjectState:
         return store.search(embedding.vector, k=k), references
 
     def save(self, snapshot_candidates: bool = True, flush_candidate_index: bool = True) -> None:
+        dirty_reference_ids = set(self._reference_dirty_ids)
+        deleted_reference_ids = set(self._reference_deleted_ids)
+        dirty_candidate_ids = set(self._candidate_dirty_ids)
+        deleted_candidate_ids = set(self._candidate_deleted_ids)
         with self._state_lock():
             self.root.mkdir(parents=True, exist_ok=True)
+            self.config = self._merged_config_for_save()
             save_config(self.config, self.config_path)
+            self._loaded_config_payload = asdict(self.config)
+            self.consent = self._merged_consent_for_save()
             self._write_json_atomic(self.consent_path, self.consent)
+            self._loaded_consent = dict(self.consent)
+            self.references = self._merged_references_for_save(
+                dirty_ids=dirty_reference_ids,
+                deleted_ids=deleted_reference_ids,
+            )
             refs = [asdict(ref) for ref in self.references.values()]
             self._write_json_atomic(self.refs_path, refs)
+            self.vector_store.rebuild({ref_id: ref.vector for ref_id, ref in self.references.items()})
             self.vector_store.save(self.vector_index_path)
+            self._loaded_reference_ids = set(self.references.keys())
+            self._loaded_reference_payloads = {ref_id: asdict(ref) for ref_id, ref in self.references.items()}
+            self._reference_dirty_ids.clear()
+            self._reference_deleted_ids.clear()
+            self._invalidate_reference_indexes()
             if flush_candidate_index:
                 self._flush_candidate_index()
             if snapshot_candidates and len(self.candidates) <= CANDIDATE_JSON_SNAPSHOT_LIMIT:
+                self.candidates = self._merged_candidates_for_snapshot(
+                    dirty_ids=dirty_candidate_ids,
+                    deleted_ids=deleted_candidate_ids,
+                )
                 self._write_json_array_atomic(self.candidates_path, (asdict(candidate) for candidate in self.candidates.values()))
+                self._loaded_candidate_ids = set(self.candidates.keys())
+                self._loaded_candidate_payloads = {candidate_id: asdict(candidate) for candidate_id, candidate in self.candidates.items()}
+            self.scan_history = self._merged_scan_history_for_save()
             self._write_json_atomic(self.scan_history_path, self.scan_history[:80])
 
     def _ensure_candidate_index(self) -> None:
@@ -378,6 +548,26 @@ class ProjectState:
         except (sqlite3.Error, TypeError, ValueError):
             return False
         return indexed == len(self.candidates)
+
+    def _mark_reference_dirty(self, ref_id: str | None) -> None:
+        if not ref_id:
+            return
+        self._reference_deleted_ids.discard(ref_id)
+        self._reference_dirty_ids.add(ref_id)
+
+    def _mark_references_dirty(self, ref_ids: Iterable[str]) -> None:
+        for ref_id in ref_ids:
+            self._mark_reference_dirty(ref_id)
+
+    def _mark_reference_deleted(self, ref_id: str | None) -> None:
+        if not ref_id:
+            return
+        self._reference_dirty_ids.discard(ref_id)
+        self._reference_deleted_ids.add(ref_id)
+
+    def _mark_references_deleted(self, ref_ids: Iterable[str]) -> None:
+        for ref_id in ref_ids:
+            self._mark_reference_deleted(ref_id)
 
     def _mark_candidate_dirty(self, candidate_id: str | None) -> None:
         if not candidate_id:
@@ -415,8 +605,17 @@ class ProjectState:
                 ]
                 self.db.upsert_candidates(rows)
                 self._candidate_dirty_ids.clear()
-            elif self.db.candidate_count() != len(self.candidates):
-                self.db.replace_candidates(self.candidates.values())
+            elif (
+                self.db.candidate_count() != len(self.candidates)
+                or set(self.candidates.keys()) != self._loaded_candidate_ids
+                or any(
+                    asdict(candidate) != self._loaded_candidate_payloads.get(candidate_id)
+                    for candidate_id, candidate in self.candidates.items()
+                )
+            ):
+                merged = self._merged_candidates_for_snapshot(dirty_ids=set(), deleted_ids=set())
+                self.db.replace_candidates(merged.values())
+                self.candidates = merged
         except sqlite3.Error:
             pass
 
@@ -671,6 +870,7 @@ class ProjectState:
                     capture_date_provenance=record.capture_date_provenance,
                 )
                 self.references[ref.ref_id] = ref
+                self._mark_reference_dirty(ref.ref_id)
                 self.vector_store.add(ref.ref_id, ref.vector)
                 added += 1
             known_hashes.add(record.sha256)
@@ -886,6 +1086,7 @@ class ProjectState:
                         ),
                     )
                     self.references[new_ref.ref_id] = new_ref
+                    self._mark_reference_dirty(new_ref.ref_id)
                     self.vector_store.add(new_ref.ref_id, new_ref.vector)
                     # Normalize the model here too, so an intra-run duplicate is
                     # caught by the (now normalized) lookup key at the top of the
@@ -1225,6 +1426,7 @@ class ProjectState:
                 message=message,
                 content_hash=content_hash,
                 conn=scan_conn,
+                refresh_import_session=False,
             )
 
         def safe_mode_face_crop_allowed(
@@ -1290,6 +1492,7 @@ class ProjectState:
                             safety_score=round(assessment.score, 6),
                             content_hash=content_hash,
                             conn=scan_conn,
+                            refresh_import_session=False,
                         )
                         self._emit_scan_progress(
                             on_progress,
@@ -1417,6 +1620,7 @@ class ProjectState:
                         candidate_id="",
                         content_hash=content_hash,
                         conn=scan_conn,
+                        refresh_import_session=False,
                     )
                     recorded_any = True
                     continue
@@ -1505,6 +1709,7 @@ class ProjectState:
                     candidate_id=candidate.candidate_id,
                     content_hash=content_hash,
                     conn=scan_conn,
+                    refresh_import_session=False,
                 )
                 recorded_any = True
                 added += 1
@@ -1530,9 +1735,9 @@ class ProjectState:
                     record_skip_reason(image_path, signature, "skipped", "", content_hash)
             elif queued_unmatched:
                 if any(row[0] == image_path for row in unmatched):
-                    self.db.record_scan_file(run_id, image_path, signature, "unmatched", phase="pending_cluster", content_hash=content_hash, conn=scan_conn)
+                    self.db.record_scan_file(run_id, image_path, signature, "unmatched", phase="pending_cluster", content_hash=content_hash, conn=scan_conn, refresh_import_session=False)
             elif not recorded_any:
-                self.db.record_scan_file(run_id, image_path, signature, "completed", phase="processed", content_hash=content_hash, conn=scan_conn)
+                self.db.record_scan_file(run_id, image_path, signature, "completed", phase="processed", content_hash=content_hash, conn=scan_conn, refresh_import_session=False)
             return accepted
 
         self._emit_scan_progress(on_progress, "started", metrics)
@@ -1580,6 +1785,7 @@ class ProjectState:
                         phase="discovery",
                         message=raw_path.error,
                         conn=scan_conn,
+                        refresh_import_session=False,
                     )
                     self._emit_scan_progress(on_progress, "error", metrics, current_path=str(path), message=raw_path.error)
                     checkpoint(path)
@@ -1602,7 +1808,7 @@ class ProjectState:
                     metrics["skipped"] += 1
                     metrics["processed"] += 1
                     try:
-                        self.db.record_scan_file(run_id, path, path_signature(path), "skipped", phase="excluded", message=exclusion_reason, conn=scan_conn)
+                        self.db.record_scan_file(run_id, path, path_signature(path), "skipped", phase="excluded", message=exclusion_reason, conn=scan_conn, refresh_import_session=False)
                     except OSError:
                         pass
                     self._emit_scan_progress(on_progress, "processed", metrics, current_path=str(path), message=exclusion_reason)
@@ -1652,6 +1858,7 @@ class ProjectState:
                             message="Skipped from previous completed content hash." if resume_content_hash else "Skipped from previous completed manifest.",
                             content_hash=resume_content_hash,
                             conn=scan_conn,
+                            refresh_import_session=False,
                         )
                         metrics["processed"] += 1
                         self._emit_scan_progress(on_progress, "processed", metrics, current_path=str(path))
@@ -1701,6 +1908,7 @@ class ProjectState:
                                         safety_score=round(assessment.score, 6),
                                         content_hash=video_content_hash,
                                         conn=scan_conn,
+                                        refresh_import_session=False,
                                     )
                                     self._emit_scan_progress(
                                         on_progress,
@@ -1733,7 +1941,7 @@ class ProjectState:
                                 },
                                 apply_safe_mode=False,
                             )
-                        self.db.record_scan_file(run_id, path, signature, "completed", phase="video", content_hash=video_content_hash, conn=scan_conn)
+                        self.db.record_scan_file(run_id, path, signature, "completed", phase="video", content_hash=video_content_hash, conn=scan_conn, refresh_import_session=False)
                         prune_generated_video_frames(sample_paths)
                     else:
                         queue_image(path, precomputed_signature=signature, precomputed_content_hash=resume_content_hash)
@@ -1749,7 +1957,7 @@ class ProjectState:
                     if isinstance(exc, OSError):
                         metrics["pathErrors"] += 1
                     try:
-                        self.db.record_scan_file(run_id, path, path_signature(path), "error", phase="error", message=str(exc), conn=scan_conn)
+                        self.db.record_scan_file(run_id, path, path_signature(path), "error", phase="error", message=str(exc), conn=scan_conn, refresh_import_session=False)
                     except OSError:
                         pass
                     self._emit_scan_progress(on_progress, "error", metrics, current_path=str(path), message=str(exc))
@@ -2464,6 +2672,7 @@ class ProjectState:
                 candidate_id=candidate_id,
                 content_hash=content_hash,
                 conn=conn,
+                refresh_import_session=False,
             )
         except OSError:
             pass
@@ -2472,6 +2681,11 @@ class ProjectState:
         report = safety_model_report()
         path = Path(str(report.get("path") or ""))
         parts = [str(report.get("engine", "heuristic")), str(report.get("modelName", "unknown"))]
+        try:
+            temperature = float(self.config.safe_mode_temperature)
+        except (TypeError, ValueError):
+            temperature = 1.0
+        parts.append(f"temperature:{temperature:.6g}")
         try:
             if path.exists():
                 stat = path.stat()
@@ -3165,6 +3379,7 @@ class ProjectState:
             capture_date_provenance=candidate.capture_date_provenance or "unknown",
         )
         self.references[ref.ref_id] = ref
+        self._mark_reference_dirty(ref.ref_id)
         self.vector_store.add(ref.ref_id, ref.vector)
         self._invalidate_reference_indexes()
         promoted_at = now_iso()
@@ -3216,8 +3431,7 @@ class ProjectState:
         count = len(self.candidates)
         candidate_ids = list(self.candidates.keys())
         self.candidates.clear()
-        self._candidate_dirty_ids.clear()
-        self._candidate_deleted_ids.clear()
+        self._mark_candidates_deleted(candidate_ids)
         try:
             self.db.clear_candidates()
         except sqlite3.Error:
@@ -3340,6 +3554,7 @@ class ProjectState:
         if ref_id not in self.references:
             raise KeyError(f"Reference not found: {ref_id}")
         ref = self.references.pop(ref_id)
+        self._mark_reference_deleted(ref_id)
         self.vector_store.rebuild({item_id: item.vector for item_id, item in self.references.items()})
         self._invalidate_reference_indexes()
         self._append_audit(
@@ -3354,6 +3569,7 @@ class ProjectState:
 
     def clear_references(self) -> int:
         count = len(self.references)
+        self._mark_references_deleted(list(self.references.keys()))
         self.references.clear()
         self.vector_store.clear()
         self._invalidate_reference_indexes()
@@ -3375,6 +3591,7 @@ class ProjectState:
             raise KeyError(f"Person not found: {person_name}")
         for ref_id in ref_ids:
             self.references.pop(ref_id, None)
+        self._mark_references_deleted(ref_ids)
         for candidate_id in candidate_ids:
             self.candidates.pop(candidate_id, None)
         self._mark_candidates_deleted(candidate_ids)
@@ -3414,6 +3631,7 @@ class ProjectState:
         for ref in self.references.values():
             if ref.person_name.casefold() == old_key:
                 ref.person_name = new_clean
+                self._mark_reference_dirty(ref.ref_id)
                 references += 1
         for candidate in self.candidates.values():
             if candidate.person_name.casefold() == old_key:
@@ -3464,6 +3682,7 @@ class ProjectState:
             if ref is None or not person_name:
                 continue
             ref.person_name = person_name
+            self._mark_reference_dirty(ref.ref_id)
             restored += 1
         if restored:
             self._invalidate_reference_indexes()
@@ -3588,6 +3807,7 @@ class ProjectState:
             return result
         for ref_id in missing_ref_ids:
             self.references.pop(ref_id, None)
+        self._mark_references_deleted(missing_ref_ids)
         for candidate_id in missing_candidate_ids:
             self.candidates.pop(candidate_id, None)
         self._mark_candidates_deleted(missing_candidate_ids)
@@ -3705,6 +3925,7 @@ class ProjectState:
                 samples.append({"kind": "reference", "from": ref.source_path, "to": next_path, "personName": ref.person_name})
                 if not dry_run:
                     ref.source_path = next_path
+                    self._mark_reference_dirty(ref.ref_id)
                 relinked_references += 1
                 relinked_fields += 1
         for candidate in self.candidates.values():
@@ -7961,11 +8182,11 @@ class ProjectState:
         if not confirm:
             raise ValueError("Face data deletion requires confirm=true.")
         before = self.privacy_report()
+        self._mark_references_deleted(list(self.references.keys()))
+        self._mark_candidates_deleted(list(self.candidates.keys()))
         self.references.clear()
         self.candidates.clear()
         self.scan_history.clear()
-        self._candidate_dirty_ids.clear()
-        self._candidate_deleted_ids.clear()
         self.vector_store.rebuild({})
         self._invalidate_reference_indexes()
         for generated_path in (self.previews_path, self.video_frames_path):

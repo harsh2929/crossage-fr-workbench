@@ -12,11 +12,15 @@ const extraUiPaths = [
   path.join(repoRoot, "src", "views", "PhotosView.tsx")
 ];
 const source = fs.readFileSync(i18nPath, "utf8");
+const photosUiSource = fs.existsSync(extraUiPaths[0])
+  ? fs.readFileSync(extraUiPaths[0], "utf8")
+  : "";
 const appSource = [appPath, ...extraUiPaths]
   .filter((filePath) => fs.existsSync(filePath))
   .map((filePath) => fs.readFileSync(filePath, "utf8"))
   .join("\n");
 const checks = [];
+const PHOTOS_UI_TEXT_COVERAGE_FLOOR = 0.85;
 
 function add(name, ok, detail, data = {}) {
   checks.push({ name, ok: Boolean(ok), detail, ...data });
@@ -67,6 +71,24 @@ function visibleLiteralCandidates() {
     if (/[{}[\]<>]/.test(text)) return false;
     return true;
   }).sort();
+}
+
+function decodeUiTextLiteral(value) {
+  return value
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t")
+    .replace(/\\"/g, "\"")
+    .replace(/\\'/g, "'")
+    .replace(/\\\\/g, "\\");
+}
+
+function extractUiTextLiterals(content) {
+  const literals = new Set();
+  const pattern = /uiText\(\s*(["'`])([^"'`$\\]*(?:\\.[^"'`$\\]*)*)\1\s*(?:,\s*\{[^)]*\})?\)/g;
+  for (const match of content.matchAll(pattern)) {
+    literals.add(decodeUiTextLiteral(match[2]));
+  }
+  return [...literals].sort();
 }
 
 const i18n = loadI18n();
@@ -140,6 +162,21 @@ const uncovered = visibleLiterals.filter((text) => nonEnglish.every((language) =
 add("visible literal translation coverage", visibleLiterals.length > 100, `${visibleLiterals.length - uncovered.length}/${visibleLiterals.length} visible literals have a non-English mapping`, {
   uncovered: uncovered.slice(0, 80)
 });
+
+const photosUiLiterals = extractUiTextLiterals(photosUiSource);
+add("Photos uiText literals discovered", photosUiLiterals.length > 1000, `${photosUiLiterals.length} unique literals`);
+
+for (const language of nonEnglish) {
+  const untranslated = photosUiLiterals.filter((text) => i18n.translateUiText(language, text) === text);
+  const translated = photosUiLiterals.length - untranslated.length;
+  const coverage = photosUiLiterals.length ? translated / photosUiLiterals.length : 1;
+  add(
+    `Photos uiText coverage ${language}`,
+    coverage >= PHOTOS_UI_TEXT_COVERAGE_FLOOR,
+    `${translated}/${photosUiLiterals.length} (${(coverage * 100).toFixed(1)}%)`,
+    { untranslated: untranslated.slice(0, 80) }
+  );
+}
 
 const ok = checks.every((check) => check.ok);
 console.log(JSON.stringify({

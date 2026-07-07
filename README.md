@@ -4,6 +4,35 @@ A Mac/Windows desktop workbench based on `report.md`. The app is now an Electron
 
 The product stance from the report is preserved: cross-age recognition is review-first and consent-gated. It is not an autonomous identification system.
 
+## July 2026 Audit Checkpoint
+
+The July 7 full-stack audit checkpoint closed the confirmed Critical and High issues for the local-first photo workflow. The fixes focus on keeping 50k-100k photo libraries responsive and protecting user trust boundaries:
+
+- Photo listings, folders, search, generated collections, duplicate summaries, timeline covers, and edit-stack lookups now avoid repeated whole-library work on hot read paths.
+- Smart-album, people, pet, and scan/import bookkeeping now use indexed or dirty-flagged paths instead of repeated full scans.
+- Semantic search, photo settings, album suggestions, utility folders, and generated folders are bounded by the requested page or targeted SQL probes.
+- Photos UI coverage is enforced by the localization test gate, with fallback phrase/term translation for the redesigned Photos surface.
+- Workspace state saves merge stale desktop/MCP writers instead of overwriting unrelated changes, and Safe Mode calibration changes invalidate cached safety decisions.
+- EXIF capture-date parsing now reads nested `DateTimeOriginal` / `DateTimeDigitized` metadata before falling back.
+- Desktop backend startup avoids duplicate Python backend spawns during backoff races, and stale child exits no longer reject unrelated pending requests.
+- Camera scanning cleans up pending `getUserMedia` streams on unmount, and canceling a move destination no longer moves originals.
+
+The checkpoint was verified with:
+
+```bash
+npm run test:localization
+npm run test:photos-view
+npm run build
+PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/photo_semantic_search_units.py
+npm run test:photo-folders
+npm run test:safe-mode-calibration
+npm run test:main-util
+npm run test:edge
+git diff --check
+```
+
+The remaining audit backlog is primarily Medium-severity privacy hardening, async job extraction, renderer splitting, and Apple Photos parity work. See `docs/2026-07-07-full-stack-audit-final.md` for the current remediation roadmap.
+
 ## Run The Desktop App
 
 ```bash

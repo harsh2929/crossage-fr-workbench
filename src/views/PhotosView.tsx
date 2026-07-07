@@ -7668,8 +7668,17 @@ export function PhotosView(props: {
   const timelineRows = useMemo<Array<PhotoVirtualTimelineRow<PhotoItem>>>(() => {
     const rows: Array<PhotoVirtualTimelineRow<PhotoItem>> = [];
     let currentKey = "";
+    const indexByItem = new Map<PhotoItem, number>();
+    const indexBySourcePath = new Map<string, number>();
+    items.forEach((item, index) => {
+      indexByItem.set(item, index);
+      const sourcePath = String(item.sourcePath || "");
+      if (sourcePath && !indexBySourcePath.has(sourcePath)) {
+        indexBySourcePath.set(sourcePath, index);
+      }
+    });
     visibleDateItems.forEach((item) => {
-      const index = Math.max(0, items.indexOf(item));
+      const index = indexByItem.get(item) ?? indexBySourcePath.get(String(item.sourcePath || "")) ?? 0;
       const group = dateGroup(item);
       if (group.key !== currentKey) {
         currentKey = group.key;
@@ -17822,12 +17831,13 @@ export function PhotosView(props: {
 
   async function moveSelected() {
     const folder = await chooseDestinationFolder();
-    if (folder) rememberPhotoExportDestination(folder);
+    if (!folder) return;
+    rememberPhotoExportDestination(folder);
     if (selectedCandidateIds.length) {
-      await manageCandidateMedia(selectedCandidateIds, "move", folder || undefined);
+      await manageCandidateMedia(selectedCandidateIds, "move", folder);
     }
     if (selectedPathOnlySources.length) {
-      const result = await exportPhotoSelection(selectedPathOnlySources, "move", folder || undefined);
+      const result = await exportPhotoSelection(selectedPathOnlySources, "move", folder);
       if (result) setLastPhotoSelectionExport(result);
     }
     setSelectedSources(new Set());

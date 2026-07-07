@@ -10,8 +10,12 @@ Run: PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 python3 tests/safe_mode_calibration_
 from __future__ import annotations
 
 import math
+import os
 import sys
+import tempfile
+from pathlib import Path
 
+from crossage_fr.enroll.manager import ProjectState
 from crossage_fr.ingest.safety_calibration import (
     CALIBRATION_T_MAX,
     CALIBRATION_T_MIN,
@@ -59,5 +63,15 @@ check("fitted T is no worse than T=1", temperature_nll(wrong, wrong_labels, t_fi
 check("empty data → T=1", approx(fit_temperature([], []), 1.0))
 check("single class only → T=1", approx(fit_temperature([[1.0, -1.0], [2.0, -2.0]], [0, 0]), 1.0))
 check("mismatched lengths → T=1", approx(fit_temperature([[1.0, -1.0]], [0, 1]), 1.0))
+
+with tempfile.TemporaryDirectory() as tmp:
+    registry = str(Path(tmp) / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
+    project = ProjectState(Path(tmp) / "workspace")
+    raw_version = project._safety_cache_version()
+    project.config.safe_mode_temperature = 2.0
+    calibrated_version = project._safety_cache_version()
+    check("safe-mode cache key includes temperature", raw_version != calibrated_version and "temperature:2" in calibrated_version)
 
 print("\nall safe-mode-calibration tests passed")

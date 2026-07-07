@@ -32,7 +32,8 @@ from typing import Any
 import crossage_fr.api_server as api_server_module
 import crossage_fr.store.workspace_db as workspace_db_module
 from crossage_fr.api_server import DesktopApi
-from crossage_fr.models import ReviewCandidate
+from crossage_fr.enroll.manager import ProjectState
+from crossage_fr.models import ReferenceFace, ReviewCandidate
 from crossage_fr.store.workspace_db import WorkspaceDb
 
 
@@ -332,6 +333,141 @@ def test_scan_media_creates_canonical_photo_assets() -> None:
         assert mov_asset and mov_asset["mediaKind"] == "video", mov_asset
         assert db.photo_asset_by_path(str(ignored)) is None
     print("ok scan media creates canonical photo assets")
+
+
+def test_record_scan_file_batches_import_session_refresh() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        db = WorkspaceDb(base / "workspace.db")
+        jpg = base / "batched.jpg"
+        bad = base / "bad.jpg"
+        jpg.write_bytes(b"batched")
+        bad.write_bytes(b"bad")
+        db.create_scan_run("run1", "label", "manual", str(base), total=2)
+        with db.connect() as conn:
+            db.record_scan_file(
+                "run1",
+                jpg,
+                _sig(jpg, size=7, mtime=1),
+                "completed",
+                phase="processed",
+                conn=conn,
+                refresh_import_session=False,
+            )
+            db.record_scan_file(
+                "run1",
+                bad,
+                _sig(bad, size=3, mtime=2),
+                "error",
+                phase="error",
+                message="broken",
+                conn=conn,
+                refresh_import_session=False,
+            )
+            stored = conn.execute(
+                "SELECT imported_count, failed_count FROM photo_import_sessions WHERE import_id = 'run1'"
+            ).fetchone()
+            assert int(stored["imported_count"] or 0) == 0, stored
+            assert int(stored["failed_count"] or 0) == 0, stored
+            db.update_scan_run("run1", {"total": 2, "processed": 2, "added": 1, "errors": 1}, "complete", "", conn)
+            refreshed = conn.execute(
+                "SELECT imported_count, failed_count FROM photo_import_sessions WHERE import_id = 'run1'"
+            ).fetchone()
+            assert int(refreshed["imported_count"] or 0) == 1, refreshed
+            assert int(refreshed["failed_count"] or 0) == 1, refreshed
+
+    manager_source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "enroll" / "manager.py").read_text(encoding="utf-8")
+    scan_block = manager_source[
+        manager_source.index("    def scan_paths("):manager_source.index("    def request_scan_cancel(")
+    ]
+    assert scan_block.count("record_scan_file(") == scan_block.count("refresh_import_session=False"), scan_block
+    assert "self.db.update_scan_run(run_id, metrics" in scan_block, scan_block
+    manifest_block = manager_source[
+        manager_source.index("    def _record_manifest_file("):manager_source.index("    def _safety_cache_version(")
+    ]
+    assert "refresh_import_session=False" in manifest_block, manifest_block
+    print("ok record_scan_file batches import session refresh during scans")
+
+
+def test_project_state_save_merges_stale_workspace_state() -> None:
+    vector = [0.01] * 512
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        stale = ProjectState(root)
+        writer = ProjectState(root)
+        ref = ReferenceFace(
+            ref_id="ref_external",
+            person_name="Casey",
+            age_bucket="adult",
+            source_path=str(root / "casey.jpg"),
+            capture_date=None,
+            quality=0.91,
+            model_name="test-model",
+            vector=vector,
+            source_hash="hash-ref",
+        )
+        writer.references[ref.ref_id] = ref
+        writer._mark_reference_dirty(ref.ref_id)
+        writer.config.safe_mode_temperature = 1.7
+        writer.consent = {"active": True, "operator": "writer"}
+        writer.scan_history = [{"runId": "writer-run"}]
+        writer.save()
+
+        stale.config.retention_reviewed_days = 123
+        stale.consent = {"note": "stale local edit"}
+        stale.scan_history = [{"runId": "stale-run"}]
+        stale.save()
+
+        merged = ProjectState(root)
+        assert "ref_external" in merged.references, merged.references
+        assert merged.config.safe_mode_temperature == 1.7, merged.config
+        assert merged.config.retention_reviewed_days == 123, merged.config
+        assert merged.consent["active"] is True, merged.consent
+        assert merged.consent["note"] == "stale local edit", merged.consent
+        assert {row.get("runId") for row in merged.scan_history} >= {"writer-run", "stale-run"}, merged.scan_history
+
+        candidate_stale = ProjectState(root)
+        candidate_writer = ProjectState(root)
+        candidate = ReviewCandidate(
+            candidate_id="cand_external",
+            source_path=str(root / "candidate.jpg"),
+            person_name="Casey",
+            best_ref_id="ref_external",
+            best_ref_path=ref.source_path,
+            score=0.92,
+            band="likely",
+            quality=0.81,
+            model_name="test-model",
+        )
+        candidate_writer.candidates[candidate.candidate_id] = candidate
+        candidate_writer._mark_candidate_dirty(candidate.candidate_id)
+        candidate_writer.save()
+        candidate_stale.scan_history = [{"runId": "candidate-stale-run"}]
+        candidate_stale.save()
+
+        merged = ProjectState(root)
+        assert "cand_external" in merged.candidates, merged.candidates
+        assert merged.db.candidate_count() == 1
+        snapshot = json.loads((root / "review_candidates.json").read_text(encoding="utf-8"))
+        assert [row["candidate_id"] for row in snapshot] == ["cand_external"], snapshot
+
+        ref_stale = ProjectState(root)
+        deleter = ProjectState(root)
+        deleter.delete_reference("ref_external")
+        ref_stale.config.face_detector_size = 640
+        ref_stale.save()
+        merged = ProjectState(root)
+        assert "ref_external" not in merged.references, merged.references
+        assert merged.config.face_detector_size == 640, merged.config
+
+        clearer = ProjectState(root)
+        clearer.clear_candidates()
+        merged = ProjectState(root)
+        assert not merged.candidates, merged.candidates
+        assert merged.db.candidate_count() == 0
+        snapshot = json.loads((root / "review_candidates.json").read_text(encoding="utf-8"))
+        assert snapshot == [], snapshot
+    print("ok project state save merges stale workspace state")
 
 
 def test_scan_video_metadata_probe_populates_canonical_asset_and_search() -> None:
@@ -738,6 +874,109 @@ def test_photo_backfills_legacy_scan_rows_into_assets_sessions_and_failures() ->
         assert failures[0]["sourcePath"] == str(failed), failures
         assert failures[0]["reason"] == "legacy decode failure", failures
     print("ok legacy scan rows backfill assets, sessions, and failures")
+
+
+def test_photo_backfills_stream_without_full_manifest_or_asset_path_sets() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        db = WorkspaceDb(base / "workspace.db")
+        paths = [base / f"stream-{index}.jpg" for index in range(3)]
+        db.create_scan_run("run-stream", "Streaming backfill", "manual", str(base))
+        for index, path in enumerate(paths):
+            db.record_scan_file(
+                "run-stream",
+                path,
+                _sig(path, size=100 + index, mtime=10 + index),
+                "completed",
+                phase="processed",
+                content_hash=f"hash-{index}",
+            )
+        with db.connect() as conn:
+            conn.execute("DELETE FROM photo_assets")
+        assert db.backfill_photo_assets_from_scan_media(missing_only=True) == 3
+        original_list_scan_media = db.list_scan_media
+
+        def fail_full_manifest_load(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+            raise AssertionError("backfill should stream scan rows directly instead of loading the whole scan manifest")
+
+        db.list_scan_media = fail_full_manifest_load  # type: ignore[method-assign]
+        statements: list[str] = []
+        try:
+            with db.connect() as conn:
+                conn.set_trace_callback(statements.append)
+                assert db.backfill_photo_assets_from_scan_media(conn, missing_only=True) == 0
+                db.upsert_candidates([
+                    _candidate("stream-candidate", "Ada", str(base / "candidate.jpg"), status="accepted", score=0.93),
+                ], conn)
+                assert db.backfill_photo_assets_from_review_candidates(conn, missing_only=True) == 0
+                conn.set_trace_callback(None)
+        finally:
+            db.list_scan_media = original_list_scan_media  # type: ignore[method-assign]
+        joined = "\n".join(statements)
+        assert "SELECT source_path FROM photo_assets" not in joined, joined
+        assert "LEFT JOIN photo_assets AS pa ON pa.source_path = latest.path" in joined, joined
+
+    source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "store" / "workspace_db.py").read_text(encoding="utf-8")
+    scan_method = source[
+        source.index("    def backfill_photo_assets_from_scan_media("):source.index("    def backfill_photo_assets_from_review_candidates(")
+    ]
+    candidate_method = source[
+        source.index("    def backfill_photo_assets_from_review_candidates("):source.index("    def _album_folder_row(")
+    ]
+    assert "self.list_scan_media" not in scan_method, scan_method
+    assert "SELECT source_path FROM photo_assets" not in scan_method, scan_method
+    assert ".fetchall()" not in candidate_method, candidate_method
+    print("ok photo backfills stream without full manifest/path sets")
+
+
+def test_photo_asset_page_materializes_filter_once_for_count_and_page() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = WorkspaceDb(Path(tmp) / "workspace.db")
+        base = Path(tmp)
+        now = "2026-01-01T00:00:00Z"
+        with db.connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO photo_assets(asset_id, source_path, media_kind, added_at, updated_at)
+                VALUES(?, ?, 'image', ?, ?)
+                """,
+                [
+                    ("asset-a", str(base / "a.jpg"), "2026-01-01T00:00:00Z", now),
+                    ("asset-b", str(base / "b.jpg"), "2026-01-02T00:00:00Z", now),
+                    ("asset-c", str(base / "c.jpg"), "2026-01-03T00:00:00Z", now),
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO photo_asset_metadata(asset_id, title, updated_at) VALUES(?, ?, ?)",
+                [("asset-a", "Zulu", now), ("asset-b", "Alpha", now), ("asset-c", "Bravo", now)],
+            )
+            statements: list[str] = []
+            conn.set_trace_callback(statements.append)
+            page = db.list_photo_asset_page(offset=1, limit=1, sort="title", conn=conn)
+            conn.set_trace_callback(None)
+            temp_rows = conn.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM sqlite_temp_master
+                WHERE name = 'temp_photo_asset_page_rows'
+                """
+            ).fetchone()
+        assert page["total"] == 3, page
+        assert [asset["assetId"] for asset in page["assets"]] == ["asset-c"], page
+        assert int(temp_rows["n"] or 0) == 0, temp_rows
+        joined = "\n".join(statements)
+        assert joined.count("INSERT OR IGNORE INTO temp_photo_asset_page_rows") == 1, joined
+        assert "SELECT COUNT(*) AS n FROM filtered" not in joined, joined
+        assert "FROM filtered\n            JOIN photo_assets" not in joined, joined
+
+    source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "store" / "workspace_db.py").read_text(encoding="utf-8")
+    method = source[
+        source.index("    def list_photo_asset_page("):source.index("    def list_photo_date_bucket_summaries(")
+    ]
+    assert 'temp_table = "temp_photo_asset_page_rows"' in method, method
+    assert "CREATE TEMP TABLE {temp_table}" in method, method
+    assert "SELECT COUNT(*) AS n FROM filtered" not in method, method
+    print("ok photo asset page materializes filter once")
 
 
 def test_scan_runs_create_photo_import_sessions_and_import_folders() -> None:
@@ -3879,6 +4118,90 @@ def test_photo_edit_stack_version_duplicate_restore_delete() -> None:
     print("ok photo edit stack version duplicate restore delete")
 
 
+def test_photo_edit_stack_version_counts_use_temp_table_for_large_batches() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = WorkspaceDb(Path(tmp) / "workspace.db")
+        now = "2026-01-01T00:00:00Z"
+        asset_ids = [f"asset_large_{index:04d}" for index in range(1500)]
+        with db.connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO photo_assets(asset_id, source_path, added_at, updated_at)
+                VALUES(?, ?, ?, ?)
+                """,
+                [
+                    (asset_id, str(Path(tmp) / f"{asset_id}.jpg"), now, now)
+                    for asset_id in asset_ids
+                ],
+            )
+            version_rows = [
+                ("version-a", asset_ids[0], "[]", now, now),
+                ("version-b", asset_ids[0], "[]", now, now),
+                ("version-c", asset_ids[999], "[]", now, now),
+                ("version-d", asset_ids[-1], "[]", now, now),
+            ]
+            conn.executemany(
+                """
+                INSERT INTO photo_edit_stack_versions(version_id, asset_id, operations_json, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                version_rows,
+            )
+            counts = db.photo_edit_stack_version_counts_for_assets(asset_ids, conn=conn)
+            temp_rows = conn.execute(
+                """
+                SELECT name
+                FROM sqlite_temp_master
+                WHERE name = 'temp_photo_edit_stack_version_count_ids'
+                """
+            ).fetchall()
+        assert counts[asset_ids[0]] == 2, counts
+        assert counts[asset_ids[999]] == 1, counts
+        assert counts[asset_ids[-1]] == 1, counts
+        assert asset_ids[1] not in counts, counts
+        assert temp_rows == [], temp_rows
+    print("ok photo edit stack version counts handle large batches")
+
+
+def test_photo_date_bucket_covers_use_single_windowed_query() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = WorkspaceDb(Path(tmp) / "workspace.db")
+        now = "2026-01-01T00:00:00Z"
+        with db.connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO photo_assets(asset_id, source_path, media_kind, capture_date, added_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    ("asset_plain", str(Path(tmp) / "plain.jpg"), "image", "2026-01-01T08:00:00Z", now, now),
+                    ("asset_favorite", str(Path(tmp) / "favorite.jpg"), "image", "2026-01-01T07:00:00Z", now, now),
+                    ("asset_video", str(Path(tmp) / "video.mov"), "video", "2026-01-02T09:00:00Z", now, now),
+                ],
+            )
+            conn.execute(
+                """
+                INSERT INTO photo_asset_metadata(asset_id, favorite, title, updated_at)
+                VALUES(?, 1, ?, ?)
+                """,
+                ("asset_favorite", "Favorite cover", now),
+            )
+        buckets = db.list_photo_date_bucket_summaries("days")
+        by_key = {str(bucket["key"]): bucket for bucket in buckets}
+        assert by_key["2026-01-01"]["count"] == 2, by_key
+        assert by_key["2026-01-01"]["coverSourcePath"].endswith("favorite.jpg"), by_key
+        assert by_key["2026-01-01"]["coverReason"] == "Favorite", by_key
+        assert by_key["2026-01-02"]["coverReason"] == "Video", by_key
+
+    source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "store" / "workspace_db.py").read_text(encoding="utf-8")
+    method = source[
+        source.index("    def list_photo_date_bucket_summaries("):source.index("    def photo_asset_by_path(")
+    ]
+    assert "ROW_NUMBER() OVER" in method, method
+    assert "WHERE bucket_key = ?" not in method, method
+    print("ok photo date bucket covers use one windowed query")
+
+
 def test_photo_asset_version_duplicate_clones_catalog_stack_and_undo() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -4462,6 +4785,14 @@ def test_photo_edit_stack_renders_image_adjustments_preview() -> None:
         assert payload["operations"][0]["adjustments"]["tint"] == 15, payload
         assert payload["operations"][0]["adjustments"]["vignette"] == 50, payload
         assert payload["operations"][0]["adjustments"]["noiseReduction"] == 30, payload
+        api_source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "api_server.py").read_text(encoding="utf-8")
+        vignette_block = api_source[
+            api_source.index("        def apply_vignette("):api_source.index("        exposure = adjustments.get")
+        ]
+        assert "for y in range(height)" not in vignette_block, vignette_block
+        assert "for x in range(width)" not in vignette_block, vignette_block
+        assert "ImageDraw.Draw(mask)" in vignette_block, vignette_block
+        assert "max_mask_edge = 1024" in vignette_block, vignette_block
 
         exported = api.export_photo_selection(
             [photo_path],
@@ -5087,6 +5418,49 @@ def test_photo_recently_saved_uses_app_source_provenance() -> None:
         hidden_source = api.list_photo_folder_items({"folderId": import_source_folder["id"], "previewBudget": 0})
         assert hidden_source["total"] == 0, hidden_source
     print("ok photo recently saved app source provenance")
+
+
+def test_common_utility_folder_pages_use_sql_without_full_materialization() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        favorite_photo = base / "favorite.jpg"
+        edited_photo = base / "edited.jpg"
+        mail_photo = base / "mail-saved.jpg"
+        for path in (favorite_photo, edited_photo, mail_photo):
+            path.write_bytes(path.name.encode("utf-8"))
+        api.import_photos({"sourcePaths": [str(favorite_photo), str(edited_photo)], "storageMode": "referenced"})
+        mail_result = api.import_photos({
+            "sourcePaths": [str(mail_photo)],
+            "storageMode": "referenced",
+            "sourceKind": "mail",
+            "sourceLabel": "Mail",
+        })
+        favorite_path = str(favorite_photo.resolve())
+        edited_path = str(edited_photo.resolve())
+        mail_path = mail_result["importedPaths"][0]
+        api.update_photo_asset_metadata({"sourcePath": favorite_path, "favorite": True})
+        edited_asset = api.project.db.photo_asset_by_path(edited_path)
+        assert edited_asset is not None
+        api.project.db.save_photo_edit_stack(asset_id=edited_asset["assetId"], operations=[{"type": "adjust", "contrast": 0.2}])
+
+        def fail_materialization(*_args, **_kwargs):
+            raise AssertionError("utility page used full-library Python materialization")
+
+        api._photo_asset_entries = fail_materialization  # type: ignore[method-assign]
+        favorite_page = api.list_photo_folder_items({"folderId": "favorites", "limit": 1, "previewBudget": 0})
+        edited_page = api.list_photo_folder_items({"folderId": "recentlyEdited", "limit": 1, "previewBudget": 0})
+        media_page = api.list_photo_folder_items({"folderId": "media:image", "limit": 2, "previewBudget": 0})
+        saved_page = api.list_photo_folder_items({"folderId": "recentlySaved", "limit": 1, "previewBudget": 0})
+
+        assert favorite_page["total"] == 1, favorite_page
+        assert favorite_page["items"][0]["sourcePath"] == favorite_path, favorite_page
+        assert edited_page["total"] == 1, edited_page
+        assert edited_page["items"][0]["sourcePath"] == edited_path, edited_page
+        assert media_page["total"] == 3, media_page
+        assert saved_page["total"] == 1, saved_page
+        assert saved_page["items"][0]["sourcePath"] == mail_path, saved_page
+    print("ok common utility folders page through SQL")
 
 
 def test_photo_import_session_provenance_edit_updates_assets_and_sources() -> None:
@@ -5888,6 +6262,252 @@ def test_list_photo_assets_api_returns_people_and_media_filter() -> None:
     print("ok list_photo_assets API media filter + people")
 
 
+def test_photo_asset_people_candidate_index_exists_for_backfill_probe() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = WorkspaceDb(Path(tmp) / "workspace.db")
+        with db.connect() as conn:
+            indexes = {str(row["name"] or "") for row in conn.execute("PRAGMA index_list(photo_asset_people)").fetchall()}
+            assert "idx_photo_asset_people_candidate" in indexes, indexes
+            columns = [
+                str(row["name"] or "")
+                for row in conn.execute("PRAGMA index_info(idx_photo_asset_people_candidate)").fetchall()
+            ]
+            assert columns == ["candidate_id"], columns
+    print("ok photo_asset_people candidate_id index exists")
+
+
+def test_photo_read_paths_do_not_run_legacy_asset_backfills() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        photo = base / "quiet-beach-day.jpg"
+        api.project.db.create_scan_run("run1", "Read path import", "manual", str(base))
+        api.project.db.record_scan_file(
+            "run1",
+            photo,
+            _sig(photo, size=1024, mtime=123),
+            "completed",
+            phase="processed",
+            content_hash="hash-beach",
+        )
+
+        def fail_backfill(*_args, **_kwargs):
+            raise AssertionError("legacy photo-asset backfill ran during a read path")
+
+        api.project.db.backfill_photo_assets_from_scan_media = fail_backfill  # type: ignore[method-assign]
+        api.project.db.backfill_photo_assets_from_review_candidates = fail_backfill  # type: ignore[method-assign]
+
+        page = api.list_photo_assets({"limit": 10})
+        assert page["total"] == 1 and page["returned"] == 1, page
+        assert page["items"][0]["sourcePath"] == str(photo), page
+
+        query_page = api.list_photo_assets({"query": "quiet", "limit": 10})
+        assert query_page["total"] == 1 and query_page["items"][0]["sourcePath"] == str(photo), query_page
+
+        folder_page = api.list_photo_folder_items({"folderId": "all", "query": "beach", "previewBudget": 0})
+        assert folder_page["total"] == 1 and folder_page["items"][0]["sourcePath"] == str(photo), folder_page
+
+        search_page = api.search_photo_library({"query": "beach", "limit": 3})
+        assert search_page["total"] >= 1, search_page
+
+        date_buckets = api.list_photo_date_buckets({"folderId": "all", "mode": "days"})
+        assert isinstance(date_buckets.get("buckets"), list), date_buckets
+
+        burst_stacks = api.list_photo_burst_stacks({})
+        assert burst_stacks["total"] == 0, burst_stacks
+    print("ok photo read paths avoid legacy asset backfills")
+
+
+def test_photo_album_membership_uses_bounded_smart_album_probe() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        now = "2026-01-01T00:00:00Z"
+        target = Path(tmp) / "favorite.jpg"
+        other = Path(tmp) / "plain.jpg"
+        with api.project.db.connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO photo_assets(asset_id, source_path, media_kind, capture_date, added_at, updated_at)
+                VALUES(?, ?, 'image', ?, ?, ?)
+                """,
+                [
+                    ("asset_favorite", str(target), "2026-01-01T08:00:00Z", now, now),
+                    ("asset_plain", str(other), "2026-01-01T09:00:00Z", now, now),
+                ],
+            )
+            conn.execute(
+                """
+                INSERT INTO photo_asset_metadata(asset_id, favorite, updated_at)
+                VALUES('asset_favorite', 1, ?)
+                """,
+                (now,),
+            )
+        api.project.db.upsert_photo_album(
+            album_id="album_favorites",
+            name="Favorites",
+            album_kind="smart",
+            include_people=[],
+            exclude_people=[],
+            rules={"favoriteOnly": True},
+        )
+
+        def fail_materialization(_album):
+            raise AssertionError("smart album full materialization should not run for one-asset membership")
+
+        original_album_items = api._photo_album_items
+        api._photo_album_items = fail_materialization  # type: ignore[method-assign]
+        try:
+            memberships = api._photo_album_memberships_for_asset("asset_favorite", str(target))
+            plain_memberships = api._photo_album_memberships_for_asset("asset_plain", str(other))
+        finally:
+            api._photo_album_items = original_album_items  # type: ignore[method-assign]
+        assert [row["albumId"] for row in memberships] == ["album_favorites"], memberships
+        assert plain_memberships == [], plain_memberships
+
+    source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "api_server.py").read_text(encoding="utf-8")
+    membership_block = source[
+        source.index("    def _photo_album_memberships_for_asset("):source.index("    def _photo_raw_preview_proxy_path(")
+    ]
+    assert "_photo_smart_album_contains_asset" in membership_block, membership_block
+    assert "_photo_smart_album_sql_assets_for_criteria" not in membership_block, membership_block
+    print("ok photo album membership uses bounded smart album probe")
+
+
+def test_smart_album_revision_avoids_people_row_fingerprint_scan() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = WorkspaceDb(Path(tmp) / "workspace.db")
+        photo_path = Path(tmp) / "people-revision.jpg"
+        with db.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO photo_assets(asset_id, source_path, media_kind, added_at, updated_at)
+                VALUES('asset-a', ?, 'image', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+                """,
+                (str(photo_path),),
+            )
+            conn.execute(
+                """
+                INSERT INTO photo_asset_metadata(asset_id, updated_at)
+                VALUES('asset-a', '2026-01-01T00:00:00Z')
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO photo_asset_people(asset_id, candidate_id, person_name, status, score, quality, band, updated_at)
+                VALUES('asset-a', 'candidate-a', 'Alice', 'accepted', 0.9, 0.8, 'accepted', '2026-01-02T00:00:00Z')
+                """
+            )
+            statements: list[str] = []
+            conn.set_trace_callback(statements.append)
+            revision = db.photo_smart_album_materialization_revision(conn)
+            conn.set_trace_callback(None)
+
+        assert revision["photoAssetPeople"]["count"] == 1, revision
+        assert revision["photoAssetPeople"]["latest"] == "2026-01-02T00:00:00Z", revision
+        joined = "\n".join(statements)
+        assert "SELECT asset_id, person_name, status, score, band, updated_at" not in joined, joined
+        assert "ORDER BY asset_id ASC, LOWER(person_name) ASC" not in joined, joined
+
+    source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "store" / "workspace_db.py").read_text(encoding="utf-8")
+    method = source[
+        source.index("    def photo_smart_album_materialization_revision("):source.index("    def _clean_photo_slideshow_project(")
+    ]
+    assert "def people_summary" not in method, method
+    assert "photoAssetPeople\": table_summary(\"photo_asset_people\")" in method, method
+    print("ok smart album revision avoids people row fingerprint scan")
+
+
+def test_photo_library_settings_counts_managed_roots_in_sql() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        managed_root = base / "managed-root"
+        unmanaged_root = base / "other-managed"
+        managed_root.mkdir()
+        unmanaged_root.mkdir()
+        now = "2026-01-01T00:00:00Z"
+        api.project.db.save_photo_library_settings(
+            managed_root=managed_root,
+            profile_name="External managed",
+            backup_policy={"enabled": True, "warnOnReferencedOriginals": True, "warnOnExternalManagedRoots": True},
+        )
+        with api.project.db.connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO photo_assets(asset_id, source_path, source_kind, media_kind, capture_date, added_at, updated_at)
+                VALUES(?, ?, ?, 'image', ?, ?, ?)
+                """,
+                [
+                    ("asset_managed", str((managed_root / "inside.jpg").resolve()), "managed", "2026-01-01T08:00:00Z", now, now),
+                    ("asset_outside", str((unmanaged_root / "outside.jpg").resolve()), "managed", "2026-01-01T09:00:00Z", now, now),
+                    ("asset_referenced", str((base / "referenced.jpg").resolve()), "referenced", "2026-01-01T10:00:00Z", now, now),
+                ],
+            )
+        settings = api.photo_library_settings({})
+        status = settings["backupPolicyStatus"]
+        coverage = {
+            str(row.get("path", "")): row
+            for row in status["rootCoverage"]
+        }
+        assert coverage[str(managed_root.resolve())]["assetCount"] == 1, coverage
+        assert status["counts"]["managedAssets"] == 2, status
+        assert status["counts"]["referencedAssets"] == 1, status
+        assert status["counts"]["externalManagedAssetsRequiringBackup"] == 1, status
+        assert status["counts"]["managedAssetsOutsideProfiles"] == 1, status
+
+    source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "api_server.py").read_text(encoding="utf-8")
+    method = source[
+        source.index("    def _photo_backup_policy_status("):source.index("    def photo_backup_restore_rehearsal(")
+    ]
+    assert "SELECT source_path, source_kind" not in method, method
+    assert "managed_sources" not in method, method
+    assert "_photo_sql_source_within_root_clause" in method, method
+    print("ok photo library settings counts managed roots in SQL")
+
+
+def test_photo_duplicate_groups_are_cached_on_folder_reads() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        now = "2026-01-01T00:00:00Z"
+        with api.project.db.connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO photo_assets(asset_id, source_path, source_kind, content_hash, media_kind, capture_date, added_at, updated_at)
+                VALUES(?, ?, 'referenced', ?, 'image', ?, ?, ?)
+                """,
+                [
+                    ("asset_dup_a", str(base / "dup-a.jpg"), "same-hash", "2026-01-01T08:00:00Z", now, now),
+                    ("asset_dup_b", str(base / "dup-b.jpg"), "same-hash", "2026-01-01T09:00:00Z", now, now),
+                ],
+            )
+            rebuilt = api.project.db.rebuild_photo_duplicate_groups(conn)
+            assert rebuilt["groups"] == 1 and rebuilt["items"] == 2, rebuilt
+
+        original_rebuild = api.project.db.rebuild_photo_duplicate_groups
+
+        def fail_rebuild(*_args: Any, **_kwargs: Any) -> dict[str, int]:
+            raise AssertionError("Photo folder reads should not rebuild duplicate groups when the duplicate signature is unchanged.")
+
+        api.project.db.rebuild_photo_duplicate_groups = fail_rebuild  # type: ignore[method-assign]
+        try:
+            summary = api.project.db.photo_duplicate_summary()
+            folders = api.list_photo_folders({"coverPreviewBudget": 0})
+        finally:
+            api.project.db.rebuild_photo_duplicate_groups = original_rebuild  # type: ignore[method-assign]
+        assert summary["groupCount"] == 1 and summary["count"] == 2, summary
+        duplicate_folders = [folder for folder in folders.get("folders", []) if folder.get("id") == "duplicates"]
+        assert duplicate_folders and duplicate_folders[0]["count"] == 2, folders
+
+    source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "store" / "workspace_db.py").read_text(encoding="utf-8")
+    summary_method = source[
+        source.index("    def photo_duplicate_summary("):source.index("    def photo_duplicate_group_for_asset(")
+    ]
+    assert "ensure_photo_duplicate_groups(conn)" in summary_method, summary_method
+    assert "rebuild_photo_duplicate_groups(conn)" not in summary_method, summary_method
+    print("ok photo duplicate groups are cached on folder reads")
+
+
 def test_photo_asset_metadata_update_indexes_search_and_folder_items() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -6145,6 +6765,54 @@ def test_photo_asset_metadata_update_indexes_search_and_folder_items() -> None:
         deleted_keyword_page = api.list_photo_folder_items({"folderId": "all", "keyword": "birthday", "previewBudget": 0})
         assert deleted_keyword_page["total"] == 0, deleted_keyword_page
     print("ok photo metadata update + FTS search + folder item metadata")
+
+
+def test_search_photo_library_uses_scoped_context_loads() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        target = base / "bounded-search-target.jpg"
+        distractor = base / "bounded-search-other.jpg"
+        target.write_bytes(b"target")
+        distractor.write_bytes(b"other")
+        imported = api.import_photos({
+            "sourcePaths": [str(target), str(distractor)],
+            "storageMode": "referenced",
+        })
+        target_path = imported["importedPaths"][0]
+        distractor_path = imported["importedPaths"][1]
+        api.update_photo_asset_metadata({
+            "sourcePath": target_path,
+            "title": "Bounded Aurora Harbor",
+            "locationOverride": {"label": "Harbor Point", "latitude": 36.9741, "longitude": -122.0308},
+        })
+        api.update_photo_asset_metadata({"sourcePath": distractor_path, "title": "Quiet Archive"})
+        target_asset = api.project.db.photo_asset_by_path(target_path)
+        assert target_asset is not None
+        api.project.db.save_photo_edit_stack(asset_id=target_asset["assetId"], operations=[{"type": "adjust", "exposure": 0.1}])
+        api.project.db.upsert_candidates([
+            _candidate("scoped-candidate", target_path, "Scoped Alice", score=0.96),
+        ])
+
+        def fail_global_loader(*_args, **_kwargs):
+            raise AssertionError("search used an unbounded global loader")
+
+        api._photo_matches_by_source = fail_global_loader  # type: ignore[method-assign]
+        api._photo_place_labels_by_asset_id = fail_global_loader  # type: ignore[method-assign]
+        api.project.db.iter_candidate_payloads = fail_global_loader  # type: ignore[method-assign]
+        api.project.db.list_photo_places = fail_global_loader  # type: ignore[method-assign]
+        api.project.db.count_photo_edit_stacks = fail_global_loader  # type: ignore[method-assign]
+        api.project.db.list_photo_edit_stacks = fail_global_loader  # type: ignore[method-assign]
+
+        result = api.search_photo_library({"query": "Bounded Aurora", "limit": 6})
+        photo_items = [
+            item
+            for group in result.get("groups", [])
+            if group.get("id") == "photos"
+            for item in group.get("items", [])
+        ]
+        assert any(item.get("sourcePath") == target_path for item in photo_items), result
+    print("ok search photo library uses scoped context loads")
 
 
 def test_photo_keyword_vocabulary_export_import_roundtrip() -> None:
@@ -6937,6 +7605,8 @@ def test_photo_review_decision_records_operation_and_undo() -> None:
         assert api.project.candidates["decision"].status == "pending"
         restored_people = api.project.db.list_photo_asset_people(api.project.db.photo_asset_by_path(photo)["assetId"])
         assert restored_people and restored_people[0]["status"] == "pending", restored_people
+        api.project.load()
+        assert api.project.candidates["decision"].status == "pending"
     print("ok photo review decision records operation and undo")
 
 
@@ -7603,6 +8273,17 @@ def test_photo_library_search_uses_bounded_non_photo_catalog() -> None:
             memory_result = api.search_photo_library({"query": "Harbor Memory", "limit": 6})
             memory_groups = {group["id"]: group for group in memory_result["groups"]}
             assert memory_groups["memories"]["items"][0]["folderId"] == "memory:cached-harbor-memory", memory_result
+
+            trip_page = api.list_photo_folder_items({"folderId": "trip:cached-harbor-trip", "previewBudget": 0})
+            assert trip_page["total"] == 1, trip_page
+            assert trip_page["items"][0]["sourcePath"] == harbor, trip_page
+            memory_page = api.list_photo_folder_items({"folderId": "memory:cached-harbor-memory", "previewBudget": 0})
+            assert memory_page["total"] == 1, memory_page
+            assert memory_page["items"][0]["sourcePath"] == harbor, memory_page
+            trips_page = api.list_photo_folder_items({"folderId": "trips", "previewBudget": 0})
+            assert trips_page["total"] == 1, trips_page
+            memories_page = api.list_photo_folder_items({"folderId": "memories", "previewBudget": 0})
+            assert memories_page["total"] == 1, memories_page
         finally:
             api.list_photo_folders = original_list_photo_folders
             api._photo_generated_collection_summaries = original_generated_collections
@@ -7699,6 +8380,47 @@ def test_photo_search_index_repairs_partial_drift_without_full_rebuild() -> None
             assert by_asset.get(beta_id) == 1, by_asset
             assert len(by_asset) == 3, by_asset
     print("ok photo search index repairs partial drift without full rebuild")
+
+
+def test_photo_search_index_healthy_cache_skips_integrity_counts_for_search_path() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        paths = [base / "cache-alpha.jpg", base / "cache-beta.jpg"]
+        api.project.db.create_scan_run("run1", "label", "manual", str(base))
+        for index, path in enumerate(paths, start=1):
+            api.project.db.record_scan_file("run1", path, _sig(path), "completed", phase="processed")
+            api.update_photo_asset_metadata({"sourcePath": str(path), "title": f"Cache title {index}"})
+        with api.project.db.connect() as conn:
+            indexed = api.project.db.rebuild_photo_search_index(conn)
+            assert indexed == 2
+
+        original_counts = api.project.db._photo_search_index_counts
+
+        def fail_full_integrity_counts(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("Healthy Photos search path should use cached FTS health instead of full integrity counts.")
+
+        api.project.db._photo_search_index_counts = fail_full_integrity_counts  # type: ignore[method-assign]
+        try:
+            status = api.project.db.ensure_photo_search_index(
+                allow_rebuild=False,
+                enqueue_on_cold=True,
+                repair_limit=1000,
+            )
+        finally:
+            api.project.db._photo_search_index_counts = original_counts  # type: ignore[method-assign]
+        assert status["completed"] is True, status
+        assert status["pending"] is False, status
+        assert status["cached"] is True, status
+        assert status["assetCount"] == 2 and status["indexCount"] == 2, status
+
+    source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "store" / "workspace_db.py").read_text(encoding="utf-8")
+    method = source[
+        source.index("    def ensure_photo_search_index("):source.index("    def count_photo_assets(")
+    ]
+    assert "_photo_search_index_fast_counts" in method, method
+    assert "_photo_search_index_cached_healthy" in method, method
+    print("ok photo search index healthy cache skips full integrity counts")
 
 
 def test_photo_search_index_cold_queue_runs_incrementally_without_foreground_rebuild() -> None:
@@ -12392,20 +13114,38 @@ def test_photo_pet_folders_from_local_metadata() -> None:
         managed_pet_folders = api.list_photo_folders({"includeHiddenPets": True})["folders"]
         managed_luna = next(folder for folder in managed_pet_folders if folder["id"] == "pet:Luna")
         assert managed_luna["petProfile"]["hidden"] is True, managed_luna
-        hidden_luna_page = api.list_photo_folder_items({"folderId": "pet:Luna", "previewBudget": 0})
-        assert hidden_luna_page["total"] == 1, hidden_luna_page
+        original_asset_entries = api._photo_asset_entries
+        original_all_entries = api._all_photo_entries
 
-        milo_page = api.list_photo_folder_items({"folderId": pet_folders["Milo"]["id"], "previewBudget": 0})
-        assert milo_page["total"] == 1, milo_page
-        assert [item["sourcePath"] for item in milo_page["items"]] == [milo], milo_page
-        pets_page = api.list_photo_folder_items({"folderId": "pets", "sort": "filename", "previewBudget": 0})
-        assert [item["sourcePath"] for item in pets_page["items"]] == [milo], pets_page
+        def fail_full_pet_materialization(*_args, **_kwargs):
+            raise AssertionError("pet folder pages must use SQL paging, not full-library materialization")
+
+        try:
+            api._photo_asset_entries = fail_full_pet_materialization  # type: ignore[method-assign]
+            api._all_photo_entries = fail_full_pet_materialization  # type: ignore[method-assign]
+            hidden_luna_page = api.list_photo_folder_items({"folderId": "pet:Luna", "previewBudget": 0})
+            assert hidden_luna_page["total"] == 1, hidden_luna_page
+
+            milo_page = api.list_photo_folder_items({"folderId": pet_folders["Milo"]["id"], "previewBudget": 0})
+            assert milo_page["total"] == 1, milo_page
+            assert [item["sourcePath"] for item in milo_page["items"]] == [milo], milo_page
+            pets_page = api.list_photo_folder_items({"folderId": "pets", "sort": "filename", "previewBudget": 0})
+            assert [item["sourcePath"] for item in pets_page["items"]] == [milo], pets_page
+            _expect_raises(ValueError, lambda: api.list_photo_folder_items({"folderId": "pet:Missing"}), "Unknown pet folder id")
+        finally:
+            api._photo_asset_entries = original_asset_entries  # type: ignore[method-assign]
+            api._all_photo_entries = original_all_entries  # type: ignore[method-assign]
 
         search = api.search_photo_library({"query": "Milo", "limit": 6})
         groups = {group["id"]: group for group in search["groups"]}
         assert "people" in groups, search
         assert any(item["folderId"] == pet_folders["Milo"]["id"] for item in groups["people"]["items"]), groups["people"]
-        _expect_raises(ValueError, lambda: api.list_photo_folder_items({"folderId": "pet:Missing"}), "Unknown pet folder id")
+        source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "api_server.py").read_text(encoding="utf-8")
+        method = source[
+            source.index("    def list_photo_folder_items("):source.index("    def suggest_photo_albums(")
+        ]
+        assert "_photo_pet_folder_items_sql_page" in method, method
+        assert "for entry in self._visible_photo_entries(self._all_photo_entries())\n                for pet" not in method, method
     print("ok photo pet folders from local metadata")
 
 
@@ -12437,14 +13177,26 @@ def test_photo_pet_review_queue_and_assignment_from_generic_metadata() -> None:
         assert review["count"] == 2, review
         assert review["petReview"] is True, review
         assert review["petReviewKinds"] == [{"label": "Cat", "count": 1}, {"label": "Dog", "count": 1}], review
-        review_page = api.list_photo_folder_items({"folderId": "petReview", "sort": "filename", "previewBudget": 0})
-        assert [item["sourcePath"] for item in review_page["items"]] == [generic_cat, generic_dog], review_page
-        dog_review_page = api.list_photo_folder_items({"folderId": "petReview", "petReviewKind": "Dog", "sort": "filename", "previewBudget": 0})
-        assert dog_review_page["total"] == 1, dog_review_page
-        assert [item["sourcePath"] for item in dog_review_page["items"]] == [generic_dog], dog_review_page
-        cat_review_page = api.list_photo_folder_items({"folderId": "petReview", "petReviewKind": "cat", "sort": "filename", "previewBudget": 0})
-        assert cat_review_page["total"] == 1, cat_review_page
-        assert [item["sourcePath"] for item in cat_review_page["items"]] == [generic_cat], cat_review_page
+        original_asset_entries = api._photo_asset_entries
+        original_all_entries = api._all_photo_entries
+
+        def fail_full_pet_materialization(*_args, **_kwargs):
+            raise AssertionError("pet review pages must use SQL paging, not full-library materialization")
+
+        try:
+            api._photo_asset_entries = fail_full_pet_materialization  # type: ignore[method-assign]
+            api._all_photo_entries = fail_full_pet_materialization  # type: ignore[method-assign]
+            review_page = api.list_photo_folder_items({"folderId": "petReview", "sort": "filename", "previewBudget": 0})
+            assert [item["sourcePath"] for item in review_page["items"]] == [generic_cat, generic_dog], review_page
+            dog_review_page = api.list_photo_folder_items({"folderId": "petReview", "petReviewKind": "Dog", "sort": "filename", "previewBudget": 0})
+            assert dog_review_page["total"] == 1, dog_review_page
+            assert [item["sourcePath"] for item in dog_review_page["items"]] == [generic_dog], dog_review_page
+            cat_review_page = api.list_photo_folder_items({"folderId": "petReview", "petReviewKind": "cat", "sort": "filename", "previewBudget": 0})
+            assert cat_review_page["total"] == 1, cat_review_page
+            assert [item["sourcePath"] for item in cat_review_page["items"]] == [generic_cat], cat_review_page
+        finally:
+            api._photo_asset_entries = original_asset_entries  # type: ignore[method-assign]
+            api._all_photo_entries = original_all_entries  # type: ignore[method-assign]
         dismissed_cat = api.handle("dismiss_photo_pet_review", {"sourcePath": generic_cat, "petKind": "cat"})["value"]
         assert dismissed_cat["dismissed"] is True, dismissed_cat
         assert dismissed_cat["petKind"] == "cat", dismissed_cat
@@ -12465,8 +13217,14 @@ def test_photo_pet_review_queue_and_assignment_from_generic_metadata() -> None:
         assert "petReview" not in folders_after, folders_after
         milo_folder = folders_after["pet:Milo"]
         assert milo_folder["count"] == 2, milo_folder
-        milo_page = api.list_photo_folder_items({"folderId": "pet:Milo", "sort": "filename", "previewBudget": 0})
-        assert sorted(item["sourcePath"] for item in milo_page["items"]) == sorted([generic_dog, milo]), milo_page
+        try:
+            api._photo_asset_entries = fail_full_pet_materialization  # type: ignore[method-assign]
+            api._all_photo_entries = fail_full_pet_materialization  # type: ignore[method-assign]
+            milo_page = api.list_photo_folder_items({"folderId": "pet:Milo", "sort": "filename", "previewBudget": 0})
+            assert sorted(item["sourcePath"] for item in milo_page["items"]) == sorted([generic_dog, milo]), milo_page
+        finally:
+            api._photo_asset_entries = original_asset_entries  # type: ignore[method-assign]
+            api._all_photo_entries = original_all_entries  # type: ignore[method-assign]
     print("ok photo pet review queue and assignment from generic metadata")
 
 
@@ -12893,6 +13651,13 @@ def test_list_photo_folders_orders_and_counts() -> None:
         assert [f["name"] for f in people] == ["Alice", "Bob"], people  # Zoe hidden; Alice(2) before Bob(1)
         assert people[0]["count"] == 2, people[0]
         assert any(f["kind"] == "unknown" and f["name"] == "Unmatched cluster 1" for f in folders), folders
+        source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "api_server.py").read_text(encoding="utf-8")
+        method = source[
+            source.index("    def list_photo_folders("):source.index("    def state(")
+        ]
+        assert "[entry for entry in visible_all if" not in method, method
+        assert "source_folder_rows(visible_all)" not in method, method
+        assert "classifier_utility_entries(folder_id)" not in method, method
     print("ok list_photo_folders ordering + counts + hide-empty")
 
 
@@ -15793,14 +16558,23 @@ def test_suggest_photo_albums_and_export_selection() -> None:
             "v1": _candidate("v1", "Alice", str(base / "frame.jpg"), status="pending", score=0.93, media_kind="video", media_source_path=video),
         }
         api.project.db.upsert_candidates(api.project.candidates.values())
-        suggestions = api.suggest_photo_albums({"limit": 8})["suggestions"]
-        names = {item["name"] for item in suggestions}
-        assert {"Videos with matches", "High-confidence photos", "Needs review"} <= names, suggestions
-        api.save_photo_curation_preferences({"featureLessContent": ["video"]})
-        curated_suggestions = api.suggest_photo_albums({"limit": 3})["suggestions"]
-        assert curated_suggestions[0]["name"] != "Videos with matches", curated_suggestions
-        assert all("_curationPenalty" not in item and "_position" not in item for item in curated_suggestions), curated_suggestions
-        api.save_photo_curation_preferences({"clear": True})
+        original_album_items = api._photo_album_items
+
+        def fail_full_album_materialization(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("album suggestions should use SQL count probes, not full album materialization")
+
+        api._photo_album_items = fail_full_album_materialization
+        try:
+            suggestions = api.suggest_photo_albums({"limit": 8})["suggestions"]
+            names = {item["name"] for item in suggestions}
+            assert {"Videos with matches", "High-confidence photos", "Needs review"} <= names, suggestions
+            api.save_photo_curation_preferences({"featureLessContent": ["video"]})
+            curated_suggestions = api.suggest_photo_albums({"limit": 3})["suggestions"]
+            assert curated_suggestions[0]["name"] != "Videos with matches", curated_suggestions
+            assert all("_curationPenalty" not in item and "_position" not in item for item in curated_suggestions), curated_suggestions
+            api.save_photo_curation_preferences({"clear": True})
+        finally:
+            api._photo_album_items = original_album_items
         api.update_photo_asset_metadata(
             {
                 "sourcePath": alice,
@@ -17173,10 +17947,14 @@ def test_photo_indexing_queue_does_not_open_network_sockets() -> None:
 if __name__ == "__main__":
     test_list_scan_media_dedupes_path_and_excludes_error_and_excluded()
     test_scan_media_creates_canonical_photo_assets()
+    test_record_scan_file_batches_import_session_refresh()
+    test_project_state_save_merges_stale_workspace_state()
     test_scan_video_metadata_probe_populates_canonical_asset_and_search()
     test_photo_schema_migrates_legacy_album_rows_without_losing_covers()
     test_photo_schema_migrates_legacy_organization_tables_without_losing_rows()
     test_photo_backfills_legacy_scan_rows_into_assets_sessions_and_failures()
+    test_photo_backfills_stream_without_full_manifest_or_asset_path_sets()
+    test_photo_asset_page_materializes_filter_once_for_count_and_page()
     test_scan_runs_create_photo_import_sessions_and_import_folders()
     test_import_aggregate_folders_expose_extended_session_history()
     test_photo_library_root_scope_filters_browse_dates_and_search()
@@ -17209,6 +17987,8 @@ if __name__ == "__main__":
     test_photo_schema_migrates_legacy_edit_stack_tables_without_losing_rows()
     test_photo_edit_stack_sidecar_save_revert_and_backup_check()
     test_photo_edit_stack_version_duplicate_restore_delete()
+    test_photo_edit_stack_version_counts_use_temp_table_for_large_batches()
+    test_photo_date_bucket_covers_use_single_windowed_query()
     test_photo_asset_version_duplicate_clones_catalog_stack_and_undo()
     test_photo_asset_rendered_version_creates_baked_library_asset_and_undo()
     test_photo_edit_stack_renders_markup_annotations_preview_and_export()
@@ -17228,6 +18008,7 @@ if __name__ == "__main__":
     test_photo_recovered_cleanup_policy_handles_stale_orphan_rows()
     test_photo_recovered_cleanup_can_delete_expired_recovered_files_when_requested()
     test_photo_recently_saved_uses_app_source_provenance()
+    test_common_utility_folder_pages_use_sql_without_full_materialization()
     test_photo_import_session_provenance_edit_updates_assets_and_sources()
     test_photo_import_session_archive_hides_and_restores_history_without_deleting_assets()
     test_photo_recently_viewed_and_shared_event_collections()
@@ -17240,7 +18021,14 @@ if __name__ == "__main__":
     test_all_photos_reads_candidate_backed_photo_assets_without_scan_manifest()
     test_smart_album_people_rules_read_candidate_backed_photo_assets_without_scan_manifest()
     test_list_photo_assets_api_returns_people_and_media_filter()
+    test_photo_asset_people_candidate_index_exists_for_backfill_probe()
+    test_photo_read_paths_do_not_run_legacy_asset_backfills()
+    test_photo_album_membership_uses_bounded_smart_album_probe()
+    test_smart_album_revision_avoids_people_row_fingerprint_scan()
+    test_photo_library_settings_counts_managed_roots_in_sql()
+    test_photo_duplicate_groups_are_cached_on_folder_reads()
     test_photo_asset_metadata_update_indexes_search_and_folder_items()
+    test_search_photo_library_uses_scoped_context_loads()
     test_photo_keyword_vocabulary_export_import_roundtrip()
     test_photo_object_tag_review_bounds_scope_same_label()
     test_photo_ocr_index_reads_local_sidecars_and_updates_search()
@@ -17254,6 +18042,7 @@ if __name__ == "__main__":
     test_photo_library_search_categorizes_local_results()
     test_photo_library_search_uses_bounded_non_photo_catalog()
     test_photo_search_index_repairs_partial_drift_without_full_rebuild()
+    test_photo_search_index_healthy_cache_skips_integrity_counts_for_search_path()
     test_photo_search_index_cold_queue_runs_incrementally_without_foreground_rebuild()
     test_photo_utility_folders_hide_delete_and_restore()
     test_photo_recently_deleted_retention_cutoff_permanent_cleanup()

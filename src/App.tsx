@@ -9883,11 +9883,25 @@ function CameraScanner(props: {
             },
             audio: false
           });
+      if (!mountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       streamRef.current = stream;
       const video = videoRef.current;
       if (video) {
         video.srcObject = stream;
         await video.play();
+      }
+      if (!mountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        if (streamRef.current === stream) {
+          streamRef.current = null;
+        }
+        if (video) {
+          video.srcObject = null;
+        }
+        return;
       }
       if (mountedRef.current) {
         setMode("live");
@@ -13272,7 +13286,7 @@ function SettingsView(props: {
       {props.section === "general" && (<>
       <div className="panel settings-panel">
         <div className="panel-title"><Activity size={18} /> System</div>
-        <label className="switch-row">
+        <label className="switch-row language-picker">
           <span>
             <strong>Start at login</strong>
             <small>{props.systemIntegration?.platform === "darwin" ? "macOS login item" : "Windows startup task"}</small>

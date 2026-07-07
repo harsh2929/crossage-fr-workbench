@@ -11,20 +11,20 @@ import hashlib
 import math
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import ExifTags, Image, ImageDraw
 
 from crossage_fr.api_server import DesktopApi, structured_error
 from crossage_fr.config import MAX_CLUSTER_MIN_SIZE, RuntimeConfig, Thresholds, load_config, save_config
 from crossage_fr.enroll import manager as manager_module
 from crossage_fr.enroll import ProjectState
-from crossage_fr.ingest.image_io import ImageLoadError, load_image, sha256_file
+from crossage_fr.ingest.image_io import ImageLoadError, capture_date_with_provenance, load_image, sha256_file
 from crossage_fr.ingest.safety import SafetyAssessment
 from crossage_fr.ingest.video_io import VideoFrameSample, probe_video, sample_video_frames, video_decoder_report
 from crossage_fr.match.scoring import group_hits
 from crossage_fr.model_manager import MODEL_PACKAGES, ModelPackageSpec, download_model_pack, model_governance, model_status
 from crossage_fr.models import EmbeddingResult, ReferenceFace, ReviewCandidate
 from crossage_fr.store import SearchHit, VectorStore
-from crossage_fr.store.workspace_db import path_signature
+from crossage_fr.store.workspace_db import WorkspaceDb, path_signature
 
 _EDGE_REGISTRY = str(Path(tempfile.mkdtemp(prefix="crossage-edge-registry-")) / "registry")
 os.environ["VINTRACE_REGISTRY_HOME"] = _EDGE_REGISTRY
@@ -381,14 +381,17 @@ def assert_static_app_contracts() -> None:
     assert 'document.getElementById("root") || document.body' in app_tsx
     assert "localizeDom(targetRoot, language)" in app_tsx
     assert 'attributeFilter: ["alt", "aria-label", "placeholder", "title"]' in app_tsx
-    assert 'className="language-picker"' in app_tsx
+    assert 'className="switch-row language-picker"' in app_tsx
+    assert 'aria-label="Interface language"' in app_tsx
     assert 'document.documentElement.dir = language === "ar" ? "rtl" : "ltr"' in app_tsx
     assert "setImperativeLanguage(language)" in app_tsx
     assert "window.crossAge.setAppLanguage" in app_tsx
     assert "setNoticeMessage(" in app_tsx
     assert "setErrorNotice(error" in app_tsx
-    assert "formatErrorMessage(language, notice.errorCode" in app_tsx
-    assert "notice.messageKey" in app_tsx
+    assert "formatErrorMessage={formatErrorMessage}" in app_tsx
+    assert "errorCode?: string" in app_tsx
+    assert "messageKey?: UiMessageKey" in app_tsx
+    assert "setNotice({ tone, messageKey, values, text: fallback })" in app_tsx
     assert "Native share is not available here, so I opened the folder containing" in app_tsx
     assert "reviewFocus" in app_tsx
     assert "Show all Review" in app_tsx
@@ -953,7 +956,8 @@ def assert_static_app_contracts() -> None:
     assert "PhotoExternalImportRequest" in types_ts
     assert "photoExternalImportRequest" in app_tsx
     assert "Array.isArray(payload.paths)" in app_tsx
-    assert "setActiveTab(\"photos\")" in app_tsx
+    assert 'legacyNavigate("photos")' in app_tsx
+    assert 'case "photos":\n      return { tab: "library" };' in (root / "src" / "shell" / "navModel.ts").read_text(encoding="utf-8")
     assert "externalImportRequest={photoExternalImportRequest}" in app_tsx
     assert "onExternalImportConsumed" in app_tsx
     assert "externalImportRequest" in photos_view
@@ -1009,7 +1013,8 @@ def assert_static_app_contracts() -> None:
     assert "sourceDetail" in types_ts
     assert "apple-photos-library-package" in workspace_db
     assert "os-protected-folder" in workspace_db
-    assert "Import files, import a folder, or drop photos onto this view." in photos_view
+    assert "Drop photos or folders to import" in photos_view
+    assert "Drop photos to import" in photos_view
     assert "Import storage" in photos_view
     assert "Reference originals" in photos_view
     assert "Copy into library" in photos_view
@@ -3343,6 +3348,18 @@ def assert_static_app_contracts() -> None:
     } <= manifest_tools
 
 
+def assert_high_audit_ui_regressions() -> None:
+    root = Path(__file__).resolve().parents[1]
+    app_tsx = (root / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "if (!mountedRef.current) {\n        stream.getTracks().forEach((track) => track.stop());\n        return;\n      }" in app_tsx
+    assert "if (!mountedRef.current) {\n        stream.getTracks().forEach((track) => track.stop());\n        if (streamRef.current === stream)" in app_tsx
+
+    photos_view = (root / "src" / "views" / "PhotosView.tsx").read_text(encoding="utf-8")
+    assert "async function moveSelected() {\n    const folder = await chooseDestinationFolder();\n    if (!folder) return;" in photos_view
+    assert 'await manageCandidateMedia(selectedCandidateIds, "move", folder);' in photos_view
+    assert 'await exportPhotoSelection(selectedPathOnlySources, "move", folder);' in photos_view
+
+
 def assert_model_downloader_integrity_and_safe_extract() -> None:
     root = Path(tempfile.mkdtemp(prefix="crossage-edge-model-download-"))
     source = root / "source"
@@ -3953,9 +3970,9 @@ def assert_heuristic_fallback_safety_is_not_cached() -> None:
     calls = 0
     original = manager_module.assess_image_safety
 
-    def fake_assess(path: Path, threshold: float, image=None) -> SafetyAssessment:
+    def fake_assess(path: Path, threshold: float, image=None, temperature: float = 1.0) -> SafetyAssessment:
         nonlocal calls
-        del path, threshold, image
+        del path, threshold, image, temperature
         calls += 1
         if calls == 1:
             return SafetyAssessment(
@@ -3987,6 +4004,35 @@ def assert_heuristic_fallback_safety_is_not_cached() -> None:
     assert first.engine == "heuristic-fallback"
     assert second.engine == "onnx-hybrid"
     assert calls == 2
+
+
+def assert_nested_exif_original_date_wins_over_ifd0_date() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-exif-nested-"))
+    try:
+        path = root / "nested-exif.jpg"
+        image = Image.new("RGB", (8, 8), "navy")
+        exif = Image.Exif()
+        exif[306] = "2026:07:01 12:00:00"
+        exif[ExifTags.IFD.Exif] = {
+            36867: "2001:02:03 04:05:06",
+            36868: "2002:03:04 05:06:07",
+        }
+        image.save(path, exif=exif, quality=95)
+
+        with Image.open(path) as loaded:
+            captured, provenance = capture_date_with_provenance(path, loaded)
+        assert captured == "2001-02-03", captured
+        assert provenance == "exif", provenance
+
+        db = WorkspaceDb(root / "workspace.db")
+        db.create_scan_run("run1", "Nested EXIF", "manual", str(root))
+        db.record_scan_file("run1", path, path_signature(path), "completed", phase="processed")
+        asset = db.photo_asset_by_path(str(path))
+        assert asset and asset["captureDate"] == "2001-02-03", asset
+        assert asset["metadata"]["exif"]["captureDateProvenance"] == "exif", asset
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    print("  nested EXIF original date ok")
 
 
 def assert_hashing_can_be_cancelled() -> None:
@@ -5930,6 +5976,7 @@ def main() -> None:
     assert_generated_cache_ownership_guards()
     assert_retention_skips_undated_candidates()
     assert_review_and_settings_guards()
+    assert_high_audit_ui_regressions()
     assert_vector_store_edges()
     assert_backend_json_rpc_errors()
     assert_structured_backend_error_codes()
@@ -5944,6 +5991,7 @@ def main() -> None:
     assert_jurisdiction_presets()
     assert_compliance_pack()
     assert_multi_workspace_registry()
+    assert_nested_exif_original_date_wins_over_ifd0_date()
     assert_examination_report()
     print("edge cases ok")
 

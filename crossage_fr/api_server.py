@@ -4750,23 +4750,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             if str(album.get("albumKind", "smart") or "smart") == "manual":
                 continue
             try:
-                if smart_album_source_cache is not None:
+                matched: bool | None = self._photo_smart_album_contains_asset(album, asset_id)
+                if matched is None and smart_album_source_cache is not None:
                     if album_id not in smart_album_source_cache:
-                        criteria = self._photo_smart_album_sql_criteria(album)
-                        if criteria is not None:
-                            smart_album_source_cache[album_id] = {
-                                str(asset.get("sourcePath", "") or "")
-                                for asset in self._photo_smart_album_sql_assets_for_criteria(criteria, sort="newest")
-                                if str(asset.get("sourcePath", "") or "")
-                            }
-                        else:
-                            smart_album_source_cache[album_id] = {
-                                str(item.get("sourcePath", "") or "")
-                                for item in self._photo_album_items(album)
-                                if str(item.get("sourcePath", "") or "")
-                            }
+                        smart_album_source_cache[album_id] = {
+                            str(item.get("sourcePath", "") or "")
+                            for item in self._photo_album_items(album)
+                            if str(item.get("sourcePath", "") or "")
+                        }
                     matched = source in smart_album_source_cache.get(album_id, set())
-                else:
+                elif matched is None:
                     matched = any(str(item.get("sourcePath", "") or "") == source for item in self._photo_album_items(album))
             except Exception:
                 matched = False
@@ -4784,6 +4777,36 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             )
             seen_ids.add(album_id)
         return memberships
+
+    def _photo_smart_album_contains_asset(self, album: dict[str, Any], asset_id: str) -> bool | None:
+        clean_asset_id = str(asset_id or "").strip()
+        if not clean_asset_id:
+            return None
+        criteria = self._photo_smart_album_sql_criteria(album)
+        if criteria is None:
+            return None
+        required_asset_ids = {
+            str(value or "").strip()
+            for value in criteria.get("requiredAssetIds", ())
+            if str(value or "").strip()
+        }
+        if required_asset_ids and clean_asset_id not in required_asset_ids:
+            return False
+        excluded_asset_ids = {
+            str(value or "").strip()
+            for value in criteria.get("excludedAssetIds", ())
+            if str(value or "").strip()
+        }
+        if clean_asset_id in excluded_asset_ids:
+            return False
+        scoped_criteria = {**criteria, "requiredAssetIds": (clean_asset_id,)}
+        result = self._photo_smart_album_sql_page_for_criteria(
+            scoped_criteria,
+            offset=0,
+            limit=1,
+            sort="newest",
+        )
+        return int(result.get("total", 0) or 0) > 0
 
     def _photo_raw_preview_proxy_path(
         self,
@@ -5158,6 +5181,37 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             for key, matches in matches_by_source.items()
         }
 
+    def _photo_matches_by_source_for_source_paths(self, source_paths: Iterable[str]) -> dict[str, list[ReviewCandidate]]:
+        wanted_sources = {str(source_path or "").strip() for source_path in source_paths if str(source_path or "").strip()}
+        if not wanted_sources:
+            return {}
+        matches_by_source: dict[str, list[ReviewCandidate]] = {}
+        seen_candidate_ids: set[str] = set()
+
+        def add_candidate(candidate: ReviewCandidate | None) -> None:
+            if candidate is None or candidate.candidate_id in seen_candidate_ids:
+                return
+            keys = [key for key in self._photo_source_keys(candidate) if key in wanted_sources]
+            if not keys:
+                return
+            seen_candidate_ids.add(candidate.candidate_id)
+            for key in keys:
+                matches_by_source.setdefault(key, []).append(candidate)
+
+        for candidate in self.project.candidates.values():
+            add_candidate(candidate)
+        try:
+            for payload in self.project.db.iter_candidate_payloads_for_source_paths(wanted_sources):
+                add_candidate(self._review_candidate_from_payload(payload))
+        except Exception:
+            for candidate in self.project.candidates.values():
+                add_candidate(candidate)
+
+        return {
+            key: self._dedupe_photo_matches(matches)
+            for key, matches in matches_by_source.items()
+        }
+
     def _media_kind_for_source(self, source_path: str, fallback: str = "image") -> str:
         normalized = re.sub(r"[\s._-]+", " ", Path(str(source_path or "")).name.lower()).strip()
         compact = normalized.replace(" ", "")
@@ -5339,8 +5393,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             hidden_only=bool(body.get("hiddenOnly", False)),
             deleted_only=bool(body.get("deletedOnly", False)),
         ) or "visible"
-        self.project.db.backfill_photo_assets_from_scan_media(missing_only=True)
-        self.project.db.backfill_photo_assets_from_review_candidates(missing_only=True)
         asset_count = max(0, int(self.project.db.count_photo_assets()))
         if not asset_count:
             return {"total": 0, "stacks": []}
@@ -5502,12 +5554,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         ordered_ids = [str(asset_id or "").strip() for asset_id in asset_ids if str(asset_id or "").strip()]
         if not ordered_ids:
             return []
-        assets = [
-            asset
-            for asset_id in ordered_ids
-            for asset in [self.project.db.photo_asset_by_id(asset_id)]
-            if asset
-        ]
+        assets = self.project.db.photo_assets_by_ids(ordered_ids)
         return self._photo_entries_for_assets(assets, matches_by_source=matches_by_source)
 
     def _photo_entries_for_source_paths(
@@ -5528,15 +5575,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         asset_rows = [asset for asset in assets if isinstance(asset, dict)]
         if not asset_rows:
             return []
-        matches = matches_by_source or self._photo_matches_by_source()
+        matches = matches_by_source if matches_by_source is not None else self._photo_matches_by_source()
         metadata_by_asset_id = self.project.db.photo_asset_metadata_by_ids(
             str(asset.get("assetId", "") or "") for asset in asset_rows
         )
-        edit_stack_count = self.project.db.count_photo_edit_stacks()
-        edit_stack_asset_ids = {
-            str(stack.get("assetId", "") or "")
-            for stack in self.project.db.list_photo_edit_stacks(limit=max(1, edit_stack_count))
-        } if edit_stack_count else set()
+        edit_stack_asset_ids = self.project.db.photo_edit_stack_asset_ids_for_assets(
+            str(asset.get("assetId", "") or "") for asset in asset_rows
+        )
         entries: list[dict[str, Any]] = []
         for asset in asset_rows:
             source_path = str(asset.get("sourcePath", "") or "")
@@ -6159,8 +6204,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         matches_by_source: dict[str, list[ReviewCandidate]] | None = None,
         pet_review_kind: str = "",
     ) -> list[dict[str, Any]]:
-        self.project.db.backfill_photo_assets_from_scan_media(missing_only=True)
-        self.project.db.backfill_photo_assets_from_review_candidates(missing_only=True)
         duplicate_asset_ids: set[str] = set()
         place_asset_ids: set[str] = set()
         place_filter = ""
@@ -6248,7 +6291,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 for asset_id, row in event_details_by_asset_id.items()
             }
         if utility == "duplicates":
-            self.project.db.rebuild_photo_duplicate_groups()
+            self.project.db.ensure_photo_duplicate_groups()
             for group in self.project.db.list_photo_duplicate_groups():
                 duplicate_asset_ids.update(str(item.get("assetId", "") or "") for item in group.get("items", []))
         if utility == "places" or utility.startswith("place:"):
@@ -6760,6 +6803,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         for match in entry.get("matches", []) or []:
             if isinstance(match, ReviewCandidate) and match.capture_date:
                 return str(match.capture_date)[:10]
+        capture_date = str(entry.get("captureDate", "") or "")[:10]
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", capture_date):
+            return capture_date
+        asset = self._photo_entry_asset(entry)
+        asset_capture_date = str(asset.get("captureDate", "") or "")[:10] if asset else ""
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", asset_capture_date):
+            return asset_capture_date
         scan_date = str(entry.get("scanDate", "") or "")
         return scan_date[:10] if scan_date else ""
 
@@ -7913,8 +7963,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         search_ready = False
         search_index: dict[str, Any] = {}
         try:
-            self.project.db.backfill_photo_assets_from_scan_media(missing_only=True)
-            self.project.db.backfill_photo_assets_from_review_candidates(missing_only=True)
             search_index = self.project.db.ensure_photo_search_index(allow_rebuild=False, enqueue_on_cold=True, repair_limit=1000)
             asset_ids = self.project.db.search_photo_asset_ids(text, limit=100_000)
             search_paths = {
@@ -8940,6 +8988,23 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         except (OSError, RuntimeError, ValueError):
             return False
 
+    def _photo_sql_like_escape(self, value: str) -> str:
+        return str(value or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    def _photo_sql_source_within_root_clause(self, root: Path) -> tuple[str, list[str]]:
+        root_text = str(root)
+        if not root_text:
+            return "0", []
+        normalized = root_text.rstrip("/\\") or root_text
+        patterns = [
+            f"{self._photo_sql_like_escape(normalized)}/%",
+            f"{self._photo_sql_like_escape(normalized)}\\%",
+        ]
+        return (
+            "(source_path = ? OR source_path LIKE ? ESCAPE '\\' OR source_path LIKE ? ESCAPE '\\')",
+            [root_text, *patterns],
+        )
+
     def _photo_root_profile_key(self, root: dict[str, Any], kind: str) -> str:
         profile_id = str(root.get("profileId", "") or "").strip()
         path = str(root.get("path", "") or "").strip()
@@ -9330,78 +9395,99 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
         workspace_root = self.project.root.expanduser().resolve()
         roots = [dict(root) for root in settings.get("managedRoots", []) if isinstance(root, dict)]
-        managed_sources: list[str] = []
-        referenced_assets = 0
-        with self.project.db.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT source_path, source_kind
-                FROM photo_assets
-                WHERE source_path IS NOT NULL AND TRIM(source_path) != ''
-                """
-            ).fetchall()
-        for row in rows:
-            source_kind = str(row["source_kind"] or "").strip().lower()
-            source_path = str(row["source_path"] or "").strip()
-            if source_kind == "managed":
-                managed_sources.append(source_path)
-            else:
-                referenced_assets += 1
-
         root_coverage: list[dict[str, Any]] = []
         external_managed_assets = 0
         external_managed_assets_covered = 0
         external_managed_assets_requiring_backup = 0
         managed_root_profile_issues = 0
+        managed_assets_outside_profiles = 0
         resolved_roots: list[Path] = []
-        for root in roots:
-            root_path_text = str(root.get("path", "") or "").strip()
-            if not root_path_text:
-                continue
-            root_policy = root.get("policy", {}) if isinstance(root.get("policy", {}), dict) else {}
-            external_backup_covered = bool(root_policy.get("externalBackupCovered", False))
-            readiness = self._photo_managed_root_readiness(root_path_text)
-            try:
-                root_path = Path(root_path_text).expanduser().resolve()
-                resolved_roots.append(root_path)
-                inside_workspace = root_path == workspace_root or workspace_root in root_path.parents
-            except (OSError, RuntimeError):
-                root_path = Path(root_path_text)
-                inside_workspace = False
-            asset_count = 0
-            for source in managed_sources:
-                if self._photo_path_within_root(source, root_path):
-                    asset_count += 1
-            if asset_count and not inside_workspace:
-                external_managed_assets += asset_count
-                if external_backup_covered:
-                    external_managed_assets_covered += asset_count
-                else:
-                    external_managed_assets_requiring_backup += asset_count
-            conflict_fields = self._photo_root_profile_conflict_fields(root)
-            if readiness["issue"] or conflict_fields.get("rootConflict"):
-                managed_root_profile_issues += 1
-            root_coverage.append({
-                "profileId": str(root.get("profileId", "") or ""),
-                "name": str(root.get("name", "") or ""),
-                "path": root_path_text,
-                "isDefault": bool(root.get("isDefault", False)),
-                "builtIn": bool(root.get("builtIn", False)),
-                "insideWorkspace": bool(inside_workspace),
-                "assetCount": asset_count,
-                "requiresExternalBackup": bool(asset_count and not inside_workspace and not external_backup_covered),
-                "externalBackupCovered": external_backup_covered,
-                "externalBackupLabel": str(root_policy.get("externalBackupLabel", "") or ""),
-                "externalBackupCheckedAt": str(root_policy.get("externalBackupCheckedAt", "") or ""),
-                "policy": root_policy,
-                **readiness,
-                **conflict_fields,
-            })
-        managed_assets_outside_profiles = sum(
-            1
-            for source in managed_sources
-            if resolved_roots and not any(self._photo_path_within_root(source, root) for root in resolved_roots)
-        )
+        with self.project.db.connect() as conn:
+            counts_row = conn.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN LOWER(COALESCE(source_kind, '')) = 'managed' THEN 1 ELSE 0 END) AS managed_count,
+                    SUM(CASE WHEN LOWER(COALESCE(source_kind, '')) != 'managed' THEN 1 ELSE 0 END) AS referenced_count
+                FROM photo_assets
+                """
+            ).fetchone()
+            managed_asset_count = int(counts_row["managed_count"] or 0) if counts_row else 0
+            referenced_assets = int(counts_row["referenced_count"] or 0) if counts_row else 0
+
+            def managed_assets_under_root(root_path: Path) -> int:
+                clause, args = self._photo_sql_source_within_root_clause(root_path)
+                row = conn.execute(
+                    f"""
+                    SELECT COUNT(*) AS n
+                    FROM photo_assets
+                    WHERE LOWER(COALESCE(source_kind, '')) = 'managed'
+                        AND {clause}
+                    """,
+                    args,
+                ).fetchone()
+                return int(row["n"] or 0) if row else 0
+
+            def managed_assets_outside_roots(root_paths: list[Path]) -> int:
+                if not root_paths:
+                    return 0
+                clauses: list[str] = []
+                args: list[str] = []
+                for root_path in root_paths:
+                    clause, clause_args = self._photo_sql_source_within_root_clause(root_path)
+                    clauses.append(clause)
+                    args.extend(clause_args)
+                row = conn.execute(
+                    f"""
+                    SELECT COUNT(*) AS n
+                    FROM photo_assets
+                    WHERE LOWER(COALESCE(source_kind, '')) = 'managed'
+                        AND NOT ({" OR ".join(clauses)})
+                    """,
+                    args,
+                ).fetchone()
+                return int(row["n"] or 0) if row else 0
+
+            for root in roots:
+                root_path_text = str(root.get("path", "") or "").strip()
+                if not root_path_text:
+                    continue
+                root_policy = root.get("policy", {}) if isinstance(root.get("policy", {}), dict) else {}
+                external_backup_covered = bool(root_policy.get("externalBackupCovered", False))
+                readiness = self._photo_managed_root_readiness(root_path_text)
+                try:
+                    root_path = Path(root_path_text).expanduser().resolve()
+                    resolved_roots.append(root_path)
+                    inside_workspace = root_path == workspace_root or workspace_root in root_path.parents
+                except (OSError, RuntimeError):
+                    root_path = Path(root_path_text)
+                    inside_workspace = False
+                asset_count = managed_assets_under_root(root_path)
+                if asset_count and not inside_workspace:
+                    external_managed_assets += asset_count
+                    if external_backup_covered:
+                        external_managed_assets_covered += asset_count
+                    else:
+                        external_managed_assets_requiring_backup += asset_count
+                conflict_fields = self._photo_root_profile_conflict_fields(root)
+                if readiness["issue"] or conflict_fields.get("rootConflict"):
+                    managed_root_profile_issues += 1
+                root_coverage.append({
+                    "profileId": str(root.get("profileId", "") or ""),
+                    "name": str(root.get("name", "") or ""),
+                    "path": root_path_text,
+                    "isDefault": bool(root.get("isDefault", False)),
+                    "builtIn": bool(root.get("builtIn", False)),
+                    "insideWorkspace": bool(inside_workspace),
+                    "assetCount": asset_count,
+                    "requiresExternalBackup": bool(asset_count and not inside_workspace and not external_backup_covered),
+                    "externalBackupCovered": external_backup_covered,
+                    "externalBackupLabel": str(root_policy.get("externalBackupLabel", "") or ""),
+                    "externalBackupCheckedAt": str(root_policy.get("externalBackupCheckedAt", "") or ""),
+                    "policy": root_policy,
+                    **readiness,
+                    **conflict_fields,
+                })
+            managed_assets_outside_profiles = managed_assets_outside_roots(resolved_roots)
 
         warned_referenced = referenced_assets if bool(policy.get("warnOnReferencedOriginals", True)) else 0
         warned_external_managed = external_managed_assets_requiring_backup if bool(policy.get("warnOnExternalManagedRoots", True)) else 0
@@ -9443,7 +9529,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "latestBackup": latest_backup,
             "rootCoverage": root_coverage,
             "counts": {
-                "managedAssets": len(managed_sources),
+                "managedAssets": managed_asset_count,
                 "externalManagedAssets": external_managed_assets,
                 "externalManagedAssetsCovered": external_managed_assets_covered,
                 "externalManagedAssetsRequiringBackup": external_managed_assets_requiring_backup,
@@ -16765,8 +16851,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if summary is not None:
             criteria = self._photo_smart_album_sql_criteria(album)
             if criteria is not None:
-                self.project.db.backfill_photo_assets_from_scan_media()
-                self.project.db.backfill_photo_assets_from_review_candidates(missing_only=True)
                 sample_page = self._photo_smart_album_sql_page_for_criteria(criteria, offset=0, limit=3, sort="newest")
                 items = self._photo_entries_for_assets(sample_page.get("assets", []))
             else:
@@ -17429,7 +17513,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         exclude_keys = {str(person).casefold() for person in album.get("excludePeople", []) if str(person).strip()}
         rules = self._clean_album_rules(album.get("rules", {}))
         if self._photo_rules_mention_query_field(rules, "duplicate"):
-            self.project.db.rebuild_photo_duplicate_groups()
+            self.project.db.ensure_photo_duplicate_groups()
         include_hidden_deleted = self._photo_rules_mention_query_field(rules, "hidden") or self._photo_rules_mention_query_field(rules, "deleted")
         matches_by_source = self._photo_matches_by_source()
         entries: list[dict[str, Any]] = []
@@ -17778,6 +17862,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                         if value not in labels[asset_key]:
                             labels[asset_key].append(value)
         return labels
+
+    def _photo_place_labels_by_asset_id_for_asset_ids(self, asset_ids: Iterable[str]) -> dict[str, list[str]]:
+        return self.project.db.photo_place_labels_for_asset_ids(asset_ids)
 
     def _photo_location_filter_asset_ids(self, location: str) -> tuple[str, ...]:
         needle = str(location or "").strip().casefold()
@@ -18757,8 +18844,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "coverSourcePath": selected_cover if cover_matches else sources[0] if sources else "",
                 "coverMatches": cover_matches,
             }
-        self.project.db.backfill_photo_assets_from_scan_media(missing_only=True)
-        self.project.db.backfill_photo_assets_from_review_candidates(missing_only=True)
         page = self._photo_smart_album_sql_page_for_criteria(criteria, offset=0, limit=1, sort="newest")
         assets = page.get("assets", []) if isinstance(page.get("assets", []), list) else []
         fallback_cover = str(assets[0].get("sourcePath", "") or "") if assets else ""
@@ -18801,8 +18886,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 if source_path and self._photo_source_inside_library_root(source_path, clean_library_root)
             ]
         criteria = branches[0]
-        self.project.db.backfill_photo_assets_from_scan_media()
-        self.project.db.backfill_photo_assets_from_review_candidates(missing_only=True)
         assets = self._photo_smart_album_sql_assets_for_criteria(criteria, sort="newest")
         return [
             source_path
@@ -19109,11 +19192,14 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 raise ValueError("Unknown photo memory id.")
         if folder_id.startswith("pet:"):
             pet_name = self._photo_pet_name_from_folder_id(folder_id)
-            if not any(
-                str(pet.get("name", "") or "").casefold() == pet_name.casefold()
-                for entry in self._visible_photo_entries(self._all_photo_entries())
-                for pet in self._photo_pet_labels_for_entry(entry)
-            ):
+            pet_probe = self.project.db.list_photo_asset_page(
+                offset=0,
+                limit=1,
+                visibility="visible",
+                pet_names=(pet_name,),
+                sort="newest",
+            )
+            if not int(pet_probe.get("total", 0) or 0):
                 raise ValueError("Unknown pet folder id.")
         if folder_id.startswith("media:"):
             media_folder_kind = folder_id[len("media:"):].strip().lower()
@@ -19831,11 +19917,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if self.project.candidates:
             return None
         if duplicate_only:
-            self.project.db.rebuild_photo_duplicate_groups()
+            self.project.db.ensure_photo_duplicate_groups()
         media_kind = media_kind_filter if media_kind_filter in PHOTO_MEDIA_KINDS else ""
         visibility = visibility_filter if visibility_filter in {"all", "hidden", "deleted", "visible"} else "visible"
-        self.project.db.backfill_photo_assets_from_scan_media(missing_only=True)
-        self.project.db.backfill_photo_assets_from_review_candidates(missing_only=True)
         search_index_status: dict[str, Any] = {}
         if str(query or "").strip():
             search_index_status = self.project.db.ensure_photo_search_index(allow_rebuild=False, enqueue_on_cold=True, repair_limit=1000)
@@ -20479,6 +20563,54 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 return memory
         return None
 
+    def _photo_generated_collection_cache_for_paging(
+        self,
+        library_root: str = "",
+    ) -> dict[str, Any]:
+        cache = self.project.db.photo_generated_collection_cache(library_root)
+        trips = cache.get("trips", []) if isinstance(cache.get("trips", []), list) else []
+        memories = cache.get("memories", []) if isinstance(cache.get("memories", []), list) else []
+        if trips or memories:
+            return {
+                **cache,
+                "trips": self._photo_refresh_generated_summary_previews(trips),
+                "memories": self._photo_refresh_generated_summary_previews(memories),
+                "cacheHit": True,
+            }
+        base_entries = self._filter_photo_entries_by_library_root(
+            self._visible_photo_entries(self._all_photo_entries()),
+            library_root,
+        ) if library_root else self._visible_photo_entries(self._all_photo_entries())
+        trip_summaries, memory_summaries, refreshed_cache = self._photo_generated_collection_summaries(
+            base_entries,
+            library_root=library_root,
+        )
+        return {
+            **refreshed_cache,
+            "trips": trip_summaries,
+            "memories": memory_summaries,
+        }
+
+    def _photo_cached_trip_by_id(self, trip_id: str, library_root: str = "") -> dict[str, Any] | None:
+        clean_id = str(trip_id or "").strip()
+        if not clean_id:
+            return None
+        cache = self._photo_generated_collection_cache_for_paging(library_root)
+        for trip in cache.get("trips", []) if isinstance(cache.get("trips", []), list) else []:
+            if str(trip.get("tripId", "") or "") == clean_id:
+                return trip
+        return None
+
+    def _photo_cached_memory_by_id(self, memory_id: str, library_root: str = "") -> dict[str, Any] | None:
+        clean_id = str(memory_id or "").strip()
+        if not clean_id:
+            return None
+        cache = self._photo_generated_collection_cache_for_paging(library_root)
+        for memory in cache.get("memories", []) if isinstance(cache.get("memories", []), list) else []:
+            if str(memory.get("memoryId", "") or "") == clean_id:
+                return memory
+        return None
+
     def _photo_generated_collection_signature(
         self,
         entries: list[dict[str, Any]],
@@ -20677,7 +20809,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
         duplicate_only = truthy(params.get("duplicateOnly", params.get("duplicatesOnly", params.get("duplicate", False))))
         if duplicate_only:
-            self.project.db.rebuild_photo_duplicate_groups()
+            self.project.db.ensure_photo_duplicate_groups()
         visibility_filter = self._normalize_photo_visibility_filter(
             params.get("visibility", params.get("visibilityState", "")),
             hidden_only=truthy(params.get("hiddenOnly", False)),
@@ -20738,8 +20870,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if sql_bucket_payload is not None:
             return sql_bucket_payload
         if self._photo_date_bucket_nearby_fast_path_allowed(folder_id, mode, params, nearby_filter):
-            self.project.db.backfill_photo_assets_from_scan_media(missing_only=True)
-            self.project.db.backfill_photo_assets_from_review_candidates(missing_only=True)
             nearby_asset_ids = tuple(
                 self.project.db.list_photo_asset_ids_nearby(
                     latitude=float(nearby_filter["latitude"]),
@@ -20823,6 +20953,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         source_filter: str,
         source_text_filters: tuple[tuple[str, str], ...],
         source_paths_filter: set[str],
+        source_scan_runs: Iterable[str] = (),
         file_type_filter: str,
         location_filter: str,
         camera_filter: str,
@@ -20860,8 +20991,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             return None
         media_kind = media_kind_filter if media_kind_filter in PHOTO_MEDIA_KINDS else ""
         visibility = visibility_filter if visibility_filter in {"all", "hidden", "deleted", "visible"} else "visible"
-        self.project.db.backfill_photo_assets_from_scan_media(missing_only=True)
-        self.project.db.backfill_photo_assets_from_review_candidates(missing_only=True)
         search_index_status: dict[str, Any] = {}
         if str(query or "").strip():
             search_index_status = self.project.db.ensure_photo_search_index(allow_rebuild=False, enqueue_on_cold=True, repair_limit=1000)
@@ -20891,6 +21020,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             date_bucket_mode=date_bucket_mode,
             date_bucket_key=date_bucket_key,
             source=source_filter,
+            source_scan_runs=source_scan_runs,
             source_text_filters=source_text_filters,
             required_asset_ids=nearby_asset_ids,
             file_type_aliases=self._photo_file_type_aliases(file_type_filter),
@@ -20909,6 +21039,152 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "total": int(result.get("total", 0) or 0),
             "entries": self._photo_entries_for_assets(result.get("assets", [])),
             **({"searchIndex": search_index_status} if search_index_status else {}),
+        }
+
+    def _photo_pet_folder_items_sql_page(
+        self,
+        folder_id: str,
+        *,
+        offset: int,
+        limit: int,
+        sort: str,
+        query: str,
+        keyword: str,
+        media_kind_filter: str,
+        date_bucket_mode: str,
+        date_bucket_key: str,
+        date_from_filter: str,
+        date_to_filter: str,
+        source_filter: str,
+        source_text_filters: tuple[tuple[str, str], ...],
+        source_paths_filter: set[str],
+        file_type_filter: str,
+        location_filter: str,
+        camera_filter: str,
+        nearby_filter: dict[str, float] | None,
+        album_filter: str,
+        person_filter: str,
+        status_filter: str,
+        min_quality_filter: float,
+        favorite_only: bool,
+        edited_only: bool,
+        not_in_album_only: bool,
+        duplicate_only: bool,
+        pet_review_kind_filter: str = "",
+    ) -> dict[str, Any] | None:
+        if sort not in {"newest", "oldest", "scanDate", "title", "filename", "mediaKind"}:
+            return None
+        if source_paths_filter:
+            return None
+        if not (folder_id in {"pets", "petReview"} or folder_id.startswith("pet:")):
+            return None
+        manual_album_ids = self._photo_manual_album_filter_ids(album_filter)
+        if album_filter and not manual_album_ids:
+            return None
+        if self.project.candidates and (
+            date_from_filter
+            or date_to_filter
+            or date_bucket_key
+            or album_filter
+            or not_in_album_only
+            or person_filter
+            or status_filter
+            or min_quality_filter
+            or location_filter
+            or nearby_filter
+            or sort in {"newest", "oldest"}
+        ):
+            return None
+        if duplicate_only:
+            self.project.db.ensure_photo_duplicate_groups()
+        nearby_asset_ids: tuple[str, ...] = ()
+        if nearby_filter:
+            nearby_asset_ids = tuple(
+                self.project.db.list_photo_asset_ids_nearby(
+                    latitude=float(nearby_filter["latitude"]),
+                    longitude=float(nearby_filter["longitude"]),
+                    radius_km=float(nearby_filter["radiusKm"]),
+                )
+            )
+            if not nearby_asset_ids:
+                return {"total": 0, "entries": []}
+        pet_names: tuple[str, ...] = ()
+        any_pet_state: bool | None = None
+        pet_review_kind = ""
+        excluded_pet_names: tuple[str, ...] = ()
+        if folder_id.startswith("pet:"):
+            pet_name = self._photo_pet_name_from_folder_id(folder_id)
+            if not pet_name:
+                return {"total": 0, "entries": []}
+            pet_names = (pet_name,)
+        elif folder_id == "pets":
+            any_pet_state = True
+            hidden_pet_names = [
+                str(profile.get("petName", "") or name)
+                for name, profile in self.project.db.list_photo_pet_profiles().items()
+                if bool(profile.get("hidden"))
+            ]
+            excluded_pet_names = tuple(name for name in hidden_pet_names if self._clean_photo_pet_label(name))
+        elif folder_id == "petReview":
+            pet_review_kind = pet_review_kind_filter or "*"
+        media_kind = media_kind_filter if media_kind_filter in PHOTO_MEDIA_KINDS else ""
+        result = self.project.db.list_photo_asset_page(
+            offset=offset,
+            limit=limit,
+            query=query,
+            visibility="visible",
+            media_kind=media_kind,
+            favorite_only=favorite_only,
+            edited_only=edited_only,
+            keyword=keyword,
+            date_from=date_from_filter,
+            date_to=date_to_filter,
+            date_bucket_mode=date_bucket_mode,
+            date_bucket_key=date_bucket_key,
+            source=source_filter,
+            source_text_filters=source_text_filters,
+            required_asset_ids=nearby_asset_ids,
+            file_type_aliases=self._photo_file_type_aliases(file_type_filter),
+            location=location_filter,
+            location_asset_ids=self._photo_location_filter_asset_ids(location_filter),
+            camera=camera_filter,
+            duplicate_state=True if duplicate_only else None,
+            manual_album_ids=manual_album_ids or (),
+            manual_album_membership_state=False if not_in_album_only else None,
+            candidate_person_name=person_filter,
+            candidate_status=status_filter,
+            candidate_min_quality=min_quality_filter,
+            pet_names=pet_names,
+            excluded_pet_names=excluded_pet_names,
+            any_pet_state=any_pet_state,
+            pet_review_kind=pet_review_kind,
+            sort=sort,
+        )
+        entries = self._photo_entries_for_assets(result.get("assets", []))
+        if folder_id == "pets":
+            hidden_pet_keys = {self._clean_photo_pet_label(name).casefold() for name in excluded_pet_names}
+            entries = [
+                entry
+                for entry in entries
+                if any(
+                    str(pet.get("name", "") or "").casefold() not in hidden_pet_keys
+                    for pet in self._photo_pet_labels_for_entry(entry)
+                )
+            ]
+        elif folder_id == "petReview":
+            entries = [
+                entry
+                for entry in entries
+                for review_record in [self._photo_pet_review_record_for_entry(entry)]
+                if review_record is not None
+                and (
+                    not pet_review_kind_filter
+                    or str(review_record.get("kind", "") or "") == pet_review_kind_filter
+                )
+            ]
+        return {
+            "total": int(result.get("total", 0) or 0),
+            "entries": entries,
         }
 
     def _photo_album_folder_items_sql_page(
@@ -20992,8 +21268,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "total": len(entries),
                 "entries": entries[offset:offset + limit],
             }
-        self.project.db.backfill_photo_assets_from_scan_media()
-        self.project.db.backfill_photo_assets_from_review_candidates(missing_only=True)
         folder_assets = self.project.db.photo_assets_by_paths(folder_sources)
         required_asset_ids = tuple(
             str(asset.get("assetId", "") or "")
@@ -21003,7 +21277,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if not required_asset_ids:
             return {"total": 0, "entries": []}
         if duplicate_only:
-            self.project.db.rebuild_photo_duplicate_groups()
+            self.project.db.ensure_photo_duplicate_groups()
         if nearby_filter:
             nearby_asset_ids = tuple(
                 self.project.db.list_photo_asset_ids_nearby(
@@ -21773,7 +22047,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         sort: str,
     ) -> dict[str, Any]:
         if isinstance(criteria.get("duplicateState"), bool):
-            self.project.db.rebuild_photo_duplicate_groups()
+            self.project.db.ensure_photo_duplicate_groups()
         return self.project.db.list_photo_asset_page(
             offset=offset,
             limit=limit,
@@ -21872,8 +22146,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         branches = self._photo_smart_album_sql_criteria_branches(album)
         if not branches or len(branches) <= 1:
             return None
-        self.project.db.backfill_photo_assets_from_scan_media()
-        self.project.db.backfill_photo_assets_from_review_candidates(missing_only=True)
         assets_by_source: dict[str, dict[str, Any]] = {}
         for criteria in branches:
             for asset in self._photo_smart_album_sql_assets_for_criteria(criteria, sort="newest"):
@@ -21907,8 +22179,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         branches = self._photo_smart_album_sql_criteria_branches(album, album_stack=album_stack)
         if not branches:
             return None
-        self.project.db.backfill_photo_assets_from_scan_media()
-        self.project.db.backfill_photo_assets_from_review_candidates(missing_only=True)
         assets_by_id: dict[str, None] = {}
         for criteria in branches:
             for asset in self._photo_smart_album_sql_assets_for_criteria(criteria, sort="newest"):
@@ -22036,8 +22306,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             }
         criteria = self._photo_smart_album_sql_criteria(album)
         if criteria is not None:
-            self.project.db.backfill_photo_assets_from_scan_media(missing_only=True)
-            self.project.db.backfill_photo_assets_from_review_candidates(missing_only=True)
             result = self._photo_smart_album_sql_page_for_criteria(criteria, offset=offset, limit=limit, sort=sort)
             return {
                 "total": int(result.get("total", 0) or 0),
@@ -22111,7 +22379,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             params.get("petReviewKind", params.get("petKind", params.get("animalKind", "")))
         ) or ""
         if duplicate_only:
-            self.project.db.rebuild_photo_duplicate_groups()
+            self.project.db.ensure_photo_duplicate_groups()
         visibility_filter = self._normalize_photo_visibility_filter(
             params.get("visibility", params.get("visibilityState", "")),
             hidden_only=truthy(params.get("hiddenOnly", False)),
@@ -22234,6 +22502,45 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             if search_index_status:
                 payload["searchIndex"] = search_index_status
             return payload
+
+        def all_photo_sql_page(
+            *,
+            favorite_only_value: bool | None = None,
+            edited_only_value: bool | None = None,
+            media_kind_value: str | None = None,
+            visibility_value: str | None = None,
+            duplicate_only_value: bool | None = None,
+            source_scan_runs_value: Iterable[str] = (),
+        ) -> dict[str, Any] | None:
+            return self._photo_all_folder_items_sql_page(
+                offset=offset,
+                limit=limit,
+                sort=sort,
+                query=query,
+                keyword=keyword,
+                media_kind_filter=media_kind_filter if media_kind_value is None else media_kind_value,
+                date_bucket_mode=date_bucket_mode,
+                date_bucket_key=date_bucket_key,
+                date_from_filter=date_from_filter,
+                date_to_filter=date_to_filter,
+                source_filter=source_filter,
+                source_text_filters=library_root_source_filters,
+                source_paths_filter=source_paths_filter,
+                source_scan_runs=source_scan_runs_value,
+                file_type_filter=file_type_filter,
+                location_filter=location_filter,
+                camera_filter=camera_filter,
+                nearby_filter=nearby_filter,
+                album_filter=album_filter,
+                person_filter=person_filter,
+                status_filter=status_filter,
+                min_quality_filter=min_quality_filter,
+                favorite_only=favorite_only if favorite_only_value is None else favorite_only_value,
+                edited_only=edited_only if edited_only_value is None else edited_only_value,
+                not_in_album_only=not_in_album_only,
+                duplicate_only=duplicate_only if duplicate_only_value is None else duplicate_only_value,
+                visibility_filter=visibility_filter if visibility_value is None else visibility_value,
+            )
 
         def entry_asset_id(entry: dict[str, Any]) -> str:
             asset_id = str(entry.get("_assetId", "") or "").strip()
@@ -22392,19 +22699,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
         resolved_trip: dict[str, Any] | None = None
         resolved_memory: dict[str, Any] | None = None
-        scoped_generated_entries: list[dict[str, Any]] | None = None
-        scoped_generated_trips: list[dict[str, Any]] | None = None
+        generated_cache_for_paging: dict[str, Any] | None = None
 
-        def generated_scope_entries() -> list[dict[str, Any]] | None:
-            nonlocal scoped_generated_entries
-            if not library_root_filter:
-                return None
-            if scoped_generated_entries is None:
-                scoped_generated_entries = self._filter_photo_entries_by_library_root(
-                    self._visible_photo_entries(self._all_photo_entries()),
-                    library_root_filter,
-                )
-            return scoped_generated_entries
+        def cached_generated_collections() -> dict[str, Any]:
+            nonlocal generated_cache_for_paging
+            if generated_cache_for_paging is None:
+                generated_cache_for_paging = self._photo_generated_collection_cache_for_paging(library_root_filter)
+            return generated_cache_for_paging
 
         if folder_id.startswith("place:"):
             place_id = folder_id[len("place:"):]
@@ -22413,25 +22714,27 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
         if folder_id.startswith("trip:"):
             trip_id = folder_id[len("trip:"):]
-            resolved_trip = self._photo_trip_by_id(trip_id, generated_scope_entries())
+            resolved_trip = self._photo_cached_trip_by_id(trip_id, library_root_filter)
             if not resolved_trip:
                 raise ValueError("Unknown photo trip id.")
 
         if folder_id.startswith("memory:"):
             memory_id = folder_id[len("memory:"):]
-            if library_root_filter and scoped_generated_trips is None:
-                scoped_generated_trips = self._photo_trip_summaries(generated_scope_entries())
-            resolved_memory = self._photo_memory_by_id(memory_id, generated_scope_entries(), trips=scoped_generated_trips)
+            resolved_memory = self._photo_cached_memory_by_id(memory_id, library_root_filter)
             if not resolved_memory:
                 raise ValueError("Unknown photo memory id.")
 
         if folder_id.startswith("pet:"):
             pet_name = self._photo_pet_name_from_folder_id(folder_id)
-            if not any(
-                str(pet.get("name", "") or "").casefold() == pet_name.casefold()
-                for entry in self._visible_photo_entries(self._all_photo_entries())
-                for pet in self._photo_pet_labels_for_entry(entry)
-            ):
+            pet_probe = self.project.db.list_photo_asset_page(
+                offset=0,
+                limit=1,
+                visibility="visible",
+                source_text_filters=library_root_source_filters,
+                pet_names=(pet_name,),
+                sort="newest",
+            )
+            if not int(pet_probe.get("total", 0) or 0):
                 raise ValueError("Unknown pet folder id.")
 
         if folder_id.startswith("media:"):
@@ -22464,36 +22767,104 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             import_id = folder_id[len("import:"):]
             if not self.project.db.photo_import_session_by_id(import_id):
                 raise ValueError("Unknown photo import session id.")
+
+        def import_session_ids_for_utility(utility_id: str) -> tuple[str, ...]:
+            if utility_id.startswith("import:"):
+                return (utility_id[len("import:"):].strip(),)
+            if utility_id.startswith("importSource:"):
+                group = self._photo_import_source_group_from_folder_id(utility_id)
+                return tuple(
+                    str(import_id or "")
+                    for import_id in (group or {}).get("importIds", [])
+                    if str(import_id or "")
+                )
+            if utility_id not in {"imports", "lastImport", "recentlyImported", "recentlySaved"}:
+                return ()
+            sessions = self.project.db.list_photo_import_sessions(limit=1000)
+            if utility_id == "imports":
+                return tuple(str(session.get("importId", "") or "") for session in sessions if str(session.get("importId", "") or ""))
+            if utility_id == "lastImport":
+                latest = sessions[0] if sessions else {}
+                latest_id = str(latest.get("importId", "") or "") if latest else ""
+                return (latest_id,) if latest_id else ()
+            cutoff = datetime.utcnow() - timedelta(days=30)
+            ids: list[str] = []
+            for session in sessions:
+                if utility_id == "recentlySaved" and str(session.get("sourceKind", "") or "").strip().lower() not in PHOTO_APP_IMPORT_SOURCE_KINDS:
+                    continue
+                value = str(session.get("completedAt", "") or session.get("updatedAt", "") or session.get("startedAt", "") or "")
+                try:
+                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if parsed.tzinfo is not None:
+                    parsed = parsed.replace(tzinfo=None)
+                if parsed >= cutoff:
+                    import_id = str(session.get("importId", "") or "")
+                    if import_id:
+                        ids.append(import_id)
+            return tuple(ids)
+
+        utility_sql_page: dict[str, Any] | None = None
+        if not collapse_bursts:
+            if folder_id == "favorites":
+                utility_sql_page = all_photo_sql_page(favorite_only_value=True, visibility_value="visible")
+            elif folder_id == "hidden":
+                utility_sql_page = all_photo_sql_page(visibility_value="hidden")
+            elif folder_id == "recentlyDeleted":
+                utility_sql_page = all_photo_sql_page(visibility_value="deleted")
+            elif folder_id == "recentlyAdded":
+                utility_sql_page = all_photo_sql_page(visibility_value="visible")
+            elif folder_id == "recentlyEdited":
+                utility_sql_page = all_photo_sql_page(edited_only_value=True, visibility_value="visible")
+            elif folder_id.startswith("media:"):
+                utility_sql_page = all_photo_sql_page(media_kind_value=folder_id[len("media:"):].strip().lower(), visibility_value="visible")
+            elif folder_id in {"imports", "lastImport", "recentlyImported", "recentlySaved"} or folder_id.startswith("import:") or folder_id.startswith("importSource:"):
+                import_ids = import_session_ids_for_utility(folder_id)
+                if import_ids:
+                    utility_sql_page = all_photo_sql_page(source_scan_runs_value=import_ids, visibility_value="visible")
+                else:
+                    utility_sql_page = {"total": 0, "entries": []}
+            elif folder_id in {"pets", "petReview"} or folder_id.startswith("pet:"):
+                utility_sql_page = self._photo_pet_folder_items_sql_page(
+                    folder_id,
+                    offset=offset,
+                    limit=limit,
+                    sort=sort,
+                    query=query,
+                    keyword=keyword,
+                    media_kind_filter=media_kind_filter,
+                    date_bucket_mode=date_bucket_mode,
+                    date_bucket_key=date_bucket_key,
+                    date_from_filter=date_from_filter,
+                    date_to_filter=date_to_filter,
+                    source_filter=source_filter,
+                    source_text_filters=library_root_source_filters,
+                    source_paths_filter=source_paths_filter,
+                    file_type_filter=file_type_filter,
+                    location_filter=location_filter,
+                    camera_filter=camera_filter,
+                    nearby_filter=nearby_filter,
+                    album_filter=album_filter,
+                    person_filter=person_filter,
+                    status_filter=status_filter,
+                    min_quality_filter=min_quality_filter,
+                    favorite_only=favorite_only,
+                    edited_only=edited_only,
+                    not_in_album_only=not_in_album_only,
+                    duplicate_only=duplicate_only,
+                    pet_review_kind_filter=pet_review_kind_filter,
+                )
+            if utility_sql_page is not None:
+                if isinstance(utility_sql_page.get("searchIndex"), dict):
+                    search_index_status = dict(utility_sql_page["searchIndex"])
+                rows = utility_sql_page["entries"]
+                items = photo_items_for_rows(rows)
+                return page_payload(int(utility_sql_page["total"]), offset, limit, len(items), items)
+
         if folder_id == "duplicates" and not collapse_bursts:
-            self.project.db.rebuild_photo_duplicate_groups()
-            sql_page = self._photo_all_folder_items_sql_page(
-                offset=offset,
-                limit=limit,
-                sort=sort,
-                query=query,
-                keyword=keyword,
-                media_kind_filter=media_kind_filter,
-                date_bucket_mode=date_bucket_mode,
-                date_bucket_key=date_bucket_key,
-                date_from_filter=date_from_filter,
-                date_to_filter=date_to_filter,
-                source_filter=source_filter,
-                source_text_filters=library_root_source_filters,
-                source_paths_filter=source_paths_filter,
-                file_type_filter=file_type_filter,
-                location_filter=location_filter,
-                camera_filter=camera_filter,
-                nearby_filter=nearby_filter,
-                album_filter=album_filter,
-                person_filter=person_filter,
-                status_filter=status_filter,
-                min_quality_filter=min_quality_filter,
-                favorite_only=favorite_only,
-                edited_only=edited_only,
-                not_in_album_only=not_in_album_only,
-                duplicate_only=True,
-                visibility_filter=visibility_filter,
-            )
+            self.project.db.ensure_photo_duplicate_groups()
+            sql_page = all_photo_sql_page(duplicate_only_value=True)
             if sql_page is not None:
                 if isinstance(sql_page.get("searchIndex"), dict):
                     search_index_status = dict(sql_page["searchIndex"])
@@ -22505,6 +22876,18 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 base_entries = self._photo_entries_for_source_paths(resolved_trip.get("sourcePaths", []))
             elif resolved_memory is not None:
                 base_entries = self._photo_entries_for_source_paths(resolved_memory.get("sourcePaths", []))
+            elif folder_id in {"trips", "memories"}:
+                cache = cached_generated_collections()
+                collection_key = "trips" if folder_id == "trips" else "memories"
+                source_paths: list[str] = []
+                seen_sources: set[str] = set()
+                for summary in cache.get(collection_key, []) if isinstance(cache.get(collection_key, []), list) else []:
+                    for source_path in summary.get("sourcePaths", []) if isinstance(summary.get("sourcePaths", []), list) else []:
+                        source = str(source_path or "")
+                        if source and source not in seen_sources:
+                            seen_sources.add(source)
+                            source_paths.append(source)
+                base_entries = self._photo_entries_for_source_paths(source_paths)
             else:
                 base_entries = self._photo_asset_entries(
                     folder_id,
@@ -22742,6 +23125,49 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 penalty += 2
             return penalty
 
+        def suggestion_match_count(
+            *,
+            include_people: list[str] | None,
+            exclude_people: list[str] | None,
+            rules: dict[str, Any],
+        ) -> int:
+            clean_rules = self._clean_album_rules(rules)
+            media_kind = str(clean_rules.get("mediaKind", "") or "").strip().lower()
+            if media_kind and media_kind not in PHOTO_MEDIA_KINDS:
+                return 0
+            try:
+                min_score = float(clean_rules.get("minScore", 0) or 0)
+            except (TypeError, ValueError):
+                min_score = 0.0
+            recent_cutoff = ""
+            if clean_rules.get("recentDays"):
+                recent_cutoff = self._photo_smart_album_recent_cutoff(clean_rules.get("recentDays"))
+                if not recent_cutoff:
+                    return 0
+            result = self.project.db.list_photo_asset_page(
+                offset=0,
+                limit=1,
+                visibility="visible",
+                media_kind=media_kind,
+                edited_only=bool(clean_rules.get("editedOnly", False)),
+                favorite_only=bool(clean_rules.get("favoriteOnly", False)),
+                person_names=tuple(self._clean_album_people(include_people or [])),
+                excluded_person_names=tuple(self._clean_album_people(exclude_people or [])),
+                person_score_threshold=float(self.project.config.thresholds.confident),
+                person_statuses=tuple(str(status or "").strip().lower() for status in clean_rules.get("statuses", []) or [] if str(status or "").strip()),
+                person_score_filter=("atLeast", min_score) if min_score else None,
+                unknown_person_state=True if clean_rules.get("unknownOnly") else None,
+                has_video_frames_state=True if clean_rules.get("hasVideoFrames") else None,
+                effective_time_from=recent_cutoff,
+                date_from=str(clean_rules.get("dateFrom", "") or ""),
+                date_to=str(clean_rules.get("dateTo", "") or ""),
+                source=str(clean_rules.get("folder", "") or ""),
+                keyword=str(clean_rules.get("keyword", "") or ""),
+                query=str(clean_rules.get("query", "") or ""),
+                sort="newest",
+            )
+            return int(result.get("total", 0) or 0)
+
         def add(
             *,
             name: str,
@@ -22752,16 +23178,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             reason: str = "",
         ) -> None:
             clean_rules = self._clean_album_rules(rules or {})
-            album = {
-                "albumId": "suggestion",
-                "name": name,
-                "description": description,
-                "includePeople": include_people or [],
-                "excludePeople": exclude_people or [],
-                "rules": clean_rules,
-                "coverSourcePath": "",
-            }
-            count = len(self._photo_album_items(album))
+            count = suggestion_match_count(
+                include_people=include_people or [],
+                exclude_people=exclude_people or [],
+                rules=clean_rules,
+            )
             key = name.casefold()
             if count <= 0 or key in seen_names:
                 return
@@ -28428,9 +28849,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "groupProfile": group,
             })
 
-        for place in self.project.db.list_photo_places(source_text_filters=library_root_source_filters):
-            if not text_matches([place.get("name", ""), place.get("label", ""), place.get("latitude", ""), place.get("longitude", "")]):
-                continue
+        for place in self.project.db.search_photo_places(
+            needles,
+            source_text_filters=library_root_source_filters,
+            limit=candidate_limit,
+        ):
             cover_source = str(place.get("coverSourcePath", "") or "")
             add_folder({
                 "id": f"place:{place.get('placeId', '')}",
@@ -28500,10 +28923,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         semantic_queries = self._photo_semantic_search_queries(query)
         search_queries = [query, *semantic_queries]
 
-        self.project.db.backfill_photo_assets_from_scan_media(missing_only=True)
-        self.project.db.backfill_photo_assets_from_review_candidates(missing_only=True)
         search_index = self.project.db.ensure_photo_search_index(allow_rebuild=False, enqueue_on_cold=True, repair_limit=1000)
-        matches_by_source = self._photo_matches_by_source()
         photo_hit_limit = max(limit, min(suggestion_limit, 80), 24)
         text_asset_ids: list[str] = []
         facet_asset_ids: list[str] = []
@@ -28549,8 +28969,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 continue
             seen_asset_ids.add(asset_id)
             photo_asset_ids.append(asset_id)
-        place_labels_by_asset_id = self._photo_place_labels_by_asset_id()
-        photo_entries = self._photo_entries_for_asset_ids(photo_asset_ids, matches_by_source=matches_by_source)
+        photo_assets = self.project.db.photo_assets_by_ids(photo_asset_ids)
+        matches_by_source = self._photo_matches_by_source_for_source_paths(
+            str(asset.get("sourcePath", "") or "")
+            for asset in photo_assets
+        )
+        place_labels_by_asset_id = self._photo_place_labels_by_asset_id_for_asset_ids(photo_asset_ids)
+        photo_entries = self._photo_entries_for_assets(photo_assets, matches_by_source=matches_by_source)
         photo_entries = self._filter_photo_entries_by_library_root(photo_entries, library_root_filter)
         curation_preferences = self.project.db.photo_curation_preferences()
         photo_entries = [
@@ -29100,34 +29525,23 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             ],
         }
 
-    def _photo_semantic_candidate_paths(self, params: dict[str, Any], cap: int) -> tuple[list[Path], int]:
-        """Resolve the candidate image paths for a semantic query.
-
-        Uses explicit ``sourcePaths`` when provided, else enumerates image assets
-        from the library. Returns (paths, dropped_count) so the caller can report
-        any cap-driven truncation instead of silently dropping work.
-        """
+    def _photo_semantic_candidate_assets(self, params: dict[str, Any]) -> list[dict[str, str]]:
+        """Resolve candidate image assets for semantic search without a library cap."""
         raw_paths = params.get("sourcePaths")
-        candidates: list[Path] = []
+        source_paths: list[str] = []
         if isinstance(raw_paths, list) and raw_paths:
             for value in raw_paths:
                 text = str(value or "").strip()
-                if not text:
-                    continue
-                resolved = Path(text).expanduser()
-                if resolved.exists() and resolved.suffix.lower() in IMAGE_EXTENSIONS:
-                    candidates.append(resolved)
-        else:
-            rows = self.project.db.list_photo_assets(offset=0, limit=cap + 1, media_kind="image")
-            for row in rows:
-                text = str(row.get("sourcePath", "") or "").strip()
-                if not text:
-                    continue
-                resolved = Path(text)
-                if resolved.exists() and resolved.suffix.lower() in IMAGE_EXTENSIONS:
-                    candidates.append(resolved)
-        dropped = max(0, len(candidates) - cap)
-        return candidates[:cap], dropped
+                if text and text not in source_paths:
+                    source_paths.append(text)
+        return self.project.db.list_photo_semantic_candidate_assets(source_paths=source_paths or None)
+
+    def _photo_semantic_file_stat(self, path: Path) -> tuple[int, int]:
+        try:
+            stat = path.stat()
+            return int(stat.st_size), int(stat.st_mtime_ns)
+        except OSError:
+            return -1, -1
 
     def semantic_search_photos(self, params: dict[str, Any]) -> dict[str, Any]:
         """Rank photos against a free-text query with on-device SigLIP 2 embeddings.
@@ -29144,7 +29558,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if not query:
             raise ValueError("query is required.")
         limit = max(1, min(200, int(params.get("limit", 30) or 30)))
-        candidate_cap = max(1, min(2000, int(params.get("candidateLimit", 600) or 600)))
 
         report = siglip_engine.semantic_model_report()
         if not report.get("available"):
@@ -29161,17 +29574,59 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if query_vector is None:
             return {"available": False, "query": query, "results": [], "scored": 0,
                     "reason": "Semantic-search model became unavailable."}
+        query_values = np.asarray(query_vector, dtype=np.float32).reshape(-1)
+        if query_values.size == 0 or not np.isfinite(query_values).all():
+            return {"available": False, "query": query, "results": [], "scored": 0,
+                    "reason": "Semantic-search model returned an invalid text vector."}
 
-        candidates, dropped = self._photo_semantic_candidate_paths(params, candidate_cap)
+        model_name = str(report.get("modelName", "SigLIP2") or "SigLIP2")
+        candidates = self._photo_semantic_candidate_assets(params)
         scored: list[tuple[float, str]] = []
-        for path in candidates:
-            try:
-                vector = siglip_engine.encode_image_path_cached(path)
-            except Exception:
-                vector = None
-            if vector is None:
+        encoded = 0
+        cached = 0
+        skipped = 0
+        for asset in candidates:
+            asset_id = str(asset.get("assetId", "") or "")
+            source_path = str(asset.get("sourcePath", "") or "")
+            if not asset_id or not source_path:
+                skipped += 1
                 continue
-            scored.append((float(np.dot(query_vector, vector)), str(path)))
+            path = Path(source_path).expanduser()
+            if path.suffix.lower() not in IMAGE_EXTENSIONS or not path.exists():
+                skipped += 1
+                continue
+            file_size, file_mtime_ns = self._photo_semantic_file_stat(path)
+            vector_values = self.project.db.photo_semantic_embedding_for_asset(
+                asset_id=asset_id,
+                model_name=model_name,
+                file_size=file_size,
+                file_mtime_ns=file_mtime_ns,
+            )
+            if vector_values is not None:
+                cached += 1
+                vector = np.asarray(vector_values, dtype=np.float32).reshape(-1)
+            else:
+                try:
+                    encoded_vector = siglip_engine.encode_image_path_cached(path)
+                except Exception:
+                    encoded_vector = None
+                if encoded_vector is None:
+                    skipped += 1
+                    continue
+                vector = np.asarray(encoded_vector, dtype=np.float32).reshape(-1)
+                self.project.db.upsert_photo_semantic_embedding(
+                    asset_id=asset_id,
+                    model_name=model_name,
+                    source_path=source_path,
+                    file_size=file_size,
+                    file_mtime_ns=file_mtime_ns,
+                    vector=vector.tolist(),
+                )
+                encoded += 1
+            if vector.shape != query_values.shape or not np.isfinite(vector).all():
+                skipped += 1
+                continue
+            scored.append((float(np.dot(query_values, vector)), source_path))
         scored.sort(key=lambda item: item[0], reverse=True)
         top = scored[:limit]
         results = [{"sourcePath": path, "score": round(score, 4)} for score, path in top]
@@ -29194,8 +29649,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "available": True,
             "engine": report.get("modelName", "SigLIP2"),
             "query": query,
+            "candidateCount": len(candidates),
             "scored": len(scored),
-            "dropped": dropped,
+            "encoded": encoded,
+            "cached": cached,
+            "skipped": skipped,
+            "dropped": 0,
             "results": results,
             "items": items,
         }
@@ -29207,9 +29666,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         query = str(params.get("query", "") or "").strip()
         if media_kind and media_kind not in PHOTO_MEDIA_KINDS:
             raise ValueError("mediaKind must be a known Photos media kind or empty.")
-        if bool(params.get("backfill", False)) or query:
+        if bool(params.get("backfill", False)):
             self.project.db.backfill_photo_assets_from_scan_media(missing_only=True)
             self.project.db.backfill_photo_assets_from_review_candidates(missing_only=True)
+            search_index = self.project.db.ensure_photo_search_index(allow_rebuild=False, enqueue_on_cold=True, repair_limit=1000)
+        elif query:
             search_index = self.project.db.ensure_photo_search_index(allow_rebuild=False, enqueue_on_cold=True, repair_limit=1000)
         else:
             search_index = {}
@@ -30033,7 +30494,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         for candidate_id in result.get("candidateIds", []) or []:
             self.project.candidates.pop(str(candidate_id or ""), None)
         try:
-            self.project.db.rebuild_photo_duplicate_groups()
+            self.project.db.ensure_photo_duplicate_groups()
         except Exception:
             pass
         self.project._append_audit(
@@ -30122,11 +30583,15 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         elif bool(result.get("undone")) and isinstance(undo_payload, dict) and str(undo_payload.get("kind", "") or "") == "review_candidate_correction":
             try:
                 self._refresh_project_candidates_from_db()
-                self.project.save(snapshot_candidates=True, flush_candidate_index=False)
+                candidate_payload = undo_payload.get("candidate", {}) if isinstance(undo_payload.get("candidate", {}), dict) else {}
+                candidate_id = str(candidate_payload.get("candidate_id", candidate_payload.get("candidateId", "")) or "").strip()
+                if candidate_id:
+                    self.project._mark_candidate_dirty(candidate_id)
+                self.project.save(snapshot_candidates=True, flush_candidate_index=True)
             except Exception:
                 pass
         try:
-            self.project.db.rebuild_photo_duplicate_groups()
+            self.project.db.ensure_photo_duplicate_groups()
         except Exception:
             pass
         self.project._append_audit(
@@ -31411,7 +31876,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     def _photo_edit_stack_apply_image_adjustments(self, image: Any, adjustments: dict[str, float]) -> Any:
         if not adjustments:
             return image
-        from PIL import Image, ImageEnhance, ImageFilter
+        from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 
         alpha = None
         if image.mode == "RGBA":
@@ -31547,17 +32012,28 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             if width <= 1 or height <= 1:
                 return rgb
             strength = min(0.72, max(0.0, amount / 100) * 0.72)
-            center_x = (width - 1) / 2
-            center_y = (height - 1) / 2
+            max_mask_edge = 1024
+            scale = min(1.0, max_mask_edge / max(width, height))
+            mask_width = max(2, int(round(width * scale)))
+            mask_height = max(2, int(round(height * scale)))
+            center_x = (mask_width - 1) / 2
+            center_y = (mask_height - 1) / 2
             max_distance = math.sqrt(center_x ** 2 + center_y ** 2) or 1
-            mask_values: list[int] = []
-            for y in range(height):
-                for x in range(width):
-                    distance = math.sqrt((x - center_x) ** 2 + (y - center_y) ** 2) / max_distance
-                    falloff = max(0.0, (distance - 0.18) / 0.82) ** 1.7
-                    mask_values.append(clamp_byte(255 * strength * falloff))
-            mask = Image.new("L", (width, height))
-            mask.putdata(mask_values)
+            mask = Image.new("L", (mask_width, mask_height), 0)
+            draw = ImageDraw.Draw(mask)
+            steps = 96
+            for step in range(steps, -1, -1):
+                distance = 0.18 + 0.82 * (step / steps)
+                falloff = max(0.0, (distance - 0.18) / 0.82) ** 1.7
+                alpha_value = clamp_byte(255 * strength * falloff)
+                radius = distance * max_distance
+                draw.ellipse(
+                    (center_x - radius, center_y - radius, center_x + radius, center_y + radius),
+                    fill=alpha_value,
+                )
+            if mask.size != (width, height):
+                resampling = getattr(getattr(Image, "Resampling", Image), "BILINEAR", Image.BILINEAR)
+                mask = mask.resize((width, height), resampling)
             return Image.composite(Image.new("RGB", (width, height), (0, 0, 0)), rgb, mask)
 
         exposure = adjustments.get("exposure", 0)
@@ -32950,13 +33426,53 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             people.setdefault(name, set()).add(source_path)
             people_cover.setdefault(name, source_path)
 
+        def source_folder_path_for_source(source_path: str) -> str:
+            source_path = str(source_path or "").strip()
+            if not source_path:
+                return ""
+            normalized = source_path.replace("\\", "/").rstrip("/")
+            if "/" not in normalized:
+                return ""
+            return normalized.rsplit("/", 1)[0].rstrip("/")
+
+        saved_group_specs: list[tuple[str, dict[str, Any], tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = []
+        for index, group in enumerate(saved_people_groups):
+            member_people = tuple(str(person or "").strip() for person in group.get("memberPeople", []) if str(person or "").strip())
+            member_pets = tuple(self._clean_photo_pet_label(pet) for pet in group.get("memberPets", []) if self._clean_photo_pet_label(pet))
+            if len(member_people) + len(member_pets) < 2:
+                continue
+            excluded_people = tuple(str(person or "").strip() for person in group.get("excludePeople", []) if str(person or "").strip())
+            excluded_pets = tuple(self._clean_photo_pet_label(pet) for pet in group.get("excludePets", []) if self._clean_photo_pet_label(pet))
+            group_key = str(group.get("groupId", "") or f"__saved_group_{index}")
+            saved_group_specs.append((group_key, group, member_people, excluded_people, member_pets, excluded_pets))
+
+        source_folder_groups: dict[str, dict[str, Any]] = {}
+        classifier_utility_entries_by_id: dict[str, list[dict[str, Any]]] = {
+            folder_id: [] for folder_id in PHOTO_UTILITY_CLASSIFIERS
+        }
+        saved_group_paths: dict[str, set[str]] = {group_key: set() for group_key, *_rest in saved_group_specs}
+        pet_review_records: list[dict[str, str]] = []
+        pet_review_entries: list[dict[str, Any]] = []
+
         for entry in visible_all:
             source_path = str(entry.get("sourcePath", "") or "")
             if not source_path:
                 continue
+            if source_folder_limit > 0:
+                folder_path = source_folder_path_for_source(source_path)
+                key = folder_path.replace("\\", "/").rstrip("/").casefold()
+                if key:
+                    group = source_folder_groups.setdefault(key, {
+                        "folderPath": folder_path,
+                        "entries": [],
+                        "sourcePaths": set(),
+                    })
+                    group["entries"].append(entry)
+                    group["sourcePaths"].add(source_path)
             named_people = self._photo_entry_named_people(entry)
             visible_pet_labels: list[tuple[dict[str, str], str, dict[str, Any] | None]] = []
-            for pet in self._photo_pet_labels_for_entry(entry):
+            all_pet_labels = self._photo_pet_labels_for_entry(entry)
+            for pet in all_pet_labels:
                 pet_name = str(pet.get("name", "") or "").strip()
                 if not pet_name:
                     continue
@@ -32989,6 +33505,26 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     pet_kinds[pet_name] = profile_kind
                 elif pet_kind and (pet_name not in pet_kinds or pet_kinds.get(pet_name) == "pet"):
                     pet_kinds[pet_name] = pet_kind
+            review_record = self._photo_pet_review_record_from_labels(all_pet_labels)
+            if review_record is not None:
+                pet_review_records.append(review_record)
+                pet_review_entries.append(entry)
+            entry_metadata = self._photo_entry_metadata(entry)
+            asset = entry.get("_asset")
+            asset_metadata = asset.get("metadata", {}) if isinstance(asset, dict) else {}
+            if not isinstance(asset_metadata, dict):
+                asset_metadata = {}
+            for classifier_id in PHOTO_UTILITY_CLASSIFIERS:
+                if self._photo_utility_classifier_matches(
+                    classifier_id=classifier_id,
+                    source_path=source_path,
+                    metadata=entry_metadata,
+                    asset_metadata=asset_metadata,
+                ):
+                    classifier_utility_entries_by_id[classifier_id].append(entry)
+            for group_key, _group, member_people, excluded_people, member_pets, excluded_pets in saved_group_specs:
+                if self._photo_entry_matches_people_group(entry, member_people, excluded_people, member_pets, excluded_pets):
+                    saved_group_paths[group_key].add(source_path)
 
         for candidate in self.project.candidates.values():
             name = candidate.person_name
@@ -33209,38 +33745,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 folder["utilityProfile"] = profile
             return folder
 
-        def source_folder_path_for_entry(entry: dict[str, Any]) -> str:
-            source_path = str(entry.get("sourcePath", "") or "").strip()
-            if not source_path:
-                return ""
-            normalized = source_path.replace("\\", "/").rstrip("/")
-            if "/" not in normalized:
-                return ""
-            return normalized.rsplit("/", 1)[0].rstrip("/")
-
-        def source_folder_rows(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        def source_folder_rows() -> list[dict[str, Any]]:
             if source_folder_limit <= 0:
                 return []
-            grouped: dict[str, dict[str, Any]] = {}
-            for entry in entries:
-                folder_path = source_folder_path_for_entry(entry)
-                if not folder_path:
-                    continue
-                key = folder_path.replace("\\", "/").rstrip("/").casefold()
-                if not key:
-                    continue
-                group = grouped.setdefault(key, {
-                    "folderPath": folder_path,
-                    "entries": [],
-                    "sourcePaths": set(),
-                })
-                group["entries"].append(entry)
-                source_path = str(entry.get("sourcePath", "") or "")
-                if source_path:
-                    group["sourcePaths"].add(source_path)
-
             rows: list[dict[str, Any]] = []
-            for key, group in grouped.items():
+            for key, group in source_folder_groups.items():
                 folder_path = str(group.get("folderPath", "") or "")
                 entries_for_folder = [
                     entry for entry in group.get("entries", [])
@@ -33344,7 +33853,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             for source_path in trip.get("sourcePaths", [])
         }
         trip_entries = self._sort_photo_entries(
-            [entry for entry in visible_all if str(entry.get("sourcePath", "") or "") in trip_source_paths],
+            [visible_entries_by_source[source] for source in trip_source_paths if source in visible_entries_by_source],
             "newest",
         )
         memory_source_paths = {
@@ -33353,22 +33862,14 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             for source_path in memory.get("sourcePaths", [])
         }
         memory_entries = self._sort_photo_entries(
-            [entry for entry in visible_all if str(entry.get("sourcePath", "") or "") in memory_source_paths],
+            [visible_entries_by_source[source] for source in memory_source_paths if source in visible_entries_by_source],
             "newest",
         )
         pet_source_paths = {source_path for paths in pets.values() for source_path in paths}
         pet_entries = self._sort_photo_entries(
-            [entry for entry in visible_all if str(entry.get("sourcePath", "") or "") in pet_source_paths],
+            [visible_entries_by_source[source] for source in pet_source_paths if source in visible_entries_by_source],
             "newest",
         )
-        pet_review_records: list[dict[str, str]] = []
-        pet_review_entries: list[dict[str, Any]] = []
-        for entry in visible_all:
-            review_record = self._photo_pet_review_record_for_entry(entry)
-            if review_record is None:
-                continue
-            pet_review_records.append(review_record)
-            pet_review_entries.append(entry)
         pet_review_entries = self._sort_photo_entries(pet_review_entries, "newest")
         pet_review_kind_counts: dict[str, int] = {}
         for record in pet_review_records:
@@ -33387,28 +33888,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             ("media:live_photo", "Live Photos", sql_folder_summary(media_kind="live_photo")),
             ("media:other", "Other Media", sql_folder_summary(media_kind="other")),
         ]
-        def classifier_asset_metadata(entry: dict[str, Any]) -> dict[str, Any]:
-            asset = entry.get("_asset")
-            metadata = asset.get("metadata", {}) if isinstance(asset, dict) else {}
-            return metadata if isinstance(metadata, dict) else {}
-
-        def classifier_utility_entries(folder_id: str) -> list[dict[str, Any]]:
-            return [
-                entry
-                for entry in visible_all
-                if self._photo_utility_classifier_matches(
-                    classifier_id=folder_id,
-                    source_path=str(entry.get("sourcePath", "") or ""),
-                    metadata=self._photo_entry_metadata(entry),
-                    asset_metadata=classifier_asset_metadata(entry),
-                )
-            ]
-
         classifier_utility_folders = [
             (
                 folder_id,
                 str(classifier.get("name", "")),
-                classifier_utility_entries(folder_id),
+                classifier_utility_entries_by_id.get(folder_id, []),
                 {"utilityClassifier": str(classifier.get("kind", ""))},
             )
             for folder_id, classifier in PHOTO_UTILITY_CLASSIFIERS.items()
@@ -33502,7 +33986,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     "latestImportAt": str(import_source.get("latestImportAt", "") or ""),
                 },
             })
-        folders.extend(source_folder_rows(visible_all))
+        folders.extend(source_folder_rows())
         for folder_id, name, summary in media_type_folders:
             if int(summary.get("count", 0) or 0):
                 folders.append(utility_folder_summary(folder_id, name, summary, {"mediaKind": folder_id.split(":", 1)[1]}))
@@ -33610,22 +34094,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             )
 
         suppressed_generated_group_sets: set[frozenset[str]] = set()
-        for group in saved_people_groups:
-            member_people = tuple(str(person or "").strip() for person in group.get("memberPeople", []) if str(person or "").strip())
-            member_pets = tuple(self._clean_photo_pet_label(pet) for pet in group.get("memberPets", []) if self._clean_photo_pet_label(pet))
-            if len(member_people) + len(member_pets) < 2:
-                continue
-            excluded_people = tuple(str(person or "").strip() for person in group.get("excludePeople", []) if str(person or "").strip())
-            excluded_pets = tuple(self._clean_photo_pet_label(pet) for pet in group.get("excludePets", []) if self._clean_photo_pet_label(pet))
+        for group_key, group, member_people, excluded_people, member_pets, excluded_pets in saved_group_specs:
             if not excluded_people and not excluded_pets:
                 suppressed_generated_group_sets.add(group_suppression_key(member_people, member_pets))
             if group.get("hidden") and not include_hidden_groups:
                 continue
-            group_entries = [
-                entry
-                for entry in visible_all
-                if self._photo_entry_matches_people_group(entry, member_people, excluded_people, member_pets, excluded_pets)
-            ]
+            group_paths = saved_group_paths.get(group_key, set())
+            group_entries = [visible_entries_by_source[source] for source in group_paths if source in visible_entries_by_source]
             cover_source = group_cover_source(group, group_entries)
             folders.append(
                 {
