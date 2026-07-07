@@ -7872,6 +7872,101 @@ def test_photo_operation_journal_orders_same_timestamp_by_insert_order() -> None
     print("ok photo operation journal orders same-timestamp rows by insertion order")
 
 
+def test_photo_operation_journal_prunes_bounded_history() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        empty_json = json.dumps({"kind": "metadata", "items": [{"snapshot": "x" * 1024}]}, separators=(",", ":"))
+
+        def insert_operation(conn: sqlite3.Connection, operation_id: str, created_at: str, undone_at: str = "") -> None:
+            conn.execute(
+                """
+                INSERT INTO photo_operation_journal(
+                    operation_id, operation_type, label, payload_json, undo_payload_json,
+                    affected_count, created_at, undone_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (operation_id, "test", operation_id, empty_json, empty_json, 1, created_at, undone_at),
+            )
+
+        with api.project.db.connect() as conn:
+            for index in range(5):
+                insert_operation(conn, f"pending_{index}", f"2026-06-28T00:0{index}:00Z")
+            for index in range(4):
+                insert_operation(conn, f"undone_{index}", f"2026-06-27T00:0{index}:00Z", f"2026-06-29T00:0{index}:00Z")
+            deleted = api.project.db.prune_photo_operation_journal(pending_limit=2, undone_limit=1, conn=conn)
+            rows = conn.execute(
+                """
+                SELECT operation_id, undone_at
+                FROM photo_operation_journal
+                ORDER BY undone_at = '' DESC, created_at DESC, rowid DESC
+                """
+            ).fetchall()
+
+        assert deleted == {"pendingDeleted": 3, "undoneDeleted": 3}, deleted
+        pending = [str(row["operation_id"]) for row in rows if str(row["undone_at"] or "") == ""]
+        undone = [str(row["operation_id"]) for row in rows if str(row["undone_at"] or "") != ""]
+        assert pending == ["pending_4", "pending_3"], rows
+        assert undone == ["undone_3"], rows
+    print("ok photo operation journal prunes bounded pending and undone history")
+
+
+def test_photo_operation_journal_auto_prunes_after_record() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        empty_json = json.dumps({"kind": "metadata", "items": [{"snapshot": "x" * 512}]}, separators=(",", ":"))
+        pending_limit = workspace_db_module.PHOTO_OPERATION_JOURNAL_PENDING_LIMIT
+        undone_limit = workspace_db_module.PHOTO_OPERATION_JOURNAL_UNDONE_LIMIT
+
+        with api.project.db.connect() as conn:
+            for index in range(pending_limit + 5):
+                conn.execute(
+                    """
+                    INSERT INTO photo_operation_journal(
+                        operation_id, operation_type, label, payload_json, undo_payload_json,
+                        affected_count, created_at, undone_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, '')
+                    """,
+                    (f"pending_old_{index:03d}", "test", "old pending", empty_json, empty_json, 1, f"2026-06-27T00:{index % 60:02d}:00Z"),
+                )
+            for index in range(undone_limit + 4):
+                conn.execute(
+                    """
+                    INSERT INTO photo_operation_journal(
+                        operation_id, operation_type, label, payload_json, undo_payload_json,
+                        affected_count, created_at, undone_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"undone_old_{index:03d}",
+                        "test",
+                        "old undone",
+                        empty_json,
+                        empty_json,
+                        1,
+                        f"2026-06-26T00:{index % 60:02d}:00Z",
+                        f"2026-06-28T00:{index % 60:02d}:00Z",
+                    ),
+                )
+            operation = api.project.db.record_photo_album_items_operation(
+                operation_type="test_album_op",
+                label="Newest album operation",
+                album_id="album-prune",
+                previous={"items": []},
+                affected_count=1,
+                created_at="2026-06-30T00:00:00Z",
+                conn=conn,
+            )
+            pending_count = int(conn.execute("SELECT COUNT(*) AS n FROM photo_operation_journal WHERE undone_at = ''").fetchone()["n"])
+            undone_count = int(conn.execute("SELECT COUNT(*) AS n FROM photo_operation_journal WHERE undone_at != ''").fetchone()["n"])
+            newest = api.project.db.list_photo_operations(limit=1, conn=conn)[0]
+
+        assert operation["operationId"], operation
+        assert pending_count == pending_limit, pending_count
+        assert undone_count == undone_limit, undone_count
+        assert newest["operationId"] == operation["operationId"], newest
+    print("ok photo operation journal auto-prunes after recording operations")
+
+
 def test_photo_review_decision_records_operation_and_undo() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -18362,6 +18457,8 @@ if __name__ == "__main__":
     test_photo_edit_stack_renders_image_retouch_preview_and_export()
     test_photo_edit_stack_renders_image_straighten_preview()
     test_photo_operation_journal_orders_same_timestamp_by_insert_order()
+    test_photo_operation_journal_prunes_bounded_history()
+    test_photo_operation_journal_auto_prunes_after_record()
     test_photo_review_decision_records_operation_and_undo()
     test_photo_recovered_failure_save_and_delete_actions()
     test_photo_import_failure_retry_repairs_original_source()

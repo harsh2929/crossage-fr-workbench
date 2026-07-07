@@ -24,6 +24,8 @@ from crossage_fr.workspace_registry import now_iso, restrict_file_mode
 
 SCHEMA_VERSION = 4
 PHOTO_LOCATION_INDEX_VERSION = "1"
+PHOTO_OPERATION_JOURNAL_PENDING_LIMIT = 250
+PHOTO_OPERATION_JOURNAL_UNDONE_LIMIT = 50
 PHOTO_DB_PET_KIND_TERMS: dict[str, tuple[str, ...]] = {
     "dog": ("dog", "dogs", "puppy", "puppies", "canine"),
     "cat": ("cat", "cats", "kitten", "kittens", "feline"),
@@ -11199,6 +11201,80 @@ class WorkspaceDb:
             "canUndo": not bool(undone_at),
         }
 
+    def prune_photo_operation_journal(
+        self,
+        *,
+        pending_limit: int = PHOTO_OPERATION_JOURNAL_PENDING_LIMIT,
+        undone_limit: int = PHOTO_OPERATION_JOURNAL_UNDONE_LIMIT,
+        preserve_operation_id: str = "",
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, int]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.prune_photo_operation_journal(
+                    pending_limit=pending_limit,
+                    undone_limit=undone_limit,
+                    preserve_operation_id=preserve_operation_id,
+                    conn=local_conn,
+                )
+        clean_preserve = str(preserve_operation_id or "").strip()
+        pending_keep = max(1, min(10000, int(pending_limit or PHOTO_OPERATION_JOURNAL_PENDING_LIMIT)))
+        undone_keep = max(0, min(10000, int(undone_limit or PHOTO_OPERATION_JOURNAL_UNDONE_LIMIT)))
+        preserve_undone_at = None
+        if clean_preserve:
+            preserve_row = conn.execute(
+                "SELECT undone_at FROM photo_operation_journal WHERE operation_id = ? LIMIT 1",
+                (clean_preserve,),
+            ).fetchone()
+            preserve_undone_at = str(preserve_row["undone_at"] or "") if preserve_row else None
+        pending_offset = max(0, pending_keep - 1) if preserve_undone_at == "" else pending_keep
+        undone_offset = max(0, undone_keep - 1) if preserve_undone_at not in (None, "") else undone_keep
+        pending_cursor = conn.execute(
+            """
+            DELETE FROM photo_operation_journal
+            WHERE rowid IN (
+                SELECT rowid
+                FROM photo_operation_journal
+                WHERE undone_at = ''
+                    AND (? = '' OR operation_id != ?)
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (clean_preserve, clean_preserve, pending_offset),
+        )
+        if undone_keep > 0:
+            undone_cursor = conn.execute(
+                """
+                DELETE FROM photo_operation_journal
+                WHERE rowid IN (
+                    SELECT rowid
+                    FROM photo_operation_journal
+                    WHERE undone_at != ''
+                        AND (? = '' OR operation_id != ?)
+                    ORDER BY undone_at DESC, created_at DESC, rowid DESC
+                    LIMIT -1 OFFSET ?
+                )
+                """,
+                (clean_preserve, clean_preserve, undone_offset),
+            )
+        else:
+            undone_cursor = conn.execute(
+                """
+                DELETE FROM photo_operation_journal
+                WHERE undone_at != ''
+                    AND (? = '' OR operation_id != ?)
+                """,
+                (clean_preserve, clean_preserve),
+            )
+        return {
+            "pendingDeleted": int(pending_cursor.rowcount if pending_cursor.rowcount is not None else 0),
+            "undoneDeleted": int(undone_cursor.rowcount if undone_cursor.rowcount is not None else 0),
+        }
+
+    def _prune_photo_operation_journal_after_write(self, conn: sqlite3.Connection, operation_id: str) -> None:
+        self.prune_photo_operation_journal(preserve_operation_id=operation_id, conn=conn)
+
     def _photo_operation_asset_targets(
         self,
         *,
@@ -11592,6 +11668,7 @@ class WorkspaceDb:
                 now,
             ),
         )
+        self._prune_photo_operation_journal_after_write(conn, operation_id)
         row = conn.execute(
             "SELECT * FROM photo_operation_journal WHERE operation_id = ?",
             (operation_id,),
@@ -11848,6 +11925,7 @@ class WorkspaceDb:
                 now,
             ),
         )
+        self._prune_photo_operation_journal_after_write(conn, operation_id)
         row = conn.execute(
             "SELECT * FROM photo_operation_journal WHERE operation_id = ?",
             (operation_id,),
@@ -11975,6 +12053,7 @@ class WorkspaceDb:
                 now,
             ),
         )
+        self._prune_photo_operation_journal_after_write(conn, operation_id)
         row = conn.execute(
             "SELECT * FROM photo_operation_journal WHERE operation_id = ?",
             (operation_id,),
@@ -12062,6 +12141,7 @@ class WorkspaceDb:
                 now,
             ),
         )
+        self._prune_photo_operation_journal_after_write(conn, operation_id)
         row = conn.execute(
             "SELECT * FROM photo_operation_journal WHERE operation_id = ?",
             (operation_id,),
@@ -12138,6 +12218,7 @@ class WorkspaceDb:
                 now,
             ),
         )
+        self._prune_photo_operation_journal_after_write(conn, operation_id)
         row = conn.execute(
             "SELECT * FROM photo_operation_journal WHERE operation_id = ?",
             (operation_id,),
@@ -12207,6 +12288,7 @@ class WorkspaceDb:
                 now,
             ),
         )
+        self._prune_photo_operation_journal_after_write(conn, operation_id)
         row = conn.execute(
             "SELECT * FROM photo_operation_journal WHERE operation_id = ?",
             (operation_id,),
@@ -12566,6 +12648,7 @@ class WorkspaceDb:
                 now,
             ),
         )
+        self._prune_photo_operation_journal_after_write(conn, operation_id)
         row = conn.execute(
             "SELECT * FROM photo_operation_journal WHERE operation_id = ?",
             (operation_id,),
@@ -12647,6 +12730,7 @@ class WorkspaceDb:
                 now,
             ),
         )
+        self._prune_photo_operation_journal_after_write(conn, operation_id)
         row = conn.execute(
             "SELECT * FROM photo_operation_journal WHERE operation_id = ?",
             (operation_id,),
@@ -13420,6 +13504,7 @@ class WorkspaceDb:
             "UPDATE photo_operation_journal SET undone_at = ? WHERE operation_id = ?",
             (undone_at, str(operation.get("operationId", ""))),
         )
+        self._prune_photo_operation_journal_after_write(conn, str(operation.get("operationId", "")))
         row = conn.execute(
             "SELECT * FROM photo_operation_journal WHERE operation_id = ?",
             (str(operation.get("operationId", "")),),
