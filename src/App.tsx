@@ -2045,25 +2045,45 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (language === "en") return;
     let frame = 0;
     let localizing = false;
     const root = document.getElementById("root") || document.body;
     const pendingRoots = new Set<ParentNode>();
+    const addPendingRoot = (target: ParentNode) => {
+      if (target === root) {
+        pendingRoots.clear();
+        pendingRoots.add(root);
+        return;
+      }
+      for (const current of pendingRoots) {
+        const currentNode = current as Node;
+        const targetNode = target as Node;
+        if (current === root || current === target || currentNode.contains(targetNode)) {
+          return;
+        }
+      }
+      for (const current of [...pendingRoots]) {
+        if ((target as Node).contains(current as Node)) {
+          pendingRoots.delete(current);
+        }
+      }
+      pendingRoots.add(target);
+    };
     const enqueueLocalizationRoot = (node: Node | null) => {
       if (!node) return;
       const target = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
       if (!target || !root.contains(target)) return;
-      pendingRoots.add(target as ParentNode);
+      addPendingRoot(target as ParentNode);
     };
     const scheduleLocalization = (target?: ParentNode) => {
-      if (target) pendingRoots.add(target);
+      if (target) addPendingRoot(target);
       if (frame) return;
       frame = window.requestAnimationFrame(() => {
         frame = 0;
         localizing = true;
         try {
-          const validTargets = [...pendingRoots].filter((node) => node === root || root.contains(node as Node));
-          const targets = validTargets.filter((node) => !validTargets.some((other) => other !== node && (other as Node).contains(node as Node)));
+          const targets = [...pendingRoots].filter((node) => node === root || root.contains(node as Node));
           pendingRoots.clear();
           for (const targetRoot of targets) {
             localizeDom(targetRoot, language);

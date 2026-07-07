@@ -502,6 +502,9 @@ def assert_static_app_contracts() -> None:
     app_tsx = (root / "src" / "App.tsx").read_text(encoding="utf-8")
     assert "languageStorageKey" in app_tsx
     assert 'document.getElementById("root") || document.body' in app_tsx
+    assert 'if (language === "en") return;' in app_tsx
+    assert "const addPendingRoot = (target: ParentNode)" in app_tsx
+    assert "validTargets.some" not in app_tsx
     assert "localizeDom(targetRoot, language)" in app_tsx
     assert 'attributeFilter: ["alt", "aria-label", "placeholder", "title"]' in app_tsx
     assert 'className="switch-row language-picker"' in app_tsx
