@@ -9286,6 +9286,44 @@ def test_photo_operation_journal_undoes_visibility_actions() -> None:
     print("ok photo operation journal undo visibility actions")
 
 
+def test_photo_visibility_operations_skip_search_reindex() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        photo = str(base / "visibility-no-reindex.jpg")
+        Path(photo).write_bytes(b"photo")
+        api.project.db.create_scan_run("run1", "label", "manual", str(base))
+        api.project.db.record_scan_file("run1", Path(photo), _sig(Path(photo)), "completed", phase="processed")
+
+        original_index_photo_asset = api.project.db._index_photo_asset
+
+        def fail_photo_index_rebuild(_asset_id: str, _conn: Any) -> None:
+            raise AssertionError("visibility-only metadata changes should not rebuild photo FTS rows")
+
+        api.project.db._index_photo_asset = fail_photo_index_rebuild  # type: ignore[method-assign]
+        try:
+            hidden = api.apply_photo_visibility_operation({"action": "hide", "sourcePaths": [photo]})
+            assert hidden["affected"] == 1, hidden
+            undo_hidden = api.undo_photo_operation({"operationId": hidden["operation"]["operationId"]})
+            assert undo_hidden["restored"] == 1, undo_hidden
+
+            deleted = api.apply_photo_visibility_operation({"action": "delete", "sourcePaths": [photo], "deletedAt": "2026-06-20T00:00:00Z"})
+            assert deleted["affected"] == 1, deleted
+            restored = api.apply_photo_visibility_operation({"action": "restore", "sourcePaths": [photo]})
+            assert restored["affected"] == 1, restored
+            undo_restore = api.undo_photo_operation({"operationId": restored["operation"]["operationId"]})
+            assert undo_restore["restored"] == 1, undo_restore
+            undo_delete = api.undo_photo_operation({"operationId": deleted["operation"]["operationId"]})
+            assert undo_delete["restored"] == 1, undo_delete
+        finally:
+            api.project.db._index_photo_asset = original_index_photo_asset  # type: ignore[method-assign]
+
+        metadata = api.project.db.photo_asset_metadata_by_path(photo)
+        assert metadata["hidden"] is False, metadata
+        assert metadata["deletedAt"] == "", metadata
+    print("ok photo visibility operations skip search reindex")
+
+
 def test_photo_visibility_undo_preserves_later_metadata_edits() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -18647,6 +18685,7 @@ if __name__ == "__main__":
     test_photo_permanent_delete_trashes_managed_original_and_undo_restores()
     test_photo_restore_rehearsal_recovers_catalog_after_managed_trash_cleanup()
     test_photo_operation_journal_undoes_visibility_actions()
+    test_photo_visibility_operations_skip_search_reindex()
     test_photo_visibility_undo_preserves_later_metadata_edits()
     test_photo_active_view_filters_media_favorite_and_edited()
     test_photo_richer_media_type_detection_and_folders()

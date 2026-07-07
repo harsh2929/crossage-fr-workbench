@@ -13081,6 +13081,7 @@ class WorkspaceDb:
                 hidden=next_hidden,
                 deleted_at=next_deleted_at or None,
                 clear_deleted=next_deleted_at == "",
+                refresh_index=False,
                 conn=conn,
             )
             operation_items.append(
@@ -13440,6 +13441,8 @@ class WorkspaceDb:
                 if "keywords" in metadata:
                     raw_keywords = metadata.get("keywords", [])
                     update_kwargs["keywords"] = raw_keywords if isinstance(raw_keywords, list) else []
+                if len(update_kwargs) > 1 and set(update_kwargs) <= {"asset_id", "hidden", "deleted_at", "clear_deleted"}:
+                    update_kwargs["refresh_index"] = False
                 accessibility_present = "accessibilityDescription" in metadata
                 description_regions_present = "descriptionRegions" in metadata
                 local_depth_controls_present = "localDepthControls" in metadata
@@ -20883,6 +20886,7 @@ class WorkspaceDb:
         edited: bool | None = None,
         keywords: Any = None,
         conn: sqlite3.Connection | None = None,
+        refresh_index: bool = True,
     ) -> dict[str, Any]:
         if conn is None:
             with self.connect() as local_conn:
@@ -20902,6 +20906,7 @@ class WorkspaceDb:
                     edited=edited,
                     keywords=keywords,
                     conn=local_conn,
+                    refresh_index=refresh_index,
                 )
         asset_key = str(asset_id or "").strip()
         asset: dict[str, Any] | None = None
@@ -21001,7 +21006,8 @@ class WorkspaceDb:
         xmp_metadata = updated_asset_metadata.get("xmp") if isinstance(updated_asset_metadata.get("xmp"), dict) else {}
         if xmp_metadata:
             self._refresh_photo_xmp_conflicts(asset_key, xmp_metadata, {**updated_metadata, "keywords": next_keywords}, conn)
-        self._index_photo_asset(asset_key, conn)
+        if refresh_index:
+            self._index_photo_asset(asset_key, conn)
         return {
             **updated_metadata,
             "keywords": next_keywords,
