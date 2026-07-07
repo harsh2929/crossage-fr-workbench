@@ -90,6 +90,35 @@ function canonicalPathKey(filePath, { caseFold = process.platform === "darwin" |
   return caseFold ? normalized.toLowerCase() : normalized;
 }
 
+function pathTrustKeyFromResolved(filePath, { caseFold = process.platform === "darwin" || process.platform === "win32" } = {}) {
+  const normalized = path.normalize(path.resolve(String(filePath || "")));
+  return caseFold ? normalized.toLowerCase() : normalized;
+}
+
+function uniquePathBatch(values, limit) {
+  const max = Math.max(0, Math.floor(Number(limit) || 0));
+  if (!Array.isArray(values) || max <= 0) {
+    return { paths: [], overflow: false };
+  }
+  const seen = new Set();
+  const paths = [];
+  for (const value of values) {
+    if (typeof value !== "string" || !value.trim()) {
+      continue;
+    }
+    const key = path.resolve(value);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    if (paths.length >= max) {
+      return { paths, overflow: true };
+    }
+    paths.push(value);
+  }
+  return { paths, overflow: false };
+}
+
 async function filterStableWatchFiles(paths, waitForStableFile, concurrency = 8) {
   if (!Array.isArray(paths) || !paths.length) {
     return [];
@@ -127,5 +156,7 @@ module.exports = {
   safeRealpath,
   backendRestartDelayMs,
   canonicalPathKey,
+  pathTrustKeyFromResolved,
+  uniquePathBatch,
   filterStableWatchFiles,
 };

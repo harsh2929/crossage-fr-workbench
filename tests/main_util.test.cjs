@@ -107,6 +107,28 @@ function testCanonicalPathKey() {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+function testUniquePathBatch() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vintrace-path-batch-"));
+  const a = path.join(dir, "a.jpg");
+  const b = path.join(dir, "folder", "..", "b.jpg");
+  const bAgain = path.join(dir, "b.jpg");
+  const c = path.join(dir, "c.jpg");
+  assert.deepStrictEqual(
+    util.uniquePathBatch([null, "", "   ", a, b, bAgain, c], 2),
+    { paths: [a, b], overflow: true },
+  );
+  assert.deepStrictEqual(
+    util.uniquePathBatch([a, bAgain, b], 5),
+    { paths: [a, bAgain], overflow: false },
+  );
+  assert.deepStrictEqual(util.uniquePathBatch([a], 0), { paths: [], overflow: false });
+  assert.strictEqual(
+    util.pathTrustKeyFromResolved(path.join(dir, "Folder", "..", "File.JPG"), { caseFold: false }),
+    path.normalize(path.resolve(dir, "File.JPG")),
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 async function testFilterStableWatchFilesConcurrency() {
   const paths = ["a", "b", "drop-1", "c", "drop-2", "d", "e"];
   let active = 0;
@@ -141,6 +163,7 @@ async function main() {
   testPythonBackendStartRaceGuards();
   testBackendStdinErrorsAreHandled();
   testCanonicalPathKey();
+  testUniquePathBatch();
   await testFilterStableWatchFilesConcurrency();
   console.log("main util ok");
 }

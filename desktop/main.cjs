@@ -18,6 +18,8 @@ const {
   safeRealpath,
   backendRestartDelayMs,
   canonicalPathKey,
+  pathTrustKeyFromResolved,
+  uniquePathBatch,
   filterStableWatchFiles,
 } = require("./main/util.cjs");
 const { buildSystemPhotoSources } = require("./main/photo-sources.cjs");
@@ -113,6 +115,9 @@ const MAX_DIAGNOSTIC_EVENTS = 240;
 const MAX_DIAGNOSTIC_LOG_BYTES = 2 * 1024 * 1024;
 const MAX_BACKEND_STDERR_TAIL_BYTES = 64 * 1024;
 const QUERY_TRUSTED_MEDIA_PATH_LIMIT = 20000;
+const USER_GRANTED_PATH_LIMIT = Math.max(1000, Math.min(50000, Number.parseInt(process.env.CROSSAGE_USER_GRANTED_PATH_LIMIT || "20000", 10) || 20000));
+const MEDIA_PREPARE_PATH_LIMIT = Math.max(1, Math.min(5000, Number.parseInt(process.env.CROSSAGE_MEDIA_PREPARE_PATH_LIMIT || "1000", 10) || 1000));
+const MEDIA_PREPARE_SIDECAR_LIMIT = Math.max(0, Math.min(MEDIA_PREPARE_PATH_LIMIT, Number.parseInt(process.env.CROSSAGE_MEDIA_PREPARE_SIDECAR_LIMIT || "64", 10) || 64));
 const BACKEND_TIMEOUT_KILL_GRACE_MS = Math.max(1000, Number.parseInt(process.env.CROSSAGE_BACKEND_TIMEOUT_KILL_GRACE_MS || "5000", 10) || 5000);
 const WATCH_MAX_QUEUE = Math.max(500, Number.parseInt(process.env.CROSSAGE_WATCH_MAX_QUEUE || "5000", 10) || 5000);
 const WATCH_SCAN_BATCH_SIZE = Math.max(25, Number.parseInt(process.env.CROSSAGE_WATCH_SCAN_BATCH_SIZE || "250", 10) || 250);
@@ -1633,6 +1638,20 @@ function mediaUrlFor(filePath) {
   return `${MEDIA_PROTOCOL_SCHEME}://local/${encodeMediaPath(filePath)}`;
 }
 
+function rememberUserPathKey(key) {
+  if (!key) {
+    return;
+  }
+  if (userGrantedPaths.has(key)) {
+    userGrantedPaths.delete(key);
+  }
+  userGrantedPaths.add(key);
+  while (userGrantedPaths.size > USER_GRANTED_PATH_LIMIT) {
+    const oldest = userGrantedPaths.values().next().value;
+    userGrantedPaths.delete(oldest);
+  }
+}
+
 function decodeImageDataUrl(value) {
   const match = String(value || "").match(/^data:image\/(png|jpe?g|webp);base64,([A-Za-z0-9+/=]+)$/);
   if (!match) {
@@ -1653,7 +1672,19 @@ function grantUserPath(filePath) {
   if (typeof filePath === "string" && filePath.trim()) {
     // MS-5: store a case-folded canonical key on case-insensitive filesystems
     // so a differently-cased reference to the SAME granted file still matches.
-    userGrantedPaths.add(canonicalPathKey(filePath));
+    rememberUserPathKey(canonicalPathKey(filePath));
+  }
+}
+
+async function grantUserPathAsync(filePath) {
+  if (typeof filePath !== "string" || !filePath.trim()) {
+    return;
+  }
+  const target = path.resolve(filePath);
+  try {
+    rememberUserPathKey(pathTrustKeyFromResolved(await fs.promises.realpath(target)));
+  } catch {
+    rememberUserPathKey(pathTrustKeyFromResolved(target));
   }
 }
 
@@ -4916,12 +4947,12 @@ function inferLocalMediaSourceSidecarAttribution(filePath, isDir = false) {
   return {};
 }
 
-function inferLocalMediaSourceAttribution(filePath, isDir = false) {
+function inferLocalMediaSourceAttribution(filePath, isDir = false, options = {}) {
   const parts = mediaSourcePathParts(filePath);
   const containerParts = isDir ? parts : parts.slice(0, -1);
   const lowerParts = parts.map((part) => part.toLowerCase());
   const lowerPath = String(filePath || "").replace(/\\/g, "/").toLowerCase();
-  const sidecarAttribution = inferLocalMediaSourceSidecarAttribution(filePath, isDir);
+  const sidecarAttribution = options.includeSidecars === false ? {} : inferLocalMediaSourceSidecarAttribution(filePath, isDir);
   let sourceKind = "";
   let sourceDetail = "";
 
@@ -4970,22 +5001,32 @@ function inferLocalMediaSourceAttribution(filePath, isDir = false) {
 
 // Grant a batch of file/folder paths (dropped files, or folder sample images) and
 // return their thumbnail URLs, so they can be previewed before enrolling.
-ipcMain.handle("media:prepare-paths", async (event, payload) => {
+ipcMain.handle("media:prepare-paths", async (event, payload = {}) => {
   assertTrustedSender(event);
-  const paths = Array.isArray(payload && payload.paths) ? payload.paths : [];
+  assertPlainObject(payload, "Media prepare payload");
+  const { paths, overflow } = uniquePathBatch(payload.paths, MEDIA_PREPARE_PATH_LIMIT);
+  if (overflow) {
+    throw createAppError(
+      "E-MEDIA-PREPARE-LIMIT",
+      `Prepare ${MEDIA_PREPARE_PATH_LIMIT} or fewer unique files or folders at a time.`
+    );
+  }
   const out = [];
-  for (const candidate of paths) {
-    if (typeof candidate !== "string" || !candidate.trim()) {
-      continue;
-    }
-    grantUserPath(candidate);
+  for (let index = 0; index < paths.length; index += 1) {
+    const candidate = paths[index];
+    await grantUserPathAsync(candidate);
     let isDir = false;
     try {
-      isDir = fs.statSync(candidate).isDirectory();
+      isDir = (await fs.promises.stat(candidate)).isDirectory();
     } catch (_error) {
       isDir = false;
     }
-    out.push({ path: candidate, url: mediaUrlFor(candidate), isDir, ...inferLocalMediaSourceAttribution(candidate, isDir) });
+    out.push({
+      path: candidate,
+      url: mediaUrlFor(candidate),
+      isDir,
+      ...inferLocalMediaSourceAttribution(candidate, isDir, { includeSidecars: index < MEDIA_PREPARE_SIDECAR_LIMIT })
+    });
   }
   return out;
 });
