@@ -11698,6 +11698,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     def photo_repair_history(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         limit = max(1, min(100, int(params.get("limit", 12) or 12)))
+        audit_scan_limit = max(limit, min(5000, int(params.get("auditScanLimit", 1000) or 1000)))
         actions = {
             "photo_library_backup_check": "Backup check",
             "photo_library_preview_sweep": "Preview sweep",
@@ -11986,36 +11987,41 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 }
             return {}
 
-        try:
-            rows = self.project._read_audit_rows()
-        except Exception:
-            rows = []
         events: list[dict[str, Any]] = []
         total = 0
-        for row in reversed(rows):
+        scanned = 0
+        has_more = False
+        for row in self.project._iter_audit_rows_reverse():
+            scanned += 1
             action = str(row.get("action", "") or "")
-            if action not in actions:
-                continue
-            total += 1
-            if len(events) >= limit:
-                continue
-            counts = counts_for(action, row)
-            events.append({
-                "at": str(row.get("at", row.get("ts", "")) or ""),
-                "seq": as_int(row, "seq"),
-                "action": action,
-                "label": actions[action],
-                "status": status_for(action, row),
-                "ok": bool(row.get("ok", False)) if "ok" in row else None,
-                "dryRun": bool(row.get("dry_run", False)),
-                "counts": counts,
-                "summary": summary_for(action, counts, row),
-                "details": details_for(action, row),
-            })
+            if action in actions:
+                total += 1
+                if len(events) >= limit:
+                    has_more = True
+                    break
+                counts = counts_for(action, row)
+                events.append({
+                    "at": str(row.get("at", row.get("ts", "")) or ""),
+                    "seq": as_int(row, "seq"),
+                    "action": action,
+                    "label": actions[action],
+                    "status": status_for(action, row),
+                    "ok": bool(row.get("ok", False)) if "ok" in row else None,
+                    "dryRun": bool(row.get("dry_run", False)),
+                    "counts": counts,
+                    "summary": summary_for(action, counts, row),
+                    "details": details_for(action, row),
+                })
+            if scanned >= audit_scan_limit:
+                has_more = True
+                break
         return {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "limit": limit,
             "total": total,
+            "hasMore": has_more,
+            "scannedAuditEvents": scanned,
+            "auditScanLimit": audit_scan_limit,
             "events": events,
         }
 

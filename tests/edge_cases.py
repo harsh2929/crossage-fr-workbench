@@ -3308,6 +3308,10 @@ def assert_static_app_contracts() -> None:
     assert "missing-companion-replacement.dng" in photos_e2e
     assert '"photo_library_catalog_cleanup"' in api_server
     assert '"photo_repair_history"' in api_server
+    photo_repair_history_body = api_server.split("def photo_repair_history", 1)[1].split("def _photo_pet_recognition_status", 1)[0]
+    assert "_iter_audit_rows_reverse()" in photo_repair_history_body
+    assert "_read_audit_rows()" not in photo_repair_history_body
+    assert "auditScanLimit" in photo_repair_history_body
     assert '"photo_recovered_cleanup"' in api_server
     assert '"library_root"' in api_server
     assert "libraryRootLabel" in api_server

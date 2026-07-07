@@ -6364,6 +6364,34 @@ def test_photo_repair_history_summarizes_recent_repair_actions() -> None:
     print("ok Photos repair history summarizes recent repair actions")
 
 
+def test_photo_repair_history_tails_audit_without_full_read() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        for index in range(25):
+            api.project._append_audit({"action": "unit_noise", "index": index})
+        api.project._append_audit({"action": "photo_library_backup_check", "assets": 1})
+        api.project._append_audit({"action": "photo_library_preview_sweep", "generated_previews": 2})
+        api.project._append_audit({"action": "rebuild_photo_previews", "requested": 1, "generated_previews": 1})
+
+        original_read_audit_rows = api.project._read_audit_rows
+
+        def fail_full_audit_read() -> list[dict[str, object]]:
+            raise AssertionError("photo_repair_history must stream recent audit events")
+
+        api.project._read_audit_rows = fail_full_audit_read  # type: ignore[method-assign]
+        try:
+            history = api.photo_repair_history({"limit": 2, "auditScanLimit": 3})
+        finally:
+            api.project._read_audit_rows = original_read_audit_rows  # type: ignore[method-assign]
+
+        assert [event["label"] for event in history["events"]] == ["Preview rebuild", "Preview sweep"], history
+        assert history["total"] == 3, history
+        assert history["hasMore"] is True, history
+        assert history["scannedAuditEvents"] == 3, history
+        assert history["auditScanLimit"] == 3, history
+    print("ok Photos repair history tails audit without full read")
+
+
 def test_candidate_persistence_backfills_photo_assets_and_people() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
@@ -18813,6 +18841,8 @@ if __name__ == "__main__":
     test_photo_video_poster_selection_updates_preview_and_metadata()
     test_photo_preview_rebuild_repairs_cached_previews()
     test_photo_library_preview_sweep_respects_library_root_scope()
+    test_photo_repair_history_summarizes_recent_repair_actions()
+    test_photo_repair_history_tails_audit_without_full_read()
     test_candidate_persistence_backfills_photo_assets_and_people()
     test_candidate_ingest_indexes_once_after_people_rows()
     test_all_photos_reads_candidate_backed_photo_assets_without_scan_manifest()

@@ -1222,6 +1222,9 @@ export interface PhotoRepairHistoryValue {
   generatedAt: string;
   limit: number;
   total: number;
+  hasMore?: boolean;
+  scannedAuditEvents?: number;
+  auditScanLimit?: number;
   events: PhotoRepairHistoryEvent[];
 }
 
