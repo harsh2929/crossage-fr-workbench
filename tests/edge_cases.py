@@ -4911,8 +4911,10 @@ def assert_operational_use_case_commands() -> None:
     assert scanned["state"]["counts"]["candidates"] == 1
     candidate_id = scanned["state"]["candidates"][0]["candidateId"]
 
+    reference_index_version = api.project._reference_index_version
     renamed = api.handle("rename_person", {"oldName": "Person", "newName": "Person Prime"})
     assert renamed["renamed"] == {"references": 1, "candidates": 1}
+    assert api.project._reference_index_version > reference_index_version
     assert renamed["state"]["references"][0]["personName"] == "Person Prime"
     assert renamed["state"]["candidates"][0]["personName"] == "Person Prime"
 

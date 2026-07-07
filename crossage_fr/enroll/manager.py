@@ -3652,6 +3652,8 @@ class ProjectState:
                 self._mark_candidate_dirty(candidate.candidate_id)
         if references == 0 and candidates == 0:
             raise KeyError(f"Person not found: {old_name}")
+        if references:
+            self._invalidate_reference_indexes()
         self._append_audit(
             {
                 "action": "rename_person",
