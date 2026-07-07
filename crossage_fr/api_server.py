@@ -14308,17 +14308,17 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             ),
             None,
         )
-        visible_by_source = {
-            str(entry.get("sourcePath", "") or ""): entry
-            for entry in self._visible_photo_entries(self._all_photo_entries())
-            if str(entry.get("sourcePath", "") or "")
-        }
         raw_paths_provided = "sourcePaths" in params or "sources" in params
         if raw_paths_provided:
             raw_paths = params.get("sourcePaths", params.get("sources", []))
             if not isinstance(raw_paths, list):
                 raise ValueError("sourcePaths must be a list.")
             requested_paths = [str(path or "").strip() for path in raw_paths if str(path or "").strip()]
+            visible_by_source = {
+                str(entry.get("sourcePath", "") or ""): entry
+                for entry in self._visible_photo_entries(self._photo_entries_for_source_paths(requested_paths))
+                if str(entry.get("sourcePath", "") or "")
+            }
             source_paths: list[str] = []
             seen: set[str] = set()
             for path in requested_paths:

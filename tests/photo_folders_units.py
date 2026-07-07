@@ -12054,12 +12054,23 @@ def test_photo_memories_generate_local_collections() -> None:
             lambda: api.save_photo_user_memory({"name": "Too Small", "sourcePaths": [bob_city, hidden_favorite]}),
             "at least two visible photos",
         )
-        user_memory = api.save_photo_user_memory({
-            "name": "Road Trip Picks",
-            "subtitle": "My picks",
-            "sourcePaths": [bob_city, alice_favorite, bob_city],
-            "coverSourcePath": bob_city,
-        })
+        original_all_photo_entries = api._all_photo_entries
+
+        def fail_user_memory_full_library_entries(
+            matches_by_source: dict[str, list[ReviewCandidate]] | None = None,
+        ) -> list[dict[str, Any]]:
+            raise AssertionError("user memory save should validate requested paths without loading the full library")
+
+        api._all_photo_entries = fail_user_memory_full_library_entries  # type: ignore[method-assign]
+        try:
+            user_memory = api.save_photo_user_memory({
+                "name": "Road Trip Picks",
+                "subtitle": "My picks",
+                "sourcePaths": [bob_city, alice_favorite, bob_city],
+                "coverSourcePath": bob_city,
+            })
+        finally:
+            api._all_photo_entries = original_all_photo_entries  # type: ignore[method-assign]
         assert user_memory["memoryId"].startswith("user:"), user_memory
         assert user_memory["sourcePaths"] == [bob_city, alice_favorite], user_memory
         assert api.photo_user_memories({})["memories"][0]["memoryId"] == user_memory["memoryId"], user_memory
@@ -12074,10 +12085,14 @@ def test_photo_memories_generate_local_collections() -> None:
         assert custom_memory["memory"]["sourcePaths"] == [bob_city, alice_favorite], custom_memory
         manual_user_page = api.list_photo_folder_items({"folderId": custom_memory["id"], "sort": "manual", "previewBudget": 0})
         assert [item["sourcePath"] for item in manual_user_page["items"]] == [bob_city, alice_favorite], manual_user_page
-        updated_user_memory = api.save_photo_user_memory({
-            "memoryId": user_memory["memoryId"],
-            "coverSourcePath": alice_favorite,
-        })
+        api._all_photo_entries = fail_user_memory_full_library_entries  # type: ignore[method-assign]
+        try:
+            updated_user_memory = api.save_photo_user_memory({
+                "memoryId": user_memory["memoryId"],
+                "coverSourcePath": alice_favorite,
+            })
+        finally:
+            api._all_photo_entries = original_all_photo_entries  # type: ignore[method-assign]
         assert updated_user_memory["name"] == "Road Trip Picks", updated_user_memory
         assert updated_user_memory["subtitle"] == "My picks", updated_user_memory
         assert updated_user_memory["sourcePaths"] == [bob_city, alice_favorite], updated_user_memory
