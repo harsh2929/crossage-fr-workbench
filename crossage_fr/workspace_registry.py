@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from contextlib import contextmanager
 from typing import Any, Callable
 import json
 import os
+import time
 import uuid
 
 
@@ -12,6 +14,8 @@ REGISTRY_ENV = "VINTRACE_REGISTRY_HOME"
 LEGACY_REGISTRY_ENV = "CROSSAGE_REGISTRY_HOME"
 WORKSPACE_ENV = "VINTRACE_WORKSPACE"
 LEGACY_WORKSPACE_ENV = "CROSSAGE_WORKSPACE"
+REGISTRY_LOCK_TIMEOUT_SECONDS = 10.0
+REGISTRY_LOCK_STALE_SECONDS = 30.0
 
 
 def now_iso() -> str:
@@ -23,6 +27,40 @@ def registry_root() -> Path:
     if configured:
         return Path(configured).expanduser().resolve()
     return (Path.home() / ".vintrace").resolve()
+
+
+@contextmanager
+def registry_lock(timeout_seconds: float = REGISTRY_LOCK_TIMEOUT_SECONDS):
+    root = registry_root()
+    root.mkdir(parents=True, exist_ok=True)
+    restrict_file_mode(root, 0o700)
+    lock_dir = root / ".registry.lock"
+    deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+    while True:
+        try:
+            lock_dir.mkdir(mode=0o700)
+            break
+        except FileExistsError:
+            try:
+                age = time.time() - lock_dir.stat().st_mtime
+            except OSError:
+                age = 0.0
+            if age > REGISTRY_LOCK_STALE_SECONDS:
+                try:
+                    lock_dir.rmdir()
+                    continue
+                except OSError:
+                    pass
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Timed out waiting for registry lock: {lock_dir}")
+            time.sleep(0.02)
+    try:
+        yield
+    finally:
+        try:
+            lock_dir.rmdir()
+        except OSError:
+            pass
 
 
 def active_workspace_path() -> Path:
@@ -153,6 +191,11 @@ def _read_workspace_list() -> list[dict[str, Any]]:
 
 
 def record_workspace(workspace: Path, metadata: dict[str, Any] | None = None) -> None:
+    with registry_lock():
+        _record_workspace_unlocked(workspace, metadata)
+
+
+def _record_workspace_unlocked(workspace: Path, metadata: dict[str, Any] | None = None) -> None:
     # Upsert a workspace into the known-workspace list so the desktop can offer a switcher.
     resolved = str(workspace.expanduser().resolve())
     entries = _read_workspace_list()
@@ -207,12 +250,13 @@ def write_active_workspace(workspace: Path, actor: str, metadata: dict[str, Any]
         "updatedAt": now_iso(),
         "lastOpenedBy": actor,
     }
-    write_json_atomic(active_workspace_path(), payload)
-    # Keep the known-workspace list in sync so switching/opening always lists the workspace.
-    try:
-        record_workspace(resolved, metadata)
-    except OSError:
-        pass
+    with registry_lock():
+        write_json_atomic(active_workspace_path(), payload)
+        # Keep the known-workspace list in sync so switching/opening always lists the workspace.
+        try:
+            _record_workspace_unlocked(resolved, metadata)
+        except OSError:
+            pass
 
 
 def read_active_workspace() -> Path | None:
