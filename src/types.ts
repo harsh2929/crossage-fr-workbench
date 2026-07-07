@@ -1,6 +1,7 @@
 export type AgeBucket = "child" | "adolescent" | "adult" | "unknown";
 export type CandidateStatus = "pending" | "accepted" | "rejected" | "uncertain";
 export type LearningMode = "off" | "manual" | "auto_stage";
+export type ExtensibleStringUnion<T extends string> = T | (string & Record<never, never>);
 
 export interface PlatformReport {
   platform_key: string;
@@ -49,7 +50,7 @@ export interface ScanExclusions {
 export interface ReadinessCheck {
   name: string;
   ok: boolean;
-  severity: "blocker" | "warning" | "info" | string;
+  severity: ExtensibleStringUnion<"blocker" | "warning" | "info">;
   detail: string;
   value?: unknown;
 }
@@ -57,7 +58,7 @@ export interface ReadinessCheck {
 export interface ScanReadiness {
   generatedAt: string;
   ready: boolean;
-  status: "pass" | "warn" | "fail" | string;
+  status: ExtensibleStringUnion<"pass" | "warn" | "fail">;
   largeScan: boolean;
   checks: ReadinessCheck[];
   blockers: string[];
@@ -125,7 +126,7 @@ export interface AppConfig {
   twoPassScan: boolean;
   verificationDetectorSize: number;
   performanceMode?: string;
-  learningMode?: LearningMode | string;
+  learningMode?: ExtensibleStringUnion<LearningMode>;
   effectivePerformanceMode?: string;
   effectiveFaceDetectorSize?: number;
   effectiveTwoPassScan?: boolean;
@@ -279,7 +280,7 @@ export interface BuildInfo {
 export interface ModelDownloadProgress {
   pack: string;
   label: string;
-  phase: "starting" | "downloading" | "verifying" | "extracting" | "complete" | "error" | string;
+  phase: ExtensibleStringUnion<"starting" | "downloading" | "verifying" | "extracting" | "complete" | "error">;
   downloadedBytes: number;
   totalBytes: number;
   percent: number;
@@ -327,7 +328,7 @@ export interface ReviewCandidate {
   sourceUrl?: string;
   previewPath?: string | null;
   previewUrl?: string;
-  mediaKind?: "image" | "video" | string;
+  mediaKind?: ExtensibleStringUnion<"image" | "video">;
   mediaSourcePath?: string;
   mediaSourceUrl?: string;
   videoTimestampMs?: number | null;
@@ -390,7 +391,7 @@ export type PhotoSmartQueryNode = PhotoSmartQueryClause | PhotoSmartQueryGroup;
 
 export interface PhotoAlbumRules {
   statuses?: CandidateStatus[];
-  mediaKind?: "image" | "video" | string;
+  mediaKind?: ExtensibleStringUnion<"image" | "video">;
   query?: string;
   keyword?: string;
   dateFrom?: string;
@@ -471,7 +472,7 @@ export interface PhotoPlace {
   count: number;
   coverAssetId?: string;
   coverSourcePath?: string;
-  source?: "user" | "exif" | string;
+  source?: ExtensibleStringUnion<"user" | "exif">;
   assetIds?: string[];
   placeProfile?: PhotoPlaceProfile;
 }
@@ -588,8 +589,8 @@ export interface PhotoMemory {
 
 export interface PhotoImportSession {
   importId: string;
-  sourceKind: "folder" | "camera" | "phone" | "library" | "app" | "mail" | "safari" | "messages" | "airdrop" | "downloads" | "other" | string;
-  storageMode: "referenced" | "managed" | string;
+  sourceKind: ExtensibleStringUnion<"folder" | "camera" | "phone" | "library" | "app" | "mail" | "safari" | "messages" | "airdrop" | "downloads" | "other">;
+  storageMode: ExtensibleStringUnion<"referenced" | "managed">;
   sourceLabel: string;
   sourceDetail?: string;
   rootPath: string;
@@ -722,8 +723,8 @@ export interface PhotoManagedRootPolicy {
 }
 
 export interface PhotoRootPolicyWarning {
-  kind: "duplicate" | "overlap" | "symlink" | "nested" | "multiple" | string;
-  severity?: "info" | "warning" | "error" | string;
+  kind: ExtensibleStringUnion<"duplicate" | "overlap" | "symlink" | "nested" | "multiple">;
+  severity?: ExtensibleStringUnion<"info" | "warning" | "error">;
   message: string;
   action?: string;
   relatedPath?: string;
@@ -732,18 +733,18 @@ export interface PhotoRootPolicyWarning {
 
 export interface PhotoRootConflictDiagnostics {
   rootConflict?: boolean;
-  rootConflictKind?: "duplicate" | "symlink_alias" | "nested" | "multiple" | string;
+  rootConflictKind?: ExtensibleStringUnion<"duplicate" | "symlink_alias" | "nested" | "multiple">;
   rootConflictMessage?: string;
   rootConflictMessages?: string[];
   rootConflictWith?: Array<{
     profileId?: string;
     name?: string;
     path: string;
-    kind: "managed" | "library" | string;
+    kind: ExtensibleStringUnion<"managed" | "library">;
     conflictKind?: string;
   }>;
   policyWarnings?: PhotoRootPolicyWarning[];
-  policyStatus?: "ready" | "warning" | "attention" | string;
+  policyStatus?: ExtensibleStringUnion<"ready" | "warning" | "attention">;
 }
 
 export interface PhotoManagedRootProfile extends PhotoRootConflictDiagnostics {
@@ -771,7 +772,7 @@ export interface PhotoLibraryRootProfile extends PhotoRootConflictDiagnostics {
 }
 
 export interface PhotoRootPolicyStatus {
-  status: "ready" | "warning" | "attention" | string;
+  status: ExtensibleStringUnion<"ready" | "warning" | "attention">;
   counts: {
     rootsWithConflicts: number;
     duplicates: number;
@@ -799,7 +800,7 @@ export interface PhotoBackupPolicy {
   warnOnExternalManagedRoots: boolean;
   lastCheckedAt: string;
   lastOkAt: string;
-  lastStatus: "never" | "ready" | "warning" | "attention" | "disabled" | string;
+  lastStatus: ExtensibleStringUnion<"never" | "ready" | "warning" | "attention" | "disabled">;
   lastBackupPath: string;
   lastSummary: string;
 }
@@ -809,7 +810,7 @@ export interface PhotoBackupPolicyStatus {
   enabled: boolean;
   autoCheckOnOpen: boolean;
   due: boolean;
-  status: "ready" | "warning" | "attention" | "disabled" | string;
+  status: ExtensibleStringUnion<"ready" | "warning" | "attention" | "disabled">;
   intervalHours: number;
   lastCheckedAt: string;
   lastOkAt: string;
@@ -854,7 +855,7 @@ export interface PhotoBackupPolicyStatus {
 }
 
 export interface PhotoLibrarySettingsValue {
-  defaultStorageMode: "referenced" | "managed" | string;
+  defaultStorageMode: ExtensibleStringUnion<"referenced" | "managed">;
   defaultManagedRoot: string;
   defaultManagedRootPersisted?: boolean;
   workspaceDefaultManagedRoot?: string;
@@ -873,7 +874,7 @@ export interface PhotoLibrarySettingsValue {
 
 export interface PhotoPetRecognitionStatus {
   generatedAt: string;
-  status: "metadata_only" | "model_requested_unavailable" | "local_intelligence_disabled" | string;
+  status: ExtensibleStringUnion<"metadata_only" | "model_requested_unavailable" | "local_intelligence_disabled">;
   metadataBacked: boolean;
   localIntelligenceEnabled: boolean;
   noNetwork: boolean;
@@ -899,14 +900,14 @@ export interface PhotoCurationPreferencesValue {
 
 export interface PhotoImportResult {
   importId: string;
-  storageMode: "referenced" | "managed" | string;
-  sourceKind: "folder" | "camera" | "phone" | "library" | "app" | "mail" | "safari" | "messages" | "airdrop" | "downloads" | "other" | string;
+  storageMode: ExtensibleStringUnion<"referenced" | "managed">;
+  sourceKind: ExtensibleStringUnion<"folder" | "camera" | "phone" | "library" | "app" | "mail" | "safari" | "messages" | "airdrop" | "downloads" | "other">;
   sourceLabel: string;
   sourceDetail?: string;
   rootPath: string;
   managedRoot?: string;
   keepFolderOrganization?: boolean;
-  keepFolderOrganizationSource?: "explicit" | "root-default" | "off" | string;
+  keepFolderOrganizationSource?: ExtensibleStringUnion<"explicit" | "root-default" | "off">;
   deleteFromSourceAfterImport?: boolean;
   deleteFromSourceSupported?: boolean;
   pairedMotionCopiedCount?: number;
@@ -961,7 +962,7 @@ export interface PhotoImportFailureRetryValue {
   saved: boolean;
   failureId?: string;
   sourcePath?: string;
-  storageMode?: "referenced" | "managed" | string;
+  storageMode?: ExtensibleStringUnion<"referenced" | "managed">;
   importResult?: PhotoImportResult;
   dismissedFailure?: PhotoImportFailureDismissValue;
 }
@@ -1040,7 +1041,7 @@ export interface PhotoLibraryPreviewSweepValue {
     label: string;
   };
   ok: boolean;
-  status: "ready" | "warning" | "attention" | "repaired" | string;
+  status: ExtensibleStringUnion<"ready" | "warning" | "attention" | "repaired">;
   limit: number;
   truncated: boolean;
   counts: {
@@ -1136,7 +1137,7 @@ export interface PhotoLibraryBackupCheckValue {
     label: string;
   };
   ok: boolean;
-  status: "ready" | "warning" | "attention" | string;
+  status: ExtensibleStringUnion<"ready" | "warning" | "attention">;
   counts: {
     assets: number;
     managedAssets: number;
@@ -1170,7 +1171,7 @@ export interface PhotoLibraryBackupCheckValue {
     label: string;
     ok: boolean;
     status: string;
-    severity: "error" | "warning" | "info" | string;
+    severity: ExtensibleStringUnion<"error" | "warning" | "info">;
     count: number;
     detail: string;
   }>;
@@ -1181,7 +1182,7 @@ export interface PhotoLibraryCatalogCleanupValue {
   generatedAt: string;
   applied: boolean;
   ok: boolean;
-  status: "ready" | "warning" | "attention" | "repaired" | string;
+  status: ExtensibleStringUnion<"ready" | "warning" | "attention" | "repaired">;
   counts: {
     cleanupCandidates: number;
     cleanedRows: number;
@@ -1227,7 +1228,7 @@ export interface PhotoRepairHistoryValue {
 export interface PhotoBackupRestoreRehearsalValue {
   generatedAt: string;
   ok: boolean;
-  status: "ready" | "warning" | "attention" | string;
+  status: ExtensibleStringUnion<"ready" | "warning" | "attention">;
   createdBackup: boolean;
   includeGenerated: boolean;
   counts: {
@@ -1279,7 +1280,7 @@ export interface PhotoBackupRestoreRehearsalValue {
     label: string;
     ok: boolean;
     status: string;
-    severity: "error" | "warning" | "info" | string;
+    severity: ExtensibleStringUnion<"error" | "warning" | "info">;
     count: number;
     detail: string;
   }>;
@@ -1287,7 +1288,7 @@ export interface PhotoBackupRestoreRehearsalValue {
 }
 
 export interface PhotoAssetEventValue {
-  eventType: "viewed" | "shared" | string;
+  eventType: ExtensibleStringUnion<"viewed" | "shared">;
   eventAt?: string;
   requested: number;
   recorded: number;
@@ -1370,7 +1371,7 @@ export interface PhotoColorProfileAvailability {
   description?: string;
   available: boolean;
   selected?: boolean;
-  source?: "embedded" | "generated" | "system" | "custom" | "none" | string;
+  source?: ExtensibleStringUnion<"embedded" | "generated" | "system" | "custom" | "none">;
   path?: string;
   fileName?: string;
   bytes?: number;
@@ -1421,7 +1422,7 @@ export interface PhotoFolder {
   name: string;
   count: number;
   albumId?: string;
-  albumKind?: "smart" | "manual" | string;
+  albumKind?: ExtensibleStringUnion<"smart" | "manual">;
   albumCount?: number;
   folderId?: string;
   parentFolderId?: string;
@@ -1459,7 +1460,7 @@ export interface PhotoFolder {
   petCount?: number;
   petReview?: boolean;
   petReviewKinds?: Array<{ label: string; count: number }>;
-  mediaKind?: "image" | "video" | "live_photo" | "raw" | "other" | string;
+  mediaKind?: ExtensibleStringUnion<"image" | "video" | "live_photo" | "raw" | "other">;
   petName?: string;
   petKind?: string;
   petKindLabel?: string;
@@ -1472,7 +1473,7 @@ export interface PhotoFolder {
   trip?: PhotoTrip;
   memoryId?: string;
   memory?: PhotoMemory;
-  utilityClassifier?: "documents" | "receipts" | "handwriting" | "illustrations" | "qr" | string;
+  utilityClassifier?: ExtensibleStringUnion<"documents" | "receipts" | "handwriting" | "illustrations" | "qr">;
   importId?: string;
   importSession?: PhotoImportSession | null;
   importSessions?: PhotoImportSession[];
@@ -1482,7 +1483,7 @@ export interface PhotoFolder {
   failureCount?: number;
   personProfile?: PhotoPersonProfile;
   groupId?: string;
-  groupSource?: "saved" | "generated" | string;
+  groupSource?: ExtensibleStringUnion<"saved" | "generated">;
   groupPeople?: string[];
   groupPets?: string[];
   excludePets?: string[];
@@ -1502,12 +1503,12 @@ export interface PhotoFolderList {
 export interface PhotoPersonPresence {
   candidateId: string;
   personName: string;
-  status: CandidateStatus | string;
+  status: ExtensibleStringUnion<CandidateStatus>;
   score: number;
   quality: number;
   band: string;
   assetOnly?: boolean;
-  mediaKind?: "image" | "video" | string;
+  mediaKind?: ExtensibleStringUnion<"image" | "video">;
   captureDate?: string | null;
   createdAt?: string;
 }
@@ -1515,7 +1516,7 @@ export interface PhotoPersonPresence {
 export interface PhotoAlbumMembership {
   albumId: string;
   name: string;
-  albumKind: "smart" | "manual" | string;
+  albumKind: ExtensibleStringUnion<"smart" | "manual">;
   position: number;
   addedAt: string;
   derived?: boolean;
@@ -1539,7 +1540,7 @@ export interface PhotoDuplicateGroupItem {
 
 export interface PhotoDuplicateGroup {
   groupId: string;
-  algorithm: "exact_hash" | "perceptual_dhash" | string;
+  algorithm: ExtensibleStringUnion<"exact_hash" | "perceptual_dhash">;
   signature: string;
   itemCount: number;
   primaryAssetId: string;
@@ -1586,7 +1587,7 @@ export interface PhotoUtilityMatch {
   fieldLabel: string;
   value: string;
   evidenceLabel: string;
-  reviewAction?: "confirmed" | "rejected" | string;
+  reviewAction?: ExtensibleStringUnion<"confirmed" | "rejected">;
 }
 
 export interface PhotoItem {
@@ -1600,8 +1601,8 @@ export interface PhotoItem {
   rawPreviewProxyPath?: string;
   previewError?: string;
   personName?: string | null;
-  mediaKind?: "image" | "video" | string;
-  sourceKind?: "managed" | "referenced" | string;
+  mediaKind?: ExtensibleStringUnion<"image" | "video">;
+  sourceKind?: ExtensibleStringUnion<"managed" | "referenced">;
   fileSignature?: Record<string, unknown>;
   contentHash?: string;
   perceptualHash?: string;
@@ -1635,11 +1636,11 @@ export interface PhotoItem {
   importSourceDetail?: string;
   importedAt?: string;
   eventAt?: string;
-  eventType?: "viewed" | "shared" | string;
+  eventType?: ExtensibleStringUnion<"viewed" | "shared">;
   eventActor?: string;
   eventMetadata?: Record<string, unknown>;
   createdAt?: string;
-  status?: CandidateStatus | string | null;
+  status?: ExtensibleStringUnion<CandidateStatus> | null;
   score?: number | null;
   quality?: number | null;
   candidateIds?: string[];
@@ -1689,7 +1690,7 @@ export interface PhotoRestoreRehearsalItem {
   sourcePath?: string;
   sourceKind?: string;
   trashPath?: string;
-  status: "ready" | "warning" | "blocked" | string;
+  status: ExtensibleStringUnion<"ready" | "warning" | "blocked">;
   issue: string;
   detail: string;
   canRestoreCatalog: boolean;
@@ -1723,7 +1724,7 @@ export interface PhotoRestoreRehearsalValue {
   generatedAt: string;
   operationId: string;
   ok: boolean;
-  status: "ready" | "warning" | "attention" | string;
+  status: ExtensibleStringUnion<"ready" | "warning" | "attention">;
   counts: {
     operations: number;
     items: number;
@@ -1747,7 +1748,7 @@ export interface PhotoItemsPage {
   items: PhotoItem[];
   searchIndex?: PhotoSearchIndexStatus;
   validation?: PhotoAlbumValidation[];
-  groupMode?: "all" | "best" | string;
+  groupMode?: ExtensibleStringUnion<"all" | "best">;
   nearby?: { latitude: number; longitude: number; radiusKm: number };
   previewFailures?: number;
   previewErrorSamples?: Array<{ sourcePath: string; message: string }>;
@@ -1813,7 +1814,7 @@ export interface PhotoDateBucket {
 
 export interface PhotoDateBucketList {
   folderId: string;
-  mode: "years" | "months" | "days" | "recentDays" | string;
+  mode: ExtensibleStringUnion<"years" | "months" | "days" | "recentDays">;
   total: number;
   buckets: PhotoDateBucket[];
   searchIndex?: PhotoSearchIndexStatus;
@@ -1821,7 +1822,7 @@ export interface PhotoDateBucketList {
 
 export interface PhotoLibrarySearchItem {
   id: string;
-  kind: "photo" | "folder" | "keyword" | "date" | string;
+  kind: ExtensibleStringUnion<"photo" | "folder" | "keyword" | "date">;
   title: string;
   subtitle?: string;
   snippet?: string;
@@ -1840,7 +1841,7 @@ export interface PhotoLibrarySearchItem {
   importSourceKind?: string;
   importSourceLabel?: string;
   keyword?: string;
-  dateBucketMode?: "years" | "months" | "days" | "recentDays" | string;
+  dateBucketMode?: ExtensibleStringUnion<"years" | "months" | "days" | "recentDays">;
   dateBucketKey?: string;
   searchText?: string;
   count?: number;
@@ -1871,7 +1872,7 @@ export interface PhotoAssetPerson {
   assetId: string;
   candidateId: string;
   personName: string;
-  status: CandidateStatus | string;
+  status: ExtensibleStringUnion<CandidateStatus>;
   score: number;
   quality: number;
   band: string;
@@ -1881,11 +1882,11 @@ export interface PhotoAssetPerson {
 export interface PhotoAsset {
   assetId: string;
   sourcePath: string;
-  sourceKind: "managed" | "referenced" | string;
+  sourceKind: ExtensibleStringUnion<"managed" | "referenced">;
   fileSignature: Record<string, unknown>;
   contentHash: string;
   perceptualHash: string;
-  mediaKind: "image" | "video" | "live_photo" | "raw" | "other" | string;
+  mediaKind: ExtensibleStringUnion<"image" | "video" | "live_photo" | "raw" | "other">;
   mimeType: string;
   width?: number | null;
   height?: number | null;
@@ -1942,15 +1943,15 @@ export interface PhotoSelectionExportValue {
   stripLocation?: boolean;
   allowRenderFallback?: boolean;
   preserveColorProfile?: boolean;
-  targetColorProfile?: "source" | "srgb" | "display-p3" | "adobe-rgb" | "custom-icc" | "none" | string;
+  targetColorProfile?: ExtensibleStringUnion<"source" | "srgb" | "display-p3" | "adobe-rgb" | "custom-icc" | "none">;
   targetColorProfilePath?: string;
   includeExistingSidecars?: boolean;
-  exportVariant?: "original" | "rendered" | string;
-  renderFormat?: "jpeg" | "png" | "tiff" | "heic" | "mp4" | string;
+  exportVariant?: ExtensibleStringUnion<"original" | "rendered">;
+  renderFormat?: ExtensibleStringUnion<"jpeg" | "png" | "tiff" | "heic" | "mp4">;
   renderQuality?: number;
   renderMaxDimension?: number;
-  videoRenderFormat?: "mp4" | "mov" | "m4v" | "webm" | "hevc" | "prores" | string;
-  videoRenderQuality?: "small" | "medium" | "high" | string;
+  videoRenderFormat?: ExtensibleStringUnion<"mp4" | "mov" | "m4v" | "webm" | "hevc" | "prores">;
+  videoRenderQuality?: ExtensibleStringUnion<"small" | "medium" | "high">;
   filenameTemplate?: string;
   subfolderTemplate?: string;
   counts: {
@@ -2005,14 +2006,14 @@ export interface PhotoContactSheetExportValue {
   targetPath: string;
   targetPaths: string[];
   manifestPath: string;
-  format: "pdf" | "png" | "jpeg" | string;
-  layoutPreset?: "custom" | "full_page" | "two_up" | "four_up" | "wallet" | string;
+  format: ExtensibleStringUnion<"pdf" | "png" | "jpeg">;
+  layoutPreset?: ExtensibleStringUnion<"custom" | "full_page" | "two_up" | "four_up" | "wallet">;
   columns: number;
   thumbnailSize: number;
   effectiveColumns?: number;
   effectiveThumbnailSize?: number;
   includeCaptions: boolean;
-  captionMode?: "title_date_people" | "metadata" | "filename" | string;
+  captionMode?: ExtensibleStringUnion<"title_date_people" | "metadata" | "filename">;
   title?: string;
   pageSize?: string;
   counts: {
@@ -2082,8 +2083,8 @@ export interface PhotoSlideshowExportValue {
   htmlPath: string;
   targetPath?: string;
   manifestPath: string;
-  outputMode?: "html" | "video" | string;
-  exportKind?: "slideshow" | "memoryMovie" | string;
+  outputMode?: ExtensibleStringUnion<"html" | "video">;
+  exportKind?: ExtensibleStringUnion<"slideshow" | "memoryMovie">;
   projectId?: string;
   memoryId?: string;
   memoryName?: string;
@@ -2121,8 +2122,8 @@ export interface PhotoSlideshowExportValue {
   motionPresets?: string[];
   resolvedMotionPresets?: string[];
   chapters?: Array<{ id?: string; index?: number; slideIndex?: number; sourceIndex?: number; sourcePath?: string; relativePath?: string; label?: string; kind?: string; motion?: string; keyframes?: PhotoSlideshowMotionKeyframesValue | null; focalX?: number; focalY?: number; cropZoom?: number; captionText?: string; captionPlacement?: string; captionRegion?: { x?: number; y?: number; width?: number; height?: number }; captionTypography?: string; captionWrap?: string; captions?: PhotoSlideshowCaptionValue[]; resolvedMotion?: string; startMs?: number; durationMs?: number; endMs?: number }>;
-  videoRenderFormat?: "mp4" | "mov" | "m4v" | "webm" | "hevc" | "prores" | string;
-  videoRenderQuality?: "small" | "medium" | "high" | string;
+  videoRenderFormat?: ExtensibleStringUnion<"mp4" | "mov" | "m4v" | "webm" | "hevc" | "prores">;
+  videoRenderQuality?: ExtensibleStringUnion<"small" | "medium" | "high">;
   renderMaxDimension?: number;
   videoRender?: { targetPath?: string; slideCount?: number; durationMs?: number; width?: number; height?: number; audioTrack?: string; audioGenerated?: boolean; audioImported?: boolean; audioPath?: string; audioVolume?: number; audioFadeMs?: number; audioStartMs?: number; audioEndMs?: number; audioPlacementStartMs?: number; audioPlacementEndMs?: number; transitionEffect?: string; transitionDurationMs?: number; transitionFfmpegEffect?: string; transitionTimeline?: Array<{ index?: number; transitionOut?: string; transitionDurationMs?: number; transitionFfmpegEffect?: string }>; transitionApplied?: boolean; motionPresets?: string[]; resolvedMotionPresets?: string[]; motionApplied?: boolean; titleCardIncluded?: boolean; themeTemplateStageWidth?: number; templateStageFrame?: { x?: number; y?: number; width?: number; height?: number }; themeTemplateLayout?: string; templateLayoutChromeRendered?: boolean; templateLayoutChromeStyle?: string; templateLayoutMediaFrame?: { x?: number; y?: number; width?: number; height?: number }; templateLayoutBackgroundColor?: string; themeTemplateFrameStyle?: string; templateFrameRendered?: boolean; templateFrameBorderPx?: number; templateFrameColor?: string; themeTemplateChromeDensity?: string; templateChromeDensity?: string; themeTemplateCaptionPreset?: string; templateCaptionPreset?: string; templateCaptionResolvedPreset?: string; themeTemplateRegionMap?: PhotoSlideshowTemplateRegionMapValue; templateCaptionResolvedRegionMap?: PhotoSlideshowTemplateRegionMapValue; templateChromeRendered?: boolean; templateChromeBarPx?: number; templateChromeColor?: string; templateChromeOverlayRendered?: boolean; templateChromeTextRendered?: boolean; templateChromeOverlayCount?: number; templateChromeOverlayKinds?: string[]; templateChromeOverlayRows?: Array<{ index?: number; title?: string; sourceLabel?: string; chapterLabel?: string; counter?: string; themeTemplateStageWidth?: number; templateStageFrame?: { x?: number; y?: number; width?: number; height?: number }; themeTemplateLayout?: string; templateLayoutChromeRendered?: boolean; templateLayoutChromeStyle?: string; templateLayoutMediaFrame?: { x?: number; y?: number; width?: number; height?: number }; themeTemplateCaptionPreset?: string; templateCaptionResolvedPreset?: string; themeTemplateRegionMap?: PhotoSlideshowTemplateRegionMapValue; templateCaptionResolvedRegionMap?: PhotoSlideshowTemplateRegionMapValue; captionText?: string; captionPlacement?: string; captionRegion?: { x?: number; y?: number; width?: number; height?: number }; captionTypography?: string; captionWrap?: string; captions?: PhotoSlideshowCaptionValue[] }>; templateCaptionRendered?: boolean; templateCaptionOverlayCount?: number; templateCaptionItemCount?: number; cropFocusRendered?: boolean };
   titleCard?: { included?: boolean; title?: string; subtitle?: string; durationMs?: number; targetPath?: string; relativePath?: string; palette?: string; resolvedPalette?: string; layout?: string; fontScale?: string; showFooter?: boolean };
@@ -2148,7 +2149,7 @@ export interface PhotoVideoFrameExportValue {
   posterFrameReused?: boolean;
   posterTimestampMs?: number | null;
   posterPreviewPath?: string;
-  renderFormat: "jpeg" | "png" | "tiff" | string;
+  renderFormat: ExtensibleStringUnion<"jpeg" | "png" | "tiff">;
   renderQuality: number;
   renderMaxDimension: number;
   width?: number;
@@ -2167,11 +2168,11 @@ export interface PhotoVideoTrimExportValue {
   endMs: number;
   trimDurationMs: number;
   sourceDurationMs?: number;
-  videoRenderFormat: "mp4" | "mov" | "m4v" | "webm" | "hevc" | "prores" | string;
-  videoRenderQuality: "small" | "medium" | "high" | string;
+  videoRenderFormat: ExtensibleStringUnion<"mp4" | "mov" | "m4v" | "webm" | "hevc" | "prores">;
+  videoRenderQuality: ExtensibleStringUnion<"small" | "medium" | "high">;
   renderMaxDimension: number;
   videoRotateDegrees?: number;
-  videoCropAspect?: "none" | "square" | "landscape" | "portrait" | string;
+  videoCropAspect?: ExtensibleStringUnion<"none" | "square" | "landscape" | "portrait">;
   videoTransformApplied?: boolean;
   sharedEvent?: PhotoAssetEventValue;
 }
@@ -2183,8 +2184,8 @@ export interface PhotoLiveMotionExportValue {
   manifestPath: string;
   sourcePath: string;
   motionSourcePath: string;
-  exportVariant?: "motion" | "loop_gif" | "bounce_gif" | string;
-  format?: "video" | "gif" | string;
+  exportVariant?: ExtensibleStringUnion<"motion" | "loop_gif" | "bounce_gif">;
+  format?: ExtensibleStringUnion<"video" | "gif">;
   durationMs?: number;
   frameCount?: number;
   baseFrameCount?: number;
@@ -2200,8 +2201,8 @@ export interface PhotoSubjectCutoutExportValue {
   targetPath: string;
   manifestPath: string;
   sourcePath: string;
-  exportVariant?: "cutout" | "sticker" | string;
-  format?: "png" | string;
+  exportVariant?: ExtensibleStringUnion<"cutout" | "sticker">;
+  format?: ExtensibleStringUnion<"png">;
   renderMaxDimension?: number;
   width?: number;
   height?: number;
@@ -2224,7 +2225,7 @@ export interface PhotoPortraitBlurExportValue {
   targetPath: string;
   manifestPath: string;
   sourcePath: string;
-  format?: "png" | string;
+  format?: ExtensibleStringUnion<"png">;
   renderMaxDimension?: number;
   width?: number;
   height?: number;
@@ -2284,7 +2285,7 @@ export interface PhotoVideoPosterValue {
   sourcePath: string;
   timestampMs: number;
   previewPath: string;
-  policy?: "manual" | "auto" | "default" | string;
+  policy?: ExtensibleStringUnion<"manual" | "auto" | "default">;
   previewUrl?: string;
   width?: number;
   height?: number;
@@ -2340,7 +2341,7 @@ export interface ScanMetrics {
   singleReferenceMatches?: number;
   hardPoseUnsupported?: number;
   safeModeFaceCropAllowed?: number;
-  memoryPressure?: "normal" | "elevated" | "high" | "critical" | string;
+  memoryPressure?: ExtensibleStringUnion<"normal" | "elevated" | "high" | "critical">;
   memoryMessage?: string;
   memoryAvailableBytes?: number;
   memoryTotalBytes?: number;
@@ -2529,7 +2530,7 @@ export interface MediaActionHistoryValue {
   items: Array<{
     manifestPath: string;
     generatedAt: string;
-    action: CandidateMediaAction | string;
+    action: ExtensibleStringUnion<CandidateMediaAction>;
     destinationPath: string;
     mediaPath: string;
     counts: CandidateMediaActionValue["counts"];
@@ -2602,8 +2603,8 @@ export interface MediaTrashCleanupValue {
 }
 
 export interface MediaActionProgress {
-  phase: "started" | "processing" | "complete" | "cancelled" | "error" | string;
-  action: CandidateMediaAction | string;
+  phase: ExtensibleStringUnion<"started" | "processing" | "complete" | "cancelled" | "error">;
+  action: ExtensibleStringUnion<CandidateMediaAction>;
   processed: number;
   total: number;
   currentPath?: string;
@@ -2887,7 +2888,7 @@ export interface ReferenceGapItem {
     edgeFace: number;
     unknown: number;
   };
-  ageBuckets: Record<AgeBucket | string, number>;
+  ageBuckets: Record<ExtensibleStringUnion<AgeBucket>, number>;
   averageQuality: number;
   bestQuality: number;
   pendingCandidates: number;
@@ -2900,7 +2901,7 @@ export interface ReferenceGapItem {
   gaps: string[];
   actions: string[];
   score: number;
-  status: "strong" | "usable" | "weak" | "blocked" | string;
+  status: ExtensibleStringUnion<"strong" | "usable" | "weak" | "blocked">;
 }
 
 export interface ReferenceGapReport {
@@ -3069,7 +3070,7 @@ export interface CalibrationLearningArtifact {
   artifactId?: string;
   artifact_type?: string;
   artifactType?: string;
-  status: "candidate" | "staged" | "promoted" | "rejected" | "rolled_back" | string;
+  status: ExtensibleStringUnion<"candidate" | "staged" | "promoted" | "rejected" | "rolled_back">;
   model_name?: string;
   modelName?: string;
   version_key?: string;
@@ -3309,7 +3310,7 @@ export interface AccuracyValidationPackValue {
   segments: Record<string, AccuracyBucket>;
   recommendations: string[];
   runId?: string;
-  status?: "pass" | "warn" | "fail" | string;
+  status?: ExtensibleStringUnion<"pass" | "warn" | "fail">;
   passed?: number;
   warned?: number;
   failed?: number;
@@ -3321,7 +3322,7 @@ export interface AccuracyValidationPackValue {
 
 export interface AccuracyValidationScenarioResult {
   scenario: string;
-  status: "pass" | "warn" | "fail" | string;
+  status: ExtensibleStringUnion<"pass" | "warn" | "fail">;
   expectedMatch: boolean;
   score: number;
   likelyThreshold: number;
@@ -3334,7 +3335,7 @@ export interface AccuracyValidationScenarioResult {
 export interface AccuracyValidationRun {
   runId: string;
   generatedAt: string;
-  status: "pass" | "warn" | "fail" | string;
+  status: ExtensibleStringUnion<"pass" | "warn" | "fail">;
   passed: number;
   warned: number;
   failed: number;
@@ -3538,7 +3539,7 @@ export interface PublicDatasetModelComparisonPack {
   pack: string;
   label: string;
   available: boolean;
-  status: "complete" | "missing" | "error" | string;
+  status: ExtensibleStringUnion<"complete" | "missing" | "error">;
   engine: string;
   error: string;
   metrics: PublicDatasetBenchmarkResult["metrics"] | null;
@@ -3554,11 +3555,11 @@ export interface PublicDatasetModelComparisonPack {
 }
 
 export interface ModelPackRecommendation {
-  status: "switch" | "keep" | "unavailable" | string;
+  status: ExtensibleStringUnion<"switch" | "keep" | "unavailable">;
   recommendedPack: string | null;
   recommendedLabel?: string;
   currentPack: string;
-  confidence: "high" | "medium" | "low" | "none" | string;
+  confidence: ExtensibleStringUnion<"high" | "medium" | "low" | "none">;
   score?: number;
   currentScore?: number | null;
   margin?: number;
@@ -3754,7 +3755,7 @@ export interface ModelDistributionItem {
   sha256: string;
   sizeBytes: number;
   license: string;
-  licenseState: "declared" | "missing" | "needs-review" | string;
+  licenseState: ExtensibleStringUnion<"declared" | "missing" | "needs-review">;
   installed: boolean;
   archivePath: string;
   installedPath: string;
@@ -3812,7 +3813,7 @@ export interface PhotoAssetIndexPage {
 export interface ReferenceSuggestion {
   artifactId: string;
   artifactHash: string;
-  status: "candidate" | "staged" | "promoted" | "rejected" | "rolled_back" | string;
+  status: ExtensibleStringUnion<"candidate" | "staged" | "promoted" | "rejected" | "rolled_back">;
   candidateId: string;
   personName: string;
   sourceHash: string;
@@ -3894,7 +3895,7 @@ export interface CommandResult<T = unknown> {
 
 export interface ScanProgress extends Partial<ScanMetrics> {
   phase: "started" | "processing" | "protected" | "candidate" | "processed" | "clustering" | "verifying" | "verified" | "model_backfill" | "paused" | "error" | "complete" | "cancelled";
-  source?: "manual" | "watch" | "camera" | string;
+  source?: ExtensibleStringUnion<"manual" | "watch" | "camera">;
   currentPath?: string;
   candidateId?: string;
   message?: string;

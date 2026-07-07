@@ -367,6 +367,10 @@ const PHOTO_PLACE_MAP_CLUSTER_RADII = [10, 7, 4, 0] as const;
 const PHOTO_NEARBY_RADIUS_OPTIONS = ["5", "25", "100"] as const;
 const PHOTO_STATUS_FILTERS: CandidateStatus[] = ["pending", "accepted", "uncertain", "rejected"];
 
+function isPhotoDateBucketViewMode(value: unknown): value is Exclude<PhotoDateViewMode, "all"> {
+  return value === "years" || value === "months" || value === "days" || value === "recentDays";
+}
+
 type PhotoLightboxVideoControlsProps = {
   videoRef: RefObject<HTMLVideoElement | null>;
   sourceKey: string;
@@ -7334,9 +7338,7 @@ export function PhotosView(props: {
       return;
     }
     if (item.kind === "date" && item.dateBucketKey) {
-      const mode = item.dateBucketMode === "years" || item.dateBucketMode === "months" || item.dateBucketMode === "days" || item.dateBucketMode === "recentDays"
-        ? item.dateBucketMode
-        : "days";
+      const mode = isPhotoDateBucketViewMode(item.dateBucketMode) ? item.dateBucketMode : "days";
       setActiveId("all");
       setPhotoDateViewMode(mode);
       selectActiveDateBucket(item.dateBucketKey);
