@@ -181,9 +181,31 @@ def assert_safe_mode_override_schema_migrates_and_private_delete_clears() -> Non
         count = int(db_conn.execute("SELECT COUNT(*) AS n FROM safe_mode_overrides").fetchone()["n"])
         assert count == 0
     db.set_safe_mode_override("private-safe-mode-hash", True, reason="operator-confirmed-sensitive")
+    event_asset_id = db._photo_asset_id(str(root / "viewed.jpg"))
+    with db.connect() as db_conn:
+        db_conn.execute(
+            """
+            INSERT INTO photo_assets(asset_id, source_path, added_at, updated_at)
+            VALUES(?, ?, ?, ?)
+            """,
+            (event_asset_id, str(root / "viewed.jpg"), "2026-07-07T00:00:00Z", "2026-07-07T00:00:00Z"),
+        )
+        db_conn.execute(
+            """
+            INSERT INTO photo_asset_events(event_id, asset_id, event_type, event_at, actor, metadata_json)
+            VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            ("evt-private-viewed", event_asset_id, "viewed", "2026-07-07T00:01:00Z", "test", '{"surface":"lightbox"}'),
+        )
     deleted = db.clear_private_data()
     assert deleted["safe_mode_overrides"] == 1
+    assert deleted["photo_asset_events"] == 1
     assert db.safe_mode_override_for("private-safe-mode-hash") is None
+    with db.connect() as db_conn:
+        event_count = int(db_conn.execute("SELECT COUNT(*) AS n FROM photo_asset_events").fetchone()["n"])
+        asset_count = int(db_conn.execute("SELECT COUNT(*) AS n FROM photo_assets").fetchone()["n"])
+    assert event_count == 0
+    assert asset_count == 1
 
 
 def assert_safe_mode_flagged_list_is_paged_and_preview_budgeted() -> None:
@@ -5550,6 +5572,22 @@ def assert_privacy_controls_delete_face_data() -> None:
     assert blocked["value"]["summary"]["total"] == 2
     api.project.db.set_safe_mode_override("private-safe-mode-hash", True, reason="operator-confirmed-sensitive")
     assert api.project.db.safe_mode_override_for("private-safe-mode-hash") is True
+    event_asset_id = api.project.db._photo_asset_id(str(scan / "candidate.jpg"))
+    with api.project.db.connect() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO photo_assets(asset_id, source_path, added_at, updated_at)
+            VALUES(?, ?, ?, ?)
+            """,
+            (event_asset_id, str(scan / "candidate.jpg"), "2026-07-07T00:00:00Z", "2026-07-07T00:00:00Z"),
+        )
+        conn.execute(
+            """
+            INSERT INTO photo_asset_events(event_id, asset_id, event_type, event_at, actor, metadata_json)
+            VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            ("evt-delete-face-data-viewed", event_asset_id, "viewed", "2026-07-07T00:01:00Z", "test", "{}"),
+        )
     before = api.handle("privacy_report", {})
     assert before["references"] == 1
     assert before["candidates"] == 1
@@ -5558,7 +5596,11 @@ def assert_privacy_controls_delete_face_data() -> None:
     assert deleted["value"]["before"]["references"] == 1
     assert deleted["value"]["dbDeleted"]["blocked_pairs"] == 2
     assert deleted["value"]["dbDeleted"]["safe_mode_overrides"] == 1
+    assert deleted["value"]["dbDeleted"]["photo_asset_events"] == 1
     assert api.project.db.safe_mode_override_for("private-safe-mode-hash") is None
+    with api.project.db.connect() as conn:
+        event_count = int(conn.execute("SELECT COUNT(*) AS n FROM photo_asset_events").fetchone()["n"])
+    assert event_count == 0
     assert deleted["state"]["counts"]["references"] == 0
     assert deleted["state"]["counts"]["candidates"] == 0
     after = api.handle("privacy_report", {})

@@ -23424,6 +23424,7 @@ class WorkspaceDb:
         tables = [
             "safety_cache",
             "safe_mode_overrides",
+            "photo_asset_events",
             "embedding_cache",
             "calibration_labels",
             "training_examples",
