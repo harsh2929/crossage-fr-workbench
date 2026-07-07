@@ -18890,6 +18890,56 @@ def test_photo_contact_sheet_export_writes_manifest_and_pages() -> None:
     print("ok photo contact sheet export")
 
 
+def test_photo_contact_sheet_reuses_cached_preview_before_original_decode() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        photo = base / "cached-preview-contact.jpg"
+        _write_pattern_photo(photo, "near")
+        imported = api.import_photos({
+            "sourcePaths": [str(photo)],
+            "storageMode": "referenced",
+            "sourceLabel": "Contact preview cache",
+        })
+        source_path = imported["importedPaths"][0]
+        preview_path = api.project.preview_path_for(source_path, create=True)
+        assert preview_path and Path(preview_path).is_file(), preview_path
+
+        original_load_image = api_server_module.load_image
+        original_resolved = str(Path(source_path).resolve())
+        calls: list[str] = []
+
+        def fail_original_load(path: Path, *args: Any, **kwargs: Any):
+            resolved = str(Path(path).resolve())
+            calls.append(resolved)
+            if resolved == original_resolved:
+                raise AssertionError("contact sheet should reuse the cached preview before decoding the original")
+            return original_load_image(path, *args, **kwargs)
+
+        api_server_module.load_image = fail_original_load  # type: ignore[assignment]
+        try:
+            result = api.export_photo_contact_sheet({
+                "sourcePaths": [source_path],
+                "format": "png",
+                "columns": 1,
+                "thumbnailSize": 128,
+                "includeCaptions": False,
+            })
+        finally:
+            api_server_module.load_image = original_load_image  # type: ignore[assignment]
+
+        assert calls == [str(Path(preview_path).resolve())], calls
+        assert result["counts"]["included"] == 1, result
+        target = Path(result["targetPath"])
+        assert target.exists() and target.suffix == ".png", result
+        manifest = json.loads(Path(result["manifestPath"]).read_text(encoding="utf-8"))
+        item = manifest["items"][0]
+        assert item["result"] == "included", item
+        assert item["thumbnailSource"] == "preview", item
+        assert item["previewPath"] == preview_path, item
+    print("ok contact sheet reuses cached preview before original decode")
+
+
 def test_photo_video_frame_export_writes_still_image_manifest_and_event() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -19408,6 +19458,7 @@ if __name__ == "__main__":
     test_photo_video_trim_export_with_quality_settings()
     test_photo_export_move_records_undoable_file_move()
     test_photo_contact_sheet_export_writes_manifest_and_pages()
+    test_photo_contact_sheet_reuses_cached_preview_before_original_decode()
     test_photo_video_frame_export_writes_still_image_manifest_and_event()
     test_photo_subject_cutout_export_writes_alpha_png_manifest_and_event()
     test_photo_export_jobs_do_not_open_network_sockets()

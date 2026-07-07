@@ -27468,6 +27468,20 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 lines.append(file_text)
             return "\n".join(lines)
 
+        def load_contact_thumbnail(resolved: Path, suffix: str) -> tuple[Any, str, str, str]:
+            if suffix not in IMAGE_EXTENSIONS | VIDEO_EXTENSIONS:
+                raise ValueError("Unsupported contact-sheet media type.")
+            preview_error = ""
+            preview_path = self.project.preview_path_for(str(resolved), create=False) or ""
+            if preview_path:
+                try:
+                    return load_image(Path(preview_path)).convert("RGB"), "preview", preview_path, preview_error
+                except Exception as exc:
+                    preview_error = str(exc)[:240]
+            if suffix in IMAGE_EXTENSIONS:
+                return load_image(resolved).convert("RGB"), "original", preview_path, preview_error
+            return self._photo_video_frame_image(resolved, 0).convert("RGB"), "video-frame", preview_path, preview_error
+
         for index, source_value in enumerate(unique_paths, start=1):
             source = Path(source_value).expanduser()
             row = {
@@ -27476,6 +27490,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "result": "missing",
                 "label": source.name or "Photo",
                 "mediaKind": "",
+                "thumbnailSource": "",
+                "previewPath": "",
+                "previewError": "",
                 "error": "",
             }
             try:
@@ -27497,14 +27514,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             payload = self._photo_export_sidecar_payload(str(resolved))
             row["label"] = contact_label(payload, resolved)
             try:
-                if suffix in IMAGE_EXTENSIONS:
-                    thumb = load_image(resolved).convert("RGB")
-                    row["mediaKind"] = "image"
-                elif suffix in VIDEO_EXTENSIONS:
-                    thumb = self._photo_video_frame_image(resolved, 0).convert("RGB")
-                    row["mediaKind"] = "video"
-                else:
-                    raise ValueError("Unsupported contact-sheet media type.")
+                row["mediaKind"] = "image" if suffix in IMAGE_EXTENSIONS else ("video" if suffix in VIDEO_EXTENSIONS else "")
+                thumb, thumbnail_source, preview_path, preview_error = load_contact_thumbnail(resolved, suffix)
+                row["thumbnailSource"] = thumbnail_source
+                row["previewPath"] = preview_path
+                row["previewError"] = preview_error
                 resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", getattr(Image, "LANCZOS", 1))
                 thumb.thumbnail((tile_size, tile_size), resampling)
                 row["result"] = "included"
