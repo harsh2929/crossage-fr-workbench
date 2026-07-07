@@ -12,8 +12,12 @@ Run: PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 python3 tests/safety_explain_units.p
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
+from pathlib import Path
 
+from crossage_fr.ingest import safety_explain as safety_explain_module
 from crossage_fr.ingest.safety_explain import (
     ExplainDetection,
     box_iou,
@@ -22,6 +26,7 @@ from crossage_fr.ingest.safety_explain import (
     letterbox_params,
     non_max_suppression,
     normalize_detection_box,
+    install_explainer_model,
     unletterbox_box,
 )
 
@@ -69,6 +74,54 @@ result = explain_sensitivity(None)
 check("no-model → not available", result.get("available") is False)
 check("no-model → empty detections", result.get("detections") == [])
 check("no-model → has a reason", bool(result.get("reason")))
+
+
+def _clear_explainer_cache() -> None:
+    if hasattr(safety_explain_module.find_explainer_model, "cache_clear"):
+        safety_explain_module.find_explainer_model.cache_clear()
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    base = Path(tmp)
+    source = base / "downloaded.onnx"
+    source.write_bytes(b"fake onnx payload" * 128)
+    user_model_root = base / "user-data" / "models"
+    expected_dir = user_model_root / "safety-explain"
+    saved_env = {
+        key: os.environ.get(key)
+        for key in (
+            "CROSSAGE_PACKAGED_BACKEND",
+            "CROSSAGE_USER_MODEL_DIR",
+            "CROSSAGE_SAFETY_EXPLAIN_DIR",
+            "CROSSAGE_SAFETY_EXPLAIN_INSTALL_DIR",
+        )
+    }
+    try:
+        os.environ["CROSSAGE_PACKAGED_BACKEND"] = "1"
+        os.environ["CROSSAGE_USER_MODEL_DIR"] = str(user_model_root)
+        os.environ.pop("CROSSAGE_SAFETY_EXPLAIN_DIR", None)
+        os.environ.pop("CROSSAGE_SAFETY_EXPLAIN_INSTALL_DIR", None)
+        _clear_explainer_cache()
+        installed = install_explainer_model(
+            source_path=str(source),
+            model_name="../unsafe explainer name",
+            input_size=640,
+            license="MIT",
+            classes=["sensitive_region"],
+        )
+        installed_path = expected_dir / "unsafe-explainer-name.onnx"
+        check("packaged explainer install succeeds", installed.get("ok") is True)
+        check("packaged explainer writes into user model dir", installed_path.exists())
+        check("packaged explainer sanitizes model filename", not (base / "unsafe explainer name.onnx").exists())
+        report = safety_explain_module.explain_model_report()
+        check("packaged explainer discovery finds user model", report.get("path") == str(installed_path.resolve()))
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        _clear_explainer_cache()
 
 # --- NudeNet YOLO geometry (letterbox pad-resize → detect → un-letterbox) ---
 

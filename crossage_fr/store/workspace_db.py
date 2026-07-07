@@ -1115,7 +1115,77 @@ class WorkspaceDb:
         columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(safe_mode_overrides)").fetchall()}
         if "content_hash" in columns and "asset_id" not in columns:
             return
+        migrated_rows: list[tuple[str, int, str, str]] = []
+        reason_expr = "COALESCE(reason, '')" if "reason" in columns else "''"
+        created_expr = "COALESCE(created_at, '')" if "created_at" in columns else "''"
+        order_expr = "COALESCE(created_at, '')" if "created_at" in columns else "''"
+        joined_reason_expr = "COALESCE(smo.reason, '')" if "reason" in columns else "''"
+        joined_created_expr = "COALESCE(smo.created_at, '')" if "created_at" in columns else "''"
+        joined_order_expr = "COALESCE(smo.created_at, '')" if "created_at" in columns else "''"
+        if "override_sensitive" in columns:
+            if "content_hash" in columns:
+                try:
+                    migrated_rows.extend(
+                        (
+                            str(row["content_hash"] or ""),
+                            1 if bool(row["override_sensitive"]) else 0,
+                            str(row["reason"] or ""),
+                            str(row["created_at"] or ""),
+                        )
+                        for row in conn.execute(
+                            f"""
+                            SELECT content_hash, override_sensitive, {reason_expr} AS reason, {created_expr} AS created_at
+                            FROM safe_mode_overrides
+                            WHERE COALESCE(content_hash, '') <> ''
+                            ORDER BY {order_expr} ASC
+                            """
+                        ).fetchall()
+                    )
+                except sqlite3.DatabaseError:
+                    migrated_rows = []
+            if "asset_id" in columns and self._table_exists(conn, "photo_assets"):
+                photo_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(photo_assets)").fetchall()}
+                if "asset_id" in photo_columns and "content_hash" in photo_columns:
+                    try:
+                        migrated_rows.extend(
+                            (
+                                str(row["content_hash"] or ""),
+                                1 if bool(row["override_sensitive"]) else 0,
+                                str(row["reason"] or ""),
+                                str(row["created_at"] or ""),
+                            )
+                            for row in conn.execute(
+                                f"""
+                                SELECT pa.content_hash AS content_hash, smo.override_sensitive AS override_sensitive,
+                                       {joined_reason_expr} AS reason, {joined_created_expr} AS created_at
+                                FROM safe_mode_overrides AS smo
+                                JOIN photo_assets AS pa ON pa.asset_id = smo.asset_id
+                                WHERE COALESCE(pa.content_hash, '') <> ''
+                                ORDER BY {joined_order_expr} ASC
+                                """
+                            ).fetchall()
+                        )
+                    except sqlite3.DatabaseError:
+                        pass
         conn.execute("DROP TABLE IF EXISTS safe_mode_overrides")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS safe_mode_overrides (
+                content_hash TEXT PRIMARY KEY,
+                override_sensitive INTEGER NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        if migrated_rows:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO safe_mode_overrides(content_hash, override_sensitive, reason, created_at)
+                VALUES(?, ?, ?, ?)
+                """,
+                [(content_hash, value, reason, created_at or now_iso()) for content_hash, value, reason, created_at in migrated_rows if content_hash],
+            )
 
     def _backfill_photo_album_item_positions(self, conn: sqlite3.Connection) -> None:
         if not self._table_exists(conn, "photo_album_items"):

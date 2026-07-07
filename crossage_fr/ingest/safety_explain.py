@@ -25,6 +25,7 @@ from pathlib import Path
 import json
 import logging
 import os
+import re
 import sys
 from typing import Any
 
@@ -170,20 +171,68 @@ def non_max_suppression(detections: list[ExplainDetection], iou_threshold: float
     return result
 
 
+def _is_packaged_backend() -> bool:
+    return bool(getattr(sys, "frozen", False) or os.environ.get("CROSSAGE_PACKAGED_BACKEND") == "1")
+
+
+def _unique_dirs(paths: list[Path]) -> list[Path]:
+    result: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        try:
+            resolved = path.expanduser().resolve()
+        except (OSError, RuntimeError):
+            resolved = path.expanduser()
+        key = str(resolved)
+        if key and key not in seen:
+            result.append(resolved)
+            seen.add(key)
+    return result
+
+
+def _safe_explainer_model_stem(value: str, fallback: str = "nudenet-explainer") -> str:
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip()).strip(".-_")
+    return (stem or fallback)[:120]
+
+
+def _explainer_install_dir() -> Path:
+    override = (
+        os.environ.get("CROSSAGE_SAFETY_EXPLAIN_INSTALL_DIR", "").strip()
+        or os.environ.get("CROSSAGE_SAFETY_EXPLAIN_DIR", "").strip()
+    )
+    if override:
+        return Path(override)
+    user_model_root = os.environ.get("CROSSAGE_USER_MODEL_DIR", "").strip()
+    if user_model_root:
+        return Path(user_model_root) / "safety-explain"
+    if _is_packaged_backend():
+        return Path.home() / ".vintrace" / "models" / "safety-explain"
+    return Path(__file__).resolve().parents[2] / "models" / "safety-explain"
+
+
 def _explainer_model_dirs() -> list[Path]:
     dirs: list[Path] = []
     env_dir = os.environ.get("CROSSAGE_SAFETY_EXPLAIN_DIR", "").strip()
     if env_dir:
         dirs.append(Path(env_dir))
+    dirs.append(_explainer_install_dir())
     here = Path(__file__).resolve()
-    # repo/models/safety-explain and, in a packaged app, the bundled resources dir.
+    # repo/models/safety-explain and, in packaged apps, bundled resource layouts.
     dirs.append(here.parents[2] / "models" / "safety-explain")
+    dirs.append(Path.cwd() / "models" / "safety-explain")
+    try:
+        executable = Path(sys.executable).resolve()
+        dirs.append(executable.parent / "models" / "safety-explain")
+        dirs.append(executable.parent.parent / "models" / "safety-explain")
+    except (OSError, ValueError):
+        pass
     meipass = getattr(sys, "_MEIPASS", "")
     if meipass:
         dirs.append(Path(meipass) / "models" / "safety-explain")
-    return [d for d in dirs if d]
+    return _unique_dirs([d for d in dirs if d])
 
 
+@lru_cache(maxsize=1)
 def find_explainer_model() -> Path | None:
     for directory in _explainer_model_dirs():
         try:
@@ -217,14 +266,6 @@ def explain_model_report() -> dict[str, Any]:
         "reason": "Explainer model available.",
         "classes": list(manifest.get("classes", SENSITIVE_EXPLAIN_CLASSES)),
     }
-
-
-def _explainer_install_dir() -> Path:
-    override = os.environ.get("CROSSAGE_SAFETY_EXPLAIN_DIR", "").strip()
-    if override:
-        return Path(override)
-    return Path(__file__).resolve().parents[2] / "models" / "safety-explain"
-
 
 def install_explainer_model(
     *,
@@ -266,10 +307,11 @@ def install_explainer_model(
     try:
         dest_dir = _explainer_install_dir()
         dest_dir.mkdir(parents=True, exist_ok=True)
-        onnx_path = dest_dir / f"{model_name}.onnx"
+        clean_model_name = _safe_explainer_model_stem(model_name)
+        onnx_path = dest_dir / f"{clean_model_name}.onnx"
         onnx_path.write_bytes(data)
         manifest = {
-            "modelName": model_name,
+            "modelName": clean_model_name,
             "format": fmt,
             "inputSize": int(input_size),
             "license": license or "unknown",

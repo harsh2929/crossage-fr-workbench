@@ -3265,13 +3265,18 @@ class PythonBackend {
     const root = appRoot();
     const executable = findPythonExecutable();
     const isFrozenBackend = path.basename(executable).startsWith("crossage-backend");
+    const userModelRoot = path.join(app.getPath("userData"), "models");
+    const safetyExplainDir = path.join(userModelRoot, "safety-explain");
     this.stderrTail = "";
     const args = isFrozenBackend ? [] : ["-m", "crossage_fr.api_server"];
     const env = {
       ...process.env,
       PYTHONPATH: root,
       VINTRACE_WORKSPACE: process.env.VINTRACE_WORKSPACE || process.env.CROSSAGE_WORKSPACE || path.join(app.getPath("userData"), "workspace"),
-      CROSSAGE_WORKSPACE: process.env.CROSSAGE_WORKSPACE || process.env.VINTRACE_WORKSPACE || path.join(app.getPath("userData"), "workspace")
+      CROSSAGE_WORKSPACE: process.env.CROSSAGE_WORKSPACE || process.env.VINTRACE_WORKSPACE || path.join(app.getPath("userData"), "workspace"),
+      CROSSAGE_USER_MODEL_DIR: isFrozenBackend ? userModelRoot : (process.env.CROSSAGE_USER_MODEL_DIR || userModelRoot),
+      CROSSAGE_SAFETY_EXPLAIN_INSTALL_DIR: isFrozenBackend ? safetyExplainDir : (process.env.CROSSAGE_SAFETY_EXPLAIN_INSTALL_DIR || safetyExplainDir),
+      CROSSAGE_SAFETY_EXPLAIN_DIR: isFrozenBackend ? safetyExplainDir : (process.env.CROSSAGE_SAFETY_EXPLAIN_DIR || safetyExplainDir)
     };
     // MISS-01: scrub dynamic-loader injection variables before spawning the
     // backend so a local attacker who sets DYLD_*/LD_* can't load a malicious

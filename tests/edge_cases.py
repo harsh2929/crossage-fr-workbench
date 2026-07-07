@@ -184,6 +184,21 @@ def assert_safe_mode_override_schema_migrates_and_private_delete_clears() -> Non
     try:
         conn.execute(
             """
+            CREATE TABLE photo_assets (
+                asset_id TEXT PRIMARY KEY,
+                source_path TEXT NOT NULL,
+                content_hash TEXT NOT NULL DEFAULT '',
+                added_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO photo_assets(asset_id, source_path, content_hash, added_at, updated_at) VALUES(?, ?, ?, ?, ?)",
+            ("legacy-asset-id", str(root / "legacy.jpg"), "legacy-content-hash", "2026-07-07T00:00:00Z", "2026-07-07T00:00:00Z"),
+        )
+        conn.execute(
+            """
             CREATE TABLE safe_mode_overrides (
                 asset_id TEXT PRIMARY KEY,
                 override_sensitive INTEGER NOT NULL,
@@ -196,6 +211,10 @@ def assert_safe_mode_override_schema_migrates_and_private_delete_clears() -> Non
             "INSERT INTO safe_mode_overrides(asset_id, override_sensitive, reason, created_at) VALUES(?, ?, ?, ?)",
             ("legacy-asset-id", 1, "legacy", "2026-07-07T00:00:00Z"),
         )
+        conn.execute(
+            "INSERT INTO safe_mode_overrides(asset_id, override_sensitive, reason, created_at) VALUES(?, ?, ?, ?)",
+            ("missing-legacy-asset-id", 0, "unmapped", "2026-07-07T00:00:01Z"),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -204,8 +223,12 @@ def assert_safe_mode_override_schema_migrates_and_private_delete_clears() -> Non
         columns = {str(row["name"]) for row in db_conn.execute("PRAGMA table_info(safe_mode_overrides)").fetchall()}
         assert "content_hash" in columns
         assert "asset_id" not in columns
-        count = int(db_conn.execute("SELECT COUNT(*) AS n FROM safe_mode_overrides").fetchone()["n"])
-        assert count == 0
+        rows = db_conn.execute("SELECT content_hash, override_sensitive, reason FROM safe_mode_overrides").fetchall()
+        assert [(str(row["content_hash"]), int(row["override_sensitive"]), str(row["reason"])) for row in rows] == [
+            ("legacy-content-hash", 1, "legacy")
+        ]
+    assert db.safe_mode_override_for("legacy-content-hash") is True
+    assert db.safe_mode_override_for("missing-legacy-asset-id") is None
     db.set_safe_mode_override("private-safe-mode-hash", True, reason="operator-confirmed-sensitive")
     event_asset_id = db._photo_asset_id(str(root / "viewed.jpg"))
     with db.connect() as db_conn:
@@ -224,14 +247,15 @@ def assert_safe_mode_override_schema_migrates_and_private_delete_clears() -> Non
             ("evt-private-viewed", event_asset_id, "viewed", "2026-07-07T00:01:00Z", "test", '{"surface":"lightbox"}'),
         )
     deleted = db.clear_private_data()
-    assert deleted["safe_mode_overrides"] == 1
+    assert deleted["safe_mode_overrides"] == 2
     assert deleted["photo_asset_events"] == 1
+    assert db.safe_mode_override_for("legacy-content-hash") is None
     assert db.safe_mode_override_for("private-safe-mode-hash") is None
     with db.connect() as db_conn:
         event_count = int(db_conn.execute("SELECT COUNT(*) AS n FROM photo_asset_events").fetchone()["n"])
         asset_count = int(db_conn.execute("SELECT COUNT(*) AS n FROM photo_assets").fetchone()["n"])
     assert event_count == 0
-    assert asset_count == 1
+    assert asset_count == 2
 
 
 def assert_safe_mode_flagged_list_is_paged_and_preview_budgeted() -> None:
@@ -615,6 +639,11 @@ def assert_static_app_contracts() -> None:
     assert "chooseColorProfileFile:" in preload
     assert "dialog:choose-color-profile" in desktop_main
     assert "ICC profiles" in desktop_main
+    assert "CROSSAGE_USER_MODEL_DIR" in desktop_main
+    assert "CROSSAGE_SAFETY_EXPLAIN_INSTALL_DIR" in desktop_main
+    assert "CROSSAGE_SAFETY_EXPLAIN_DIR" in desktop_main
+    assert 'path.join(app.getPath("userData"), "models")' in desktop_main
+    assert 'path.join(userModelRoot, "safety-explain")' in desktop_main
     assert "app:set-language" in desktop_main
     assert "nativeUiText" in desktop_main
     assert "createAppError(\"E-WORKSPACE-LOCKED\"" in desktop_main
