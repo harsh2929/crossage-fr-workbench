@@ -5527,17 +5527,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             hidden_only=bool(body.get("hiddenOnly", False)),
             deleted_only=bool(body.get("deletedOnly", False)),
         ) or "visible"
-        asset_count = max(0, int(self.project.db.count_photo_assets()))
-        if not asset_count:
+        burst_assets = self.project.db.list_photo_burst_candidate_assets(visibility=visibility)
+        if not burst_assets:
             return {"total": 0, "stacks": []}
-        result = self.project.db.list_photo_asset_page(
-            offset=0,
-            limit=max(1, asset_count),
-            visibility=visibility,
-            sort="filename",
-        )
         groups: dict[str, list[dict[str, Any]]] = {}
-        for asset in result.get("assets", []):
+        for asset in burst_assets:
             if not isinstance(asset, dict):
                 continue
             info = self._photo_burst_asset_info(asset)
@@ -5567,17 +5561,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         single_source = str(params.get("sourcePath", params.get("path", "")) or "").strip()
         if single_source and single_source not in keep_paths and not clear:
             keep_paths.append(single_source)
-        if not stack_id and single_source:
-            stacks_for_source = self.list_photo_burst_stacks({"includeItems": True, "includeSingles": True, "visibility": "all"})["stacks"]
-            for stack in stacks_for_source:
-                if single_source in set(stack.get("sourcePaths", [])):
-                    stack_id = str(stack.get("stackId", "") or "")
-                    break
-        if not stack_id:
-            raise ValueError("A burst stackId or sourcePath is required.")
         if not clear and not keep_paths:
             raise ValueError("At least one keepSourcePaths item is required.")
         stacks = self.list_photo_burst_stacks({"includeItems": True, "includeSingles": True, "visibility": "all"})["stacks"]
+        if not stack_id and single_source:
+            for candidate_stack in stacks:
+                if single_source in set(candidate_stack.get("sourcePaths", [])):
+                    stack_id = str(candidate_stack.get("stackId", "") or "")
+                    break
+        if not stack_id:
+            raise ValueError("A burst stackId or sourcePath is required.")
         stack = next((item for item in stacks if str(item.get("stackId", "") or "") == stack_id), None)
         if stack is None:
             raise ValueError("Unknown burst stack id.")

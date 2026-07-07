@@ -15053,6 +15053,51 @@ class WorkspaceDb:
             row = conn.execute("SELECT COUNT(*) AS n FROM photo_assets").fetchone()
         return int(row["n"] if row else 0)
 
+    def list_photo_burst_candidate_assets(
+        self,
+        *,
+        visibility: str = "visible",
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.list_photo_burst_candidate_assets(visibility=visibility, conn=local_conn)
+        where: list[str] = []
+        args: list[Any] = []
+        clean_visibility = str(visibility or "visible").strip().lower()
+        if clean_visibility in {"", "visible"}:
+            where.append("COALESCE(m.hidden, 0) = 0")
+            where.append("m.deleted_at IS NULL")
+        elif clean_visibility == "hidden":
+            where.append("COALESCE(m.hidden, 0) = 1")
+            where.append("m.deleted_at IS NULL")
+        elif clean_visibility == "deleted":
+            where.append("m.deleted_at IS NOT NULL")
+        elif clean_visibility != "all":
+            where.append("COALESCE(m.hidden, 0) = 0")
+            where.append("m.deleted_at IS NULL")
+        where.append(
+            "("
+            "a.media_kind = 'burst' "
+            "OR LOWER(a.source_path) LIKE ? "
+            "OR LOWER(COALESCE(a.metadata_json, '')) LIKE ?"
+            ")"
+        )
+        args.extend(["%burst%", "%burst%"])
+        sql = """
+            SELECT
+                a.asset_id, a.source_path, a.source_kind, a.file_signature_json,
+                a.content_hash, a.perceptual_hash, a.media_kind, a.mime_type,
+                a.width, a.height, a.duration_ms, a.capture_date, a.added_at,
+                a.updated_at, a.missing_at, a.source_scan_run, a.metadata_json
+            FROM photo_assets AS a
+            LEFT JOIN photo_asset_metadata AS m ON m.asset_id = a.asset_id
+        """
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY LOWER(a.source_path) ASC, a.asset_id ASC"
+        return [self._photo_asset_row(row) for row in conn.execute(sql, args).fetchall()]
+
     def _photo_source_text_filter_sql_parts(
         self,
         source_text_filters: Iterable[tuple[str, str]] = (),

@@ -9922,6 +9922,49 @@ def test_photo_burst_stacks_detect_and_keep_selection() -> None:
     print("ok photo burst stack detection and keep selection")
 
 
+def test_photo_burst_stacks_avoid_full_asset_page() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        burst_one = str(base / "Fast Burst 0001.jpg")
+        burst_two = str(base / "Fast Burst 0002 cover.jpg")
+        regular = str(base / "regular-family-photo.jpg")
+        api.project.db.create_scan_run("run-burst-fast", "label", "manual", str(base))
+        for path in (burst_one, burst_two, regular):
+            api.project.db.record_scan_file("run-burst-fast", Path(path), _sig(Path(path)), "completed", phase="processed")
+
+        original_page = api.project.db.list_photo_asset_page
+        original_candidates = api.project.db.list_photo_burst_candidate_assets
+        candidate_calls = 0
+
+        def fail_full_asset_page(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("burst stack operations must not page the full photo asset table")
+
+        def counted_burst_candidates(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            nonlocal candidate_calls
+            if kwargs.get("conn") is None:
+                candidate_calls += 1
+            return original_candidates(*args, **kwargs)
+
+        api.project.db.list_photo_asset_page = fail_full_asset_page  # type: ignore[method-assign]
+        api.project.db.list_photo_burst_candidate_assets = counted_burst_candidates  # type: ignore[method-assign]
+        try:
+            result = api.list_photo_burst_stacks({"includeItems": True})
+            assert result["total"] == 1, result
+            assert result["stacks"][0]["sourcePaths"] == [burst_one, burst_two], result
+            assert candidate_calls == 1, candidate_calls
+            candidate_calls = 0
+            selected = api.set_photo_burst_selection({"sourcePath": burst_one})
+            assert selected["selectedCount"] == 1, selected
+            assert selected["updated"] == 2, selected
+            assert selected["stack"]["coverSourcePath"] == burst_one, selected
+        finally:
+            api.project.db.list_photo_asset_page = original_page  # type: ignore[method-assign]
+            api.project.db.list_photo_burst_candidate_assets = original_candidates  # type: ignore[method-assign]
+        assert candidate_calls <= 2, candidate_calls
+    print("ok photo burst stack operations avoid full asset paging")
+
+
 def test_photo_burst_stacks_detect_native_metadata_identifiers() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -19059,6 +19102,7 @@ if __name__ == "__main__":
     test_photo_active_view_filters_media_favorite_and_edited()
     test_photo_richer_media_type_detection_and_folders()
     test_photo_burst_stacks_detect_and_keep_selection()
+    test_photo_burst_stacks_avoid_full_asset_page()
     test_photo_burst_stacks_detect_native_metadata_identifiers()
     test_photo_burst_stacks_import_xmp_golden_fixture_metadata()
     test_photo_live_photo_motion_export_and_key_photo()
