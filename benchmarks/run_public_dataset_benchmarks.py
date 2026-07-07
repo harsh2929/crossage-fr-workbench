@@ -76,6 +76,11 @@ DATASET_RUNS = {
 }
 
 
+def _resolve_repo_path(path: str | Path) -> Path:
+    candidate = Path(path).expanduser()
+    return candidate if candidate.is_absolute() else REPO_ROOT / candidate
+
+
 BENCHMARK_PROFILES: dict[str, dict[str, int]] = {
     "standard": {"maxIdentities": 32, "negativeIdentities": 8, "candidateImages": 2},
     "large": {"maxIdentities": 128, "negativeIdentities": 32, "candidateImages": 2},
@@ -124,7 +129,7 @@ def main() -> None:
     rows: list[dict[str, Any]] = []
     for dataset_id in args.datasets:
         spec = _resolve_dataset_spec(dataset_id, DATASET_RUNS[dataset_id], args)
-        folder = Path(spec["folder"]).expanduser().resolve()
+        folder = _resolve_repo_path(spec["folder"]).resolve()
         if spec.get("manual") and not folder.exists():
             if args.require_real_data:
                 raise SystemExit(f"Required prepared dataset is missing: {folder}")
