@@ -92,6 +92,7 @@ EXPECTED_TOOLS = {
     "export_training_examples",
     "import_training_examples",
     "apply_calibration",
+    "apply_personalized_calibration",
     "calibration_learning_status",
     "run_learning_jobs",
     "reference_suggestion_status",
@@ -291,6 +292,7 @@ async def smoke() -> None:
                 "operator approval token",
             )
             await expect_tool_error(session, "apply_calibration", {}, "confirm=True")
+            await expect_tool_error(session, "apply_personalized_calibration", {}, "confirm=True")
             await expect_tool_error(session, "run_learning_jobs", {}, "confirm=True")
             await expect_tool_error(session, "stage_reference_suggestions", {}, "confirm=True")
             await expect_tool_error(session, "approve_reference_suggestion", {"artifact_id": "learn_missing"}, "confirm=True")

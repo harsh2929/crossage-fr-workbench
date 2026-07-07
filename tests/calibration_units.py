@@ -338,6 +338,47 @@ def test_ordered_review_candidates_surfaces_matches_abstains_noise() -> None:
         assert names[-1] == "noise"
 
 
+def test_persisted_review_queue_orders_by_review_priority() -> None:
+    from crossage_fr.models import ReviewCandidate
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = WorkspaceDb(Path(tmp) / "workspace.sqlite3")
+        high_priority = ReviewCandidate(
+            candidate_id="cand_priority",
+            source_path="/priority.jpg",
+            person_name="Priority",
+            best_ref_id="ref_p",
+            best_ref_path="/ref-p.jpg",
+            score=0.31,
+            band="likely",
+            quality=0.5,
+            model_name="m",
+            review_priority=0.95,
+            review_lane="surface",
+            created_at="2026-07-07T00:00:00Z",
+        )
+        high_score = ReviewCandidate(
+            candidate_id="cand_score",
+            source_path="/score.jpg",
+            person_name="Score",
+            best_ref_id="ref_s",
+            best_ref_path="/ref-s.jpg",
+            score=0.99,
+            band="confident",
+            quality=0.9,
+            model_name="m",
+            review_priority=0.10,
+            review_lane="review",
+            created_at="2026-07-07T00:01:00Z",
+        )
+        assert db.upsert_candidates([high_score, high_priority]) == 2
+
+        page = db.query_candidates(status="pending", sort="score", limit=10)
+        assert [item["candidate_id"] for item in page["items"]] == ["cand_priority", "cand_score"]
+        assert page["items"][0]["review_priority"] == 0.95
+        assert page["items"][0]["review_lane"] == "surface"
+
+
 def main() -> None:
     test_calibration_labels_round_trip_with_stratification()
     test_accuracy_det_report_from_labels()
@@ -346,6 +387,7 @@ def main() -> None:
     test_calibration_is_model_pack_versioned()
     test_calibration_keeps_untagged_legacy_labels_with_dominant_model()
     test_ordered_review_candidates_surfaces_matches_abstains_noise()
+    test_persisted_review_queue_orders_by_review_priority()
     test_platt_calibrator_monotonic_and_separating()
     test_empirical_fmr_and_threshold_for_fmr()
     test_fit_score_calibrator_guards_insufficient_data()

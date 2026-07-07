@@ -214,6 +214,10 @@
       "description": "Apply local review feedback to matching thresholds, requiring confirm=true."
     },
     {
+      "name": "apply_personalized_calibration",
+      "description": "Fit per-person calibration from local accept/reject labels and prefer it when matching that person, requiring confirm=true."
+    },
+    {
       "name": "calibration_learning_status",
       "description": "Read staged/promoted calibration-learning artifacts and current calibration state."
     },

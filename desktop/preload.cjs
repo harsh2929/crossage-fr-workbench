@@ -227,6 +227,7 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "promote_embedding_adapter",
   "rollback_embedding_adapter",
   "apply_calibration",
+  "apply_personalized_calibration",
   "export_accuracy_labels",
   "import_accuracy_labels",
   "export_training_examples",

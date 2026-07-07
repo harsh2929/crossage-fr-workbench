@@ -1022,6 +1022,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "promote_embedding_adapter": "_cmd_promote_embedding_adapter",
         "rollback_embedding_adapter": "_cmd_rollback_embedding_adapter",
         "apply_calibration": "_cmd_apply_calibration",
+        "apply_personalized_calibration": "_cmd_apply_personalized_calibration",
         "export_accuracy_labels": "_cmd_export_accuracy_labels",
         "import_accuracy_labels": "_cmd_import_accuracy_labels",
         "export_training_examples": "_cmd_export_training_examples",
@@ -2255,6 +2256,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         result = self.project.apply_calibration_to_config()
         self._reset_engine()
         return {"value": result, "state": self.state()}
+
+    def _cmd_apply_personalized_calibration(self, params, progress=None):
+        result = self.project.apply_personalized_calibration()
+        return {"value": result, "state": self.state(preview_create_budget=0)}
 
     def _cmd_export_accuracy_labels(self, params, progress=None):
         folder_param = str(params.get("folder", "")).strip()
@@ -4759,7 +4764,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             elif sort == "status":
                 ranked = heapq.nsmallest(bound, iter_matches(), key=lambda item: (item.status, item.person_name.lower(), -float(item.score), item.candidate_id))
             else:
-                ranked = heapq.nlargest(bound, iter_matches(), key=lambda item: (float(item.score), item.quality, item.created_at, item.candidate_id))
+                ranked = heapq.nlargest(bound, iter_matches(), key=lambda item: (float(item.review_priority or 0.0), float(item.score), item.quality, item.created_at, item.candidate_id))
         else:
             matched = list(iter_matches())
             if sort == "newest":
@@ -4769,7 +4774,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             elif sort == "status":
                 ranked = sorted(matched, key=lambda item: (item.status, item.person_name.lower(), -float(item.score), item.candidate_id))
             else:
-                ranked = sorted(matched, key=lambda item: (float(item.score), item.quality, item.created_at, item.candidate_id), reverse=True)
+                ranked = sorted(matched, key=lambda item: (float(item.review_priority or 0.0), float(item.score), item.quality, item.created_at, item.candidate_id), reverse=True)
         page = ranked[offset:offset + limit]
         items = []
         remaining_preview_budget = preview_budget

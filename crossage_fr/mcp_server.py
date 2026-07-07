@@ -1349,6 +1349,14 @@ def apply_calibration(confirm: bool = False) -> dict[str, Any]:
 
 
 @safe_tool()
+def apply_personalized_calibration(confirm: bool = False) -> dict[str, Any]:
+    """Fit per-person calibration from local accept/reject labels and prefer it when matching that person."""
+    _confirmed(confirm, "apply per-person calibration")
+    result = _call("apply_personalized_calibration")
+    return {"personalizedCalibration": result.get("value", {}), "state": _state_summary(result["state"])}
+
+
+@safe_tool()
 def calibration_learning_status() -> dict[str, Any]:
     """Read staged/promoted calibration-learning artifacts and current calibration state."""
     return _call("calibration_learning_status")

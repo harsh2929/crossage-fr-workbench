@@ -953,6 +953,7 @@ def assert_static_app_contracts() -> None:
         "promote_embedding_adapter",
         "rollback_embedding_adapter",
         "apply_calibration",
+        "apply_personalized_calibration",
         "export_accuracy_labels",
         "import_accuracy_labels",
         "export_training_examples",
@@ -995,6 +996,8 @@ def assert_static_app_contracts() -> None:
     assert '"stage_embedding_adapter"' in app_tsx
     assert '"promote_embedding_adapter"' in app_tsx
     assert '"rollback_embedding_adapter"' in app_tsx
+    assert '"apply_personalized_calibration"' in app_tsx
+    assert "Personalize people" in app_tsx
     assert '"list_photo_date_buckets"' in app_tsx
     assert '"search_photo_library"' in app_tsx
     assert '"list_photo_burst_stacks"' in app_tsx

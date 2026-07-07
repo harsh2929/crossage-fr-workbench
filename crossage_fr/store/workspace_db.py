@@ -667,13 +667,19 @@ class WorkspaceDb:
                     video_frame_index INTEGER,
                     video_duration_ms INTEGER,
                     source_hash TEXT NOT NULL DEFAULT '',
+                    review_priority REAL NOT NULL DEFAULT 0,
+                    review_lane TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     payload_json TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_review_candidates_status_score
-                    ON review_candidates(status, score DESC, quality DESC, created_at DESC, candidate_id);
+                    ON review_candidates(status, review_priority DESC, score DESC, quality DESC, created_at DESC, candidate_id);
                 CREATE INDEX IF NOT EXISTS idx_review_candidates_score
-                    ON review_candidates(score DESC, quality DESC, created_at DESC, candidate_id);
+                    ON review_candidates(review_priority DESC, score DESC, quality DESC, created_at DESC, candidate_id);
+                CREATE INDEX IF NOT EXISTS idx_review_candidates_review_priority
+                    ON review_candidates(review_priority DESC, score DESC, quality DESC, created_at DESC, candidate_id);
+                CREATE INDEX IF NOT EXISTS idx_review_candidates_status_priority
+                    ON review_candidates(status, review_priority DESC, score DESC, quality DESC, created_at DESC, candidate_id);
                 CREATE INDEX IF NOT EXISTS idx_review_candidates_created
                     ON review_candidates(created_at DESC, candidate_id);
                 CREATE INDEX IF NOT EXISTS idx_review_candidates_quality
@@ -687,7 +693,7 @@ class WorkspaceDb:
                 CREATE INDEX IF NOT EXISTS idx_review_candidates_media_path
                     ON review_candidates(media_path);
                 CREATE INDEX IF NOT EXISTS idx_review_candidates_media_kind
-                    ON review_candidates(media_kind, status, score DESC);
+                    ON review_candidates(media_kind, status, review_priority DESC, score DESC);
                 CREATE INDEX IF NOT EXISTS idx_review_candidates_video_source_score
                     ON review_candidates(media_kind, media_source_path, score DESC, created_at DESC, candidate_id);
                 CREATE INDEX IF NOT EXISTS idx_review_candidates_source_hash
@@ -832,10 +838,27 @@ class WorkspaceDb:
             ):
                 for column, definition in columns:
                     self._ensure_column(conn, table, column, definition)
+            for column, definition in (
+                ("review_priority", "REAL NOT NULL DEFAULT 0"),
+                ("review_lane", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                self._ensure_column(conn, "review_candidates", column, definition)
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_review_candidates_folder
-                    ON review_candidates(folder_path, status, score DESC)
+                    ON review_candidates(folder_path, status, review_priority DESC, score DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_review_candidates_review_priority
+                    ON review_candidates(review_priority DESC, score DESC, quality DESC, created_at DESC, candidate_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_review_candidates_status_priority
+                    ON review_candidates(status, review_priority DESC, score DESC, quality DESC, created_at DESC, candidate_id)
                 """
             )
             conn.execute(
@@ -847,13 +870,13 @@ class WorkspaceDb:
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_review_candidates_close_runner
-                    ON review_candidates(close_runner_up, status, score DESC, candidate_id)
+                    ON review_candidates(close_runner_up, status, review_priority DESC, score DESC, candidate_id)
                 """
             )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_review_candidates_single_reference
-                    ON review_candidates(single_reference_match, status, score DESC, candidate_id)
+                    ON review_candidates(single_reference_match, status, review_priority DESC, score DESC, candidate_id)
                 """
             )
             conn.execute(
@@ -1322,6 +1345,8 @@ class WorkspaceDb:
                 "video_frame_index": getattr(candidate, "video_frame_index", None),
                 "video_duration_ms": getattr(candidate, "video_duration_ms", None),
                 "source_hash": getattr(candidate, "source_hash", ""),
+                "review_priority": getattr(candidate, "review_priority", 0.0),
+                "review_lane": getattr(candidate, "review_lane", ""),
                 "created_at": getattr(candidate, "created_at", now_iso()),
             }
         return payload
@@ -1341,6 +1366,12 @@ class WorkspaceDb:
         risk_flags_text = " ".join(risk_flags)
         close_runner_up = int(bool({"close-runner-up", "ambiguous-person-margin"} & set(risk_flags)))
         single_reference_match = int(bool({"single-reference-match", "single-reference-close-runner-up", "single-reference-hard-pose"} & set(risk_flags)))
+        review_priority_value = payload.get("review_priority", payload.get("reviewPriority", 0.0))
+        try:
+            review_priority = float(review_priority_value or 0.0)
+        except (TypeError, ValueError):
+            review_priority = 0.0
+        review_lane = str(payload.get("review_lane", payload.get("reviewLane", "")) or "")
         return (
             str(payload.get("candidate_id", "")),
             source_path,
@@ -1365,6 +1396,8 @@ class WorkspaceDb:
             payload.get("video_frame_index"),
             payload.get("video_duration_ms"),
             str(payload.get("source_hash", "")),
+            review_priority,
+            review_lane,
             str(payload.get("created_at", "") or now_iso()),
             json.dumps(payload, separators=(",", ":")),
         )
@@ -1374,9 +1407,9 @@ class WorkspaceDb:
             INSERT OR REPLACE INTO review_candidates(
                 candidate_id, source_path, person_name, person_key, best_ref_id, best_ref_path,
                 score, band, quality, model_name, status, note, risk_flags, close_runner_up, single_reference_match, media_kind, media_source_path,
-                media_path, folder_path, video_timestamp_ms, video_frame_index, video_duration_ms, source_hash,
+                media_path, folder_path, video_timestamp_ms, video_frame_index, video_duration_ms, source_hash, review_priority, review_lane,
                 created_at, payload_json
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
     def _candidate_param_batches(self, candidates: Iterable[Any], batch_size: int = 1000) -> Iterator[list[tuple[Any, ...]]]:
@@ -7256,8 +7289,8 @@ class WorkspaceDb:
             "newest": "created_at DESC, candidate_id DESC",
             "quality": "quality DESC, created_at DESC, candidate_id DESC",
             "status": "status ASC, person_key ASC, score DESC, candidate_id ASC",
-            "state": "CASE WHEN status = 'pending' THEN 0 ELSE 1 END ASC, score DESC, person_key ASC, candidate_id ASC",
-        }.get(sort, "score DESC, quality DESC, created_at DESC, candidate_id DESC")
+            "state": "CASE WHEN status = 'pending' THEN 0 ELSE 1 END ASC, review_priority DESC, score DESC, person_key ASC, candidate_id ASC",
+        }.get(sort, "review_priority DESC, score DESC, quality DESC, created_at DESC, candidate_id DESC")
         rows = conn.execute(
             f"""
             SELECT payload_json FROM review_candidates

@@ -5957,6 +5957,22 @@ export default function App() {
     setNotice({ tone: "ok", text: "Matching levels updated from review feedback." });
   }
 
+  async function applyPersonalizedCalibration() {
+    if (!await confirmDialog("Fit per-person calibration from reviewed matches? It only applies to people with enough accepted and rejected examples.")) return;
+    const result = await invoke<CommandResult<{ count?: number; identities?: string[] }>>(
+      "Applying per-person calibration",
+      "apply_personalized_calibration"
+    );
+    void refreshCalibrationLearningStatus().catch(() => undefined);
+    const count = finiteInteger(result.value?.count, result.value?.identities?.length ?? 0, 0, Number.MAX_SAFE_INTEGER);
+    setNotice({
+      tone: count ? "ok" : "warn",
+      text: count
+        ? `Personalized calibration applied for ${formatNumber(count)} person${count === 1 ? "" : "s"}.`
+        : "No person had enough accepted and rejected examples for personalized calibration."
+    });
+  }
+
   async function refreshCalibrationLearningStatus() {
     const result = await invoke<CalibrationLearningStatus>(
       "Checking learned calibration",
@@ -7084,6 +7100,7 @@ export default function App() {
             runPublicDatasetModelComparison={runPublicDatasetModelComparison}
             applyModelRecommendation={applyModelRecommendation}
             applyCalibration={applyCalibration}
+            applyPersonalizedCalibration={applyPersonalizedCalibration}
             exportAccuracyLabels={exportAccuracyLabels}
             importAccuracyLabels={importAccuracyLabels}
             exportTrainingExamples={exportTrainingExamples}
@@ -12684,6 +12701,7 @@ function SettingsView(props: {
   runPublicDatasetModelComparison(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; downloadIfMissing?: boolean; includeVideos?: boolean }): void | Promise<void>;
   applyModelRecommendation(pack: string): void | Promise<void>;
   applyCalibration(): void;
+  applyPersonalizedCalibration(): void;
   exportAccuracyLabels(): void;
   importAccuracyLabels(text: string): void | Promise<void>;
   exportTrainingExamples(): void;
@@ -13362,6 +13380,7 @@ function SettingsView(props: {
         runModelComparison={props.runPublicDatasetModelComparison}
         applyModelRecommendation={props.applyModelRecommendation}
         applyCalibration={props.applyCalibration}
+        applyPersonalizedCalibration={props.applyPersonalizedCalibration}
         exportAccuracyLabels={props.exportAccuracyLabels}
         importAccuracyLabels={props.importAccuracyLabels}
         exportTrainingExamples={props.exportTrainingExamples}
@@ -14845,6 +14864,7 @@ function AccuracyLabPanel({
   runModelComparison,
   applyModelRecommendation,
   applyCalibration,
+  applyPersonalizedCalibration,
   exportAccuracyLabels,
   importAccuracyLabels,
   exportTrainingExamples,
@@ -14882,6 +14902,7 @@ function AccuracyLabPanel({
   runModelComparison(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; downloadIfMissing?: boolean; includeVideos?: boolean }): void | Promise<void>;
   applyModelRecommendation(pack: string): void | Promise<void>;
   applyCalibration(): void;
+  applyPersonalizedCalibration(): void;
   exportAccuracyLabels(): void;
   importAccuracyLabels(text: string): void | Promise<void>;
   exportTrainingExamples(): void;
@@ -15090,6 +15111,10 @@ function AccuracyLabPanel({
         <button className="secondary" onClick={applyCalibration} disabled={busy || labelCount < 8}>
           <SlidersHorizontal size={17} />
           <span>Apply feedback</span>
+        </button>
+        <button className="secondary" onClick={applyPersonalizedCalibration} disabled={busy || labelCount < 16}>
+          <Users size={17} />
+          <span>Personalize people</span>
         </button>
         <button className="secondary" onClick={exportAccuracyLabels} disabled={busy || labelCount < 1}>
           <Archive size={17} />
