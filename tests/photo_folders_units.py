@@ -13706,6 +13706,90 @@ def test_photo_slideshow_projects_workspace_crud() -> None:
     print("ok photo slideshow projects workspace CRUD")
 
 
+def test_photo_slideshow_video_export_cleans_failed_bundle() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        source = base / "cleanup-slideshow.jpg"
+        _write_pattern_photo(source, "near")
+        imported = api.import_photos({
+            "sourcePaths": [str(source)],
+            "storageMode": "referenced",
+            "sourceLabel": "Failed slideshow cleanup",
+        })
+        source_path = str(source.resolve())
+        assert source_path in imported["importedPaths"], imported
+
+        seen_bundle: Path | None = None
+        original_render = api._photo_export_render_slideshow_video
+
+        def fail_render(rows: list[dict[str, Any]], target: Path, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            nonlocal seen_bundle
+            seen_bundle = target.parent.parent
+            copied_targets = [
+                Path(str(row.get("targetPath", "")))
+                for row in rows
+                if str(row.get("result", "")) == "included" and str(row.get("targetPath", ""))
+            ]
+            assert copied_targets and all(path.exists() for path in copied_targets), copied_targets
+            raise RuntimeError("simulated slideshow movie render failure")
+
+        api._photo_export_render_slideshow_video = fail_render  # type: ignore[method-assign]
+        try:
+            _expect_raises(
+                RuntimeError,
+                lambda: api.export_photo_slideshow({
+                    "title": "Cleanup regression",
+                    "sourcePaths": [source_path],
+                    "outputMode": "video",
+                    "videoRenderFormat": "mp4",
+                }),
+                "simulated slideshow movie render failure",
+            )
+        finally:
+            api._photo_export_render_slideshow_video = original_render  # type: ignore[method-assign]
+
+        assert seen_bundle is not None, "render should have been reached after staging media"
+        assert not seen_bundle.exists(), seen_bundle
+        assert source.exists(), "failed export cleanup must not delete original media"
+        exports_root = base / "exports"
+        assert list(exports_root.glob("vintrace-slideshow-*")) == []
+
+        missing_source = base / "missing-after-import.jpg"
+        _write_pattern_photo(missing_source, "far")
+        missing_import = api.import_photos({
+            "sourcePaths": [str(missing_source)],
+            "storageMode": "referenced",
+            "sourceLabel": "Missing slideshow cleanup",
+        })
+        missing_source_path = str(missing_source.resolve())
+        assert missing_source_path in missing_import["importedPaths"], missing_import
+        missing_source.unlink()
+        _expect_raises(
+            ValueError,
+            lambda: api.export_photo_slideshow({
+                "title": "Missing media cleanup",
+                "sourcePaths": [missing_source_path],
+            }),
+            "could not include any playable local media",
+        )
+        assert list(exports_root.glob("vintrace-slideshow-*")) == []
+
+        _expect_raises(
+            ValueError,
+            lambda: api.export_photo_slideshow({
+                "title": "Missing audio cleanup",
+                "sourcePaths": [source_path],
+                "music": "custom",
+                "audioPath": str(base / "missing-audio.mp3"),
+            }),
+            "audio file is missing",
+        )
+        assert source.exists(), "custom audio failure cleanup must not delete original media"
+        assert list(exports_root.glob("vintrace-slideshow-*")) == []
+    print("ok failed slideshow exports clean staged bundles")
+
+
 # --- Task 2: list_photo_folder_items ----------------------------------------
 
 def test_folder_items_person_filter_and_dedupe() -> None:
@@ -19276,6 +19360,7 @@ if __name__ == "__main__":
     test_photo_memories_generate_local_collections()
     test_photo_memories_generate_event_and_holiday_collections()
     test_photo_slideshow_projects_workspace_crud()
+    test_photo_slideshow_video_export_cleans_failed_bundle()
     test_folder_items_person_filter_and_dedupe()
     test_person_folders_exclude_rejected_high_score_matches()
     test_photo_people_profiles_key_favorite_hide_and_direct_access()

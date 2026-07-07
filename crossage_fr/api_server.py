@@ -15768,6 +15768,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         media_root = bundle_root / "media"
         media_root.mkdir(parents=True, exist_ok=True)
 
+        def cleanup_failed_bundle() -> None:
+            self._cleanup_failed_photo_export_bundle(bundle_root, export_root)
+
         generated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
         rows: list[dict[str, Any]] = []
         counts = {
@@ -15862,6 +15865,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             included_event_sources.append(source_value)
 
         if counts["included"] <= 0:
+            cleanup_failed_bundle()
             raise ValueError("Slideshow export could not include any playable local media.")
 
         title_card = {
@@ -15943,11 +15947,14 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             try:
                 resolved_audio = safe_resolve(audio_source)
             except OSError as exc:
+                cleanup_failed_bundle()
                 raise ValueError(f"Custom slideshow audio could not be resolved: {exc}") from exc
             if not resolved_audio.exists() or not resolved_audio.is_file():
+                cleanup_failed_bundle()
                 raise ValueError("Custom slideshow audio file is missing.")
             audio_suffix = resolved_audio.suffix.lower()
             if audio_suffix not in audio_suffixes:
+                cleanup_failed_bundle()
                 raise ValueError("Custom slideshow audio must be AAC, AIFF, CAF, FLAC, M4A, MP3, OGG, OPUS, or WAV.")
             audio_target = self._photo_export_allocate_target(
                 media_root,
@@ -16162,32 +16169,36 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 suffix=video_render_suffix,
                 filename_mode="original",
             )
-            video_render = self._photo_export_render_slideshow_video(
-                rows,
-                video_target,
-                video_format=video_render_format,
-                quality=video_render_quality,
-                max_dimension=render_max_dimension,
-                fit_mode=fit_mode,
-                music=music,
-                audio_path=str(custom_audio.get("targetPath", "") or ""),
-                audio_volume=audio_volume,
-                audio_fade_ms=audio_fade_ms,
-                audio_start_ms=audio_start_ms,
-                audio_end_ms=audio_end_ms,
-                audio_placement_start_ms=audio_placement_start_ms,
-                audio_placement_end_ms=audio_placement_end_ms,
-                transition_effect=transition_resolved_effect,
-                transition_duration_ms=transition_duration_ms,
-                theme_template_layout=theme_template_layout,
-                theme_template_stage_width=theme_template_stage_width,
-                theme_template_frame_style=theme_template_frame_style,
-                theme_template_chrome_density=theme_template_chrome_density,
-                theme_template_caption_preset=theme_template_caption_preset,
-                theme_template_region_map=theme_template_region_map,
-                title=title,
-                source_label=source_label,
-            )
+            try:
+                video_render = self._photo_export_render_slideshow_video(
+                    rows,
+                    video_target,
+                    video_format=video_render_format,
+                    quality=video_render_quality,
+                    max_dimension=render_max_dimension,
+                    fit_mode=fit_mode,
+                    music=music,
+                    audio_path=str(custom_audio.get("targetPath", "") or ""),
+                    audio_volume=audio_volume,
+                    audio_fade_ms=audio_fade_ms,
+                    audio_start_ms=audio_start_ms,
+                    audio_end_ms=audio_end_ms,
+                    audio_placement_start_ms=audio_placement_start_ms,
+                    audio_placement_end_ms=audio_placement_end_ms,
+                    transition_effect=transition_resolved_effect,
+                    transition_duration_ms=transition_duration_ms,
+                    theme_template_layout=theme_template_layout,
+                    theme_template_stage_width=theme_template_stage_width,
+                    theme_template_frame_style=theme_template_frame_style,
+                    theme_template_chrome_density=theme_template_chrome_density,
+                    theme_template_caption_preset=theme_template_caption_preset,
+                    theme_template_region_map=theme_template_region_map,
+                    title=title,
+                    source_label=source_label,
+                )
+            except Exception:
+                cleanup_failed_bundle()
+                raise
         manifest = {
             "generatedAt": generated_at,
             "workspace": str(self.project.root),
@@ -23730,6 +23741,27 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             target_root = target_root / part
         target_root.mkdir(parents=True, exist_ok=True)
         return target_root
+
+    def _cleanup_failed_photo_export_bundle(self, bundle_root: Path, export_root: Path) -> None:
+        try:
+            resolved_bundle = bundle_root.resolve()
+            resolved_export_root = export_root.resolve()
+        except OSError:
+            return
+        if resolved_bundle.parent != resolved_export_root or not resolved_bundle.is_dir():
+            return
+        if not resolved_bundle.name.startswith((
+            "vintrace-photo-selection-",
+            "vintrace-slideshow-",
+            "vintrace-memory-movie-",
+            "vintrace-contact-sheet-",
+            "vintrace-video-frame-",
+            "vintrace-video-trim-",
+            "vintrace-live-photo-",
+            "vintrace-subject-",
+        )):
+            return
+        shutil.rmtree(resolved_bundle, ignore_errors=True)
 
     def _photo_export_strip_known_suffix(self, value: str) -> str:
         text = self._safe_photo_export_name(value)
