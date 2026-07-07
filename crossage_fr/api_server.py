@@ -28669,19 +28669,49 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             seen_ids.add(folder_id)
             folders.append(folder)
 
+        source_visibility_cache: dict[str, bool] = {}
+        entry_by_source: dict[str, dict[str, Any]] = {}
+
+        def remember_source_entry(entry: dict[str, Any]) -> None:
+            source = str(entry.get("sourcePath", "") or "")
+            if not source:
+                return
+            visible = self._photo_entry_default_visible(entry)
+            source_visibility_cache[source] = visible
+            if visible:
+                entry_by_source[source] = entry
+
+        for entry in photo_entries:
+            remember_source_entry(entry)
+
+        def hydrate_visibility_sources(sources: Iterable[Any]) -> None:
+            missing: list[str] = []
+            seen_sources: set[str] = set()
+            for value in sources:
+                source = str(value or "").strip()
+                if (
+                    not source
+                    or source in seen_sources
+                    or source in source_visibility_cache
+                    or not self._photo_source_inside_library_root(source, library_root_filter)
+                ):
+                    continue
+                seen_sources.add(source)
+                missing.append(source)
+            if not missing:
+                return
+            for entry in self._photo_entries_for_source_paths(missing, matches_by_source=matches_by_source):
+                remember_source_entry(entry)
+            for source in missing:
+                source_visibility_cache.setdefault(source, False)
+
         def source_visible(source_path: Any) -> bool:
             source = str(source_path or "").strip()
             if not source or not self._photo_source_inside_library_root(source, library_root_filter):
                 return False
-            asset = self.project.db.photo_asset_by_path(source)
-            if not asset:
-                return False
-            metadata = self.project.db.photo_asset_metadata_by_id(str(asset.get("assetId", "") or ""))
-            return not metadata.get("hidden") and not str(metadata.get("deletedAt", "") or "")
-
-        def source_asset_id(source_path: Any) -> str:
-            asset = self.project.db.photo_asset_by_path(str(source_path or ""))
-            return str(asset.get("assetId", "") or "") if asset else ""
+            if source not in source_visibility_cache:
+                hydrate_visibility_sources([source])
+            return bool(source_visibility_cache.get(source, False))
 
         def add_static_collection(folder_id: str, name: str, values: Iterable[Any], extra: dict[str, Any] | None = None) -> None:
             if not text_matches([name, folder_id, *(values or [])]):
@@ -28875,8 +28905,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 })
 
         dynamic_sources: set[str] = {str(entry.get("sourcePath", "") or "") for entry in photo_entries if str(entry.get("sourcePath", "") or "")}
-        dynamic_person_sources: dict[str, set[str]] = {}
-        dynamic_person_cover: dict[str, str] = {}
+        dynamic_person_matches: dict[str, list[str]] = {}
         for source_path, matches in matches_by_source.items():
             source = str(source_path or "")
             if not source or not self._photo_source_inside_library_root(source, library_root_filter):
@@ -28889,6 +28918,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             ]
             if not matched_names:
                 continue
+            dynamic_person_matches[source] = matched_names
+        hydrate_visibility_sources(dynamic_person_matches.keys())
+
+        dynamic_person_sources: dict[str, set[str]] = {}
+        dynamic_person_cover: dict[str, str] = {}
+        for source, matched_names in dynamic_person_matches.items():
             if not source_visible(source):
                 continue
             dynamic_sources.add(source)
@@ -28907,17 +28942,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "personProfile": self.project.db.photo_person_profile(name),
             })
 
-        entry_by_source = {
-            str(entry.get("sourcePath", "") or ""): entry
-            for entry in photo_entries
-            if str(entry.get("sourcePath", "") or "") and self._photo_entry_default_visible(entry)
-        }
         missing_sources = [source for source in sorted(dynamic_sources) if source not in entry_by_source]
         if missing_sources:
             for entry in self._photo_entries_for_source_paths(missing_sources[:candidate_limit], matches_by_source=matches_by_source):
                 source = str(entry.get("sourcePath", "") or "")
-                if source and self._photo_entry_default_visible(entry):
-                    entry_by_source[source] = entry
+                remember_source_entry(entry)
 
         pet_sources: dict[str, set[str]] = {}
         pet_covers: dict[str, str] = {}

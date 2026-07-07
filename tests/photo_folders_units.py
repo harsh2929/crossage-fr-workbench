@@ -8870,6 +8870,46 @@ def test_photo_library_search_categorizes_local_results() -> None:
     print("ok global Photos library search categorizes local results")
 
 
+def test_photo_search_folder_candidates_batch_hydrate_dynamic_visibility() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        photo = base / "harbor-person.jpg"
+        _write_exif_photo(photo)
+        imported = api.import_photos({
+            "sourcePaths": [str(photo)],
+            "storageMode": "referenced",
+            "sourceLabel": "Search folder visibility",
+        })
+        source_path = imported["importedPaths"][0]
+        matches_by_source = {
+            source_path: [_candidate("harbor-person", "Harbor Person", source_path, status="accepted", score=0.98)],
+        }
+
+        original_photo_asset_by_path = api.project.db.photo_asset_by_path
+
+        def fail_point_asset_lookup(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("folder search should batch-hydrate dynamic source visibility")
+
+        api.project.db.photo_asset_by_path = fail_point_asset_lookup  # type: ignore[method-assign]
+        try:
+            folders = api._photo_search_folder_candidates(
+                ["Harbor"],
+                library_root_filter="",
+                library_root_source_filters=[],
+                matches_by_source=matches_by_source,
+                photo_entries=[],
+                limit=8,
+            )
+        finally:
+            api.project.db.photo_asset_by_path = original_photo_asset_by_path  # type: ignore[method-assign]
+
+        person_folder = next(folder for folder in folders if folder.get("id") == "person:Harbor Person")
+        assert person_folder["count"] == 1, folders
+        assert person_folder["coverSourcePath"] == source_path, folders
+    print("ok photo search folder candidates batch hydrate dynamic visibility")
+
+
 def test_photo_library_search_uses_bounded_non_photo_catalog() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -18916,6 +18956,7 @@ if __name__ == "__main__":
     test_photo_xmp_sidecar_imports_metadata_without_overwriting_manual_edits()
     test_photo_xmp_sidecar_import_tries_valid_alternate_sidecar()
     test_photo_library_search_categorizes_local_results()
+    test_photo_search_folder_candidates_batch_hydrate_dynamic_visibility()
     test_photo_library_search_uses_bounded_non_photo_catalog()
     test_photo_search_index_repairs_partial_drift_without_full_rebuild()
     test_photo_search_index_healthy_cache_skips_integrity_counts_for_search_path()
