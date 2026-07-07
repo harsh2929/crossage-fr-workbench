@@ -1236,6 +1236,7 @@ class ProjectState:
         added = 0
         errors: list[str] = []
         unmatched: list[tuple[Path, float, str, list[float], dict[str, Any]]] = []
+        unmatched_paths: set[Path] = set()
         large_candidate_store = len(self.candidates) > CANDIDATE_MEMORY_DEDUPE_LIMIT and self.candidate_index_ready()
         existing = set() if large_candidate_store else {self._candidate_existing_key(candidate) for candidate in self.candidates.values()}
         retained_video_frame_paths: set[Path] = set()
@@ -1332,6 +1333,7 @@ class ProjectState:
             self._emit_scan_progress(on_progress, "clustering", metrics)
             batch = unmatched
             unmatched = []
+            unmatched_paths.difference_update(row[0] for row in batch)
             labels = cluster_vectors([row[3] for row in batch], self.config.cluster_min_size)
             max_label = max(labels, default=-1)
             for (path, quality, model_name, _vector, metadata), label in zip(batch, labels):
@@ -1620,6 +1622,7 @@ class ProjectState:
                         metrics["poseRelaxedThreeQuarter"] += 1
                 if decision is None or decision.band == "below-review":
                     unmatched.append((image_path, embedding.quality, embedding.model_name, embedding.vector, embedding_metadata))
+                    unmatched_paths.add(image_path)
                     metrics["unmatched"] += 1
                     if rescue_used:
                         metrics["profileRescueUnmatched"] += 1
@@ -1753,7 +1756,7 @@ class ProjectState:
                 else:
                     record_skip_reason(image_path, signature, "skipped", "", content_hash)
             elif queued_unmatched:
-                if any(row[0] == image_path for row in unmatched):
+                if image_path in unmatched_paths:
                     self.db.record_scan_file(run_id, image_path, signature, "unmatched", phase="pending_cluster", content_hash=content_hash, conn=scan_conn, refresh_import_session=False)
             elif not recorded_any:
                 self.db.record_scan_file(run_id, image_path, signature, "completed", phase="processed", content_hash=content_hash, conn=scan_conn, refresh_import_session=False)

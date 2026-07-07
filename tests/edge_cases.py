@@ -516,6 +516,10 @@ def assert_static_app_contracts() -> None:
     assert "resolveTrustedMediaPath(target)" in desktop_main
     assert "!realTarget || !fs.existsSync(realTarget)" in desktop_main
     assert "pathToFileURL(realTarget)" in desktop_main
+    enroll_manager = (root / "crossage_fr" / "enroll" / "manager.py").read_text(encoding="utf-8")
+    assert "unmatched_paths: set[Path]" in enroll_manager
+    assert "image_path in unmatched_paths" in enroll_manager
+    assert "any(row[0] == image_path for row in unmatched)" not in enroll_manager
 
     release_workflow = (root / ".github" / "workflows" / "windows-release.yml").read_text(encoding="utf-8")
     assert "release_tag" in release_workflow
