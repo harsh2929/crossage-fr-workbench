@@ -1957,6 +1957,15 @@ run("Review group finder caps rendered thumbnail results", () => {
   assert.doesNotMatch(source, /\{groupResults\.length \? groupResults\.map\(\(row\) => \(/);
 });
 
+run("CandidateTable load-more expansion survives candidate refreshes", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
+  const tableBlock = source.match(/function CandidateTable\([\s\S]*?\nfunction CandidateIdentity/);
+  assert.ok(tableBlock, "CandidateTable source block should exist");
+  assert.match(tableBlock[0], /useEffect\(\(\) => \{\s*setVisibleLimit\(props\.batchSize\);\s*\}, \[props\.batchSize\]\);/);
+  assert.doesNotMatch(tableBlock[0], /\[props\.batchSize, props\.candidates\]/);
+  assert.match(tableBlock[0], /props\.candidates\.slice\(0, visibleLimit\)/);
+});
+
 await (async () => {
   const record = await settingsMod.createPhotoSensitivePasscodeRecord("4931", "fixedSalt_01");
   const settings = settingsMod.normalizePhotoLocalSettings({

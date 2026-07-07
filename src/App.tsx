@@ -16329,7 +16329,7 @@ function CandidateTable(props: {
   );
   useEffect(() => {
     setVisibleLimit(props.batchSize);
-  }, [props.batchSize, props.candidates]);
+  }, [props.batchSize]);
 
   return (
     <div className={props.compact ? "panel table-panel compact-table" : "panel table-panel"}>
