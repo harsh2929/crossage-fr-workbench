@@ -17907,7 +17907,39 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return bool(self.project.db.list_photo_asset_album_memberships(str(asset.get("assetId", "") or "")))
 
     def _filter_photo_entries_not_in_manual_album(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [entry for entry in entries if not self._photo_entry_in_manual_album(entry)]
+        if not entries:
+            return []
+        asset_id_by_source: dict[str, str] = {}
+        missing_sources: list[str] = []
+        seen_missing: set[str] = set()
+        for entry in entries:
+            source_path = str(entry.get("sourcePath", "") or "")
+            if not source_path:
+                continue
+            asset_id = str(entry.get("_assetId", "") or "")
+            if not asset_id:
+                cached_asset = entry.get("_asset")
+                if isinstance(cached_asset, dict):
+                    asset_id = str(cached_asset.get("assetId", "") or "")
+            if asset_id:
+                asset_id_by_source[source_path] = asset_id
+            elif source_path not in seen_missing:
+                seen_missing.add(source_path)
+                missing_sources.append(source_path)
+        if missing_sources:
+            for asset in self.project.db.photo_assets_by_paths(missing_sources):
+                source_path = str(asset.get("sourcePath", "") or "")
+                asset_id = str(asset.get("assetId", "") or "")
+                if source_path and asset_id:
+                    asset_id_by_source[source_path] = asset_id
+        asset_ids = [asset_id for asset_id in asset_id_by_source.values() if asset_id]
+        album_asset_ids = self.project.db.photo_asset_ids_with_album_memberships(asset_ids)
+        return [
+            entry
+            for entry in entries
+            if str(entry.get("sourcePath", "") or "") not in asset_id_by_source
+            or asset_id_by_source[str(entry.get("sourcePath", "") or "")] not in album_asset_ids
+        ]
 
     def _photo_manual_album_filter_ids(self, album_filter: str) -> tuple[str, ...] | None:
         clean = str(album_filter or "").strip()

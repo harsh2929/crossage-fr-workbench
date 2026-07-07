@@ -22845,6 +22845,38 @@ class WorkspaceDb:
             for row in rows
         ]
 
+    def photo_asset_ids_with_album_memberships(
+        self,
+        asset_ids: Iterable[str],
+        conn: sqlite3.Connection | None = None,
+    ) -> set[str]:
+        clean_ids: list[str] = []
+        seen: set[str] = set()
+        for value in asset_ids:
+            asset_id = str(value or "").strip()
+            if asset_id and asset_id not in seen:
+                seen.add(asset_id)
+                clean_ids.append(asset_id)
+        if not clean_ids:
+            return set()
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_asset_ids_with_album_memberships(clean_ids, local_conn)
+        matched: set[str] = set()
+        for start in range(0, len(clean_ids), 800):
+            chunk = clean_ids[start:start + 800]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT asset_id
+                FROM photo_album_items
+                WHERE asset_id IN ({placeholders})
+                """,
+                tuple(chunk),
+            ).fetchall()
+            matched.update(str(row["asset_id"] or "") for row in rows if str(row["asset_id"] or ""))
+        return matched
+
     def update_scan_run(
         self,
         run_id: str,

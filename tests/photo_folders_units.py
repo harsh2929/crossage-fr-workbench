@@ -9744,6 +9744,41 @@ def test_photo_active_view_filters_media_favorite_and_edited() -> None:
             {"folderId": "all", "mediaKind": "image", "notInAlbumOnly": True, "sort": "filename", "previewBudget": 0}
         )
         assert [item["sourcePath"] for item in loose_images["items"]] == [edited, favorite], loose_images
+        all_entries = api._all_photo_entries()
+        original_asset_by_path = api.project.db.photo_asset_by_path
+        original_memberships = api.project.db.list_photo_asset_album_memberships
+        original_batch_memberships = api.project.db.photo_asset_ids_with_album_memberships
+        membership_batch_calls = 0
+
+        def fail_point_asset_lookup(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("notInAlbum fallback should batch asset lookup instead of querying each source path")
+
+        def fail_point_membership_lookup(*_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("notInAlbum fallback should batch album membership lookup instead of querying each asset")
+
+        def counting_batch_memberships(asset_ids: Any, conn: Any = None) -> set[str]:
+            nonlocal membership_batch_calls
+            if conn is None:
+                membership_batch_calls += 1
+            return original_batch_memberships(asset_ids, conn)
+
+        api.project.db.photo_asset_by_path = fail_point_asset_lookup  # type: ignore[method-assign]
+        api.project.db.list_photo_asset_album_memberships = fail_point_membership_lookup  # type: ignore[method-assign]
+        api.project.db.photo_asset_ids_with_album_memberships = counting_batch_memberships  # type: ignore[method-assign]
+        try:
+            loose_fallback = api._filter_photo_entries_not_in_manual_album(all_entries)
+        finally:
+            api.project.db.photo_asset_by_path = original_asset_by_path  # type: ignore[method-assign]
+            api.project.db.list_photo_asset_album_memberships = original_memberships  # type: ignore[method-assign]
+            api.project.db.photo_asset_ids_with_album_memberships = original_batch_memberships  # type: ignore[method-assign]
+        assert membership_batch_calls == 1, membership_batch_calls
+        assert [entry["sourcePath"] for entry in api._sort_photo_entries(loose_fallback, "filename")] == [
+            edited,
+            favorite,
+            hidden_image,
+            screen_recording,
+            screenshot,
+        ], loose_fallback
 
         alice = api.list_photo_folder_items({"folderId": "all", "person": "Alice", "sort": "filename", "previewBudget": 0})
         assert [item["sourcePath"] for item in alice["items"]] == [favorite, plain], alice
