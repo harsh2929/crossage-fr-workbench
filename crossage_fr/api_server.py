@@ -13687,39 +13687,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return result
 
     def photo_ocr_index_status(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        assets = self._photo_ocr_all_assets(limit=max(1, min(100_000, int((params or {}).get("limit", 100_000) or 100_000))))
-        status_counts: dict[str, int] = {}
-        failures: list[dict[str, str]] = []
-        indexed = 0
-        pending = 0
-        ocr_block_counts = self.project.db.photo_ocr_block_counts(
-            str(asset.get("assetId", "") or "") for asset in assets if str(asset.get("assetId", "") or "")
+        params = params if isinstance(params, dict) else {}
+        status = self.project.db.photo_local_index_status_counts(
+            "ocr",
+            limit=max(1, min(100_000, int(params.get("limit", 100_000) or 100_000))),
         )
-        for asset in assets:
-            asset_id = str(asset.get("assetId", "") or "")
-            metadata = asset.get("metadata", {}) if isinstance(asset.get("metadata"), dict) else {}
-            local_ocr = metadata.get("localOcr", {}) if isinstance(metadata.get("localOcr"), dict) else {}
-            has_ocr = (
-                bool(str(metadata.get("ocrText", "") or "").strip())
-                or bool(str(metadata.get("detectedText", "") or "").strip())
-                or bool(str(metadata.get("liveText", "") or "").strip())
-                or bool(metadata.get("textRegions"))
-                or bool(metadata.get("textBlocks"))
-                or bool(ocr_block_counts.get(asset_id, 0))
-            )
-            status = str(local_ocr.get("status", "") or ("indexed" if has_ocr else "pending"))
-            status_counts[status] = status_counts.get(status, 0) + 1
-            if status == "indexed":
-                indexed += 1
-            elif status == "pending":
-                pending += 1
-            if status in {"failed", "no_text"} and len(failures) < 25:
-                failures.append({
-                    "assetId": str(asset.get("assetId", "") or ""),
-                    "sourcePath": str(asset.get("sourcePath", "") or ""),
-                    "status": status,
-                    "error": str(local_ocr.get("error", "") or ""),
-                })
         settings = self.photo_library_settings({})
         local_settings = settings.get("localSettings", {}) if isinstance(settings.get("localSettings"), dict) else {}
         return {
@@ -13728,11 +13700,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "noNetwork": bool(local_settings.get("noNetworkIntelligence", True)),
             "paused": bool(local_settings.get("backgroundIndexingPaused", False)),
             "powerMode": str(local_settings.get("indexingPowerMode", "balanced") or "balanced"),
-            "total": len(assets),
-            "indexed": indexed,
-            "pending": pending,
-            "statusCounts": status_counts,
-            "failures": failures,
+            "total": int(status.get("total", 0) or 0),
+            "indexed": int(status.get("indexed", 0) or 0),
+            "pending": int(status.get("pending", 0) or 0),
+            "statusCounts": status.get("statusCounts", {}),
+            "failures": status.get("failures", []),
         }
 
     def _photo_barcode_scope_assets(self, params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -13958,33 +13930,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return result
 
     def photo_barcode_index_status(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        assets = self._photo_ocr_all_assets(limit=max(1, min(100_000, int((params or {}).get("limit", 100_000) or 100_000))))
-        status_counts: dict[str, int] = {}
-        failures: list[dict[str, str]] = []
-        indexed = 0
-        pending = 0
-        for asset in assets:
-            metadata = asset.get("metadata", {}) if isinstance(asset.get("metadata"), dict) else {}
-            local_barcode = metadata.get("localBarcode", {}) if isinstance(metadata.get("localBarcode"), dict) else {}
-            has_barcode = (
-                bool(str(metadata.get("barcodeText", "") or "").strip())
-                or bool(str(metadata.get("decodedText", "") or "").strip())
-                or bool(str(metadata.get("qrText", "") or "").strip())
-                or bool(metadata.get("barcodes"))
-            )
-            status = str(local_barcode.get("status", "") or ("indexed" if has_barcode else "pending"))
-            status_counts[status] = status_counts.get(status, 0) + 1
-            if status == "indexed":
-                indexed += 1
-            elif status == "pending":
-                pending += 1
-            if status in {"failed", "no_code", "unavailable"} and len(failures) < 25:
-                failures.append({
-                    "assetId": str(asset.get("assetId", "") or ""),
-                    "sourcePath": str(asset.get("sourcePath", "") or ""),
-                    "status": status,
-                    "error": str(local_barcode.get("error", "") or ""),
-                })
+        params = params if isinstance(params, dict) else {}
+        status = self.project.db.photo_local_index_status_counts(
+            "barcode",
+            limit=max(1, min(100_000, int(params.get("limit", 100_000) or 100_000))),
+        )
         settings = self.photo_library_settings({})
         local_settings = settings.get("localSettings", {}) if isinstance(settings.get("localSettings"), dict) else {}
         return {
@@ -13994,11 +13944,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "paused": bool(local_settings.get("backgroundIndexingPaused", False)),
             "powerMode": str(local_settings.get("indexingPowerMode", "balanced") or "balanced"),
             "decoders": self.project.db._photo_asset_barcode_decoder_names(),
-            "total": len(assets),
-            "indexed": indexed,
-            "pending": pending,
-            "statusCounts": status_counts,
-            "failures": failures,
+            "total": int(status.get("total", 0) or 0),
+            "indexed": int(status.get("indexed", 0) or 0),
+            "pending": int(status.get("pending", 0) or 0),
+            "statusCounts": status.get("statusCounts", {}),
+            "failures": status.get("failures", []),
         }
 
     def _photo_object_scope_assets(self, params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -14186,32 +14136,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return result
 
     def photo_object_index_status(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        assets = self._photo_ocr_all_assets(limit=max(1, min(100_000, int((params or {}).get("limit", 100_000) or 100_000))))
-        status_counts: dict[str, int] = {}
-        failures: list[dict[str, str]] = []
-        indexed = 0
-        pending = 0
-        object_tag_counts = self.project.db.photo_object_tag_counts(
-            str(asset.get("assetId", "") or "") for asset in assets if str(asset.get("assetId", "") or "")
+        params = params if isinstance(params, dict) else {}
+        status = self.project.db.photo_local_index_status_counts(
+            "objects",
+            limit=max(1, min(100_000, int(params.get("limit", 100_000) or 100_000))),
         )
-        for asset in assets:
-            asset_id = str(asset.get("assetId", "") or "")
-            metadata = asset.get("metadata", {}) if isinstance(asset.get("metadata"), dict) else {}
-            local_objects = metadata.get("localObjectTags", {}) if isinstance(metadata.get("localObjectTags"), dict) else {}
-            has_objects = bool(object_tag_counts.get(asset_id, 0))
-            status = str(local_objects.get("status", "") or ("indexed" if has_objects else "pending"))
-            status_counts[status] = status_counts.get(status, 0) + 1
-            if status == "indexed":
-                indexed += 1
-            elif status == "pending":
-                pending += 1
-            if status in {"failed", "no_objects", "unavailable"} and len(failures) < 25:
-                failures.append({
-                    "assetId": str(asset.get("assetId", "") or ""),
-                    "sourcePath": str(asset.get("sourcePath", "") or ""),
-                    "status": status,
-                    "error": str(local_objects.get("error", "") or ""),
-                })
         settings = self.photo_library_settings({})
         local_settings = settings.get("localSettings", {}) if isinstance(settings.get("localSettings"), dict) else {}
         return {
@@ -14221,11 +14150,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "paused": bool(local_settings.get("backgroundIndexingPaused", False)),
             "powerMode": str(local_settings.get("indexingPowerMode", "balanced") or "balanced"),
             "metadataOnly": True,
-            "total": len(assets),
-            "indexed": indexed,
-            "pending": pending,
-            "statusCounts": status_counts,
-            "failures": failures,
+            "total": int(status.get("total", 0) or 0),
+            "indexed": int(status.get("indexed", 0) or 0),
+            "pending": int(status.get("pending", 0) or 0),
+            "statusCounts": status.get("statusCounts", {}),
+            "failures": status.get("failures", []),
         }
 
     def photo_curation_preferences(self, params: dict[str, Any] | None = None) -> dict[str, Any]:

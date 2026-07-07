@@ -8168,6 +8168,71 @@ def test_photo_object_index_status_and_queue_materializes_metadata_tags() -> Non
     print("ok photo object indexing materializes metadata tags through durable queue")
 
 
+def test_photo_index_status_uses_sql_counts_without_full_asset_hydration() -> None:
+    from PIL import Image
+
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        ocr_photo = base / "status-ocr.png"
+        barcode_photo = base / "status-barcode.png"
+        object_photo = base / "status-object.png"
+        pending_photo = base / "status-pending.png"
+        for path in (ocr_photo, barcode_photo, object_photo, pending_photo):
+            Image.new("RGB", (72, 40), (220, 220, 220)).save(path)
+        imported = api.import_photos({
+            "sourcePaths": [str(ocr_photo), str(barcode_photo), str(object_photo), str(pending_photo)],
+            "storageMode": "referenced",
+            "sourceLabel": "Index status SQL",
+        })
+        imported_by_name = {Path(path).name: path for path in imported["importedPaths"]}
+        ocr_path = imported_by_name["status-ocr.png"]
+        barcode_path = imported_by_name["status-barcode.png"]
+        object_path = imported_by_name["status-object.png"]
+        ocr_asset = api.project.db.photo_asset_by_path(ocr_path)
+        barcode_asset = api.project.db.photo_asset_by_path(barcode_path)
+        object_asset = api.project.db.photo_asset_by_path(object_path)
+        assert ocr_asset and barcode_asset and object_asset
+        api.project.db.replace_photo_ocr_blocks(
+            ocr_asset["assetId"],
+            [{"text": "schema OCR", "language": "eng", "confidence": 0.9, "bounds": {"x": 0, "y": 0, "width": 100, "height": 100}}],
+        )
+        api.project.db.update_photo_asset_metadata_json(
+            asset_id=barcode_asset["assetId"],
+            patch={"localBarcode": {"status": "no_code", "error": "No barcode"}, "barcodeText": ""},
+        )
+        api.project.db.update_photo_asset_metadata_json(
+            asset_id=object_asset["assetId"],
+            patch={"localObjectTags": {"status": "failed", "error": "Object metadata unavailable"}},
+        )
+
+        def fail_full_asset_loader(*_args: Any, **_kwargs: Any):
+            raise AssertionError("status commands should use SQL counts, not full asset hydration")
+
+        api._photo_ocr_all_assets = fail_full_asset_loader  # type: ignore[method-assign]
+
+        ocr_status = api.photo_ocr_index_status({})
+        barcode_status = api.photo_barcode_index_status({})
+        object_status = api.photo_object_index_status({})
+
+        assert ocr_status["total"] == 4, ocr_status
+        assert ocr_status["indexed"] == 1, ocr_status
+        assert ocr_status["pending"] == 3, ocr_status
+        assert ocr_status["statusCounts"]["indexed"] == 1, ocr_status
+        assert ocr_status["statusCounts"]["pending"] == 3, ocr_status
+
+        assert barcode_status["total"] == 4, barcode_status
+        assert barcode_status["pending"] == 3, barcode_status
+        assert barcode_status["statusCounts"]["no_code"] == 1, barcode_status
+        assert any(row["sourcePath"] == barcode_path and row["status"] == "no_code" for row in barcode_status["failures"]), barcode_status
+
+        assert object_status["total"] == 4, object_status
+        assert object_status["pending"] == 3, object_status
+        assert object_status["statusCounts"]["failed"] == 1, object_status
+        assert any(row["sourcePath"] == object_path and row["status"] == "failed" for row in object_status["failures"]), object_status
+    print("ok photo index status uses SQL counts without full asset hydration")
+
+
 def test_photo_operation_journal_orders_same_timestamp_by_insert_order() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -19464,5 +19529,6 @@ if __name__ == "__main__":
     test_photo_export_jobs_do_not_open_network_sockets()
     test_photo_ocr_indexing_does_not_open_network_sockets()
     test_photo_object_index_status_and_queue_materializes_metadata_tags()
+    test_photo_index_status_uses_sql_counts_without_full_asset_hydration()
     test_photo_indexing_queue_does_not_open_network_sockets()
     print("all photo_folders_units tests passed")

@@ -18034,6 +18034,117 @@ class WorkspaceDb:
                     counts[asset_key] = int(row["n"] or 0)
         return counts
 
+    def photo_local_index_status_counts(
+        self,
+        kind: str,
+        *,
+        limit: int = 100_000,
+        failure_limit: int = 25,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_local_index_status_counts(kind, limit=limit, failure_limit=failure_limit, conn=local_conn)
+        clean_kind = str(kind or "").strip().lower()
+        if clean_kind not in {"ocr", "barcode", "objects"}:
+            raise ValueError("Photo local index status kind must be ocr, barcode, or objects.")
+        try:
+            clean_limit = max(1, min(100_000, int(limit or 100_000)))
+        except (TypeError, ValueError):
+            clean_limit = 100_000
+        try:
+            clean_failure_limit = max(0, min(100, int(failure_limit or 25)))
+        except (TypeError, ValueError):
+            clean_failure_limit = 25
+        suffix_clauses = " OR ".join("LOWER(a.source_path) LIKE ?" for _ in self._IMAGE_ASSET_EXTENSIONS)
+        suffix_args = [f"%{suffix}" for suffix in self._IMAGE_ASSET_EXTENSIONS]
+        metadata_json = "COALESCE(a.metadata_json, '{}')"
+        if clean_kind == "ocr":
+            local_status = f"LOWER(COALESCE(CAST(json_extract({metadata_json}, '$.localOcr.status') AS TEXT), ''))"
+            local_error = f"COALESCE(CAST(json_extract({metadata_json}, '$.localOcr.error') AS TEXT), '')"
+            has_indexed = f"""
+                (
+                    TRIM(COALESCE(CAST(json_extract({metadata_json}, '$.ocrText') AS TEXT), '')) != ''
+                    OR TRIM(COALESCE(CAST(json_extract({metadata_json}, '$.detectedText') AS TEXT), '')) != ''
+                    OR TRIM(COALESCE(CAST(json_extract({metadata_json}, '$.liveText') AS TEXT), '')) != ''
+                    OR COALESCE(json_array_length(json_extract({metadata_json}, '$.textRegions')), 0) > 0
+                    OR COALESCE(json_array_length(json_extract({metadata_json}, '$.textBlocks')), 0) > 0
+                    OR EXISTS (SELECT 1 FROM photo_ocr_blocks AS b WHERE b.asset_id = a.asset_id LIMIT 1)
+                )
+            """
+            failure_statuses = ("failed", "no_text")
+        elif clean_kind == "barcode":
+            local_status = f"LOWER(COALESCE(CAST(json_extract({metadata_json}, '$.localBarcode.status') AS TEXT), ''))"
+            local_error = f"COALESCE(CAST(json_extract({metadata_json}, '$.localBarcode.error') AS TEXT), '')"
+            has_indexed = f"""
+                (
+                    TRIM(COALESCE(CAST(json_extract({metadata_json}, '$.barcodeText') AS TEXT), '')) != ''
+                    OR TRIM(COALESCE(CAST(json_extract({metadata_json}, '$.decodedText') AS TEXT), '')) != ''
+                    OR TRIM(COALESCE(CAST(json_extract({metadata_json}, '$.qrText') AS TEXT), '')) != ''
+                    OR COALESCE(json_array_length(json_extract({metadata_json}, '$.barcodes')), 0) > 0
+                )
+            """
+            failure_statuses = ("failed", "no_code", "unavailable")
+        else:
+            local_status = f"LOWER(COALESCE(CAST(json_extract({metadata_json}, '$.localObjectTags.status') AS TEXT), ''))"
+            local_error = f"COALESCE(CAST(json_extract({metadata_json}, '$.localObjectTags.error') AS TEXT), '')"
+            has_indexed = "EXISTS (SELECT 1 FROM photo_object_tags AS t WHERE t.asset_id = a.asset_id LIMIT 1)"
+            failure_statuses = ("failed", "no_objects", "unavailable")
+        status_expr = f"""
+            CASE
+                WHEN {local_status} != '' THEN {local_status}
+                WHEN {has_indexed} THEN 'indexed'
+                ELSE 'pending'
+            END
+        """
+        limited_sql = f"""
+            SELECT a.asset_id, a.source_path, a.metadata_json,
+                {status_expr} AS status,
+                {local_error} AS error
+            FROM photo_assets AS a
+            WHERE ({suffix_clauses})
+            ORDER BY LOWER(a.source_path) ASC, a.asset_id ASC
+            LIMIT ?
+        """
+        rows = conn.execute(
+            f"""
+            WITH limited AS ({limited_sql})
+            SELECT status, COUNT(*) AS n
+            FROM limited
+            GROUP BY status
+            """,
+            (*suffix_args, clean_limit),
+        ).fetchall()
+        status_counts = {str(row["status"] or "pending"): int(row["n"] or 0) for row in rows}
+        total = sum(status_counts.values())
+        failure_placeholders = ",".join("?" for _ in failure_statuses)
+        failure_rows = conn.execute(
+            f"""
+            WITH limited AS ({limited_sql})
+            SELECT asset_id, source_path, status, error
+            FROM limited
+            WHERE status IN ({failure_placeholders})
+            ORDER BY LOWER(source_path) ASC, asset_id ASC
+            LIMIT ?
+            """,
+            (*suffix_args, clean_limit, *failure_statuses, clean_failure_limit),
+        ).fetchall()
+        return {
+            "total": total,
+            "indexed": int(status_counts.get("indexed", 0)),
+            "pending": int(status_counts.get("pending", 0)),
+            "statusCounts": status_counts,
+            "failures": [
+                {
+                    "assetId": str(row["asset_id"] or ""),
+                    "sourcePath": str(row["source_path"] or ""),
+                    "status": str(row["status"] or ""),
+                    "error": str(row["error"] or ""),
+                }
+                for row in failure_rows
+            ],
+        }
+
     def _photo_object_tag_row(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         try:
             bounds = json.loads(str(row["bounds_json"] or "{}"))
