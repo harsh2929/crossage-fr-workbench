@@ -122,6 +122,42 @@ def test_review_status_persists_current_training_example() -> None:
         assert project.db.training_example_rows() == []
 
 
+def test_bulk_review_learning_examples_share_one_db_transaction() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        project = _project(tmp)
+        first = _candidate(project.root, "cand_bulk_1")
+        second = _candidate(project.root, "cand_bulk_2")
+        first.source_hash = sha256_file(Path(first.source_path))
+        second.source_hash = sha256_file(Path(second.source_path))
+        project.candidates[first.candidate_id] = first
+        project.candidates[second.candidate_id] = second
+
+        calibration_conns: list[sqlite3.Connection | None] = []
+        training_conns: list[sqlite3.Connection | None] = []
+        original_add_calibration_label = project.db.add_calibration_label
+        original_add_training_example = project.db.add_training_example
+
+        def record_calibration_conn(label_id: str, row: dict[str, object], conn: sqlite3.Connection | None = None) -> None:
+            calibration_conns.append(conn)
+            original_add_calibration_label(label_id, row, conn=conn)
+
+        def record_training_conn(example_id: str, row: dict[str, object], conn: sqlite3.Connection | None = None) -> dict[str, object]:
+            training_conns.append(conn)
+            return original_add_training_example(example_id, row, conn=conn)
+
+        project.db.add_calibration_label = record_calibration_conn  # type: ignore[method-assign]
+        project.db.add_training_example = record_training_conn  # type: ignore[method-assign]
+
+        updated = project.bulk_set_candidate_status([first.candidate_id, second.candidate_id], "accepted")
+        assert updated == 2
+        assert len(calibration_conns) == 2
+        assert len(training_conns) == 2
+        assert all(conn is not None for conn in [*calibration_conns, *training_conns])
+        assert len({id(conn) for conn in [*calibration_conns, *training_conns]}) == 1
+        assert len(project.db.training_example_rows()) == 2
+
+
 def test_reference_suggestion_stage_and_approval_adds_reference() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -987,6 +1023,7 @@ def test_stage_calibration_blocks_insufficient_or_regressed_feedback() -> None:
 
 def main() -> None:
     test_review_status_persists_current_training_example()
+    test_bulk_review_learning_examples_share_one_db_transaction()
     test_reference_suggestion_stage_and_approval_adds_reference()
     test_reference_suggestion_rejects_duplicate_outlier_and_model_mismatch()
     test_reference_suggestion_delete_person_cleanup()

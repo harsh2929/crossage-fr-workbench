@@ -22873,38 +22873,46 @@ class WorkspaceDb:
             ),
         )
 
-    def add_calibration_label(self, label_id: str, row: dict[str, Any]) -> None:
+    def add_calibration_label(
+        self,
+        label_id: str,
+        row: dict[str, Any],
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
         def _opt_float(value: Any) -> float | None:
             try:
                 return None if value is None else float(value)
             except (TypeError, ValueError):
                 return None
 
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO calibration_labels(
-                    label_id, source_path, file_hash, expected_person, actual_person,
-                    match_score, is_match, safe_label, pose_bucket, age_gap_years,
-                    raw_cosine, model_name, created_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    label_id,
-                    str(row.get("sourcePath", "")),
-                    str(row.get("fileHash", "")),
-                    str(row.get("expectedPerson", "")),
-                    str(row.get("actualPerson", "")),
-                    row.get("matchScore"),
-                    None if row.get("isMatch") is None else (1 if bool(row.get("isMatch")) else 0),
-                    str(row.get("safeLabel", "")),
-                    str(row.get("poseBucket", "") or ""),
-                    _opt_float(row.get("ageGapYears")),
-                    _opt_float(row.get("rawCosine")),
-                    str(row.get("modelName", "") or ""),
-                    now_iso(),
-                ),
+        if conn is None:
+            with self.connect() as local_conn:
+                self.add_calibration_label(label_id, row, local_conn)
+            return
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO calibration_labels(
+                label_id, source_path, file_hash, expected_person, actual_person,
+                match_score, is_match, safe_label, pose_bucket, age_gap_years,
+                raw_cosine, model_name, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                label_id,
+                str(row.get("sourcePath", "")),
+                str(row.get("fileHash", "")),
+                str(row.get("expectedPerson", "")),
+                str(row.get("actualPerson", "")),
+                row.get("matchScore"),
+                None if row.get("isMatch") is None else (1 if bool(row.get("isMatch")) else 0),
+                str(row.get("safeLabel", "")),
+                str(row.get("poseBucket", "") or ""),
+                _opt_float(row.get("ageGapYears")),
+                _opt_float(row.get("rawCosine")),
+                str(row.get("modelName", "") or ""),
+                now_iso(),
             )
+        )
 
     def calibration_label_rows(self) -> list[dict[str, Any]]:
         """Labeled (score, raw_cosine, is_match, pose, age-gap) rows for calibration.
@@ -22949,7 +22957,12 @@ class WorkspaceDb:
         digest = hashlib.sha256(f"{source}|{expected}|{model}|{label}".encode("utf-8")).hexdigest()
         return f"pair:{digest}"
 
-    def add_training_example(self, example_id: str, row: dict[str, Any]) -> dict[str, Any]:
+    def add_training_example(
+        self,
+        example_id: str,
+        row: dict[str, Any],
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
         """Persist one human-reviewed learning example for future adapters.
 
         Candidate-backed examples are keyed by candidate id, so changing a review
@@ -22971,72 +22984,74 @@ class WorkspaceDb:
         payload["naturalKey"] = natural_key
         payload["isMatch"] = bool(is_match)
         features = row.get("features")
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO training_examples(
-                    example_id, natural_key, label_id, candidate_id, source_path, source_hash,
-                    expected_person, actual_person, is_match, match_score, raw_cosine, quality,
-                    model_name, detector_size, candidate_embedding_key, best_ref_id, best_ref_path,
-                    reference_model_name, pose_bucket, age_gap_years, align_error, ied_px,
-                    media_kind, features_json, payload_json, created_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(natural_key) DO UPDATE SET
-                    example_id=excluded.example_id,
-                    label_id=excluded.label_id,
-                    candidate_id=excluded.candidate_id,
-                    source_path=excluded.source_path,
-                    source_hash=excluded.source_hash,
-                    expected_person=excluded.expected_person,
-                    actual_person=excluded.actual_person,
-                    is_match=excluded.is_match,
-                    match_score=excluded.match_score,
-                    raw_cosine=excluded.raw_cosine,
-                    quality=excluded.quality,
-                    model_name=excluded.model_name,
-                    detector_size=excluded.detector_size,
-                    candidate_embedding_key=excluded.candidate_embedding_key,
-                    best_ref_id=excluded.best_ref_id,
-                    best_ref_path=excluded.best_ref_path,
-                    reference_model_name=excluded.reference_model_name,
-                    pose_bucket=excluded.pose_bucket,
-                    age_gap_years=excluded.age_gap_years,
-                    align_error=excluded.align_error,
-                    ied_px=excluded.ied_px,
-                    media_kind=excluded.media_kind,
-                    features_json=excluded.features_json,
-                    payload_json=excluded.payload_json,
-                    created_at=excluded.created_at
-                """,
-                (
-                    example_id,
-                    natural_key,
-                    str(row.get("labelId", "") or ""),
-                    str(row.get("candidateId", "") or ""),
-                    str(row.get("sourcePath", "") or ""),
-                    str(row.get("sourceHash", "") or row.get("fileHash", "") or ""),
-                    str(row.get("expectedPerson", "") or ""),
-                    str(row.get("actualPerson", "") or ""),
-                    is_match,
-                    _opt_float(row.get("matchScore")),
-                    _opt_float(row.get("rawCosine")),
-                    _opt_float(row.get("quality")),
-                    str(row.get("modelName", "") or ""),
-                    int(row.get("detectorSize", 0) or 0),
-                    str(row.get("candidateEmbeddingKey", "") or ""),
-                    str(row.get("bestRefId", "") or ""),
-                    str(row.get("bestRefPath", "") or ""),
-                    str(row.get("referenceModelName", "") or ""),
-                    str(row.get("poseBucket", "") or ""),
-                    _opt_float(row.get("ageGapYears")),
-                    _opt_float(row.get("alignError")),
-                    _opt_float(row.get("iedPx")),
-                    str(row.get("mediaKind", "image") or "image"),
-                    _json_obj(features),
-                    json.dumps(payload, separators=(",", ":"), sort_keys=True),
-                    str(row.get("createdAt", "") or now_iso()),
-                ),
-            )
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.add_training_example(example_id, row, local_conn)
+        conn.execute(
+            """
+            INSERT INTO training_examples(
+                example_id, natural_key, label_id, candidate_id, source_path, source_hash,
+                expected_person, actual_person, is_match, match_score, raw_cosine, quality,
+                model_name, detector_size, candidate_embedding_key, best_ref_id, best_ref_path,
+                reference_model_name, pose_bucket, age_gap_years, align_error, ied_px,
+                media_kind, features_json, payload_json, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(natural_key) DO UPDATE SET
+                example_id=excluded.example_id,
+                label_id=excluded.label_id,
+                candidate_id=excluded.candidate_id,
+                source_path=excluded.source_path,
+                source_hash=excluded.source_hash,
+                expected_person=excluded.expected_person,
+                actual_person=excluded.actual_person,
+                is_match=excluded.is_match,
+                match_score=excluded.match_score,
+                raw_cosine=excluded.raw_cosine,
+                quality=excluded.quality,
+                model_name=excluded.model_name,
+                detector_size=excluded.detector_size,
+                candidate_embedding_key=excluded.candidate_embedding_key,
+                best_ref_id=excluded.best_ref_id,
+                best_ref_path=excluded.best_ref_path,
+                reference_model_name=excluded.reference_model_name,
+                pose_bucket=excluded.pose_bucket,
+                age_gap_years=excluded.age_gap_years,
+                align_error=excluded.align_error,
+                ied_px=excluded.ied_px,
+                media_kind=excluded.media_kind,
+                features_json=excluded.features_json,
+                payload_json=excluded.payload_json,
+                created_at=excluded.created_at
+            """,
+            (
+                example_id,
+                natural_key,
+                str(row.get("labelId", "") or ""),
+                str(row.get("candidateId", "") or ""),
+                str(row.get("sourcePath", "") or ""),
+                str(row.get("sourceHash", "") or row.get("fileHash", "") or ""),
+                str(row.get("expectedPerson", "") or ""),
+                str(row.get("actualPerson", "") or ""),
+                is_match,
+                _opt_float(row.get("matchScore")),
+                _opt_float(row.get("rawCosine")),
+                _opt_float(row.get("quality")),
+                str(row.get("modelName", "") or ""),
+                int(row.get("detectorSize", 0) or 0),
+                str(row.get("candidateEmbeddingKey", "") or ""),
+                str(row.get("bestRefId", "") or ""),
+                str(row.get("bestRefPath", "") or ""),
+                str(row.get("referenceModelName", "") or ""),
+                str(row.get("poseBucket", "") or ""),
+                _opt_float(row.get("ageGapYears")),
+                _opt_float(row.get("alignError")),
+                _opt_float(row.get("iedPx")),
+                str(row.get("mediaKind", "image") or "image"),
+                _json_obj(features),
+                json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                str(row.get("createdAt", "") or now_iso()),
+            ),
+        )
         return {"exampleId": example_id, "naturalKey": natural_key}
 
     def training_example_rows(self, limit: int = 0) -> list[dict[str, Any]]:

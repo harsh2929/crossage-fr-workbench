@@ -2758,11 +2758,16 @@ class ProjectState:
             return ""
         return f"sha256:{file_hash}|model:{model_name}|detector:{int(self.config.face_detector_size)}"
 
-    def _record_review_learning_example(self, candidate: ReviewCandidate, status: str) -> dict[str, str]:
+    def _record_review_learning_example(
+        self,
+        candidate: ReviewCandidate,
+        status: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, str]:
         """Persist the current accepted/rejected review as calibration + adapter input."""
         if status not in {"accepted", "rejected"}:
             try:
-                self.db.delete_training_examples_for_candidates([candidate.candidate_id])
+                self.db.delete_training_examples_for_candidates([candidate.candidate_id], conn=conn)
             except sqlite3.Error:
                 pass
             return {"labelId": "", "exampleId": ""}
@@ -2783,6 +2788,7 @@ class ProjectState:
                 "rawCosine": candidate.raw_cosine,
                 "modelName": candidate.model_name,
             },
+            conn=conn,
         )
         reference = self.references.get(str(candidate.best_ref_id or ""))
         features = {
@@ -2826,6 +2832,7 @@ class ProjectState:
                 "mediaKind": candidate.media_kind,
                 "features": features,
             },
+            conn=conn,
         )
         return {"labelId": label_id, "exampleId": example_id}
 
@@ -3077,12 +3084,13 @@ class ProjectState:
         if missing:
             raise KeyError(f"Candidate not found: {missing[0]}")
         learning_examples = 0
-        for candidate_id in unique_ids:
-            candidate = self.candidates[candidate_id]
-            candidate.status = status
-            learning = self._record_review_learning_example(candidate, status)
-            if learning.get("exampleId"):
-                learning_examples += 1
+        with self.db.connect() as conn:
+            for candidate_id in unique_ids:
+                candidate = self.candidates[candidate_id]
+                candidate.status = status
+                learning = self._record_review_learning_example(candidate, status, conn=conn)
+                if learning.get("exampleId"):
+                    learning_examples += 1
         self._mark_candidates_dirty(unique_ids)
         self._append_audit(
             {
