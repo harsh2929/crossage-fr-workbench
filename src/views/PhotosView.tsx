@@ -31507,12 +31507,14 @@ function photoObjectTagBoundsPercent(value: unknown, mediaWidth: number, mediaHe
   const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
   const unit = String(record.unit || record.units || record.coordinateUnit || record.coordinateSpace || "").toLocaleLowerCase();
   const maxValue = Math.max(Math.abs(x), Math.abs(y), Math.abs(width), Math.abs(height));
-  if (unit.includes("normal") || unit.includes("relative") || unit === "fraction" || maxValue <= 1.5) {
+  const isPercentUnit = unit.includes("percent") || unit === "%";
+  const isNormalizedUnit = unit.includes("normal") || unit.includes("relative") || unit === "fraction";
+  if (!isPercentUnit && (isNormalizedUnit || (!unit && maxValue <= 1.5))) {
     x *= 100;
     y *= 100;
     width *= 100;
     height *= 100;
-  } else if (!unit.includes("percent") && unit !== "%" && mediaWidth > 0 && mediaHeight > 0 && maxValue > 100) {
+  } else if (!isPercentUnit && mediaWidth > 0 && mediaHeight > 0 && maxValue > 100) {
     x = (x / mediaWidth) * 100;
     width = (width / mediaWidth) * 100;
     y = (y / mediaHeight) * 100;
@@ -31613,12 +31615,12 @@ function photoObjectTagReviewEntries(item: PhotoItem): PhotoObjectTagReviewEntry
         : "";
     if (!action) return [];
     const source = cleanPhotoObjectTagSource(record.source, action === "confirmed" ? "user" : "object");
-    const key = `${source.toLocaleLowerCase()}:${label.toLocaleLowerCase()}:${action}`;
+    const bounds = photoObjectTagBoundsPercent(record.bounds, 100, 100);
+    const boundsKey = bounds ? photoObjectTagBoundsKey(photoObjectTagReviewBoundsPatch(bounds)) : "";
+    const key = `${photoObjectTagReviewKey(source, label, boundsKey)}:${action}`;
     if (seen.has(key)) return [];
     seen.add(key);
     const confidence = photoObjectTagConfidenceValue(record.confidence ?? record.score ?? record.probability);
-    const bounds = photoObjectTagBoundsPercent(record.bounds, 100, 100);
-    const boundsKey = bounds ? photoObjectTagBoundsKey(photoObjectTagReviewBoundsPatch(bounds)) : "";
     return [{
       label,
       source,
