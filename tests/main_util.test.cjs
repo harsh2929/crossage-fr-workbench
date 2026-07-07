@@ -79,6 +79,16 @@ function testPythonBackendStartRaceGuards() {
   assert.match(spawnBlock, /stale: !activeChild/);
 }
 
+function testBackendStdinErrorsAreHandled() {
+  const source = fs.readFileSync(path.join(__dirname, "..", "desktop", "main.cjs"), "utf8");
+  const spawnBlock = source.slice(source.indexOf("  _spawn() {"), source.indexOf("  async invoke("));
+  assert.match(spawnBlock, /child\.stdin\.on\("error", \(error\) => \{/);
+  assert.match(spawnBlock, /type: "backend_stdin_error"/);
+  assert.match(spawnBlock, /createAppError\("E-BACKEND-PIPE"/);
+  assert.match(spawnBlock, /for \(const pending of this\.pending\.values\(\)\) \{[\s\S]*?pending\.reject\(pipeError\);[\s\S]*?\}/);
+  assert.match(spawnBlock, /this\.pending\.clear\(\);[\s\S]*?this\.readyPromise = null;[\s\S]*?this\.readyState = null;[\s\S]*?this\.child = null;/);
+}
+
 function testCanonicalPathKey() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vintrace-canon-"));
   // case-fold on -> equal keys regardless of case
@@ -105,5 +115,6 @@ testTimestampSlug();
 testSafeRealpath();
 testBackendRestartDelay();
 testPythonBackendStartRaceGuards();
+testBackendStdinErrorsAreHandled();
 testCanonicalPathKey();
 console.log("main util ok");

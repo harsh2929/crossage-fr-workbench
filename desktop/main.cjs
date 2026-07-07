@@ -3332,6 +3332,34 @@ class PythonBackend {
           reject(createAppError("E-BACKEND-START", error.message || "Python backend could not start.", { cause: error }));
         }
       });
+      child.stdin.on("error", (error) => {
+        const activeChild = this.child === child;
+        const pipeError = createAppError("E-BACKEND-PIPE", error?.message || "Python backend is not accepting commands.", { cause: error });
+        appendDiagnosticEvent({
+          type: "backend_stdin_error",
+          level: "error",
+          message: pipeError.message,
+          stack: diagnosticStack(error),
+          stderrTail: this.stderrTail,
+          stale: !activeChild
+        });
+        if (!activeChild) {
+          return;
+        }
+        clearTimeout(timer);
+        for (const pending of this.pending.values()) {
+          clearTimeout(pending.timer);
+          pending.reject(pipeError);
+        }
+        this.pending.clear();
+        this.readyPromise = null;
+        this.readyState = null;
+        this.child = null;
+        if (!child.killed) {
+          child.kill();
+        }
+        reject(pipeError);
+      });
       child.on("exit", (code) => {
         clearTimeout(timer);
         const activeChild = this.child === child;
