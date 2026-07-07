@@ -20,6 +20,7 @@ const {
   canonicalPathKey,
   pathTrustKeyFromResolved,
   uniquePathBatch,
+  buildTrustedMediaPathSet,
   filterStableWatchFiles,
 } = require("./main/util.cjs");
 const { buildSystemPhotoSources } = require("./main/photo-sources.cjs");
@@ -104,6 +105,8 @@ const pendingExternalOpens = [];
 const userGrantedPaths = new Set();
 const userGrantedExternalEditorPaths = new Set();
 const queryTrustedMediaPaths = new Set();
+let queryTrustedMediaPathsVersion = 0;
+let trustedMediaPathCache = null;
 const recentDiagnosticEvents = [];
 let workspaceLockUnlocked = true;
 let workspaceLockInitialized = false;
@@ -1694,14 +1697,28 @@ function grantExternalEditorPath(filePath) {
   }
 }
 
+function invalidateTrustedMediaPathCache() {
+  trustedMediaPathCache = null;
+}
+
 function grantQueryMediaPath(filePath) {
   if (typeof filePath !== "string" || !filePath.trim()) {
     return;
   }
-  queryTrustedMediaPaths.add(path.resolve(filePath));
+  const resolved = path.resolve(filePath);
+  let changed = false;
+  if (!queryTrustedMediaPaths.has(resolved)) {
+    queryTrustedMediaPaths.add(resolved);
+    changed = true;
+  }
   while (queryTrustedMediaPaths.size > QUERY_TRUSTED_MEDIA_PATH_LIMIT) {
     const oldest = queryTrustedMediaPaths.values().next().value;
     queryTrustedMediaPaths.delete(oldest);
+    changed = true;
+  }
+  if (changed) {
+    queryTrustedMediaPathsVersion += 1;
+    invalidateTrustedMediaPathCache();
   }
 }
 
@@ -1712,7 +1729,11 @@ function grantQueryMediaPath(filePath) {
 function clearPathTrust() {
   userGrantedPaths.clear();
   userGrantedExternalEditorPaths.clear();
-  queryTrustedMediaPaths.clear();
+  if (queryTrustedMediaPaths.size) {
+    queryTrustedMediaPaths.clear();
+    queryTrustedMediaPathsVersion += 1;
+  }
+  invalidateTrustedMediaPathCache();
 }
 
 function isUserGrantedPath(filePath) {
@@ -1728,29 +1749,35 @@ function isUserGrantedPath(filePath) {
 }
 
 function currentTrustedPaths() {
-  const state = backend?.readyState;
-  const paths = new Set();
-  const add = (value) => {
-    if (typeof value === "string" && value.trim()) {
-      paths.add(path.resolve(value));
-    }
-  };
-  add(state?.workspace);
-  for (const item of state?.references || []) {
-    add(item.sourcePath);
-    add(item.previewPath);
+  const state = backend?.readyState || null;
+  if (
+    trustedMediaPathCache &&
+    trustedMediaPathCache.state === state &&
+    trustedMediaPathCache.queryVersion === queryTrustedMediaPathsVersion
+  ) {
+    return trustedMediaPathCache;
   }
-  for (const item of state?.candidates || []) {
-    add(item.sourcePath);
-    add(item.mediaSourcePath);
-    add(item.previewPath);
-    add(item.bestRefPath);
-    add(item.bestRefPreviewPath);
+  const paths = buildTrustedMediaPathSet(state, queryTrustedMediaPaths);
+  const previewsReal = state?.workspace ? safeRealpath(path.join(state.workspace, "previews")) : "";
+  trustedMediaPathCache = { state, paths, previewsReal, queryVersion: queryTrustedMediaPathsVersion };
+  return trustedMediaPathCache;
+}
+
+async function realpathOrEmpty(filePath) {
+  try {
+    return await fs.promises.realpath(path.resolve(String(filePath || "")));
+  } catch {
+    return "";
   }
-  for (const item of queryTrustedMediaPaths) {
-    add(item);
+}
+
+async function pathExistsAsync(filePath) {
+  try {
+    await fs.promises.access(filePath, fs.constants.R_OK);
+    return true;
+  } catch {
+    return false;
   }
-  return { state, paths };
 }
 
 // Resolve a media request to the canonical real path it is trusted to serve,
@@ -1759,28 +1786,27 @@ function currentTrustedPaths() {
 // trust check resolved symlinks but the fetch used the unresolved path, so a
 // symlink swapped between check and fetch could serve a file outside the trust
 // boundary. Callers must fetch the returned path, never the original.
-function resolveTrustedMediaPath(filePath) {
+async function resolveTrustedMediaPath(filePath) {
   const target = path.resolve(String(filePath || ""));
-  const targetReal = safeRealpath(target);
+  const targetReal = await realpathOrEmpty(target);
   if (!targetReal) {
     return "";
   }
-  const { state, paths } = currentTrustedPaths();
+  const { state, paths, previewsReal } = currentTrustedPaths();
   if (!state || !paths.size) {
     return "";
   }
   if (paths.has(target)) {
     return targetReal;
   }
-  const previewsReal = state.workspace ? safeRealpath(path.join(state.workspace, "previews")) : "";
   if (previewsReal && isSubpath(previewsReal, targetReal)) {
     return targetReal;
   }
   return "";
 }
 
-function isTrustedMediaPath(filePath) {
-  return Boolean(resolveTrustedMediaPath(filePath));
+async function isTrustedMediaPath(filePath) {
+  return Boolean(await resolveTrustedMediaPath(filePath));
 }
 
 function isTrustedShellPath(filePath) {
@@ -2535,8 +2561,8 @@ function registerMediaProtocol() {
     // Resolve + validate to a single canonical real path, then fetch THAT path
     // (not the original) so a symlink swapped between check and fetch can't
     // redirect us outside the trust boundary.
-    const realTarget = target && !isWorkspaceLocked() ? resolveTrustedMediaPath(target) : "";
-    if (!realTarget || !fs.existsSync(realTarget)) {
+    const realTarget = target && !isWorkspaceLocked() ? await resolveTrustedMediaPath(target) : "";
+    if (!realTarget || !(await pathExistsAsync(realTarget))) {
       return new Response("Not found", { status: 404 });
     }
     return net.fetch(pathToFileURL(realTarget).toString());

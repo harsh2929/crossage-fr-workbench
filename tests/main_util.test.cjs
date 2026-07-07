@@ -129,6 +129,26 @@ function testUniquePathBatch() {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+function testBuildTrustedMediaPathSet() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vintrace-trusted-media-"));
+  const workspace = path.join(dir, "workspace");
+  const source = path.join(dir, "media", "a.jpg");
+  const preview = path.join(workspace, "previews", "a.webp");
+  const bestRef = path.join(dir, "refs", "best.jpg");
+  const extra = path.join(dir, "dynamic", "cover.webp");
+  const paths = util.buildTrustedMediaPathSet({
+    workspace,
+    references: [{ sourcePath: source, previewPath: preview }],
+    candidates: [{ sourcePath: source, mediaSourcePath: path.join(dir, "video.mov"), bestRefPath: bestRef }],
+  }, [extra, "", null]);
+  assert.ok(paths.has(path.resolve(workspace)));
+  assert.ok(paths.has(path.resolve(source)));
+  assert.ok(paths.has(path.resolve(preview)));
+  assert.ok(paths.has(path.resolve(bestRef)));
+  assert.ok(paths.has(path.resolve(extra)));
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 async function testFilterStableWatchFilesConcurrency() {
   const paths = ["a", "b", "drop-1", "c", "drop-2", "d", "e"];
   let active = 0;
@@ -164,6 +184,7 @@ async function main() {
   testBackendStdinErrorsAreHandled();
   testCanonicalPathKey();
   testUniquePathBatch();
+  testBuildTrustedMediaPathSet();
   await testFilterStableWatchFilesConcurrency();
   console.log("main util ok");
 }

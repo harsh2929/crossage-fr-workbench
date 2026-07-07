@@ -513,8 +513,12 @@ def assert_static_app_contracts() -> None:
     # real path and fetches THAT path (not the original), so a symlink swapped
     # between the trust check and the fetch cannot escape the trust boundary.
     assert "function resolveTrustedMediaPath" in desktop_main
-    assert "resolveTrustedMediaPath(target)" in desktop_main
-    assert "!realTarget || !fs.existsSync(realTarget)" in desktop_main
+    assert "await resolveTrustedMediaPath(target)" in desktop_main
+    assert "trustedMediaPathCache" in desktop_main
+    assert "buildTrustedMediaPathSet(state, queryTrustedMediaPaths)" in desktop_main
+    assert "await pathExistsAsync(realTarget)" in desktop_main
+    media_protocol_block = desktop_main[desktop_main.index("function registerMediaProtocol"):desktop_main.index("function hardenWebContents")]
+    assert "fs.existsSync" not in media_protocol_block
     assert "pathToFileURL(realTarget)" in desktop_main
     enroll_manager = (root / "crossage_fr" / "enroll" / "manager.py").read_text(encoding="utf-8")
     assert "unmatched_paths: set[Path]" in enroll_manager

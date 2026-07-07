@@ -119,6 +119,31 @@ function uniquePathBatch(values, limit) {
   return { paths, overflow: false };
 }
 
+function buildTrustedMediaPathSet(state, extraPaths = []) {
+  const paths = new Set();
+  const add = (value) => {
+    if (typeof value === "string" && value.trim()) {
+      paths.add(path.resolve(value));
+    }
+  };
+  add(state?.workspace);
+  for (const item of state?.references || []) {
+    add(item?.sourcePath);
+    add(item?.previewPath);
+  }
+  for (const item of state?.candidates || []) {
+    add(item?.sourcePath);
+    add(item?.mediaSourcePath);
+    add(item?.previewPath);
+    add(item?.bestRefPath);
+    add(item?.bestRefPreviewPath);
+  }
+  for (const item of extraPaths || []) {
+    add(item);
+  }
+  return paths;
+}
+
 async function filterStableWatchFiles(paths, waitForStableFile, concurrency = 8) {
   if (!Array.isArray(paths) || !paths.length) {
     return [];
@@ -158,5 +183,6 @@ module.exports = {
   canonicalPathKey,
   pathTrustKeyFromResolved,
   uniquePathBatch,
+  buildTrustedMediaPathSet,
   filterStableWatchFiles,
 };
