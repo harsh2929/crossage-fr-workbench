@@ -4887,7 +4887,6 @@ export default function App() {
   async function blockFalseMatch(candidateId: string, options: { confirm?: boolean } = {}) {
     if (options.confirm !== false && !await confirmDialog("Stop suggesting this image for this person again, even if another saved photo triggers it? The current row will be rejected.")) return;
     const result = await invoke<CommandResult>("Saving feedback", "block_false_match", { candidateId });
-    if (result.state) applyState(result.state);
     const value = result.value as { blocked?: number } | undefined;
     setNotice({ tone: "ok", text: value?.blocked ? "This image/person false match will be suppressed in future scans." : "Feedback saved." });
   }
@@ -4903,7 +4902,6 @@ export default function App() {
       personName: target,
       clearReference: true
     });
-    if (result.state) applyState(result.state);
     setNotice({ tone: "ok", text: `Moved match to ${target}.` });
   }
 
@@ -4942,7 +4940,6 @@ export default function App() {
   async function stageReferenceSuggestions() {
     if (!await confirmDialog("Find accepted matches that are safe to suggest as saved person photos? Suggestions still require approval.")) return;
     const result = await invoke<CommandResult<{ staged?: number; rejected?: unknown[]; skipped?: unknown[] }>>("Finding reference suggestions", "stage_reference_suggestions", { limit: 20 });
-    if (result.state) applyState(result.state);
     const staged = finiteInteger(result.value?.staged, 0, 0, Number.MAX_SAFE_INTEGER);
     const rejected = Array.isArray(result.value?.rejected) ? result.value.rejected.length : 0;
     setNotice({
@@ -4957,7 +4954,6 @@ export default function App() {
     if (!artifactId) return;
     if (!await confirmDialog("Add this accepted match as a saved person photo? The app will recheck quality and duplicates first.")) return;
     const result = await invoke<CommandResult<{ refId?: string }>>("Approving suggested reference", "approve_reference_suggestion", { artifactId });
-    if (result.state) applyState(result.state);
     setNotice({ tone: "ok", text: "Suggested reference added to saved person photos." });
   }
 
@@ -4967,7 +4963,6 @@ export default function App() {
       artifactId,
       reason: "Rejected from People view."
     });
-    if (result.state) applyState(result.state);
     setNotice({ tone: "ok", text: "Suggested reference rejected." });
   }
 
@@ -5035,7 +5030,6 @@ export default function App() {
         `Repaired app folder: removed ${result.value.removedReferences} saved photo link${result.value.removedReferences === 1 ? "" : "s"} and ${result.value.removedCandidates} match row${result.value.removedCandidates === 1 ? "" : "s"}.`
       );
     }
-    if (result.state) applyState(result.state);
   }
 
   async function repairDatabaseIntegrity() {
@@ -5069,7 +5063,6 @@ export default function App() {
           : "Database repair finished but integrity still needs attention. Export diagnostics."
       });
     }
-    if (result.state) applyState(result.state);
     await runWorkspaceHealth();
   }
 
@@ -5122,7 +5115,6 @@ export default function App() {
       }
       setNoticeMessage("ok", "notice.pathsRelinked", { count: result.value.relinkedFields }, `Relinked ${result.value.relinkedFields} saved path${result.value.relinkedFields === 1 ? "" : "s"}.`);
     }
-    if (result.state) applyState(result.state);
     await runWorkspaceHealth();
   }
 
@@ -5258,7 +5250,6 @@ export default function App() {
       setScanManifestPruneResult(result.value);
       setNoticeMessage("ok", "notice.oldScanRunsRemoved", { runs: result.value.runsDeleted, rows: formatNumber(result.value.filesDeleted) }, `Removed ${result.value.runsDeleted} old scan run${result.value.runsDeleted === 1 ? "" : "s"} and ${formatNumber(result.value.filesDeleted)} manifest row${result.value.filesDeleted === 1 ? "" : "s"}.`);
     }
-    if (result.state) applyState(result.state);
   }
 
   async function exportWorkspaceInventory() {
@@ -5821,9 +5812,6 @@ export default function App() {
       "Running validation pack",
       "run_accuracy_validation_pack"
     );
-    if (result.state) {
-      applyState(result.state);
-    }
     if (!result.value) {
       setNotice({ tone: "warn", text: "Validation pack command completed without a result." });
       return;
@@ -5965,9 +5953,6 @@ export default function App() {
   async function applyCalibration() {
     if (!await confirmDialog("Apply the current review feedback to the matching levels? You can still change settings afterward.")) return;
     const result = await invoke<CommandResult>("Applying calibration", "apply_calibration");
-    if (result.state) {
-      applyState(result.state);
-    }
     void refreshCalibrationLearningStatus().catch(() => undefined);
     setNotice({ tone: "ok", text: "Matching levels updated from review feedback." });
   }
@@ -6024,9 +6009,6 @@ export default function App() {
     if (!await confirmDialog("Run the local learning check now? It can stage a learned calibration artifact, but it will not apply it.")) return;
     const result = await invoke<CommandResult<LearningJobsResult>>("Running learning check", "run_learning_jobs");
     const value = normalizeLearningJobsResult(result.value);
-    if (result.state) {
-      applyState(result.state);
-    }
     if (value.status) {
       setCalibrationLearning(value.status);
     } else {
@@ -6042,9 +6024,6 @@ export default function App() {
     if (!await confirmDialog("Apply the staged learned calibration to matching levels now? Rollback metadata will remain in the local artifact history.")) return;
     const params = artifactId ? { artifactId } : {};
     const result = await invoke<CommandResult<CalibrationLearningResult>>("Applying learned calibration", "promote_calibration", params);
-    if (result.state) {
-      applyState(result.state);
-    }
     await refreshCalibrationLearningStatus();
     setNotice({ tone: "ok", text: "Learned calibration applied to matching levels." });
   }
@@ -6053,9 +6032,6 @@ export default function App() {
     if (!await confirmDialog("Rollback the promoted learned calibration and restore the previous matching levels saved in the artifact?")) return;
     const params = artifactId ? { artifactId } : {};
     const result = await invoke<CommandResult<CalibrationLearningResult>>("Rolling back calibration", "rollback_calibration", params);
-    if (result.state) {
-      applyState(result.state);
-    }
     await refreshCalibrationLearningStatus();
     setNotice({ tone: "ok", text: "Learned calibration rolled back." });
   }
@@ -6063,9 +6039,6 @@ export default function App() {
   async function stageEmbeddingAdapter() {
     const result = await invoke<CommandResult<CalibrationLearningResult>>("Staging embedding adapter", "stage_embedding_adapter");
     const value = normalizeCalibrationLearningResult(result.value);
-    if (result.state) {
-      applyState(result.state);
-    }
     await refreshEmbeddingAdapterStatus();
     const labels = finiteInteger(
       value.payload?.inputCount,
@@ -6085,9 +6058,6 @@ export default function App() {
     if (!await confirmDialog("Apply the staged embedding adapter to future matching? Rollback keeps the previous scoring path available.")) return;
     const params = artifactId ? { artifactId } : {};
     const result = await invoke<CommandResult<CalibrationLearningResult>>("Applying embedding adapter", "promote_embedding_adapter", params);
-    if (result.state) {
-      applyState(result.state);
-    }
     await refreshEmbeddingAdapterStatus();
     setNotice({ tone: "ok", text: "Embedding adapter applied to future matching." });
   }
@@ -6096,9 +6066,6 @@ export default function App() {
     if (!await confirmDialog("Rollback the promoted embedding adapter and return to the current scoring path?")) return;
     const params = artifactId ? { artifactId } : {};
     const result = await invoke<CommandResult<CalibrationLearningResult>>("Rolling back embedding adapter", "rollback_embedding_adapter", params);
-    if (result.state) {
-      applyState(result.state);
-    }
     await refreshEmbeddingAdapterStatus();
     setNotice({ tone: "ok", text: "Embedding adapter rolled back." });
   }
@@ -6159,9 +6126,6 @@ export default function App() {
       return;
     }
     const result = await invoke<CommandResult<AccuracyLabelsImportValue>>("Importing accuracy labels", "import_accuracy_labels", { rows });
-    if (result.state) {
-      applyState(result.state);
-    }
     const imported = result.value?.imported ?? 0;
     const skipped = result.value?.skipped ?? 0;
     setNotice({
@@ -6178,9 +6142,6 @@ export default function App() {
       return;
     }
     const result = await invoke<CommandResult<TrainingExamplesImportValue>>("Importing training examples", "import_training_examples", { rows });
-    if (result.state) {
-      applyState(result.state);
-    }
     const imported = result.value?.imported ?? 0;
     const skipped = result.value?.skipped ?? 0;
     setNotice({
@@ -11080,10 +11041,8 @@ function ReviewView(props: {
     reviewLane,
     search: deferredSearch.trim(),
     sort,
-    pageSize,
-    candidateCount: props.state.counts.candidates,
-    pendingCount: props.state.counts.pending
-  }), [deferredSearch, pageSize, props.state.counts.candidates, props.state.counts.pending, props.state.workspace, props.state.workspaceMetadata?.workspaceId, reviewLane, sort, statusFilter]);
+    pageSize
+  }), [deferredSearch, pageSize, props.state.workspace, props.state.workspaceMetadata?.workspaceId, reviewLane, sort, statusFilter]);
 
   async function loadCandidatePage(append = false, requestedOffset?: number) {
     const requestId = pageRequestRef.current + 1;

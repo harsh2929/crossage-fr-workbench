@@ -1844,6 +1844,7 @@ run("photo detected item review controls persist object tag review metadata", ()
   assert.match(source, /const isPercentUnit = unit\.includes\("percent"\) \|\| unit === "%"/);
   assert.match(source, /if \(!isPercentUnit && \(isNormalizedUnit \|\| \(!unit && maxValue <= 1\.5\)\)\)/);
   assert.match(source, /const key = `\$\{photoObjectTagReviewKey\(source, label, boundsKey\)\}:\$\{action\}`/);
+  assert.match(source, /const id = `\$\{source\}:\$\{entry\.label\.toLocaleLowerCase\(\)\}:\$\{boundsKey\}:\$\{entry\.action\}:review`/);
   assert.match(source, /visualLookupObjectTagId/);
   assert.match(source, /function openVisualLookupForObjectTag\(row: PhotoObjectTagReviewRow\)/);
   assert.match(source, /function searchVisualLookupObjectTag\(row: PhotoObjectTagReviewRow\)/);

@@ -31976,7 +31976,7 @@ function photoObjectTagReviewRows(item: PhotoItem): PhotoObjectTagReviewRow[] {
     const userAdded = entry.action === "confirmed" && ["user", "manual", "added"].includes(source.toLocaleLowerCase());
     const alreadyVisible = rows.some((row) => photoObjectTagReviewKey(row.source, row.label, row.boundsKey) === key && row.action === entry.action);
     if (alreadyVisible || (entry.action === "confirmed" && !userAdded)) return;
-    const id = `${source}:${entry.label.toLocaleLowerCase()}:${entry.action}:review`;
+    const id = `${source}:${entry.label.toLocaleLowerCase()}:${boundsKey}:${entry.action}:review`;
     if (seen.has(id)) return;
     seen.add(id);
     rows.push({
