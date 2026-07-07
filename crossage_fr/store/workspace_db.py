@@ -24,6 +24,8 @@ from crossage_fr.workspace_registry import now_iso, restrict_file_mode
 
 SCHEMA_VERSION = 4
 PHOTO_LOCATION_INDEX_VERSION = "1"
+SQLITE_CACHE_SIZE_KIB = 65536
+SQLITE_MMAP_SIZE_BYTES = 256 * 1024 * 1024
 PHOTO_OPERATION_JOURNAL_PENDING_LIMIT = 250
 PHOTO_OPERATION_JOURNAL_UNDONE_LIMIT = 50
 PHOTO_DB_PET_KIND_TERMS: dict[str, tuple[str, ...]] = {
@@ -108,6 +110,8 @@ class WorkspaceDb:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute(f"PRAGMA cache_size=-{SQLITE_CACHE_SIZE_KIB}")
+            conn.execute(f"PRAGMA mmap_size={SQLITE_MMAP_SIZE_BYTES}")
             conn.execute("PRAGMA foreign_keys=ON")
             yield conn
             conn.commit()

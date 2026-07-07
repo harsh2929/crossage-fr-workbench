@@ -271,6 +271,19 @@ def _candidate(
     )
 
 
+def test_workspace_db_connection_pragmas_tune_cache_and_mmap() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = WorkspaceDb(Path(tmp) / "workspace.sqlite3")
+        with db.connect() as conn:
+            cache_size = int(conn.execute("PRAGMA cache_size").fetchone()[0])
+            mmap_size = int(conn.execute("PRAGMA mmap_size").fetchone()[0])
+            foreign_keys = int(conn.execute("PRAGMA foreign_keys").fetchone()[0])
+        assert cache_size == -workspace_db_module.SQLITE_CACHE_SIZE_KIB, cache_size
+        assert mmap_size == workspace_db_module.SQLITE_MMAP_SIZE_BYTES, mmap_size
+        assert foreign_keys == 1, foreign_keys
+    print("ok workspace DB connection tunes cache mmap and foreign keys")
+
+
 def _api(tmp: str) -> DesktopApi:
     base = Path(tmp)
     registry = str(base / "registry")
@@ -18440,6 +18453,7 @@ def test_photo_indexing_queue_does_not_open_network_sockets() -> None:
 
 
 if __name__ == "__main__":
+    test_workspace_db_connection_pragmas_tune_cache_and_mmap()
     test_list_scan_media_dedupes_path_and_excludes_error_and_excluded()
     test_scan_media_creates_canonical_photo_assets()
     test_record_scan_file_batches_import_session_refresh()
