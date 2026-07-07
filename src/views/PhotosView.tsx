@@ -8279,15 +8279,16 @@ export function PhotosView(props: {
     if (!albumId) return;
     setSavingAlbum(true);
     setAlbumError("");
-    // Capture enough to re-create the album if the user undoes the delete. People
-    // filters only live on the active album object, so use it when it matches.
+    // Capture enough to re-create the album if the user undoes the delete. The
+    // active album carries the freshest edit-session fields; rail-context deletes
+    // must fall back to the folder row so people filters survive there too.
     const isActive = activeAlbum?.albumId === albumId;
     const restoreConfig: Record<string, unknown> = {
       name: folder.name,
       albumKind: folder.albumKind || "smart",
       description: folder.description || "",
-      includePeople: isActive ? (activeAlbum?.includePeople || []) : [],
-      excludePeople: isActive ? (activeAlbum?.excludePeople || []) : [],
+      includePeople: isActive ? (activeAlbum?.includePeople || folder.includePeople || []) : (folder.includePeople || []),
+      excludePeople: isActive ? (activeAlbum?.excludePeople || folder.excludePeople || []) : (folder.excludePeople || []),
       rules: folder.rules || {},
       coverSourcePath: folder.coverSourcePath || "",
       folderId: folder.folderId || "",

@@ -6514,6 +6514,16 @@ run("Photos manual collections do not coerce Newest back to Custom order", () =>
   assert.match(source, /<option value="newest">\{uiText\("Newest"\)\}<\/option>/);
 });
 
+run("Photos album delete undo preserves rail people filters", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  const deleteAlbumBlock = source.match(/async function deleteAlbum\(folder: PhotoFolder\) \{[\s\S]*?const restoreConfig: Record<string, unknown> = \{[\s\S]*?\};/);
+  assert.ok(deleteAlbumBlock, "deleteAlbum should capture a restore config");
+  assert.match(deleteAlbumBlock[0], /includePeople: isActive \? \(activeAlbum\?\.includePeople \|\| folder\.includePeople \|\| \[\]\) : \(folder\.includePeople \|\| \[\]\)/);
+  assert.match(deleteAlbumBlock[0], /excludePeople: isActive \? \(activeAlbum\?\.excludePeople \|\| folder\.excludePeople \|\| \[\]\) : \(folder\.excludePeople \|\| \[\]\)/);
+  assert.doesNotMatch(deleteAlbumBlock[0], /includePeople: isActive \? \(activeAlbum\?\.includePeople \|\| \[\]\) : \[\]/);
+  assert.doesNotMatch(deleteAlbumBlock[0], /excludePeople: isActive \? \(activeAlbum\?\.excludePeople \|\| \[\]\) : \[\]/);
+});
+
 run("App UI messages preserve raw interpolation values", () => {
   const appSource = fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
   const statusRowSource = fs.readFileSync(path.join(ROOT, "src/shell/StatusRow.tsx"), "utf8");
