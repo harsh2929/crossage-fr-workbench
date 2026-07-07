@@ -10,10 +10,27 @@ export function shouldAnimateCount(prev: number | undefined, next: number): bool
 
 export type CountDirection = "up" | "down" | "none";
 
+export interface CountRollState {
+  bumpKey: number;
+  direction: CountDirection;
+  prev: number | undefined;
+}
+
 /** Direction of the change (for directional digit slide); "none" on init/no-change. */
 export function countChangeDirection(prev: number | undefined, next: number): CountDirection {
   if (prev === undefined || prev === next) return "none";
   return next > prev ? "up" : "down";
+}
+
+export function nextCountRollState(state: CountRollState, next: number): CountRollState {
+  if (!shouldAnimateCount(state.prev, next)) {
+    return state.prev === next ? state : { ...state, prev: next };
+  }
+  return {
+    bumpKey: state.bumpKey + 1,
+    direction: countChangeDirection(state.prev, next),
+    prev: next,
+  };
 }
 
 /**

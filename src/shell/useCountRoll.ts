@@ -3,25 +3,17 @@
 // `key` to replay the CSS bump) and the change direction. Skips the initial
 // mount and no-op changes, so the count only bumps when it actually moves.
 import { useEffect, useRef, useState } from "react";
-import { countChangeDirection, shouldAnimateCount, shouldThrottledBump, type CountDirection } from "../lib/countRoll";
+import { nextCountRollState, shouldThrottledBump, type CountDirection, type CountRollState } from "../lib/countRoll";
 
 export function useCountRoll(value: number): { bumpKey: number; direction: CountDirection } {
-  const [state, setState] = useState<{ bumpKey: number; direction: CountDirection; prev: number | undefined }>({
+  const stateRef = useRef<CountRollState>({
     bumpKey: 0,
     direction: "none",
     prev: undefined,
   });
+  stateRef.current = nextCountRollState(stateRef.current, value);
 
-  useEffect(() => {
-    setState((s) => {
-      if (!shouldAnimateCount(s.prev, value)) {
-        return s.prev === value ? s : { ...s, prev: value };
-      }
-      return { bumpKey: s.bumpKey + 1, direction: countChangeDirection(s.prev, value), prev: value };
-    });
-  }, [value]);
-
-  return { bumpKey: state.bumpKey, direction: state.direction };
+  return { bumpKey: stateRef.current.bumpKey, direction: stateRef.current.direction };
 }
 
 /**

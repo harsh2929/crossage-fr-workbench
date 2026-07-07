@@ -1,7 +1,7 @@
 // Unified Search destination (Phase 1). Combines literal/facet search
 // (search_photo_library) with on-device semantic ranking (semantic_search_photos),
 // homing the previously-orphaned AI search command into a first-class tab.
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { AlertTriangle, ExternalLink, ImageIcon, Loader2, Search, Sparkles, X } from "lucide-react";
 import type { TranslationKey } from "../i18n";
 import type { PhotoLibrarySearchResult, SemanticSearchPhotosValue } from "../types";
@@ -39,14 +39,23 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
   // Distinguishes a true failure (announce assertively, AlertTriangle) from a
   // benign empty result (announce politely, neutral icon).
   const [errorIsFailure, setErrorIsFailure] = useState(false);
+  const searchRequestSeqRef = useRef(0);
+
+  function invalidateSearchResults() {
+    searchRequestSeqRef.current += 1;
+  }
 
   async function runSearch(raw: string) {
     const value = raw.trim();
     if (value.length < 2) {
+      invalidateSearchResults();
       setError(uiText("Type at least 2 characters to search."));
       setErrorIsFailure(false);
       return;
     }
+    const requestSeq = searchRequestSeqRef.current + 1;
+    searchRequestSeqRef.current = requestSeq;
+    const isCurrentSearch = () => searchRequestSeqRef.current === requestSeq;
     setBusy(true);
     setError("");
     setErrorIsFailure(false);
@@ -54,6 +63,7 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
     try {
       if (aiMode) {
         const result = await semanticSearchPhotos({ query: value, limit: 60 });
+        if (!isCurrentSearch()) return;
         setSemanticResult(result);
         setTextResult(null);
         if (result && !result.available) {
@@ -64,17 +74,19 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
         }
       } else {
         const result = await searchPhotoLibrary({ query: value, limit: 24, suggestionLimit: 24 });
+        if (!isCurrentSearch()) return;
         setTextResult(result);
         setSemanticResult(null);
         if (result.total === 0) setError(uiText("No matches found."));
       }
     } catch (err) {
+      if (!isCurrentSearch()) return;
       setError(err instanceof Error ? err.message : String(err));
       setErrorIsFailure(true);
       setTextResult(null);
       setSemanticResult(null);
     } finally {
-      setBusy(false);
+      if (isCurrentSearch()) setBusy(false);
     }
   }
 
@@ -106,11 +118,14 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
             className="search-hero-clear"
             aria-label={uiText("Clear search")}
             onClick={() => {
+              invalidateSearchResults();
               setQuery("");
               setTextResult(null);
               setSemanticResult(null);
               setError("");
+              setErrorIsFailure(false);
               setSubmitted("");
+              setBusy(false);
             }}
           >
             <X size={16} />
@@ -120,7 +135,11 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
           type="button"
           className={`search-ai-toggle${aiMode ? " active" : ""}`}
           aria-pressed={aiMode}
-          onClick={() => setAiMode((on) => !on)}
+          onClick={() => {
+            invalidateSearchResults();
+            setAiMode((on) => !on);
+            setBusy(false);
+          }}
           title={uiText("Search by meaning with on-device AI")}
         >
           <Sparkles size={15} />

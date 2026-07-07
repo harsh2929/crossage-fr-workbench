@@ -49,6 +49,26 @@ run("direction reflects increase/decrease", () => {
   assert.strictEqual(mod.countChangeDirection(4, 1), "down");
 });
 
+run("nextCountRollState initializes without bumping", () => {
+  assert.deepStrictEqual(
+    mod.nextCountRollState({ bumpKey: 0, direction: "none", prev: undefined }, 4),
+    { bumpKey: 0, direction: "none", prev: 4 },
+  );
+});
+
+run("nextCountRollState bumps synchronously on value changes", () => {
+  const first = mod.nextCountRollState({ bumpKey: 0, direction: "none", prev: undefined }, 4);
+  const second = mod.nextCountRollState(first, 6);
+  const third = mod.nextCountRollState(second, 3);
+  assert.deepStrictEqual(second, { bumpKey: 1, direction: "up", prev: 6 });
+  assert.deepStrictEqual(third, { bumpKey: 2, direction: "down", prev: 3 });
+});
+
+run("nextCountRollState returns same state for no-op renders", () => {
+  const state = { bumpKey: 2, direction: "up", prev: 6 };
+  assert.strictEqual(mod.nextCountRollState(state, 6), state);
+});
+
 run("throttled bump: only when changed AND interval elapsed AND not initial", () => {
   // changed but too soon since last bump → no bump
   assert.strictEqual(mod.shouldThrottledBump(5, 6, 0, 100, 300), false);
