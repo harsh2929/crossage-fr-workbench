@@ -429,7 +429,11 @@ const uiMessageEn: UiMessageTable = {
 };
 
 export function formatUiMessage(language: LanguageCode, key: UiMessageKey, values: Record<string, string | number> = {}): string {
-  const template = localeBundle(language).uiMessages?.[key] || uiMessageEn[key] || key;
+  const resolved = localeBundle(language).uiMessages?.[key] ?? uiMessageEn[key];
+  if (resolved === undefined && import.meta.env?.DEV) {
+    console.warn(`[i18n] missing UI message key: ${key}`);
+  }
+  const template = resolved ?? key;
   return Object.entries(values).reduce((text, [name, value]) => {
     const rendered = String(value);
     const isolated = language === "ar" && typeof value === "string" && rendered && !/[\u0600-\u06ff]/.test(rendered) ? `\u2068${rendered}\u2069` : rendered;

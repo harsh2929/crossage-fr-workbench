@@ -9,6 +9,7 @@ const path = require("path");
 const root = path.resolve(__dirname, "..");
 const source = fs.readFileSync(path.join(root, "src", "App.tsx"), "utf8");
 const appStorageOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-storage-diagnostics-")), "appStorageDiagnostics.cjs");
+const i18nOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-i18n-")), "i18n.cjs");
 
 esbuild.buildSync({
   entryPoints: [path.join(root, "src", "appStorageDiagnostics.ts")],
@@ -18,6 +19,15 @@ esbuild.buildSync({
   outfile: appStorageOutFile,
 });
 const appStorageDiagnostics = require(appStorageOutFile);
+esbuild.buildSync({
+  entryPoints: [path.join(root, "src", "i18n.ts")],
+  bundle: true,
+  define: { "import.meta.env": JSON.stringify({ DEV: true }) },
+  format: "cjs",
+  platform: "node",
+  outfile: i18nOutFile,
+});
+const i18n = require(i18nOutFile);
 
 function run(name, fn) {
   fn();
@@ -138,6 +148,20 @@ run("app localStorage helpers report failures instead of silent fallbacks", () =
   assert.match(source, /recordAppStorageIssue\("savedScanSources", "read"/);
   assert.match(source, /recordAppStorageIssue\("savedReviewViews", "write"/);
   assert.match(source, /window\.addEventListener\(APP_STORAGE_ISSUE_EVENT, handleStorageIssue\)/);
+});
+
+run("i18n dev diagnostics warn before raw-key fallback", () => {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try {
+    assert.strictEqual(i18n.translate("en", "__missing.translation__", { count: 3 }), "__missing.translation__");
+    assert.strictEqual(i18n.formatUiMessage("en", "__missing.ui__", { count: 3 }), "__missing.ui__");
+    assert.ok(warnings.some((message) => message.includes("[i18n] missing translation key: __missing.translation__")), warnings);
+    assert.ok(warnings.some((message) => message.includes("[i18n] missing UI message key: __missing.ui__")), warnings);
+  } finally {
+    console.warn = originalWarn;
+  }
 });
 
 console.log("\nall app state unit tests passed");
