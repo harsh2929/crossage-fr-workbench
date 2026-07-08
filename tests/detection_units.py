@@ -5,10 +5,15 @@ Run: PYTHONPATH=. .venv/bin/python tests/detection_units.py
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 from pathlib import Path
 
+import crossage_fr.embed.engine as engine_module
+from crossage_fr.config import RuntimeConfig
+from crossage_fr.model_manager import model_status
 from crossage_fr.embed.engine import (
     ARCFACE_DST,
     InsightFaceEmbeddingEngine,
@@ -16,6 +21,7 @@ from crossage_fr.embed.engine import (
     apply_recognizer_preference,
     detect_cache_tag,
     flip_average,
+    create_embedding_engine,
     inter_eye_distance,
     nms_boxes,
     plan_detect_sizes,
@@ -43,6 +49,55 @@ def _tiling_engine() -> InsightFaceEmbeddingEngine:
 def test_plan_detect_sizes_multi_scale() -> None:
     # default detail 512 + rescue 768 on a dynamic model -> two distinct scales
     assert plan_detect_sizes(512, 768, multi_scale=True, dynamic=True) == [(512, 512), (768, 768)]
+
+
+def test_engine_fallback_preserves_redacted_load_error_detail(tmp_path: Path | None = None) -> None:
+    root = tmp_path or Path("/tmp")
+    original_find_spec = engine_module.importlib.util.find_spec
+    original_roots = engine_module.model_roots_for_engine
+    original_ready = engine_module.model_pack_ready
+    original_engine_cls = engine_module.InsightFaceEmbeddingEngine
+    old_force = {
+        "VINTRACE_FORCE_FALLBACK": os.environ.pop("VINTRACE_FORCE_FALLBACK", None),
+        "CROSSAGE_FORCE_FALLBACK": os.environ.pop("CROSSAGE_FORCE_FALLBACK", None),
+    }
+
+    class FailingInsightFaceEngine:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise RuntimeError("ONNX provider failed while opening /Users/alice/private/model.onnx")
+
+    def fake_find_spec(name: str, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if name == "insightface":
+            return object()
+        return original_find_spec(name, *args, **kwargs)
+
+    try:
+        engine_module.importlib.util.find_spec = fake_find_spec  # type: ignore[assignment]
+        engine_module.model_roots_for_engine = lambda _config: [root]  # type: ignore[assignment]
+        engine_module.model_pack_ready = lambda _root, _pack: True  # type: ignore[assignment]
+        engine_module.InsightFaceEmbeddingEngine = FailingInsightFaceEngine  # type: ignore[assignment]
+        engine = create_embedding_engine(RuntimeConfig())
+    finally:
+        engine_module.importlib.util.find_spec = original_find_spec  # type: ignore[assignment]
+        engine_module.model_roots_for_engine = original_roots  # type: ignore[assignment]
+        engine_module.model_pack_ready = original_ready  # type: ignore[assignment]
+        engine_module.InsightFaceEmbeddingEngine = original_engine_cls  # type: ignore[assignment]
+        for key, value in old_force.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    assert engine.model_name == "local-image-fingerprint (InsightFace unavailable: RuntimeError)"
+    detail = getattr(engine, "engine_detail", "")
+    assert "RuntimeError" in detail
+    assert "ONNX provider failed" in detail
+    assert "/Users/alice" not in detail
+    assert "[path]" in detail
+    status = model_status(RuntimeConfig(), engine.model_name, getattr(engine, "fallback_reason", ""))
+    assert status["fallbackActive"] is True
+    assert status["fallbackReason"] == getattr(engine, "fallback_reason", "")
+    assert "ONNX provider failed" in status["engineDetail"]
 
 
 def test_plan_detect_sizes_dedupes_when_equal() -> None:
@@ -190,6 +245,7 @@ def test_apply_recognizer_preference_moves_drop_in_to_front() -> None:
 
 
 def main() -> None:
+    test_engine_fallback_preserves_redacted_load_error_detail()
     test_apply_recognizer_preference_moves_drop_in_to_front()
     test_alignment_error_is_zero_for_canonical_and_similarity_invariant()
     test_alignment_error_flags_distorted_geometry()

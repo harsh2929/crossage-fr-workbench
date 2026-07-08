@@ -554,6 +554,18 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     def engine_name(self) -> str:
         return self._engine.model_name if self._engine is not None else self._engine_model_name
 
+    def _engine_detail(self) -> str:
+        if self._engine is None:
+            return ""
+        return str(
+            getattr(self._engine, "fallback_reason", "")
+            or getattr(self._engine, "engine_detail", "")
+            or ""
+        ).strip()
+
+    def _model_status(self) -> dict[str, Any]:
+        return model_status(self.project.config, self.engine_name, self._engine_detail())
+
     def _engine_instance(self) -> EmbeddingEngine:
         if self._engine is None:
             self._startup("engine", "Loading recognition engine")
@@ -661,7 +673,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if pack not in MODEL_PACKAGES:
             raise ValueError("Choose a known face model package.")
         spec = MODEL_PACKAGES[pack]
-        setup = model_status(self.project.config, self.engine_name)
+        setup = self._model_status()
         package = next((item for item in setup.get("packages", []) if item.get("pack") == pack), {})
         installed = bool(package.get("available", False))
         current_pack = str(self.project.config.model_pack or "")
@@ -1059,7 +1071,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         )
 
     def _cmd_model_status(self, params, progress=None):
-        return model_status(self.project.config, self.engine_name)
+        return self._model_status()
 
     def _cmd_model_switch_dry_run(self, params, progress=None):
         return self._model_switch_dry_run(str(params.get("targetPack", params.get("pack", self.project.config.model_pack))))
@@ -3258,7 +3270,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         storage = analysis.get("storage", {}) if isinstance(analysis.get("storage"), dict) else {}
         plan = analysis.get("plan", {}) if isinstance(analysis.get("plan"), dict) else {}
         video_decoder = analysis.get("videoDecoder", {}) if isinstance(analysis.get("videoDecoder"), dict) else video_decoder_report()
-        face_model = model_status(self.project.config, self.engine_name)
+        face_model = self._model_status()
         safe_model = safety_model_report()
         estimated_workspace_bytes = int(plan.get("estimatedWorkspaceBytes", 0) or 0)
         free_bytes = int(storage.get("freeBytes", 0) or 0)
@@ -3408,7 +3420,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 pass
         add("Workspace write", workspace_ok, workspace_detail)
         add("Recognition engine", bool(self.engine_name), self.engine_name)
-        face_model = model_status(self.project.config, self.engine_name)
+        face_model = self._model_status()
         add("Face model", bool(face_model.get("ready")), str(face_model.get("recommendation") or face_model.get("engine")), face_model)
         add("Safe Mode model", bool(safe_model.get("available")), str(safe_model.get("modelName") or safe_model.get("reason") or safe_model.get("engine")), safe_model)
         add("Image decoder", bool(image_decoder.get("extensions")), f"{len(image_decoder.get('extensions', []))} supported extension(s).", image_decoder)
@@ -3626,7 +3638,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return recommendations
 
     def model_distribution_audit(self) -> dict[str, Any]:
-        face_model = model_status(self.project.config, self.engine_name)
+        face_model = self._model_status()
         safe_model = safety_model_report()
         items: list[dict[str, Any]] = []
 
@@ -3797,7 +3809,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             }
 
     def release_readiness(self) -> dict[str, Any]:
-        face_model = model_status(self.project.config, self.engine_name)
+        face_model = self._model_status()
         safe_model = safety_model_report()
         distribution = self.model_distribution_audit()
         db_integrity = self.project.database_integrity()
@@ -3916,7 +3928,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         }
 
     def model_integrity(self) -> dict[str, Any]:
-        face_model = model_status(self.project.config, self.engine_name)
+        face_model = self._model_status()
         safe_model = safety_model_report()
         image_decoder = image_decoder_report()
         video_decoder = video_decoder_report()
@@ -4075,7 +4087,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "runtime-self-test.json": self.runtime_self_test(),
             "model-integrity.json": self.model_integrity(),
             "release-readiness.json": self.release_readiness(),
-            "model-status.json": model_status(self.project.config, self.engine_name),
+            "model-status.json": self._model_status(),
             "safe-mode-model.json": safety_model_report(),
             "image-decoder.json": image_decoder_report(),
             "video-decoder.json": video_decoder_report(),
@@ -4560,7 +4572,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def installer_self_diagnostics(self) -> dict[str, Any]:
         runtime = self.runtime_self_test()
-        face_model = model_status(self.project.config, self.engine_name)
+        face_model = self._model_status()
         safe_model = safety_model_report()
         image_decoder = image_decoder_report()
         video_decoder = video_decoder_report()
@@ -34921,7 +34933,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             },
             "safeModeModel": safety_model_report(),
             "safeModeExplain": explain_model_report(),
-            "modelSetup": model_status(self.project.config, self.engine_name),
+            "modelSetup": self._model_status(),
             "modelCompatibility": self.project.model_compatibility_report(self.engine_name),
             "videoDecoder": video_decoder_report(),
             "references": [

@@ -4,9 +4,11 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 import glob
 import importlib.util
+import logging
 import math
 import os
 import os.path as osp
+import re
 
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
@@ -24,6 +26,10 @@ from crossage_fr.model_manager import (
 from crossage_fr.models import EmbeddingResult
 from crossage_fr.runtime_env import env_flag
 from crossage_fr.platform_detect import build_platform_report, get_providers, provider_label, split_provider_config
+
+
+_LOG = logging.getLogger(__name__)
+_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w.-])(?:/[^\s'\"),;]+|[A-Za-z]:\\[^\s'\"),;]+|\\\\[^\s'\"),;]+)")
 
 
 class EmbeddingEngine(ABC):
@@ -53,6 +59,13 @@ def _l2_normalize(vector: np.ndarray) -> np.ndarray:
     if norm == 0.0 or math.isnan(norm):
         return vector
     return vector / norm
+
+
+def _engine_error_detail(exc: Exception, limit: int = 240) -> str:
+    message = str(exc).strip() or exc.__class__.__name__
+    message = _ABSOLUTE_PATH_RE.sub("[path]", message)
+    message = re.sub(r"\s+", " ", message).strip()
+    return message[:limit]
 
 
 # Conservative, per-model defaults for mapping the raw (pre-normalization) ArcFace
@@ -295,6 +308,8 @@ class FallbackEmbeddingEngine(EmbeddingEngine):
     """Deterministic local image features used when FR models are unavailable."""
 
     model_name = "local-image-fingerprint"
+    engine_detail = ""
+    fallback_reason = ""
 
     def embed_loaded_image(self, image: Image.Image, path: Path | None = None) -> list[EmbeddingResult]:
         vector = self._feature_vector(image)
@@ -796,11 +811,18 @@ def create_embedding_engine(config: RuntimeConfig) -> EmbeddingEngine:
                 return InsightFaceEmbeddingEngine(config, model_pack=pack)
             except Exception as exc:
                 last_error = exc
+                _LOG.exception("InsightFace embedding engine failed to load model pack %s.", pack)
                 continue
         fallback = FallbackEmbeddingEngine()
         if last_error is not None:
-            fallback.model_name = f"{fallback.model_name} (InsightFace unavailable: {type(last_error).__name__})"
+            error_type = type(last_error).__name__
+            error_detail = _engine_error_detail(last_error)
+            fallback.model_name = f"{fallback.model_name} (InsightFace unavailable: {error_type})"
+            fallback.engine_detail = f"{error_type}: {error_detail}" if error_detail and error_detail != error_type else error_type
+            fallback.fallback_reason = f"InsightFace unavailable: {fallback.engine_detail}"
         else:
             fallback.model_name = f"{fallback.model_name} (face model download needed)"
+            fallback.engine_detail = "Face model download needed."
+            fallback.fallback_reason = fallback.engine_detail
         return fallback
     return FallbackEmbeddingEngine()

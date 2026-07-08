@@ -7886,7 +7886,9 @@ function Dashboard({
     {
       label: "Face model",
       value: state.modelSetup?.ready ? state.modelSetup.currentPack : "Needs setup",
-      detail: state.modelSetup?.fallbackActive ? "Simple matching active" : state.engine,
+      detail: state.modelSetup?.fallbackActive
+        ? (state.modelSetup.fallbackReason || "Simple matching active")
+        : state.engine,
       ok: Boolean(state.modelSetup?.ready) && !state.modelSetup?.fallbackActive
     },
     {
@@ -8732,6 +8734,7 @@ function ModelSetupCard({
   const downloading = Boolean(progress && progress.phase !== "complete" && progress.phase !== "error");
   const percentValue = progress ? Math.max(0, Math.min(100, progress.percent || (progress.totalBytes ? (progress.downloadedBytes / progress.totalBytes) * 100 : 0))) : 0;
   const root = setup?.modelRoot || state.config.modelRoot || "";
+  const fallbackReason = setup?.fallbackReason || setup?.engineDetail || "";
   const statusLabel = ready
     ? "Full face model ready"
     : progress?.phase === "error"
@@ -8804,6 +8807,12 @@ function ModelSetupCard({
         <div className="model-offline-note">
           <AlertCircle size={16} />
           <span>{localizeImperativeText(setup?.offlineMessage || "Internet is needed once for the face model. If you are offline, the app can open in simple matching mode and retry later.")}</span>
+        </div>
+      )}
+      {fallbackReason && (
+        <div className="model-offline-note">
+          <AlertCircle size={16} />
+          <span>{localizeImperativeText(fallbackReason)}</span>
         </div>
       )}
 

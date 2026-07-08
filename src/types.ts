@@ -222,6 +222,8 @@ export interface ModelSetupReport {
   modelRoot: string;
   defaultRoot: string;
   engine: string;
+  engineDetail: string;
+  fallbackReason: string;
   governance?: ModelGovernance;
   packages: ModelPackageStatus[];
   offlineMessage: string;

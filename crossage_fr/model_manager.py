@@ -234,7 +234,7 @@ def missing_model_files(directory: Path, pack: str) -> list[str]:
     return missing
 
 
-def model_status(config: RuntimeConfig, engine_name: str = "") -> dict[str, Any]:
+def model_status(config: RuntimeConfig, engine_name: str = "", engine_detail: str = "") -> dict[str, Any]:
     root = model_root_for_config(config)
     packs = []
     for spec in MODEL_PACKAGES.values():
@@ -257,6 +257,7 @@ def model_status(config: RuntimeConfig, engine_name: str = "") -> dict[str, Any]
     current = next((pack for pack in packs if pack["pack"] == config.model_pack), packs[0])
     ready = bool(current["available"])
     fallback = engine_name.startswith("local-image-fingerprint")
+    detail = str(engine_detail or "").strip()
     return {
         "ready": ready,
         "fallbackActive": fallback,
@@ -264,6 +265,8 @@ def model_status(config: RuntimeConfig, engine_name: str = "") -> dict[str, Any]
         "modelRoot": str(root.expanduser()),
         "defaultRoot": str(default_model_root()),
         "engine": engine_name,
+        "engineDetail": detail,
+        "fallbackReason": detail if fallback else "",
         "governance": model_governance(config.model_pack),
         "packages": packs,
         "offlineMessage": "Connect to the internet, choose a writable folder, then download a face model." if not ready else "",
