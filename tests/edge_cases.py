@@ -1584,8 +1584,10 @@ def assert_static_app_contracts() -> None:
     assert "photoTileDropPlacement" in photos_view
     assert "reorderDraggedManualAlbum" in photos_view
     assert "customCollectionCanDragReorder" in photos_view
-    assert "draggable={customCollectionCanDragReorder}" in photos_view
-    assert "drop-${albumItemDrag.placement}" in photos_view
+    assert "canDragReorder={customCollectionCanDragReorder}" in photos_view
+    assert "draggable={props.canDragReorder}" in photos_view
+    assert "dropPlacement={dropPlacement}" in photos_view
+    assert "drop-${props.dropPlacement}" in photos_view
     assert "Adjusted date" in photos_view
     assert "Hide location" in photos_view
     assert "Keyword filter" in photos_view
@@ -1626,7 +1628,8 @@ def assert_static_app_contracts() -> None:
     assert "Permanently deleted 1 photo from catalog" in photos_e2e
     assert "window.confirm" not in photos_view
     assert "photo-context-menu" in photos_view
-    assert "openPhotoItemContextMenu" in photos_view
+    assert "handlePhotoGridTileContextMenu" in photos_view
+    assert 'setPhotoContextMenu({ kind: "photo"' in photos_view
     assert "Photo actions" in photos_view
     assert "Collection actions" in photos_view
     assert "Saved filter actions" in photos_view
