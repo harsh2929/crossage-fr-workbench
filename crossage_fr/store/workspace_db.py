@@ -23692,6 +23692,14 @@ class WorkspaceDb:
             conn.execute("VACUUM INTO ?", (str(target),))
         finally:
             conn.close()
+        verify = sqlite3.connect(str(target), timeout=30)
+        try:
+            integrity = [str(row[0]) for row in verify.execute("PRAGMA integrity_check").fetchall()]
+            foreign_key_errors = verify.execute("PRAGMA foreign_key_check").fetchmany(1)
+            if integrity != ["ok"] or foreign_key_errors:
+                raise sqlite3.DatabaseError("Snapshot failed SQLite integrity verification.")
+        finally:
+            verify.close()
 
     def integrity_report(self) -> dict[str, Any]:
         wal_path = Path(str(self.path) + "-wal")

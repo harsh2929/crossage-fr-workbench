@@ -13,6 +13,7 @@ import math
 import os
 import shutil
 import sqlite3
+import tempfile
 import time
 import zipfile
 from typing import Callable, Any
@@ -4426,6 +4427,66 @@ class ProjectState:
         except DecryptionError as exc:
             raise ValueError(str(exc)) from exc
 
+    def _verify_backup_database_entry(self, archive: zipfile.ZipFile) -> dict[str, Any]:
+        report: dict[str, Any] = {
+            "checked": False,
+            "ok": True,
+            "integrity": [],
+            "foreignKeyErrors": [],
+            "tables": [],
+            "missingTables": [],
+            "error": "",
+        }
+        if "workspace.sqlite3" not in set(archive.namelist()):
+            return report
+        report["checked"] = True
+        report["ok"] = False
+        try:
+            with tempfile.TemporaryDirectory(prefix="vintrace-backup-db-") as tmp:
+                database_path = Path(tmp) / "workspace.sqlite3"
+                with archive.open("workspace.sqlite3") as source:
+                    with database_path.open("wb") as output:
+                        shutil.copyfileobj(source, output, length=1024 * 1024)
+                if database_path.stat().st_size <= 0:
+                    report["error"] = "workspace.sqlite3 is empty."
+                    return report
+                conn = sqlite3.connect(str(database_path))
+                try:
+                    conn.execute("PRAGMA query_only=ON")
+                    integrity_rows = conn.execute("PRAGMA integrity_check").fetchall()
+                    integrity = [str(row[0]) for row in integrity_rows]
+                    foreign_key_errors = []
+                    for row in conn.execute("PRAGMA foreign_key_check").fetchall():
+                        values = list(row)
+                        foreign_key_errors.append(
+                            {
+                                "table": str(values[0]) if len(values) > 0 else "",
+                                "rowid": values[1] if len(values) > 1 else None,
+                                "parent": str(values[2]) if len(values) > 2 else "",
+                                "fkid": values[3] if len(values) > 3 else None,
+                            }
+                        )
+                    table_rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+                    tables = sorted(str(row[0]) for row in table_rows)
+                finally:
+                    conn.close()
+            expected_tables = {"scan_runs", "photo_assets", "review_candidates"}
+            missing_tables = sorted(expected_tables - set(tables))
+            report["integrity"] = integrity
+            report["foreignKeyErrors"] = foreign_key_errors[:20]
+            report["tables"] = tables
+            report["missingTables"] = missing_tables
+            if missing_tables:
+                report["error"] = "workspace.sqlite3 is not a complete Vintrace workspace database."
+            elif integrity != ["ok"]:
+                report["error"] = "workspace.sqlite3 failed SQLite integrity_check."
+            elif foreign_key_errors:
+                report["error"] = "workspace.sqlite3 failed SQLite foreign_key_check."
+            report["ok"] = integrity == ["ok"] and not foreign_key_errors and not missing_tables
+        except (OSError, sqlite3.DatabaseError, zipfile.BadZipFile) as exc:
+            report["error"] = str(exc)
+        return report
+
     def verify_workspace_backup(self, backup_path: Path | None = None) -> dict[str, Any]:
         path = backup_path.expanduser().resolve() if backup_path else self._latest_workspace_backup()
         result: dict[str, Any] = {
@@ -4439,6 +4500,7 @@ class ProjectState:
             "dangerousEntries": [],
             "invalidCoreFiles": [],
             "invalidCoreErrors": {},
+            "databaseIntegrity": {},
             "corruptEntry": "",
             "error": "",
         }
@@ -4491,6 +4553,12 @@ class ProjectState:
                         continue
                     if name == "backup-manifest.json":
                         result["manifest"] = payload
+                database_integrity = self._verify_backup_database_entry(archive)
+                result["databaseIntegrity"] = database_integrity
+                if database_integrity.get("checked") and not database_integrity.get("ok"):
+                    result["invalidCoreFiles"].append("workspace.sqlite3")
+                    message = database_integrity.get("error") or "workspace.sqlite3 failed integrity verification."
+                    result["invalidCoreErrors"]["workspace.sqlite3"] = str(message)
                 if "backup-manifest.json" not in name_set:
                     result["error"] = "Backup manifest is missing."
                 result["ok"] = (

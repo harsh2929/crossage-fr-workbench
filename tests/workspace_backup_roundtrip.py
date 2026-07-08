@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import tempfile
 import zipfile
 from pathlib import Path
@@ -77,6 +78,27 @@ def assert_backup_restore_roundtrip() -> None:
     verified = api.handle("verify_workspace_backup", {"path": str(backup_path)})["value"]
     assert verified["ok"] is True
     assert verified["manifest"]["counts"]["references"] == 1
+    assert verified["databaseIntegrity"]["checked"] is True
+    assert verified["databaseIntegrity"]["ok"] is True
+
+    with zipfile.ZipFile(backup_path) as archive:
+        names = set(archive.namelist())
+        assert "workspace.sqlite3" in names
+        assert "workspace.sqlite3-wal" not in names
+        assert "workspace.sqlite3-shm" not in names
+        with tempfile.TemporaryDirectory(prefix="vintrace-backup-snapshot-test-") as tmp:
+            snapshot_path = Path(tmp) / "workspace.sqlite3"
+            snapshot_path.write_bytes(archive.read("workspace.sqlite3"))
+            conn = sqlite3.connect(str(snapshot_path))
+            try:
+                integrity_rows = conn.execute("PRAGMA integrity_check").fetchall()
+                assert [str(row[0]) for row in integrity_rows] == ["ok"]
+                assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+                table_rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+                tables = {str(row[0]) for row in table_rows}
+                assert {"scan_runs", "photo_assets", "review_candidates"} <= tables
+            finally:
+                conn.close()
 
     before_hashes = {
         name: digest(workspace / name)
@@ -115,6 +137,25 @@ def assert_backup_restore_roundtrip() -> None:
         assert "empty" in str(exc)
     else:
         raise AssertionError("Non-empty restore target should be rejected.")
+
+    corrupt_db = root / "corrupt-db.zip"
+    with zipfile.ZipFile(corrupt_db, "w") as archive:
+        manifest = json.dumps({"counts": {"references": 0, "candidates": 0}})
+        archive.writestr("backup-manifest.json", manifest)
+        archive.writestr("config.json", "{}")
+        archive.writestr("references.json", "[]")
+        archive.writestr("workspace.sqlite3", b"not a sqlite database")
+    corrupt_verified = api.handle("verify_workspace_backup", {"path": str(corrupt_db)})["value"]
+    assert corrupt_verified["ok"] is False
+    assert "workspace.sqlite3" in corrupt_verified["invalidCoreFiles"]
+    assert corrupt_verified["databaseIntegrity"]["checked"] is True
+    assert corrupt_verified["databaseIntegrity"]["ok"] is False
+    try:
+        api.project.restore_workspace_backup(corrupt_db, root / "corrupt-db-target")
+    except ValueError as exc:
+        assert "workspace.sqlite3" in str(exc)
+    else:
+        raise AssertionError("Corrupt backup database should be rejected.")
 
     malicious = root / "malicious.zip"
     with zipfile.ZipFile(malicious, "w") as archive:
