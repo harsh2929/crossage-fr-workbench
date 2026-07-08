@@ -1135,7 +1135,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             source=str(params.get("source", self.actor)),
             operator=str(params.get("operator", "")),
             note=str(params.get("note", "")),
-            scope=str(params.get("scope", self.project.root)),
+            scope=str(params.get("scope", "")),
             person_name=person_name,
             lawful_basis=str(params.get("lawfulBasis", "")),
         )

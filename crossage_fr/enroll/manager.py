@@ -661,7 +661,11 @@ class ProjectState:
             "active": self.consent_on_file(),
             "operator": str(self.consent.get("operator", "")),
             "source": str(self.consent.get("source", "")),
-            "scope": str(self.consent.get("scope", self.root)),
+            "scope": str(
+                self.consent.get("scope")
+                or self.workspace_metadata.get("workspaceId")
+                or "workspace"
+            ),
             "confirmedAt": self.consent.get("confirmedAt"),
             "updatedAt": self.consent.get("updatedAt"),
             "perSubjectConsent": bool(getattr(self.config, "per_subject_consent", False)),

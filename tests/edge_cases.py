@@ -504,7 +504,9 @@ def assert_consent_workspace_registry_and_audit_pagination() -> None:
     api = make_api(workspace)
     state = api.state()
     assert state["workspaceMetadata"]["workspaceId"]
+    workspace_id = state["workspaceMetadata"]["workspaceId"]
     assert state["consentOnFile"] is False
+    assert state["consent"]["scope"] == workspace_id
     assert (workspace / ".vintrace-workspace.json").exists()
     assert (root / "registry" / "active-workspace.json").exists()
 
@@ -513,13 +515,20 @@ def assert_consent_workspace_registry_and_audit_pagination() -> None:
     reopened_state = reopened.state()
     assert reopened_state["consentOnFile"] is True
     assert reopened_state["consent"]["operator"] == "Edge"
+    assert reopened_state["consent"]["scope"] == workspace_id
     assert (workspace / "consent.json").exists()
+    consent_json = json.loads((workspace / "consent.json").read_text(encoding="utf-8"))
+    assert consent_json["scope"] == workspace_id
+    receipt = reopened.handle("export_consent_receipt", {})["value"]
+    receipt_json = json.loads(Path(receipt["jsonPath"]).read_text(encoding="utf-8"))
+    assert receipt_json["consent"]["scope"] == workspace_id
 
     reopened.handle("clear_queue", {})
-    audit = reopened.handle("audit_events", {"limit": 2, "offset": 0})
-    assert audit["total"] >= 2
-    assert len(audit["events"]) == 2
+    audit = reopened.handle("audit_events", {"limit": 5, "offset": 0})
+    assert audit["total"] >= 3
     assert audit["events"][0]["action"] == "clear_candidates"
+    consent_event = next(event for event in audit["events"] if event.get("action") == "set_consent")
+    assert consent_event["scope"] == workspace_id
 
 
 def assert_broken_and_sensitive_images_do_not_pollute_queue() -> None:
