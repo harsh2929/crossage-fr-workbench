@@ -11,6 +11,7 @@ const source = fs.readFileSync(path.join(root, "src", "App.tsx"), "utf8");
 const appLocalStateSource = fs.readFileSync(path.join(root, "src", "appLocalState.ts"), "utf8");
 const appToolStateSource = fs.readFileSync(path.join(root, "src", "appToolState.ts"), "utf8");
 const appFolderTreeStateSource = fs.readFileSync(path.join(root, "src", "appFolderTreeState.ts"), "utf8");
+const appRuntimeStateSource = fs.readFileSync(path.join(root, "src", "appRuntimeState.ts"), "utf8");
 const appStorageOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-storage-diagnostics-")), "appStorageDiagnostics.cjs");
 const appSettingsOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-settings-")), "appSettings.cjs");
 const appLocalStateOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-local-state-")), "appLocalState.cjs");
@@ -63,6 +64,29 @@ function run(name, fn) {
   fn();
   console.log("ok " + name);
 }
+
+function sliceBalancedFunction(sourceText, marker) {
+  const start = sourceText.indexOf(marker);
+  assert.ok(start >= 0, `missing ${marker}`);
+  const open = sourceText.indexOf("{", start);
+  assert.ok(open > start, `missing body for ${marker}`);
+  let depth = 0;
+  for (let index = open; index < sourceText.length; index += 1) {
+    const char = sourceText[index];
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return sourceText.slice(start, index + 1);
+    }
+  }
+  assert.fail(`unterminated ${marker}`);
+}
+
+function countUseStateCalls(sourceText) {
+  return (sourceText.match(/useState\s*(?:<|\()/g) || []).length;
+}
+
+const appComponentSource = sliceBalancedFunction(source, "export default function App()");
 
 run("wrapped invoke applies piggybacked state once", () => {
   const invokeStart = source.indexOf("  async function invoke<T = unknown>");
@@ -267,6 +291,26 @@ run("App folder tree picker state lives outside the main component", () => {
   assert.match(appFolderTreeStateSource, /const \[folderTree, setFolderTree\] = useState<FolderTree \| null>\(null\);/);
   assert.match(appFolderTreeStateSource, /const \[excludedDirs, setExcludedDirs\] = useState<Set<string>>\(\(\) => new Set\(\)\);/);
   assert.match(appFolderTreeStateSource, /useEffect\(\(\) => \{[\s\S]*setFolderTree\(null\);[\s\S]*setError\(null\);[\s\S]*setExcludedDirs\(new Set<string>\(\)\);[\s\S]*setRecursive\(true\);[\s\S]*\}, \[folder\]\);/);
+});
+
+run("App runtime and photo bridge state live outside the main component", () => {
+  assert.match(source, /from "\.\/appRuntimeState";/);
+  assert.match(appComponentSource, /useAppPhotoBridgeState\(\)/);
+  assert.match(appComponentSource, /useAppRuntimeStatusState\(\)/);
+  assert.doesNotMatch(appComponentSource, /const \[photoSources, setPhotoSources\] = useState/);
+  assert.doesNotMatch(appComponentSource, /const \[photoExternalImportRequest, setPhotoExternalImportRequest\] = useState/);
+  assert.doesNotMatch(appComponentSource, /const \[systemIntegration, setSystemIntegration\] = useState/);
+  assert.doesNotMatch(appComponentSource, /const \[scanProgress, setScanProgress\] = useState/);
+  assert.doesNotMatch(appComponentSource, /const \[folderAnalysis, setFolderAnalysis\] = useState/);
+  assert.match(appRuntimeStateSource, /export function useAppPhotoBridgeState\(\)/);
+  assert.match(appRuntimeStateSource, /const \[photoSources, setPhotoSources\] = useState<SystemPhotoSource\[\]>\(\[\]\);/);
+  assert.match(appRuntimeStateSource, /export function useAppRuntimeStatusState\(\)/);
+  assert.match(appRuntimeStateSource, /const \[scanProgress, setScanProgress\] = useState<ScanProgress \| null>\(null\);/);
+  assert.match(appRuntimeStateSource, /const \[folderAnalysis, setFolderAnalysis\] = useState<FolderAnalysis \| null>\(null\);/);
+});
+
+run("App component direct state count stays below the medium audit threshold", () => {
+  assert.ok(countUseStateCalls(appComponentSource) <= 40, `App still has ${countUseStateCalls(appComponentSource)} direct useState calls`);
 });
 
 run("app local scan state normalizers cap and repair stored rows", () => {

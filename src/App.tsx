@@ -312,6 +312,7 @@ import {
   type LatencySummary
 } from "./appToolState";
 import { useFolderTreeSelectionState } from "./appFolderTreeState";
+import { useAppPhotoBridgeState, useAppRuntimeStatusState } from "./appRuntimeState";
 
 type UiMessageValue = string | number | { text: string | number; localize: true };
 type UiMessageValues = Record<string, UiMessageValue>;
@@ -1525,8 +1526,6 @@ export default function App() {
   const [bootError, setBootError] = useState<string | null>(null);
   const [bootStartedAt, setBootStartedAt] = useState(() => Date.now());
   const [notice, setNotice] = useState<NoticeState | null>(null);
-  const [lastPhotoExternalEditorPath, setLastPhotoExternalEditorPath] = useState("");
-  const [photoExternalEditors, setPhotoExternalEditors] = useState<ExternalEditorFavorite[]>([]);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
   const [reviewFocus, setReviewFocus] = useState<ReviewFocus | null>(null);
   const [reviewFocusHistory, setReviewFocusHistory] = useState<ReviewFocusHistoryRecord[]>([]);
@@ -1542,21 +1541,44 @@ export default function App() {
   const [ageGroupFolders, setAgeGroupFolders] = useState<AgeFolderMap>(() => emptyAgeFolders());
   const [scanFolder, setScanFolder] = useState("");
   const [settings, setSettings] = useState<SettingsDraft | null>(null);
-  const [systemIntegration, setSystemIntegration] = useState<SystemIntegration | null>(null);
-  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
-  const [diagnosticsReport, setDiagnosticsReport] = useState<DiagnosticsReport | null>(null);
-  const [installerDiagnostics, setInstallerDiagnostics] = useState<InstallerDiagnosticsResult | null>(null);
-  const [photoSources, setPhotoSources] = useState<SystemPhotoSource[]>([]);
-  const [photoAppShortcutCommand, setPhotoAppShortcutCommand] = useState<{ id: number; shortcut: "selectPage" | "delete" } | null>(null);
-  const [photoExternalImportRequest, setPhotoExternalImportRequest] = useState<PhotoExternalImportRequest | null>(null);
-  const [workspaceLock, setWorkspaceLock] = useState<WorkspaceLockStatus | null>(null);
-  const [duplicatePeople, setDuplicatePeople] = useState<DuplicatePeopleResult | null>(null);
-  const [reviewRuleResult, setReviewRuleResult] = useState<ReviewRulesApplyResult | null>(null);
-  const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
-  const [localScanMarkers, setLocalScanMarkers] = useState<{ cancelRequested: boolean; paused: boolean } | null>(null);
-  const [modelDownloadProgress, setModelDownloadProgress] = useState<ModelDownloadProgress | null>(null);
-  const [mediaActionProgress, setMediaActionProgress] = useState<MediaActionProgress | null>(null);
-  const [folderAnalysis, setFolderAnalysis] = useState<FolderAnalysis | null>(null);
+  const {
+    lastPhotoExternalEditorPath,
+    setLastPhotoExternalEditorPath,
+    photoExternalEditors,
+    setPhotoExternalEditors,
+    photoSources,
+    setPhotoSources,
+    photoAppShortcutCommand,
+    setPhotoAppShortcutCommand,
+    photoExternalImportRequest,
+    setPhotoExternalImportRequest,
+  } = useAppPhotoBridgeState();
+  const {
+    systemIntegration,
+    setSystemIntegration,
+    updateStatus,
+    setUpdateStatus,
+    diagnosticsReport,
+    setDiagnosticsReport,
+    installerDiagnostics,
+    setInstallerDiagnostics,
+    workspaceLock,
+    setWorkspaceLock,
+    duplicatePeople,
+    setDuplicatePeople,
+    reviewRuleResult,
+    setReviewRuleResult,
+    scanProgress,
+    setScanProgress,
+    localScanMarkers,
+    setLocalScanMarkers,
+    modelDownloadProgress,
+    setModelDownloadProgress,
+    mediaActionProgress,
+    setMediaActionProgress,
+    folderAnalysis,
+    setFolderAnalysis,
+  } = useAppRuntimeStatusState();
   // Subfolder include/exclude picker state is ephemeral per selected folder.
   const {
     folderTree: scanFolderTree,
