@@ -95,6 +95,25 @@ function pathTrustKeyFromResolved(filePath, { caseFold = process.platform === "d
   return caseFold ? normalized.toLowerCase() : normalized;
 }
 
+function buildContentSecurityPolicy({ isDev = false, mediaProtocolScheme = "vintrace-media" } = {}) {
+  const mediaScheme = String(mediaProtocolScheme || "vintrace-media").replace(/:$/, "");
+  return [
+    "default-src 'self'",
+    isDev ? "script-src 'self' 'unsafe-inline'" : "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    `img-src 'self' ${mediaScheme}: data: blob:`,
+    `media-src 'self' ${mediaScheme}: blob:`,
+    "font-src 'self'",
+    "connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-src 'none'",
+    "worker-src 'self' blob:",
+    "frame-ancestors 'none'",
+  ].join("; ");
+}
+
 function uniquePathBatch(values, limit) {
   const max = Math.max(0, Math.floor(Number(limit) || 0));
   if (!Array.isArray(values) || max <= 0) {
@@ -182,6 +201,7 @@ module.exports = {
   backendRestartDelayMs,
   canonicalPathKey,
   pathTrustKeyFromResolved,
+  buildContentSecurityPolicy,
   uniquePathBatch,
   buildTrustedMediaPathSet,
   filterStableWatchFiles,

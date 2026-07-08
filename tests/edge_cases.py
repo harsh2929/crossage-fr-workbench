@@ -578,8 +578,13 @@ def assert_static_app_contracts() -> None:
     # imports and uses it for path-trust checks.
     assert 'require("./main/util.cjs")' in desktop_main
     assert "safeRealpath" in desktop_main
+    assert "buildContentSecurityPolicy" in desktop_main
     util_cjs = (root / "desktop" / "main" / "util.cjs").read_text(encoding="utf-8")
     assert "function safeRealpath" in util_cjs
+    assert "function buildContentSecurityPolicy" in util_cjs
+    assert "`img-src 'self' ${mediaScheme}: data: blob:`" in util_cjs
+    assert "`media-src 'self' ${mediaScheme}: blob:`" in util_cjs
+    assert "\"object-src 'none'\"" in util_cjs
     assert "previewsReal" in desktop_main
     # EIPC/TOCTOU: the media handler resolves the request to a single canonical
     # real path and fetches THAT path (not the original), so a symlink swapped

@@ -66,6 +66,30 @@ function testBackendRestartDelay() {
   assert.strictEqual(util.backendRestartDelayMs("nan"), 0);
 }
 
+function parseCsp(policy) {
+  return new Map(policy.split(";").map((part) => {
+    const tokens = part.trim().split(/\s+/);
+    return [tokens[0], tokens.slice(1)];
+  }));
+}
+
+function testContentSecurityPolicyAllowsMediaProtocolOnlyForMedia() {
+  const policy = util.buildContentSecurityPolicy({ mediaProtocolScheme: "vintrace-media:" });
+  const directives = parseCsp(policy);
+  assert.deepStrictEqual(directives.get("default-src"), ["'self'"]);
+  assert.ok(directives.get("img-src").includes("vintrace-media:"));
+  assert.ok(directives.get("media-src").includes("vintrace-media:"));
+  assert.ok(directives.get("img-src").includes("data:"));
+  assert.ok(directives.get("media-src").includes("blob:"));
+  assert.strictEqual(directives.get("object-src").join(" "), "'none'");
+  assert.strictEqual(directives.get("frame-src").join(" "), "'none'");
+  assert.strictEqual(directives.get("frame-ancestors").join(" "), "'none'");
+  assert.ok(!directives.get("script-src").includes("vintrace-media:"));
+  assert.ok(!directives.get("connect-src").includes("vintrace-media:"));
+  assert.ok(!directives.get("style-src").includes("vintrace-media:"));
+  assert.ok(util.buildContentSecurityPolicy({ isDev: true }).includes("script-src 'self' 'unsafe-inline'"));
+}
+
 function testPythonBackendStartRaceGuards() {
   const source = fs.readFileSync(path.join(__dirname, "..", "desktop", "main.cjs"), "utf8");
   const startBlock = source.slice(source.indexOf("  start() {"), source.indexOf("  _spawn() {"));
@@ -222,6 +246,7 @@ async function main() {
   testTimestampSlug();
   testSafeRealpath();
   testBackendRestartDelay();
+  testContentSecurityPolicyAllowsMediaProtocolOnlyForMedia();
   testPythonBackendStartRaceGuards();
   testBackendStdinErrorsAreHandled();
   testPathTrustGenerationGuardsStaleBackendResponses();

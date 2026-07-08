@@ -19,6 +19,7 @@ const {
   backendRestartDelayMs,
   canonicalPathKey,
   pathTrustKeyFromResolved,
+  buildContentSecurityPolicy,
   uniquePathBatch,
   buildTrustedMediaPathSet,
   filterStableWatchFiles,
@@ -2524,21 +2525,10 @@ function grantPathsFromBackendRequest(command, params) {
 }
 
 function configureSessionSecurity() {
-  const contentSecurityPolicy = [
-    "default-src 'self'",
-    isDev ? "script-src 'self' 'unsafe-inline'" : "script-src 'self'",
-    "style-src 'self' 'unsafe-inline'",
-    `img-src 'self' ${MEDIA_PROTOCOL_SCHEME}: data: blob:`,
-    `media-src 'self' ${MEDIA_PROTOCOL_SCHEME}: blob:`,
-    "font-src 'self'",
-    "connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*",
-    "object-src 'none'",
-    "base-uri 'none'",
-    "form-action 'none'",
-    "frame-src 'none'",
-    "worker-src 'self' blob:",
-    "frame-ancestors 'none'"
-  ].join("; ");
+  const contentSecurityPolicy = buildContentSecurityPolicy({
+    isDev,
+    mediaProtocolScheme: MEDIA_PROTOCOL_SCHEME,
+  });
 
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     const responseHeaders = { ...details.responseHeaders };
