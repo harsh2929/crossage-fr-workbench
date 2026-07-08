@@ -21,7 +21,7 @@ const appSource = [appPath, ...extraUiPaths]
   .map((filePath) => fs.readFileSync(filePath, "utf8"))
   .join("\n");
 const checks = [];
-const PHOTOS_UI_TEXT_COVERAGE_FLOOR = 0.85;
+const PHOTOS_UI_TEXT_COVERAGE_FLOOR = 0.90;
 const VISIBLE_LITERAL_LANGUAGE_COVERAGE_FLOOR = 0.90;
 const VISIBLE_LITERAL_UNCOVERED_BASELINE = 48;
 

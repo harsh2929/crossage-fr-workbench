@@ -59,14 +59,14 @@ Current status of the original critical/high set:
 | Fixed and regression-covered | Semantic search 600-photo cap | Semantic embeddings are persisted in `photo_semantic_embeddings`, candidate lookup uses `list_photo_semantic_candidate_assets` without the old cap, and `test_semantic_search_indexes_full_library_without_candidate_cap` covers a 605-image library. |
 | Fixed or substantially bounded | Utility folders, photo-library settings counts, search hydration, duplicate folders, date-bucket covers, smart-album revision fingerprints, edit-stack version counts, and scan-file import-session refreshes | `npm run test:photo-folders` now includes passing scale guards for SQL paging, one-shot date cover queries, cached duplicate summaries, bounded smart-album probes, search scoped context loading, and batched scan/import updates. |
 | Fixed and regression-covered | Phase 0 quality/privacy bugs | `moveSelected` returns on canceled destination selection, `CameraScanner` stops streams that resolve after unmount, Safe Mode review waits for sensitive unlock before listing flagged photos, safety-cache keys include Safe Mode temperature, and EXIF event dates prefer `DateTimeOriginal`/`DateTimeDigitized`. |
-| Still open | Photos i18n coverage | The Photos surface is still broad and should remain a high-priority localization pass. |
+| In progress, ratcheted | Photos i18n coverage | The Photos surface is still broad, but locale bundles now cover the common Photos glossary and `test:localization` enforces at least 90% Photos `uiText` coverage per non-English locale. |
 | Still open | Long image/ML work in the JSON-RPC dispatch path | OCR/barcode/object indexing, Safe Mode calibration, subject/portrait export, and video export still need job-style execution, progress, cancellation, and non-blocking status polling. The old vignette per-pixel loop itself is fixed. |
 | Still open | Backend process supervision and release-channel hardening | The process lifecycle and updater integrity concerns need dedicated tests beyond the photo-library suite. |
 | Ongoing | Renderer decomposition | Several App state hooks and Photos view tests now exist, but `PhotosView.tsx` and `App.tsx` remain large enough that feature work should keep extracting cohesive state owners. |
 
 Recommended next targets after this update:
 
-1. Finish the Photos i18n pass and keep localization checks loading every locale bundle.
+1. Continue the Photos i18n pass toward exact-string coverage beyond the current glossary and keep localization checks loading every locale bundle.
 2. Convert the remaining long-running ML/image handlers to jobs with progress, cancellation, and status polling.
 3. Add focused backend lifecycle tests for duplicate-start/backoff and pending-request rejection behavior.
 4. Continue Photos/App decomposition around one feature surface at a time, with behavioral tests before each extraction.
