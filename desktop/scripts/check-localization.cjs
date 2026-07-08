@@ -46,10 +46,35 @@ function loadI18n() {
       esModuleInterop: true
     }
   }).outputText;
+  function loadLocaleModule(request) {
+    if (!request.startsWith("./i18n/locales/")) {
+      throw new Error(`Unsupported localization checker import: ${request}`);
+    }
+    const localeName = path.basename(request);
+    const localePath = path.join(repoRoot, "src", "i18n", "locales", `${localeName}.ts`);
+    const localeSource = fs.readFileSync(localePath, "utf8");
+    const localeCompiled = ts.transpileModule(localeSource, {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+        esModuleInterop: true
+      }
+    }).outputText;
+    const localeSandbox = {
+      exports: {},
+      module: { exports: {} },
+      console
+    };
+    localeSandbox.module.exports = localeSandbox.exports;
+    vm.runInNewContext(localeCompiled, localeSandbox, { filename: localePath });
+    return localeSandbox.module.exports;
+  }
+
   const sandbox = {
     exports: {},
     module: { exports: {} },
     console,
+    require: loadLocaleModule,
     WeakMap,
     Map,
     Set,
@@ -94,9 +119,13 @@ function extractUiTextLiterals(content) {
   return [...literals].sort();
 }
 
+async function main() {
 const i18n = loadI18n();
 const languages = (i18n.languageOptions || []).map((item) => item.code);
 const nonEnglish = languages.filter((code) => code !== "en");
+if (typeof i18n.preloadLanguage === "function") {
+  await Promise.all(nonEnglish.map((language) => i18n.preloadLanguage(language)));
+}
 const translationKeys = extractUnionKeys("TranslationKey");
 const messageKeys = extractUnionKeys("UiMessageKey");
 
@@ -207,3 +236,9 @@ console.log(JSON.stringify({
   checks
 }, null, 2));
 process.exit(ok ? 0 : 1);
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.stack || error.message : error);
+  process.exit(1);
+});
