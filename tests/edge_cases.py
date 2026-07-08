@@ -5960,6 +5960,11 @@ def assert_review_and_settings_guards() -> None:
     assert excluded["config"]["scanExclusions"]["extensions"] == [".gif"]
     assert excluded["config"]["scanExclusions"]["filePaths"] == [str(root / "ignored.jpg")]
     expect_raises(ValueError, lambda: api.handle("set_status", {"candidateId": "missing", "status": "bad"}), "Unsupported")
+    expect_raises(ValueError, lambda: api.handle("bulk_set_status", {"status": "accepted"}), "candidateIds")
+    expect_raises(ValueError, lambda: api.handle("bulk_set_status", {"candidateIds": "cand", "status": "accepted"}), "list")
+    expect_raises(ValueError, lambda: api.handle("bulk_set_status", {"candidateIds": [], "status": "accepted"}), "at least one")
+    expect_raises(ValueError, lambda: api.handle("bulk_set_status", {"candidateIds": [" "], "status": "accepted"}), "non-empty")
+    expect_raises(ValueError, lambda: api.project.bulk_set_candidate_status([], "accepted"), "at least one")
     expect_raises(KeyError, lambda: api.handle("delete_reference", {"refId": "missing"}), "Reference")
     expect_raises(ValueError, lambda: api.handle("rename_person", {"oldName": "", "newName": "A"}), "required")
     expect_raises(KeyError, lambda: api.handle("rename_person", {"oldName": "Missing", "newName": "A"}), "Person")

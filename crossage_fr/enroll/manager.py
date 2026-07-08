@@ -3092,6 +3092,8 @@ class ProjectState:
         if status not in {"pending", "accepted", "rejected", "uncertain"}:
             raise ValueError(f"Unsupported review status: {status}")
         unique_ids = list(dict.fromkeys(candidate_ids))
+        if not unique_ids:
+            raise ValueError("candidate_ids must contain at least one candidate id.")
         missing = [candidate_id for candidate_id in unique_ids if candidate_id not in self.candidates]
         if missing:
             raise KeyError(f"Candidate not found: {missing[0]}")

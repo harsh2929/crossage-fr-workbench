@@ -753,7 +753,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     _COMMAND_REQUIRED_PARAMS = {
         "set_workspace": ("path",),
         "set_status": ("candidateId", "status"),
-        "bulk_set_status": ("status",),
+        "bulk_set_status": ("candidateIds", "status"),
         "set_candidate_note": ("candidateId",),
         "block_false_match": ("candidateId",),
         "reassign_candidate_person": ("candidateId", "personName"),
@@ -1303,12 +1303,18 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return self.state()
 
     def _cmd_bulk_set_status(self, params, progress=None):
-        if "candidateIds" not in params:
-            raise ValueError("candidateIds is required.")
-        candidate_ids = params.get("candidateIds", [])
+        candidate_ids = params["candidateIds"]
         if not isinstance(candidate_ids, list):
             raise ValueError("candidateIds must be a list.")
-        count = self.project.bulk_set_candidate_status([str(candidate_id) for candidate_id in candidate_ids], str(params["status"]))
+        normalized_ids: list[str] = []
+        for candidate_id in candidate_ids:
+            candidate_id_text = str(candidate_id).strip()
+            if not candidate_id_text:
+                raise ValueError("candidateIds must contain non-empty candidate ids.")
+            normalized_ids.append(candidate_id_text)
+        if not normalized_ids:
+            raise ValueError("candidateIds must contain at least one candidate id.")
+        count = self.project.bulk_set_candidate_status(normalized_ids, str(params["status"]))
         return {"updated": count, "state": self.state()}
 
     def _cmd_set_candidate_note(self, params, progress=None):
