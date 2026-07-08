@@ -2547,7 +2547,7 @@ export function PhotosView(props: {
   photoDateViewModeRef.current = photoDateViewMode;
   const activeDateBucketKeyRef = useRef(activeDateBucketKey);
   activeDateBucketKeyRef.current = activeDateBucketKey;
-  const activeDateBucketScopeSignature = useMemo(() => [
+  const activeDateBucketScopeSignature = [
     activeId,
     sort,
     debouncedSearchQuery,
@@ -2574,7 +2574,7 @@ export function PhotosView(props: {
     photoDateViewMode,
     activeLibraryRoot,
     activeLibraryRootProfileId,
-  ].join("\u0001"), [activeId, sort, debouncedSearchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, groupViewMode, photoDateViewMode, activeLibraryRoot, activeLibraryRootProfileId]);
+  ].join("\u0001");
   const activeDateBucketScopeSignatureRef = useRef("");
   const foldersFnRef = useRef(listPhotoFolders);
   foldersFnRef.current = listPhotoFolders;
@@ -2899,6 +2899,25 @@ export function PhotosView(props: {
   const activeSensitiveCollection = isSensitivePhotoScope(activeId, visibilityFilter);
   const previousSensitiveCollectionActiveRef = useRef(activeSensitiveCollection);
   const sensitiveCollectionLocked = activeSensitiveCollection && !sensitiveCollectionsUnlocked;
+  const gridReloadSignature = [
+    activeDateBucketScopeSignature,
+    activeDateBucketKey,
+    sensitiveCollectionLocked ? "1" : "0",
+    gridReloadToken,
+  ].join("\u0001");
+  const dateBucketRequestSignature = [
+    activeDateBucketScopeSignature,
+    dateBucketRefreshToken,
+    sensitiveCollectionLocked ? "1" : "0",
+  ].join("\u0001");
+  const gridPaginationSignature = [
+    activeDateBucketScopeSignature,
+    activeDateBucketKey,
+    items.length,
+    total,
+    loading ? "1" : "0",
+    sensitiveCollectionLocked ? "1" : "0",
+  ].join("\u0001");
   const sensitiveOsAuthAvailable = Boolean(sensitiveAuthStatus?.available && authenticateSensitiveAccess);
   const sensitiveOsAuthMethodLabel = sensitiveAuthStatus?.method === "touch-id" ? uiText("Touch ID") : uiText("Device authentication");
   const sensitiveOsAuthEnabled = Boolean(photoSettings.sensitiveOsAuthEnabled && sensitiveOsAuthAvailable);
@@ -3848,11 +3867,11 @@ export function PhotosView(props: {
       return;
     }
     loadPage(activeId, 0, sort, debouncedSearchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, cameraFilter, albumFilter, visibilityFilter);
-  }, [activeId, sort, debouncedSearchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, groupViewMode, photoDateViewMode, activeDateBucketKey, activeDateBucketScopeSignature, activeLibraryRoot, activeLibraryRootProfileId, sensitiveCollectionLocked, clearLockedSensitiveItems, loadPage, gridReloadToken]);
+  }, [gridReloadSignature, clearLockedSensitiveItems, loadPage]);
 
   useEffect(() => {
     setActiveDateBucketKey("");
-  }, [activeId, sort, debouncedSearchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, groupViewMode, photoDateViewMode, activeLibraryRoot, activeLibraryRootProfileId]);
+  }, [activeDateBucketScopeSignature]);
 
   useEffect(() => {
     if (photoDateViewMode === "all" || sensitiveCollectionLocked) {
@@ -3908,7 +3927,7 @@ export function PhotosView(props: {
     return () => {
       alive = false;
     };
-  }, [activeId, photoDateViewMode, debouncedSearchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, groupViewMode, activeLibraryRoot, activeLibraryRootProfileId, dateBucketRefreshToken, sensitiveCollectionLocked, recordPhotoSearchIndexStatus]);
+  }, [dateBucketRequestSignature, recordPhotoSearchIndexStatus]);
 
   useEffect(() => {
     if (sensitiveCollectionLocked) return;
@@ -3921,7 +3940,7 @@ export function PhotosView(props: {
     });
     io.observe(node);
     return () => io.disconnect();
-  }, [activeId, items.length, total, loading, sort, debouncedSearchQuery, keywordFilter, mediaKindFilter, favoriteOnly, editedOnly, notInAlbumOnly, personFilter, statusFilter, minQualityFilter, dateFromFilter, dateToFilter, sourceFilter, fileTypeFilter, duplicateOnly, locationFilter, nearbyFilter, cameraFilter, albumFilter, visibilityFilter, petReviewKindFilter, activeDateBucketKey, sensitiveCollectionLocked, loadPage]);
+  }, [gridPaginationSignature, loadPage]);
 
   useEffect(() => {
     if (lightbox === null) return;

@@ -6340,7 +6340,7 @@ run("Photos grid search reload is debounced before backend fetches", () => {
   assert.match(source, /loadPage\(activeId, 0, sort, debouncedSearchQuery,/);
   assert.match(source, /query: debouncedSearchQuery,/);
   assert.match(source, /loadPage\(activeId, nextOffset\(\{ loaded: items\.length \}\), sort, debouncedSearchQuery,/);
-  const autoGridEffect = source.match(/useEffect\(\(\) => \{\s*setItems\(\[\]\);[\s\S]*?gridReloadToken\]\);/);
+  const autoGridEffect = source.match(/useEffect\(\(\) => \{\s*setItems\(\[\]\);[\s\S]*?\}, \[gridReloadSignature, clearLockedSensitiveItems, loadPage\]\);/);
   assert.ok(autoGridEffect, "automatic grid reload effect should exist");
   assert.doesNotMatch(autoGridEffect[0], /loadPage\(activeId, 0, sort, searchQuery,/);
 });
@@ -6430,21 +6430,27 @@ run("Photos burst-frame fetch effect ignores unrelated item map churn", () => {
 
 run("Photos date bucket changes do not double-fetch stale grid pages", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
-  assert.match(source, /const activeDateBucketScopeSignature = useMemo\(\(\) => \[/);
+  assert.match(source, /const activeDateBucketScopeSignature = \[/);
+  assert.match(source, /const gridReloadSignature = \[/);
+  assert.match(source, /const dateBucketRequestSignature = \[/);
+  assert.match(source, /const gridPaginationSignature = \[/);
   assert.match(source, /const activeDateBucketScopeSignatureRef = useRef\(""\);/);
   assert.match(source, /function selectActiveDateBucket\(bucketKey: string\) \{/);
   assert.match(source, /activeDateBucketScopeSignatureRef\.current = cleanBucketKey \? activeDateBucketScopeSignature : "";/);
   assert.match(source, /onClick=\{\(\) => selectActiveDateBucket\(bucket\.key\)\}/);
   assert.doesNotMatch(source, /onClick=\{\(\) => setActiveDateBucketKey\(bucket\.key\)\}/);
-  const gridReloadEffect = source.match(/useEffect\(\(\) => \{\s*setItems\(\[\]\);[\s\S]*?loadPage\(activeId, 0, sort, debouncedSearchQuery,[\s\S]*?\}, \[[^\]]+\]\);/);
+  const gridReloadEffect = source.match(/useEffect\(\(\) => \{\s*setItems\(\[\]\);[\s\S]*?loadPage\(activeId, 0, sort, debouncedSearchQuery,[\s\S]*?\}, \[gridReloadSignature, clearLockedSensitiveItems, loadPage\]\);/);
   assert.ok(gridReloadEffect, "automatic grid reload effect should exist");
   assert.match(gridReloadEffect[0], /const showingDateBucketOverview = photoDateViewMode !== "all" && !activeDateBucketKey;/);
   assert.match(gridReloadEffect[0], /const staleDateBucketSelection = photoDateViewMode !== "all"[\s\S]*activeDateBucketScopeSignatureRef\.current !== activeDateBucketScopeSignature;/);
   assert.match(gridReloadEffect[0], /if \(showingDateBucketOverview \|\| staleDateBucketSelection\) \{\s*setLoading\(false\);\s*return;\s*\}/);
-  const dependencies = gridReloadEffect[0].match(/\}, \[([^\]]+)\]\);$/);
-  assert.ok(dependencies, "grid reload dependencies should be parseable");
-  assert.match(dependencies[1], /photoDateViewMode/);
-  assert.match(dependencies[1], /activeDateBucketScopeSignature/);
+  assert.doesNotMatch(gridReloadEffect[0], /\}, \[activeId, sort, debouncedSearchQuery,/);
+  const resetBucketEffect = source.match(/useEffect\(\(\) => \{\s*setActiveDateBucketKey\(""\);\s*\}, \[activeDateBucketScopeSignature\]\);/);
+  assert.ok(resetBucketEffect, "date bucket reset should depend on the scope signature");
+  const dateBucketEffect = source.match(/dateBucketsFnRef\.current\(\{[\s\S]*?\}, \[dateBucketRequestSignature, recordPhotoSearchIndexStatus\]\);/);
+  assert.ok(dateBucketEffect, "date bucket fetch effect should depend on compact request signature");
+  const paginationEffect = source.match(/new IntersectionObserver\(\(entries\) => \{[\s\S]*?\}, \[gridPaginationSignature, loadPage\]\);/);
+  assert.ok(paginationEffect, "grid pagination effect should depend on compact pagination signature");
 });
 
 run("Photos album cover and suggestion saves surface failures", () => {
