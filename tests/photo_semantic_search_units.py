@@ -13,8 +13,11 @@ Run: PYTHONPATH=. .venv/bin/python tests/photo_semantic_search_units.py
 
 from __future__ import annotations
 
+import logging
 import socket
+import sys
 import tempfile
+import types
 from pathlib import Path
 
 import numpy as np
@@ -246,10 +249,90 @@ def test_siglip_text_queries_are_truncated_to_model_limit() -> None:
     assert np.allclose(vec, np.asarray([0.6, 0.8], dtype=np.float32)), vec
 
 
+def test_siglip_provider_failure_logs_and_falls_back_to_cpu() -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeSessionOptions:
+        log_severity_level = 0
+
+    class FakeSession:
+        pass
+
+    fallback_session = FakeSession()
+
+    def fake_inference_session(
+        model_path: str,
+        *,
+        sess_options: FakeSessionOptions,
+        providers: list[str],
+        provider_options: object = None,
+    ) -> FakeSession:
+        calls.append(
+            {
+                "model_path": model_path,
+                "providers": list(providers),
+                "provider_options": provider_options,
+                "log_severity_level": sess_options.log_severity_level,
+            }
+        )
+        if providers != ["CPUExecutionProvider"]:
+            raise RuntimeError("accelerated provider exploded")
+        return fallback_session
+
+    fake_ort = types.SimpleNamespace(
+        SessionOptions=FakeSessionOptions,
+        InferenceSession=fake_inference_session,
+    )
+    had_ort = "onnxruntime" in sys.modules
+    orig_ort = sys.modules.get("onnxruntime")
+    orig_detect_platform = se.detect_platform
+    orig_get_providers = se.get_providers
+    orig_split_provider_config = se.split_provider_config
+    logger = logging.getLogger(se.__name__)
+    records: list[str] = []
+
+    class CaptureWarnings(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record.getMessage())
+
+    handler = CaptureWarnings(level=logging.WARNING)
+    logger.addHandler(handler)
+    old_level = logger.level
+    logger.setLevel(logging.WARNING)
+    se._session_for_model.cache_clear()
+    sys.modules["onnxruntime"] = fake_ort
+    se.detect_platform = lambda: "unit-gpu"  # type: ignore[assignment]
+    se.get_providers = lambda _platform: ["BrokenProvider", "CPUExecutionProvider"]  # type: ignore[assignment]
+    se.split_provider_config = lambda selected: (list(selected), None)  # type: ignore[assignment]
+    try:
+        session = se._session_for_model("fake-siglip.onnx", (11, 22))
+    finally:
+        se._session_for_model.cache_clear()
+        se.detect_platform = orig_detect_platform  # type: ignore[assignment]
+        se.get_providers = orig_get_providers  # type: ignore[assignment]
+        se.split_provider_config = orig_split_provider_config  # type: ignore[assignment]
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+        if had_ort:
+            sys.modules["onnxruntime"] = orig_ort  # type: ignore[assignment]
+        else:
+            sys.modules.pop("onnxruntime", None)
+
+    assert session is fallback_session
+    assert [call["providers"] for call in calls] == [
+        ["BrokenProvider", "CPUExecutionProvider"],
+        ["CPUExecutionProvider"],
+    ], calls
+    assert all(call["log_severity_level"] == 3 for call in calls), calls
+    assert any("falling back to CPU" in message for message in records), records
+    assert any("accelerated provider exploded" in message for message in records), records
+
+
 if __name__ == "__main__":
     test_semantic_search_unavailable_without_model_offline()
     test_semantic_search_aligns_text_and_image_offline()
     test_semantic_search_command_ranks_library_offline()
     test_semantic_search_indexes_full_library_without_candidate_cap()
     test_siglip_text_queries_are_truncated_to_model_limit()
+    test_siglip_provider_failure_logs_and_falls_back_to_cpu()
     print("all photo_semantic_search_units tests passed")
