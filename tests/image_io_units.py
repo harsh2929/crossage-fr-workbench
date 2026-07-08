@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 import tempfile
 
 from PIL import Image, JpegImagePlugin
 
-from crossage_fr.ingest.image_io import write_preview_image
+from crossage_fr.ingest.image_io import ImageLoadError, load_image, write_preview_image
 
 
 def test_jpeg_preview_uses_pillow_draft_decode_hint() -> None:
@@ -32,6 +33,52 @@ def test_jpeg_preview_uses_pillow_draft_decode_hint() -> None:
             assert max(preview.size) <= 256, preview.size
 
 
+def test_raw_decode_rejects_missing_dimensions_before_postprocess() -> None:
+    with tempfile.TemporaryDirectory(prefix="vintrace-raw-size-") as temp_name:
+        root = Path(temp_name)
+        source = root / "missing-size.dng"
+        source.write_bytes(b"fake raw bytes")
+
+        class EmptySizes:
+            pass
+
+        class FakeRaw:
+            sizes = EmptySizes()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def postprocess(self, *_args, **_kwargs):
+                raise AssertionError("RAW postprocess should not run without verified dimensions")
+
+        class FakeRawpy:
+            @staticmethod
+            def imread(_path: str) -> FakeRaw:
+                return FakeRaw()
+
+        old_rawpy = sys.modules.get("rawpy")
+        old_limit = Image.MAX_IMAGE_PIXELS
+        try:
+            sys.modules["rawpy"] = FakeRawpy()  # type: ignore[assignment]
+            Image.MAX_IMAGE_PIXELS = 4
+            try:
+                load_image(source)
+            except ImageLoadError as exc:
+                assert "reports no decodable dimensions" in str(exc)
+            else:
+                raise AssertionError("expected RAW with missing dimensions to be rejected")
+        finally:
+            Image.MAX_IMAGE_PIXELS = old_limit
+            if old_rawpy is None:
+                sys.modules.pop("rawpy", None)
+            else:
+                sys.modules["rawpy"] = old_rawpy
+
+
 if __name__ == "__main__":
     test_jpeg_preview_uses_pillow_draft_decode_hint()
+    test_raw_decode_rejects_missing_dimensions_before_postprocess()
     print("all image_io_units tests passed")
