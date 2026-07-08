@@ -519,12 +519,11 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
                     continue
                 seen.add(fingerprint)
                 bbox_values = tuple(int(round(v)) for v in face.bbox.tolist())
-                # quality_from_norm() is calibrated against the raw single-crop
-                # recognizer-embedding norm, so raw_norm is intentionally taken
-                # from face.embedding even on the flip-TTA path (where `vector`
-                # is the flip-averaged, re-normalized template). Do not switch
-                # this to the averaged vector without re-fitting the quality
-                # calibration — its norm is ~1.0 and would flatten quality.
+                # quality_from_norm() is calibrated against the raw recognizer
+                # embedding norm, so raw_norm comes from face.embedding before
+                # final L2 normalization. On flip-TTA, _recognize stores the raw
+                # averaged template there; the returned `vector` stays unit-norm
+                # for cosine matching.
                 raw_norm = float(np.linalg.norm(face.embedding))
                 fiqa_score = self._fiqa_score(source_bgr, kps_for_index)
                 quality = effective_quality(quality_from_norm(raw_norm, self.model_name), fiqa_score)
@@ -615,8 +614,10 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
                 aligned = face_align.norm_crop(source_bgr, kps, image_size=size)
                 feat1 = np.asarray(self.rec_model.get_feat(aligned), dtype="float32").flatten()
                 feat2 = np.asarray(self.rec_model.get_feat(np.ascontiguousarray(aligned[:, ::-1])), dtype="float32").flatten()
-                # Quality norm stays the SINGLE-crop norm the gates are calibrated against.
-                face.embedding = feat1
+                # Keep the quality proxy on the same two-crop evidence as the
+                # returned template, but before final normalization so the
+                # existing ArcFace norm calibration remains meaningful.
+                face.embedding = ((feat1 + feat2) * 0.5).astype("float32", copy=False)
                 return flip_average(feat1, feat2)
             except Exception:
                 pass

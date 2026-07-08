@@ -14,10 +14,13 @@ Run: PYTHONPATH=. .venv/bin/python tests/quality_units.py
 
 from __future__ import annotations
 
+import sys
+import types
+
 import numpy as np
 
 from crossage_fr.config import Thresholds
-from crossage_fr.embed.engine import InsightFaceEmbeddingEngine, quality_from_norm
+from crossage_fr.embed.engine import InsightFaceEmbeddingEngine, flip_average, quality_from_norm
 
 
 def test_quality_from_norm_gate_behavior() -> None:
@@ -79,11 +82,64 @@ def test_non_rescue_pose_behavior_preserved() -> None:
     assert eng._pose_bucket_for_face(image, bbox, None, rescue=False) == "unknown"
 
 
+def test_flip_tta_quality_norm_uses_raw_averaged_template() -> None:
+    eng = _engine()
+    eng.flip_tta = True
+
+    class FakeRecognizer:
+        input_size = (2, 2)
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_feat(self, _aligned: np.ndarray) -> np.ndarray:
+            self.calls += 1
+            if self.calls == 1:
+                return np.asarray([20.0, 0.0], dtype="float32")
+            return np.asarray([0.0, 10.0], dtype="float32")
+
+    class FakeFace:
+        embedding: np.ndarray
+
+    face = FakeFace()
+    eng.rec_model = FakeRecognizer()
+    source_bgr = np.zeros((4, 4, 3), dtype="uint8")
+    kps = np.asarray([[1.0, 1.0], [2.0, 1.0], [1.5, 2.0], [1.0, 3.0], [2.0, 3.0]], dtype="float32")
+    aligned = np.arange(12, dtype="uint8").reshape(2, 2, 3)
+
+    original_insightface = sys.modules.get("insightface")
+    original_utils = sys.modules.get("insightface.utils")
+    had_insightface = "insightface" in sys.modules
+    had_utils = "insightface.utils" in sys.modules
+    fake_utils = types.SimpleNamespace(face_align=types.SimpleNamespace(norm_crop=lambda *_args, **_kwargs: aligned))
+    sys.modules["insightface"] = types.SimpleNamespace(utils=fake_utils)
+    sys.modules["insightface.utils"] = fake_utils
+    try:
+        vector = eng._recognize(source_bgr, face, kps)
+    finally:
+        if had_insightface:
+            sys.modules["insightface"] = original_insightface  # type: ignore[assignment]
+        else:
+            sys.modules.pop("insightface", None)
+        if had_utils:
+            sys.modules["insightface.utils"] = original_utils  # type: ignore[assignment]
+        else:
+            sys.modules.pop("insightface.utils", None)
+
+    expected_vector = flip_average(np.asarray([20.0, 0.0]), np.asarray([0.0, 10.0]))
+    expected_quality_embedding = np.asarray([10.0, 5.0], dtype="float32")
+    assert np.allclose(vector, expected_vector), vector
+    assert abs(float(np.linalg.norm(vector)) - 1.0) < 1e-6
+    assert np.allclose(face.embedding, expected_quality_embedding), face.embedding
+    assert abs(float(np.linalg.norm(face.embedding)) - float(np.linalg.norm(expected_quality_embedding))) < 1e-6
+
+
 def main() -> None:
     test_quality_from_norm_gate_behavior()
     test_quality_from_norm_monotonic_and_clamped()
     test_rescue_pose_uses_real_bucket_not_hardcoded_profile()
     test_non_rescue_pose_behavior_preserved()
+    test_flip_tta_quality_norm_uses_raw_averaged_template()
     print("quality units ok")
 
 
