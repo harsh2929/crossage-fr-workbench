@@ -5,6 +5,7 @@ import importlib.util
 from pathlib import Path
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -51,12 +52,58 @@ def sharpest_index(grays: "Sequence[np.ndarray]") -> int:
 SHARPEN_WINDOW = 1
 
 
-def _sharpest_in_window(capture, cv2, index: int, frame_count: int, window: int):
+def _video_frame_pixel_limit() -> int:
+    try:
+        return int(getattr(Image, "MAX_IMAGE_PIXELS", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _video_frame_pixels(width: object, height: object) -> int:
+    try:
+        return max(0, int(width or 0)) * max(0, int(height or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _video_frame_shape_pixels(frame: object) -> int:
+    shape = getattr(frame, "shape", ())
+    if not isinstance(shape, tuple) or len(shape) < 2:
+        return 0
+    return _video_frame_pixels(shape[1], shape[0])
+
+
+def _assert_video_frame_pixel_limit(source: Path, width: object, height: object, *, label: str = "video frame") -> None:
+    limit = _video_frame_pixel_limit()
+    pixels = _video_frame_pixels(width, height)
+    if limit and pixels > limit:
+        raise VideoLoadError(f"{label} exceeds the maximum allowed pixels ({pixels} > {limit}): {source}")
+
+
+def _assert_video_frame_shape_pixel_limit(source: Path, frame: object, *, label: str = "video frame") -> None:
+    limit = _video_frame_pixel_limit()
+    pixels = _video_frame_shape_pixels(frame)
+    if limit and pixels > limit:
+        raise VideoLoadError(f"{label} exceeds the maximum allowed pixels ({pixels} > {limit}): {source}")
+
+
+def _ffmpeg_frame_scale_filter() -> str:
+    limit = _video_frame_pixel_limit()
+    if not limit:
+        return ""
+    side = max(1, int(math.sqrt(limit)))
+    return f"scale=w=min(iw\\,{side}):h=min(ih\\,{side}):force_original_aspect_ratio=decrease"
+
+
+def _sharpest_in_window(capture, cv2, index: int, frame_count: int, window: int, source: Path | None = None):
     """Decode a small neighbourhood around `index` and return (best_index, best_frame_bgr)
     by variance-of-Laplacian. Falls back to the single target frame when window<=0."""
+    source_path = source or Path("<video>")
     if window <= 0:
         capture.set(cv2.CAP_PROP_POS_FRAMES, max(0, index))
         ok, frame = capture.read()
+        if ok and frame is not None:
+            _assert_video_frame_shape_pixel_limit(source_path, frame)
         return index, (frame if ok else None)
     lo = max(0, index - window)
     hi = index + window if frame_count <= 0 else min(frame_count - 1, index + window)
@@ -66,6 +113,7 @@ def _sharpest_in_window(capture, cv2, index: int, frame_count: int, window: int)
         ok, frame = capture.read()
         if not ok or frame is None:
             continue
+        _assert_video_frame_shape_pixel_limit(source_path, frame)
         try:
             score = variance_of_laplacian(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
         except Exception:
@@ -242,6 +290,7 @@ def sample_video_frames(
         fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        _assert_video_frame_pixel_limit(resolved, width, height, label="video frame metadata")
         duration_ms = int((frame_count / fps) * 1000) if frame_count > 0 and fps > 0 else 0
         indices = _sample_indices(frame_count, fps, max_frames=max_frames, interval_seconds=interval_seconds)
         if not indices:
@@ -251,9 +300,10 @@ def sample_video_frames(
         for index in indices:
             # §5.3: pick the SHARPEST frame in a small neighbourhood, so a motion-blurred
             # representative is replaced by a crisp one (blur destroys identity signal).
-            index, frame = _sharpest_in_window(capture, cv2, index, frame_count, SHARPEN_WINDOW)
+            index, frame = _sharpest_in_window(capture, cv2, index, frame_count, SHARPEN_WINDOW, source=resolved)
             if frame is None:
                 continue
+            _assert_video_frame_shape_pixel_limit(resolved, frame)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             image = Image.fromarray(rgb).convert("RGB")
             timestamp_ms = int((index / fps) * 1000) if fps > 0 else int(capture.get(cv2.CAP_PROP_POS_MSEC) or 0)
@@ -536,6 +586,10 @@ def _sample_video_frames_ffmpeg(
         temp_dir = Path(temp_name)
         pattern = temp_dir / "frame-%08d.jpg"
         quality_scale = max(2, min(31, int(round(31 - (max(1, min(100, jpeg_quality)) / 100) * 29))))
+        filters = [f"fps=1/{interval_seconds}"]
+        scale_filter = _ffmpeg_frame_scale_filter()
+        if scale_filter:
+            filters.append(scale_filter)
         command = [
             ffmpeg,
             "-hide_banner",
@@ -544,7 +598,7 @@ def _sample_video_frames_ffmpeg(
             "-i",
             str(resolved),
             "-vf",
-            f"fps=1/{interval_seconds}",
+            ",".join(filters),
             "-frames:v",
             str(max_frames),
             "-q:v",

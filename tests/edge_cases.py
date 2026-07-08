@@ -1203,7 +1203,7 @@ def assert_static_app_contracts() -> None:
     assert "rawProxyRendered" in types_ts
     assert "rawRenderProxyPath" in types_ts
     assert "output = load_image(source)" in api_server
-    assert "thumb = load_image(resolved).convert(\"RGB\")" in api_server
+    assert "return load_image(resolved).convert(\"RGB\"), \"original\"" in api_server
     assert "base = load_image(source).convert(\"RGBA\")" in api_server
     assert "test_photo_rendered_export_uses_raw_proxy_when_native_decode_unavailable" in photo_folders
     assert "test_photo_native_raw_decoder_feeds_preview_export_edits_contact_sheet_and_cutout" in photo_folders

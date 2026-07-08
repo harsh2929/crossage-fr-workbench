@@ -14,10 +14,16 @@ from PIL import ExifTags, Image, ImageOps
 from crossage_fr.models import ImageRecord, new_id
 
 
+DEFAULT_MAX_IMAGE_PIXELS = 100_000_000
+MIN_MAX_IMAGE_PIXELS = 20_000_000
+
 try:
-    Image.MAX_IMAGE_PIXELS = max(20_000_000, int(os.environ.get("CROSSAGE_MAX_IMAGE_PIXELS", "180000000")))
+    Image.MAX_IMAGE_PIXELS = max(
+        MIN_MAX_IMAGE_PIXELS,
+        int(os.environ.get("CROSSAGE_MAX_IMAGE_PIXELS", str(DEFAULT_MAX_IMAGE_PIXELS))),
+    )
 except ValueError:
-    Image.MAX_IMAGE_PIXELS = 180_000_000
+    Image.MAX_IMAGE_PIXELS = DEFAULT_MAX_IMAGE_PIXELS
 
 
 PILLOW_IMAGE_EXTENSIONS = {

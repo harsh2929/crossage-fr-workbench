@@ -5,7 +5,14 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-from crossage_fr.ingest import video_io
+import numpy as np
+from PIL import Image
+
+from crossage_fr.ingest import image_io, video_io
+
+
+def test_default_image_pixel_limit_is_bounded_for_media_ingest() -> None:
+    assert image_io.DEFAULT_MAX_IMAGE_PIXELS == 100_000_000
 
 
 def test_ffmpeg_frame_sampling_uses_workspace_temp_and_safe_move() -> None:
@@ -22,6 +29,7 @@ def test_ffmpeg_frame_sampling_uses_workspace_temp_and_safe_move() -> None:
         original_move = video_io.shutil.move
 
         def fake_run(command, capture_output, text, timeout, check):  # type: ignore[no-untyped-def]
+            seen["filter"] = command[command.index("-vf") + 1]
             pattern = Path(command[-1])
             seen["temp_parent"] = pattern.parent.parent
             pattern.parent.mkdir(parents=True, exist_ok=True)
@@ -62,10 +70,84 @@ def test_ffmpeg_frame_sampling_uses_workspace_temp_and_safe_move() -> None:
             video_io.shutil.move = original_move  # type: ignore[assignment]
 
         assert seen["temp_parent"] == output_root, seen
+        assert "fps=1/0.5" in str(seen["filter"]), seen
+        assert "scale=w=min(iw\\," in str(seen["filter"]), seen
         assert len(seen["moves"]) == 2, seen
         assert [sample.timestamp_ms for sample in samples] == [0, 500], samples
         assert all(sample.path.exists() for sample in samples), samples
         assert all(sample.path.parent.parent == output_root for sample in samples), samples
+
+
+def test_opencv_frame_sampling_rejects_oversized_decoded_frame_before_rgb_conversion() -> None:
+    with tempfile.TemporaryDirectory(prefix="vintrace-video-frame-cap-") as temp_name:
+        root = Path(temp_name)
+        source = root / "clip.mp4"
+        source.write_bytes(b"fake video")
+        frame = np.zeros((3, 2, 3), dtype=np.uint8)
+
+        class FakeCapture:
+            def __init__(self, _path: str) -> None:
+                self.released = False
+
+            def isOpened(self) -> bool:
+                return True
+
+            def get(self, prop: int) -> float:
+                values = {
+                    fake_cv2.CAP_PROP_FRAME_COUNT: 1,
+                    fake_cv2.CAP_PROP_FPS: 30.0,
+                    fake_cv2.CAP_PROP_FRAME_WIDTH: 0,
+                    fake_cv2.CAP_PROP_FRAME_HEIGHT: 0,
+                    fake_cv2.CAP_PROP_POS_MSEC: 0,
+                }
+                return values.get(prop, 0)
+
+            def set(self, _prop: int, _value: int) -> None:
+                return None
+
+            def read(self):  # type: ignore[no-untyped-def]
+                return True, frame
+
+            def release(self) -> None:
+                self.released = True
+
+        class FakeCv2:
+            CAP_PROP_POS_FRAMES = 1
+            CAP_PROP_FRAME_COUNT = 2
+            CAP_PROP_FPS = 3
+            CAP_PROP_FRAME_WIDTH = 4
+            CAP_PROP_FRAME_HEIGHT = 5
+            CAP_PROP_POS_MSEC = 6
+            COLOR_BGR2GRAY = 7
+            COLOR_BGR2RGB = 8
+
+            def __init__(self) -> None:
+                self.capture = FakeCapture("")
+
+            def VideoCapture(self, path: str) -> FakeCapture:  # noqa: N802 - mirrors cv2.
+                self.capture = FakeCapture(path)
+                return self.capture
+
+            def cvtColor(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+                raise AssertionError("oversized video frames should fail before cvtColor/Image.fromarray")
+
+        fake_cv2 = FakeCv2()
+        original_require_cv2 = video_io._require_cv2  # noqa: SLF001 - targeted regression.
+        old_limit = Image.MAX_IMAGE_PIXELS
+        try:
+            Image.MAX_IMAGE_PIXELS = 4
+            video_io._require_cv2 = lambda: fake_cv2  # type: ignore[assignment]
+            try:
+                video_io.sample_video_frames(source, root / "cache", max_frames=1)
+            except video_io.VideoLoadError as exc:
+                assert "maximum allowed pixels" in str(exc)
+            else:
+                raise AssertionError("expected oversized decoded frame to be rejected")
+        finally:
+            Image.MAX_IMAGE_PIXELS = old_limit
+            video_io._require_cv2 = original_require_cv2  # type: ignore[assignment]
+
+        assert fake_cv2.capture.released is True
 
 
 def test_video_decoder_report_does_not_import_cv2_for_availability() -> None:
@@ -98,6 +180,8 @@ def test_video_decoder_report_does_not_import_cv2_for_availability() -> None:
 
 
 if __name__ == "__main__":
+    test_default_image_pixel_limit_is_bounded_for_media_ingest()
     test_ffmpeg_frame_sampling_uses_workspace_temp_and_safe_move()
+    test_opencv_frame_sampling_rejects_oversized_decoded_frame_before_rgb_conversion()
     test_video_decoder_report_does_not_import_cv2_for_availability()
     print("all video_io_units tests passed")
