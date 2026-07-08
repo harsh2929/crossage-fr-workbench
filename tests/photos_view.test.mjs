@@ -369,6 +369,12 @@ function run(name, fn) {
   console.log("ok " + name);
 }
 
+function assertClose(actual, expected, tolerance, label) {
+  assert.strictEqual(typeof actual, "number", `${label} should be a number`);
+  assert.ok(Number.isFinite(actual), `${label} should be finite`);
+  assert.ok(Math.abs(actual - expected) <= tolerance, { label, actual, expected, tolerance });
+}
+
 function testBudgetMs(name, fallbackMs) {
   const parsed = Number(process.env[`VINTRACE_TEST_${name.toUpperCase()}_MS`]);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackMs;
@@ -494,10 +500,10 @@ run("photoDetectedFaceCoverCrop derives crop from normalized face metadata", () 
     },
   });
   assert(crop, crop);
-  assert(Math.abs(crop.left - 18.555) < 0.05, crop);
-  assert(Math.abs(crop.top - 2.825) < 0.05, crop);
-  assert(Math.abs(crop.width - 52.89) < 0.05, crop);
-  assert(Math.abs(crop.height - 67.5) < 0.05, crop);
+  assertClose(crop.left, 18.555, 0.05, "crop.left");
+  assertClose(crop.top, 2.825, 0.05, "crop.top");
+  assertClose(crop.width, 52.89, 0.05, "crop.width");
+  assertClose(crop.height, 67.5, 0.05, "crop.height");
   assert.strictEqual(coverCropMod.photoCoverCropPresetId(crop), "custom");
   assert.strictEqual(coverCropMod.photoCoverCropsEqual(crop, { left: 18.56, top: 2.83, width: 52.9, height: 67.5 }), true);
 });
@@ -513,10 +519,10 @@ run("photoDetectedFaceCoverCrop accepts normalized min max face bounds", () => {
     },
   });
   assert(crop, crop);
-  assert(Math.abs(crop.left - 18.555) < 0.05, crop);
-  assert(Math.abs(crop.top - 2.825) < 0.05, crop);
-  assert(Math.abs(crop.width - 52.89) < 0.05, crop);
-  assert(Math.abs(crop.height - 67.5) < 0.05, crop);
+  assertClose(crop.left, 18.555, 0.05, "crop.left");
+  assertClose(crop.top, 2.825, 0.05, "crop.top");
+  assertClose(crop.width, 52.89, 0.05, "crop.width");
+  assertClose(crop.height, 67.5, 0.05, "crop.height");
 });
 
 run("photoDetectedFaceCoverCrop derives crop from pixel face bounds and chooses largest confident face", () => {
