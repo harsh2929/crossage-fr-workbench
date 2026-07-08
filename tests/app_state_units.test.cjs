@@ -62,6 +62,23 @@ run("wrapped invoke handlers do not reapply result.state", () => {
   assert.ok(warmupBlock.includes("applyState(result.state);"));
 });
 
+run("applyState normalizes against the latest applied state ref", () => {
+  assert.match(source, /const appStateRef = useRef<AppState \| null>\(null\);/);
+  const applyStart = source.indexOf("  function applyState(rawNext: AppState) {");
+  assert.ok(applyStart >= 0, "missing applyState");
+  const applyEnd = source.indexOf("  function updateSettingsDraft", applyStart);
+  assert.ok(applyEnd > applyStart, "missing applyState end marker");
+  const applyBlock = source.slice(applyStart, applyEnd);
+  assert.match(applyBlock, /const previous = appStateRef\.current;/);
+  assert.match(applyBlock, /const next = normalizeAppState\(rawNext, previous\);/);
+  assert.match(applyBlock, /const previousWorkspace = previous\?\.workspace \|\| "";/);
+  assert.match(applyBlock, /appStateRef\.current = next;[\s\S]*setState\(next\);/);
+  assert.doesNotMatch(applyBlock, /normalizeAppState\(rawNext, state\)/);
+  assert.doesNotMatch(applyBlock, /lastAppliedWorkspaceRef/);
+  const startupBlock = source.slice(source.indexOf("async function loadInitialState"), applyStart);
+  assert.match(startupBlock, /normalizeAppState\(next, appStateRef\.current\)/);
+});
+
 run("review page query signature excludes changing counts", () => {
   const signatureStart = source.indexOf("  const querySignature = useMemo(() => JSON.stringify({");
   assert.ok(signatureStart >= 0, "missing review query signature");

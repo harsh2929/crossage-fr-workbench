@@ -1977,6 +1977,7 @@ export default function App() {
   const watchStatusRef = useRef<FolderWatchStatus>(initialWatchStatus);
   const startupRequestId = useRef(0);
   const folderAnalysisRequestId = useRef(0);
+  const appStateRef = useRef<AppState | null>(null);
   const stateReadyRef = useRef(false);
   const settingsDirtyRef = useRef(false);
   // Monotonic guards so an out-of-order backend reply can't overwrite newer
@@ -1986,10 +1987,6 @@ export default function App() {
   // applied. ipcSendSeqRef stamps each send; ipcAppliedSeqRef tracks the newest applied.
   const ipcSendSeqRef = useRef(0);
   const ipcAppliedSeqRef = useRef(0);
-  // Tracks the last-applied workspace so the "workspace changed -> reset
-  // calibration" check compares against the committed value, not a possibly
-  // stale render-closure of `state` (which two rapid applyState calls could read).
-  const lastAppliedWorkspaceRef = useRef<string | null>(null);
   const rendererReadySentRef = useRef(false);
   const memoryPressureNoticeRef = useRef("");
   const languageLoadSeqRef = useRef(0);
@@ -2408,7 +2405,7 @@ export default function App() {
     try {
       const next = await window.crossAge.getInitialState();
       if (requestId !== startupRequestId.current) return;
-      const safeNext = normalizeAppState(next, state);
+      const safeNext = normalizeAppState(next, appStateRef.current);
       recordLatency("Startup", "initial_state", startedAt);
       applyState(safeNext);
       void loadWorkspaces();
@@ -2533,14 +2530,13 @@ export default function App() {
   }
 
   function applyState(rawNext: AppState) {
-    const next = normalizeAppState(rawNext, state);
-    const previousWorkspace = lastAppliedWorkspaceRef.current;
+    const previous = appStateRef.current;
+    const next = normalizeAppState(rawNext, previous);
+    const previousWorkspace = previous?.workspace || "";
     if (previousWorkspace && next.workspace && next.workspace !== previousWorkspace) {
       setCalibrationLearning(null);
     }
-    if (next.workspace) {
-      lastAppliedWorkspaceRef.current = next.workspace;
-    }
+    appStateRef.current = next;
     stateReadyRef.current = true;
     setState(next);
     setPerformanceChoiceState(normalizePerformanceChoice(next.config.performanceMode));
