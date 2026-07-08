@@ -291,6 +291,20 @@ import {
   type SettingsMode,
   type SettingsValues
 } from "./appSettings";
+import {
+  finiteTimestamp,
+  readSavedReviewViews,
+  readSavedScanSources,
+  readScanQueue,
+  reviewLanes,
+  writeSavedReviewViews,
+  writeSavedScanSources,
+  writeScanQueue,
+  type ReviewLane,
+  type SavedReviewView,
+  type SavedScanSource,
+  type ScanQueueItem
+} from "./appLocalState";
 
 type UiMessageValue = string | number | { text: string | number; localize: true };
 type UiMessageValues = Record<string, UiMessageValue>;
@@ -630,33 +644,6 @@ type CameraScanResult = CameraSaveResult & {
   matched?: boolean;
 };
 
-type SavedScanSource = {
-  id: string;
-  label: string;
-  path: string;
-  createdAt: number;
-  lastUsedAt: number;
-};
-
-type ScanQueueItem = SavedScanSource & {
-  status: "queued" | "running" | "done" | "error";
-  message?: string;
-};
-
-type ReviewLane = "all" | "high" | "lowQuality" | "groups" | "video" | "notes" | "closeRunner" | "singleReference";
-const reviewLanes: ReviewLane[] = ["all", "high", "lowQuality", "groups", "video", "notes", "closeRunner", "singleReference"];
-
-type SavedReviewView = {
-  id: string;
-  label: string;
-  statusFilter: CandidateStatus | "all";
-  reviewLane: ReviewLane;
-  search: string;
-  sort: "score" | "newest" | "quality";
-  createdAt: number;
-  lastUsedAt: number;
-};
-
 type LatencySample = {
   label: string;
   command: string;
@@ -948,130 +935,9 @@ function modelPackFromModelName(value: unknown) {
   return match?.[1] ?? "";
 }
 
-function savedScanSourcesKey(workspace: string | null | undefined) {
-  return `vintrace:scan-sources:${workspace || "default"}`;
-}
-
-function finiteTimestamp(value: unknown, fallback = Date.now()) {
-  const timestamp = Number(value);
-  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : fallback;
-}
-
 function formatTimestampDateTime(value: unknown) {
   const timestamp = finiteTimestamp(value);
   return formatDateTime(new Date(timestamp).toISOString());
-}
-
-function readSavedScanSources(workspace: string | null | undefined): SavedScanSource[] {
-  const key = savedScanSourcesKey(workspace);
-  try {
-    const rows = JSON.parse(window.localStorage.getItem(key) || "[]");
-    if (!Array.isArray(rows)) return [];
-    return rows
-      .filter((row) => row && typeof row === "object" && typeof row.path === "string")
-      .map((row) => {
-        const createdAt = finiteTimestamp(row.createdAt);
-        return {
-          id: String(row.id || row.path),
-          label: String(row.label || basename(row.path)),
-          path: String(row.path),
-          createdAt,
-          lastUsedAt: finiteTimestamp(row.lastUsedAt, createdAt)
-        };
-      })
-      .slice(0, 40);
-  } catch (error) {
-    recordAppStorageIssue("savedScanSources", "read", key, error);
-    return [];
-  }
-}
-
-function writeSavedScanSources(workspace: string | null | undefined, sources: SavedScanSource[]) {
-  const key = savedScanSourcesKey(workspace);
-  try {
-    window.localStorage.setItem(key, JSON.stringify(sources.slice(0, 40)));
-  } catch (error) {
-    recordAppStorageIssue("savedScanSources", "write", key, error);
-  }
-}
-
-function scanQueueKey(workspace: string | null | undefined) {
-  return `vintrace:scan-queue:${workspace || "default"}`;
-}
-
-function readScanQueue(workspace: string | null | undefined): ScanQueueItem[] {
-  const key = scanQueueKey(workspace);
-  try {
-    const rows = JSON.parse(window.localStorage.getItem(key) || "[]");
-    if (!Array.isArray(rows)) return [];
-    return rows
-      .filter((row) => row && typeof row === "object" && typeof row.path === "string")
-      .map((row) => {
-        const createdAt = finiteTimestamp(row.createdAt);
-        return {
-          id: String(row.id || row.path),
-          label: String(row.label || basename(row.path)),
-          path: String(row.path),
-          createdAt,
-          lastUsedAt: finiteTimestamp(row.lastUsedAt, createdAt),
-          status: ["queued", "running", "done", "error"].includes(String(row.status)) ? row.status : "queued",
-          message: typeof row.message === "string" ? row.message : undefined
-        };
-      })
-      .slice(0, 80);
-  } catch (error) {
-    recordAppStorageIssue("scanQueue", "read", key, error);
-    return [];
-  }
-}
-
-function writeScanQueue(workspace: string | null | undefined, queue: ScanQueueItem[]) {
-  const key = scanQueueKey(workspace);
-  try {
-    window.localStorage.setItem(key, JSON.stringify(queue.slice(0, 80)));
-  } catch (error) {
-    recordAppStorageIssue("scanQueue", "write", key, error);
-  }
-}
-
-function savedReviewViewsKey(workspace: string | null | undefined) {
-  return `vintrace:review-views:${workspace || "default"}`;
-}
-
-function readSavedReviewViews(workspace: string | null | undefined): SavedReviewView[] {
-  const key = savedReviewViewsKey(workspace);
-  try {
-    const rows = JSON.parse(window.localStorage.getItem(key) || "[]");
-    if (!Array.isArray(rows)) return [];
-    return rows
-      .filter((row) => row && typeof row === "object" && typeof row.label === "string")
-      .map((row) => {
-        const createdAt = finiteTimestamp(row.createdAt);
-        return {
-          id: String(row.id || `${row.label}:${createdAt}`),
-          label: String(row.label).slice(0, 60),
-          statusFilter: ["all", "pending", "accepted", "rejected", "uncertain"].includes(String(row.statusFilter)) ? row.statusFilter : "pending",
-          reviewLane: reviewLanes.includes(String(row.reviewLane) as ReviewLane) ? String(row.reviewLane) as ReviewLane : "all",
-          search: String(row.search || "").slice(0, 120),
-          sort: ["score", "newest", "quality"].includes(String(row.sort)) ? row.sort : "score",
-          createdAt,
-          lastUsedAt: finiteTimestamp(row.lastUsedAt, createdAt)
-        };
-      })
-      .slice(0, 16);
-  } catch (error) {
-    recordAppStorageIssue("savedReviewViews", "read", key, error);
-    return [];
-  }
-}
-
-function writeSavedReviewViews(workspace: string | null | undefined, views: SavedReviewView[]) {
-  const key = savedReviewViewsKey(workspace);
-  try {
-    window.localStorage.setItem(key, JSON.stringify(views.slice(0, 16)));
-  } catch (error) {
-    recordAppStorageIssue("savedReviewViews", "write", key, error);
-  }
 }
 
 function readReviewFocusHistory(workspace: string | null | undefined): ReviewFocusHistoryRecord[] {

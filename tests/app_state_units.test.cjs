@@ -8,8 +8,10 @@ const path = require("path");
 
 const root = path.resolve(__dirname, "..");
 const source = fs.readFileSync(path.join(root, "src", "App.tsx"), "utf8");
+const appLocalStateSource = fs.readFileSync(path.join(root, "src", "appLocalState.ts"), "utf8");
 const appStorageOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-storage-diagnostics-")), "appStorageDiagnostics.cjs");
 const appSettingsOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-settings-")), "appSettings.cjs");
+const appLocalStateOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-local-state-")), "appLocalState.cjs");
 const bridgeOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-bridge-validation-")), "bridgeValidation.cjs");
 const i18nOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-i18n-")), "i18n.cjs");
 
@@ -29,6 +31,14 @@ esbuild.buildSync({
   outfile: appSettingsOutFile,
 });
 const appSettings = require(appSettingsOutFile);
+esbuild.buildSync({
+  entryPoints: [path.join(root, "src", "appLocalState.ts")],
+  bundle: true,
+  format: "cjs",
+  platform: "node",
+  outfile: appLocalStateOutFile,
+});
+const appLocalState = require(appLocalStateOutFile);
 esbuild.buildSync({
   entryPoints: [path.join(root, "src", "bridgeValidation.ts")],
   bundle: true,
@@ -215,11 +225,99 @@ run("storage diagnostics redact scoped keys and dispatch deduped warnings", () =
 });
 
 run("app localStorage helpers report failures instead of silent fallbacks", () => {
-  assert.match(source, /recordAppStorageIssue\("scanQueue", "read"/);
-  assert.match(source, /recordAppStorageIssue\("scanQueue", "write"/);
-  assert.match(source, /recordAppStorageIssue\("savedScanSources", "read"/);
-  assert.match(source, /recordAppStorageIssue\("savedReviewViews", "write"/);
+  assert.match(source, /from "\.\/appLocalState";/);
+  assert.match(appLocalStateSource, /recordAppStorageIssue\("scanQueue", "read"/);
+  assert.match(appLocalStateSource, /recordAppStorageIssue\("scanQueue", "write"/);
+  assert.match(appLocalStateSource, /recordAppStorageIssue\("savedScanSources", "read"/);
+  assert.match(appLocalStateSource, /recordAppStorageIssue\("savedReviewViews", "write"/);
   assert.match(source, /window\.addEventListener\(APP_STORAGE_ISSUE_EVENT, handleStorageIssue\)/);
+});
+
+run("app persisted scan and review state is extracted from App", () => {
+  assert.doesNotMatch(source, /function readScanQueue/);
+  assert.doesNotMatch(source, /function readSavedScanSources/);
+  assert.doesNotMatch(source, /function readSavedReviewViews/);
+  assert.match(appLocalStateSource, /export function normalizeScanQueue/);
+  assert.match(appLocalStateSource, /export function normalizeSavedReviewViews/);
+});
+
+run("app local scan state normalizers cap and repair stored rows", () => {
+  const savedRows = [
+    { path: "/Users/test/Pictures/family.jpg", createdAt: "bad", lastUsedAt: 2000 },
+    { path: "/Users/test/Pictures/archive", label: "Archive", createdAt: 3000 },
+    { path: 42, label: "invalid" },
+    ...Array.from({ length: 50 }, (_, index) => ({ path: `/overflow/${index}.jpg`, createdAt: index + 1 })),
+  ];
+  const sources = appLocalState.normalizeSavedScanSources(savedRows, 1000);
+  assert.strictEqual(sources.length, 40);
+  assert.deepStrictEqual(sources[0], {
+    id: "/Users/test/Pictures/family.jpg",
+    label: "family.jpg",
+    path: "/Users/test/Pictures/family.jpg",
+    createdAt: 1000,
+    lastUsedAt: 2000,
+  });
+  assert.strictEqual(sources[1].label, "Archive");
+
+  const queue = appLocalState.normalizeScanQueue([
+    { path: "/scan/a", status: "running", createdAt: 0 },
+    { path: "/scan/b", status: "surprise", message: "retry later", createdAt: 500 },
+    { path: "/scan/c", status: "error", message: 99 },
+  ], 1234);
+  assert.strictEqual(queue.length, 3);
+  assert.strictEqual(queue[0].status, "running");
+  assert.strictEqual(queue[0].createdAt, 1234);
+  assert.strictEqual(queue[1].status, "queued");
+  assert.strictEqual(queue[1].message, "retry later");
+  assert.ok(!("message" in queue[2]));
+  assert.strictEqual(appLocalState.savedScanSourcesKey("/workspace"), "vintrace:scan-sources:/workspace");
+  assert.strictEqual(appLocalState.scanQueueKey(null), "vintrace:scan-queue:default");
+});
+
+run("app saved review view normalizer caps and validates user-writable rows", () => {
+  const longLabel = "L".repeat(80);
+  const longSearch = "S".repeat(150);
+  const views = appLocalState.normalizeSavedReviewViews([
+    {
+      label: longLabel,
+      statusFilter: "bogus",
+      reviewLane: "elsewhere",
+      search: longSearch,
+      sort: "unknown",
+      createdAt: "bad",
+    },
+    {
+      id: "valid",
+      label: "High confidence",
+      statusFilter: "accepted",
+      reviewLane: "high",
+      search: "alice",
+      sort: "newest",
+      createdAt: 2000,
+      lastUsedAt: 3000,
+    },
+    ...Array.from({ length: 30 }, (_, index) => ({ label: `Overflow ${index}`, createdAt: index + 1 })),
+  ], 1000);
+
+  assert.strictEqual(views.length, 16);
+  assert.strictEqual(views[0].label.length, 60);
+  assert.strictEqual(views[0].search.length, 120);
+  assert.strictEqual(views[0].statusFilter, "pending");
+  assert.strictEqual(views[0].reviewLane, "all");
+  assert.strictEqual(views[0].sort, "score");
+  assert.strictEqual(views[0].createdAt, 1000);
+  assert.deepStrictEqual(views[1], {
+    id: "valid",
+    label: "High confidence",
+    statusFilter: "accepted",
+    reviewLane: "high",
+    search: "alice",
+    sort: "newest",
+    createdAt: 2000,
+    lastUsedAt: 3000,
+  });
+  assert.ok(appLocalState.reviewLanes.includes("singleReference"));
+  assert.strictEqual(appLocalState.savedReviewViewsKey("workspace-a"), "vintrace:review-views:workspace-a");
 });
 
 run("app settings profile logic is extracted from App", () => {
