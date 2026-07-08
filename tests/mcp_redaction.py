@@ -64,6 +64,20 @@ def test_absent_manifest_is_skipped() -> None:
         mm.verify_model_files(Path(d), "antelopev2")
 
 
+def test_packaged_build_requires_model_integrity_manifest() -> None:
+    original_is_packaged = mm._is_packaged
+    mm._is_packaged = lambda: True  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            try:
+                mm.verify_model_files(Path(d), "antelopev2")
+                raise AssertionError("packaged build accepted a model pack without an integrity manifest")
+            except mm.ModelIntegrityError as exc:
+                assert "required in packaged builds" in str(exc)
+    finally:
+        mm._is_packaged = original_is_packaged  # type: ignore[assignment]
+
+
 def test_embedded_path_redacted_in_resource_freetext() -> None:
     frag = {"scanHistory": [{"errorSamples": [f"{LEAK_NAME}: [Errno 13] Permission denied: '{LEAK_PATH}'"]}]}
     out = json.dumps(mcp._agent_safe_value(frag, keep_path_names=False))
@@ -199,6 +213,7 @@ def test_rate_limiter_token_bucket() -> None:
 def main() -> None:
     test_usc04_rejects_added_unrecorded_model()
     test_absent_manifest_is_skipped()
+    test_packaged_build_requires_model_integrity_manifest()
     test_embedded_path_redacted_in_resource_freetext()
     test_embedded_path_redacted_in_audit_message()
     test_embedded_path_redacted_in_tool_output()

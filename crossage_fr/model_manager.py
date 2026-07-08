@@ -484,11 +484,11 @@ def write_model_integrity_manifest(pack_dir: Path, spec: ModelPackageSpec) -> di
 def verify_model_files(pack_dir: Path, pack: str) -> None:
     """USC-04: fail closed if loaded ONNX files drift from the integrity manifest.
 
-    Enforcement is strict *when a manifest is present* (always true for packs
-    installed via ``download_model_pack``). If none exists — manually placed or
-    pre-bundled models a dev dropped in — verification is skipped rather than
-    breaking those flows; that residual is closed by shipping signed manifests
-    with bundled packs. Raises :class:`ModelIntegrityError` on any mismatch.
+    Enforcement is strict when a manifest is present and in packaged builds
+    where every bundled/downloaded pack must carry one. Dev/source builds may
+    still skip a missing manifest for manually placed model packs so local
+    experimentation is not blocked. Raises :class:`ModelIntegrityError` on any
+    mismatch.
     """
     manifest_path = Path(pack_dir) / MODEL_INTEGRITY_FILENAME
     if not manifest_path.exists():
