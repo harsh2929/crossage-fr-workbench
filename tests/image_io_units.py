@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 import sys
 import tempfile
 
 from PIL import Image, JpegImagePlugin
 
-from crossage_fr.ingest.image_io import ImageLoadError, load_image, write_preview_image
+from crossage_fr.ingest.image_io import ImageLoadError, _representative_frame, load_image, write_preview_image
 
 
 def test_jpeg_preview_uses_pillow_draft_decode_hint() -> None:
@@ -78,7 +79,48 @@ def test_raw_decode_rejects_missing_dimensions_before_postprocess() -> None:
                 sys.modules["rawpy"] = old_rawpy
 
 
+def test_animated_frame_seek_fallback_is_logged() -> None:
+    class FakeAnimatedImage:
+        n_frames = 3
+
+        def __init__(self) -> None:
+            self.seek_calls: list[int] = []
+            self.current_frame = -1
+
+        def seek(self, frame: int) -> None:
+            self.seek_calls.append(frame)
+            if frame == 1:
+                raise EOFError("bad middle frame")
+            self.current_frame = frame
+
+        def copy(self) -> str:
+            return f"frame-{self.current_frame}"
+
+    records: list[logging.LogRecord] = []
+
+    class CaptureHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    image = FakeAnimatedImage()
+    logger = logging.getLogger("crossage_fr.ingest.image_io")
+    handler = CaptureHandler()
+    old_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    try:
+        representative = _representative_frame(image)  # type: ignore[arg-type]
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+
+    assert representative == "frame-0"
+    assert image.seek_calls == [1, 0]
+    assert any("falling back to frame 0" in record.getMessage() for record in records), records
+
+
 if __name__ == "__main__":
     test_jpeg_preview_uses_pillow_draft_decode_hint()
     test_raw_decode_rejects_missing_dimensions_before_postprocess()
+    test_animated_frame_seek_fallback_is_logged()
     print("all image_io_units tests passed")
