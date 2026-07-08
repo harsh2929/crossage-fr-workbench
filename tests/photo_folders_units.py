@@ -9289,6 +9289,35 @@ def test_photo_search_index_repairs_partial_drift_without_full_rebuild() -> None
     print("ok photo search index repairs partial drift without full rebuild")
 
 
+def test_photo_search_index_rebuild_streams_narrow_asset_columns() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        photo_path = base / "narrow-index.jpg"
+        api.project.db.create_scan_run("run1", "label", "manual", str(base))
+        api.project.db.record_scan_file("run1", photo_path, _sig(photo_path), "completed", phase="processed")
+        api.update_photo_asset_metadata({"sourcePath": str(photo_path), "title": "Narrow search document"})
+
+        with api.project.db.connect() as conn:
+            statements: list[str] = []
+            conn.set_trace_callback(statements.append)
+            indexed = api.project.db.rebuild_photo_search_index(conn)
+            conn.set_trace_callback(None)
+
+        assert indexed == 1, indexed
+        joined = "\n".join(statements)
+        assert "SELECT * FROM photo_assets" not in joined, joined
+        assert "SELECT asset_id, source_path, metadata_json FROM photo_assets" in joined, joined
+
+    source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "store" / "workspace_db.py").read_text(encoding="utf-8")
+    method = source[
+        source.index("    def rebuild_photo_search_index("):source.index("    def _photo_search_index_fast_counts(")
+    ]
+    assert "SELECT asset_id, source_path, metadata_json FROM photo_assets" in method, method
+    assert "SELECT * FROM photo_assets ORDER BY added_at ASC, asset_id ASC" not in method, method
+    print("ok photo search index rebuild streams narrow asset columns")
+
+
 def test_photo_search_index_healthy_cache_skips_integrity_counts_for_search_path() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -19656,6 +19685,7 @@ if __name__ == "__main__":
     test_photo_search_folder_candidates_batch_hydrate_dynamic_visibility()
     test_photo_library_search_uses_bounded_non_photo_catalog()
     test_photo_search_index_repairs_partial_drift_without_full_rebuild()
+    test_photo_search_index_rebuild_streams_narrow_asset_columns()
     test_photo_search_index_healthy_cache_skips_integrity_counts_for_search_path()
     test_photo_search_index_cold_queue_runs_incrementally_without_foreground_rebuild()
     test_photo_utility_folders_hide_delete_and_restore()

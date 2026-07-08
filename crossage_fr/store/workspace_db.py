@@ -14383,8 +14383,9 @@ class WorkspaceDb:
         conn.execute("DELETE FROM photo_search_fts")
         conn.execute("DELETE FROM photo_asset_locations")
         # Collect ids with a cheap id-only scan for the batch lookups below, then
-        # stream the full rows one at a time when building documents (below) —
-        # instead of holding every 17-column row in memory via SELECT * fetchall().
+        # stream only the columns the search document builder reads. This keeps
+        # a full rebuild from hydrating every wide photo_assets column at 100k+
+        # assets while preserving deterministic ordering.
         asset_ids = [
             str(row["asset_id"] or "")
             for row in conn.execute("SELECT asset_id FROM photo_assets ORDER BY added_at ASC, asset_id ASC")
@@ -14416,11 +14417,17 @@ class WorkspaceDb:
         documents = []
         location_records: list[tuple[str, float, float, str, str, str]] = []
         indexed_at = now_iso()
-        for row in conn.execute("SELECT * FROM photo_assets ORDER BY added_at ASC, asset_id ASC"):
-            asset = self._photo_asset_row(row)
-            asset_id = str(asset["assetId"])
+        for row in conn.execute("SELECT asset_id, source_path, metadata_json FROM photo_assets ORDER BY added_at ASC, asset_id ASC"):
+            asset_id = str(row["asset_id"] or "")
+            if not asset_id:
+                continue
             metadata = metadata_by_asset.get(asset_id, self._photo_asset_metadata_row(None))
-            meta = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+            try:
+                meta = json.loads(str(row["metadata_json"] or "{}"))
+            except json.JSONDecodeError:
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
             legacy_keywords = meta.get("keywords", [])
             if isinstance(legacy_keywords, list):
                 legacy_keyword_values: list[Any] = legacy_keywords
@@ -14459,7 +14466,7 @@ class WorkspaceDb:
             ocr_text = self._photo_join_search_text(ocr_blocks_by_asset.get(asset_id, ""), legacy_ocr_text, qr_text)
             location = metadata.get("locationOverride", {}) if not metadata.get("locationHidden") else {}
             location_text = " ".join(str(value) for value in location.values()) if isinstance(location, dict) else ""
-            source_path = str(asset["sourcePath"])
+            source_path = str(row["source_path"] or "")
             location_record = self._photo_asset_location_index_record(
                 asset_id=asset_id,
                 asset_metadata=meta,
@@ -14501,8 +14508,9 @@ class WorkspaceDb:
             "INSERT OR REPLACE INTO meta(key, value) VALUES('photoLocationIndexVersion', ?)",
             (PHOTO_LOCATION_INDEX_VERSION,),
         )
-        # One document is produced per photo_assets row (the loop never skips),
-        # so the document count equals the old len(rows) return value.
+        # One document is produced per valid photo_assets primary key, so the
+        # document count matches the indexed rows without needing to materialize
+        # the table in Python first.
         self._store_photo_search_index_health(
             conn,
             asset_count=len(documents),
