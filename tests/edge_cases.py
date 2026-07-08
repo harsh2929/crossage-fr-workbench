@@ -588,6 +588,8 @@ def assert_static_app_contracts() -> None:
     assert "await resolveTrustedMediaPath(target)" in desktop_main
     assert "trustedMediaPathCache" in desktop_main
     assert "buildTrustedMediaPathSet(state, queryTrustedMediaPaths)" in desktop_main
+    assert "paths.has(pathTrustKeyFromResolved(targetReal))" in desktop_main
+    assert "paths.has(target))" not in desktop_main
     assert "await pathExistsAsync(realTarget)" in desktop_main
     media_protocol_block = desktop_main[desktop_main.index("function registerMediaProtocol"):desktop_main.index("function hardenWebContents")]
     assert "fs.existsSync" not in media_protocol_block

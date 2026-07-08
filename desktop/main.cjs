@@ -1802,7 +1802,7 @@ async function resolveTrustedMediaPath(filePath) {
   if (!state || !paths.size) {
     return "";
   }
-  if (paths.has(target)) {
+  if (paths.has(pathTrustKeyFromResolved(targetReal))) {
     return targetReal;
   }
   if (previewsReal && isSubpath(previewsReal, targetReal)) {
@@ -1821,10 +1821,11 @@ function isTrustedShellPath(filePath) {
   if (!state) {
     return false;
   }
-  if (state.workspace && isSubpath(state.workspace, target)) {
+  const targetKey = canonicalPathKey(target);
+  if (state.workspace && isSubpath(canonicalPathKey(state.workspace), targetKey)) {
     return true;
   }
-  return paths.has(target) || isUserGrantedPath(target);
+  return paths.has(targetKey) || isUserGrantedPath(target);
 }
 
 function normalizeExternalEditorPath(filePath) {

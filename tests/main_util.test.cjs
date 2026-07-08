@@ -161,11 +161,33 @@ function testBuildTrustedMediaPathSet() {
     references: [{ sourcePath: source, previewPath: preview }],
     candidates: [{ sourcePath: source, mediaSourcePath: path.join(dir, "video.mov"), bestRefPath: bestRef }],
   }, [extra, "", null]);
-  assert.ok(paths.has(path.resolve(workspace)));
-  assert.ok(paths.has(path.resolve(source)));
-  assert.ok(paths.has(path.resolve(preview)));
-  assert.ok(paths.has(path.resolve(bestRef)));
-  assert.ok(paths.has(path.resolve(extra)));
+  assert.ok(paths.has(util.canonicalPathKey(workspace)));
+  assert.ok(paths.has(util.canonicalPathKey(source)));
+  assert.ok(paths.has(util.canonicalPathKey(preview)));
+  assert.ok(paths.has(util.canonicalPathKey(bestRef)));
+  assert.ok(paths.has(util.canonicalPathKey(extra)));
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function testBuildTrustedMediaPathSetUsesCanonicalRealpaths() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vintrace-trusted-media-symlink-"));
+  const realDir = path.join(dir, "real");
+  const linkDir = path.join(dir, "linked");
+  fs.mkdirSync(realDir, { recursive: true });
+  const realPhoto = path.join(realDir, "photo.jpg");
+  fs.writeFileSync(realPhoto, "image-bytes");
+  try {
+    fs.symlinkSync(realDir, linkDir, "dir");
+  } catch {
+    fs.rmSync(dir, { recursive: true, force: true });
+    return;
+  }
+  const linkedPhoto = path.join(linkDir, "photo.jpg");
+  const paths = util.buildTrustedMediaPathSet({
+    references: [{ sourcePath: linkedPhoto }],
+  });
+  assert.ok(paths.has(util.pathTrustKeyFromResolved(fs.realpathSync.native(realPhoto))));
+  assert.strictEqual(paths.has(path.resolve(linkedPhoto)), false);
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
@@ -206,6 +228,7 @@ async function main() {
   testCanonicalPathKey();
   testUniquePathBatch();
   testBuildTrustedMediaPathSet();
+  testBuildTrustedMediaPathSetUsesCanonicalRealpaths();
   await testFilterStableWatchFilesConcurrency();
   console.log("main util ok");
 }

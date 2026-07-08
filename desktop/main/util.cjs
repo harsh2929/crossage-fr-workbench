@@ -123,7 +123,7 @@ function buildTrustedMediaPathSet(state, extraPaths = []) {
   const paths = new Set();
   const add = (value) => {
     if (typeof value === "string" && value.trim()) {
-      paths.add(path.resolve(value));
+      paths.add(canonicalPathKey(value));
     }
   };
   add(state?.workspace);
