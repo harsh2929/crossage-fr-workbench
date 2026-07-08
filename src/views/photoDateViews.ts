@@ -72,7 +72,8 @@ const MONTH_SHORT_NAMES = [
 export function photoDateText(item: PhotoDateItemLike): string {
   const raw = String(item.dateOverride || item.captureDate || item.originalCaptureDate || item.scanDate || item.addedAt || item.createdAt || "").trim();
   const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  return match ? `${match[1]}-${match[2]}-${match[3]}` : "";
+  if (!match || !validPhotoDate(match[1], match[2], match[3])) return "";
+  return `${match[1]}-${match[2]}-${match[3]}`;
 }
 
 export function photoDateBucketKey(item: PhotoDateItemLike, mode: PhotoDateViewMode): string {
@@ -245,22 +246,41 @@ function withinRecentDays(date: string, anchor: string, days: number): boolean {
   return parsed >= anchorDate - safeDays * 24 * 60 * 60 * 1000 && parsed <= anchorDate;
 }
 
+function photoDateMonthIndex(monthText: string): number {
+  const monthNum = Number(monthText);
+  return Number.isInteger(monthNum) && monthNum >= 1 && monthNum <= 12 ? monthNum : 0;
+}
+
+function validPhotoDate(yearText: string, monthText: string, dayText: string): boolean {
+  const year = Number(yearText);
+  const month = photoDateMonthIndex(monthText);
+  const day = Number(dayText);
+  if (!Number.isInteger(year) || year < 1 || !month || !Number.isInteger(day) || day < 1 || day > 31) {
+    return false;
+  }
+  const date = new Date(Date.UTC(year, month - 1, day));
+  date.setUTCFullYear(year);
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
+}
+
 export function formatPhotoDateBucketLabel(key: string, mode: PhotoDateViewMode): string {
   if (mode === "years") return key;
   const monthMatch = key.match(/^(\d{4})-(\d{2})$/);
   if (mode === "months" && monthMatch) {
-    // Validate the month range explicitly (1-12) rather than relying on an
-    // out-of-bounds array read returning undefined for e.g. "2024-13".
-    const monthNum = Number(monthMatch[2]);
-    const month = monthNum >= 1 && monthNum <= 12 ? MONTH_NAMES[monthNum - 1] : undefined;
-    return month ? `${month} ${monthMatch[1]}` : key;
+    const monthNum = photoDateMonthIndex(monthMatch[2]);
+    return monthNum ? `${MONTH_NAMES[monthNum - 1]} ${monthMatch[1]}` : "Invalid date";
   }
   const dayMatch = key.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if ((mode === "days" || mode === "recentDays") && dayMatch) {
-    const monthNum = Number(dayMatch[2]);
-    const month = monthNum >= 1 && monthNum <= 12 ? MONTH_SHORT_NAMES[monthNum - 1] : undefined;
+    if (!validPhotoDate(dayMatch[1], dayMatch[2], dayMatch[3])) return "Invalid date";
+    const monthNum = photoDateMonthIndex(dayMatch[2]);
+    const month = MONTH_SHORT_NAMES[monthNum - 1];
     const day = Number(dayMatch[3]);
-    return month && day >= 1 && day <= 31 ? `${month} ${day}, ${dayMatch[1]}` : key;
+    return `${month} ${day}, ${dayMatch[1]}`;
   }
   return key;
 }

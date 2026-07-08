@@ -5468,11 +5468,15 @@ run("photoDateText prefers adjusted date before original dates", () => {
   }), "2026-06-19");
 });
 
-run("formatPhotoDateBucketLabel returns friendly labels while preserving keys", () => {
+run("formatPhotoDateBucketLabel returns friendly labels and rejects malformed date keys", () => {
   assert.strictEqual(dateViewsMod.formatPhotoDateBucketLabel("2026", "years"), "2026");
   assert.strictEqual(dateViewsMod.formatPhotoDateBucketLabel("2026-06", "months"), "June 2026");
   assert.strictEqual(dateViewsMod.formatPhotoDateBucketLabel("2026-06-19", "days"), "Jun 19, 2026");
   assert.strictEqual(dateViewsMod.formatPhotoDateBucketLabel("2026-06-01", "recentDays"), "Jun 1, 2026");
+  assert.strictEqual(dateViewsMod.formatPhotoDateBucketLabel("2026-13", "months"), "Invalid date");
+  assert.strictEqual(dateViewsMod.formatPhotoDateBucketLabel("2026-00-01", "days"), "Invalid date");
+  assert.strictEqual(dateViewsMod.formatPhotoDateBucketLabel("2026-02-31", "recentDays"), "Invalid date");
+  assert.strictEqual(dateViewsMod.formatPhotoDateBucketLabel("custom-date-key", "months"), "custom-date-key");
 });
 
 run("buildPhotoDateBuckets groups by year month and day", () => {
@@ -5486,6 +5490,17 @@ run("buildPhotoDateBuckets groups by year month and day", () => {
   assert.deepStrictEqual(dateViewsMod.buildPhotoDateBuckets(items, "months").map((bucket) => bucket.label), ["June 2026", "February 2025"]);
   assert.deepStrictEqual(dateViewsMod.buildPhotoDateBuckets(items, "days").map((bucket) => bucket.key), ["2026-06-19", "2026-06-18", "2025-02-01"]);
   assert.deepStrictEqual(dateViewsMod.buildPhotoDateBuckets(items, "days").map((bucket) => bucket.label), ["Jun 19, 2026", "Jun 18, 2026", "Feb 1, 2025"]);
+});
+
+run("buildPhotoDateBuckets drops malformed date-like values", () => {
+  const items = [
+    { sourcePath: "good.jpg", captureDate: "2026-06-19T10:00:00Z" },
+    { sourcePath: "bad-month.jpg", captureDate: "2026-13-01T10:00:00Z" },
+    { sourcePath: "bad-day.jpg", captureDate: "2026-02-31T10:00:00Z" },
+  ];
+  assert.deepStrictEqual(dateViewsMod.buildPhotoDateBuckets(items, "months").map((bucket) => bucket.key), ["2026-06"]);
+  assert.strictEqual(dateViewsMod.photoDateText(items[1]), "");
+  assert.strictEqual(dateViewsMod.photoDateText(items[2]), "");
 });
 
 run("buildPhotoDateBuckets limits recent days relative to latest loaded date", () => {
