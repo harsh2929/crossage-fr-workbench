@@ -6356,10 +6356,27 @@ run("Photos grid page limit stays within the preview generation budget", () => {
 
 run("Photos grid thumbnails do not fall back to full-size originals", () => {
   const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
-  const gridBlock = source.match(/photoVirtualWindow\.visibleBands\.map\(\(band\) => \{[\s\S]*?<span className="photo-tile-fallback">/);
-  assert.ok(gridBlock, "virtualized photo grid tile block should exist");
-  assert.match(gridBlock[0], /const url = itemMissing \? "" : item\.previewUrl \|\| "";/);
-  assert.doesNotMatch(gridBlock[0], /item\.previewUrl \|\| item\.sourceUrl/);
+  const tileBlock = source.match(/const PhotoGridTile = memo\(function PhotoGridTile[\s\S]*?\n\}\);/);
+  assert.ok(tileBlock, "memoized photo grid tile should exist");
+  assert.match(tileBlock[0], /const url = itemMissing \? "" : props\.item\.previewUrl \|\| "";/);
+  assert.doesNotMatch(tileBlock[0], /props\.item\.previewUrl \|\| props\.item\.sourceUrl/);
+  assert.doesNotMatch(tileBlock[0], /item\.previewUrl \|\| item\.sourceUrl/);
+});
+
+run("Photos grid tiles are memoized away from parent drag handler churn", () => {
+  const source = fs.readFileSync(path.join(ROOT, "src/views/PhotosView.tsx"), "utf8");
+  assert.match(source, /const PhotoGridTile = memo\(function PhotoGridTile/);
+  assert.match(source, /const handlePhotoGridTileDragOver = useCallback/);
+  assert.match(source, /const handlePhotoGridTileDrop = useCallback/);
+  assert.match(source, /const selectedSourcesRef = useRef\(selectedSources\);/);
+  assert.match(source, /const albumItemDragRef = useRef\(albumItemDrag\);/);
+  const gridBlock = source.match(/photoVirtualWindow\.visibleBands\.map\(\(band\) => \{[\s\S]*?<PhotoGridTile[\s\S]*?onDragEndTile=\{handlePhotoGridTileDragEnd\}[\s\S]*?\/>/);
+  assert.ok(gridBlock, "virtualized photo grid should render memoized tiles");
+  assert.doesNotMatch(gridBlock[0], /onDragStart=\{\(event\) =>/);
+  assert.doesNotMatch(gridBlock[0], /onDragOver=\{\(event\) =>/);
+  assert.doesNotMatch(gridBlock[0], /onDrop=\{\(event\) =>/);
+  assert.doesNotMatch(gridBlock[0], /onContextMenu=\{\(event\) =>/);
+  assert.doesNotMatch(gridBlock[0], /onClick=\{\(event\) =>/);
 });
 
 run("Photos video time updates stay out of parent render state", () => {

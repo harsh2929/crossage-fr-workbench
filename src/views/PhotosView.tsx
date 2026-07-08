@@ -1229,6 +1229,16 @@ function photoFileName(sourcePath: string): string {
   return sourcePath.split(/[\\/]/).filter(Boolean).pop() || sourcePath;
 }
 
+function photoContextMenuPosition(x: number, y: number) {
+  if (typeof window === "undefined") return { x, y };
+  const menuWidth = 244;
+  const menuHeight = 360;
+  return {
+    x: Math.max(12, Math.min(x, window.innerWidth - menuWidth - 12)),
+    y: Math.max(12, Math.min(y, window.innerHeight - menuHeight - 12)),
+  };
+}
+
 const PHOTO_IMPORT_SOURCE_OPTIONS: Array<{ kind: PhotoImportSourceKind; label: string }> = [
   { kind: "folder", label: "Files/folders" },
   { kind: "camera", label: "Camera/device" },
@@ -2054,6 +2064,8 @@ export function PhotosView(props: {
   const [localRailItemDrag, setLocalRailItemDrag] = useState<PhotoLocalRailItemDragState | null>(null);
   const [railSectionDrag, setRailSectionDrag] = useState<PhotoRailSectionDragState | null>(null);
   const [albumItemDrag, setAlbumItemDrag] = useState<PhotoAlbumItemDragState | null>(null);
+  const albumItemDragRef = useRef(albumItemDrag);
+  albumItemDragRef.current = albumItemDrag;
   const [folderLoadError, setFolderLoadError] = useState("");
   const [suggestionLoadError, setSuggestionLoadError] = useState("");
   const [keywordLoadError, setKeywordLoadError] = useState("");
@@ -2332,6 +2344,8 @@ export function PhotosView(props: {
   const [recentlyDeletedRetentionDays, setRecentlyDeletedRetentionDays] = useState("30");
   const [recentlyDeletedCleanupResult, setRecentlyDeletedCleanupResult] = useState("");
   const [selectedSources, setSelectedSources] = useState<Set<string>>(new Set());
+  const selectedSourcesRef = useRef(selectedSources);
+  selectedSourcesRef.current = selectedSources;
   // Wave P0: the selected-count capsule bumps as the selection changes.
   const selectionCountRoll = useCountRoll(selectedSources.size);
   const recentPhotoShortcutRef = useRef<{ shortcut: string; at: number }>({ shortcut: "", at: 0 });
@@ -7564,6 +7578,10 @@ export function PhotosView(props: {
   const userMemoryCanSaveCurrentSort = canSavePhotoSortAsAlbumOrder(sort, activeMemoryUserCreated, manualAlbumOrderScopeIsWhole, total);
   const customOrderTargetPosition = Math.max(0, Number.parseInt(customOrderPositionDraft, 10) || 0);
   const customCollectionCanDragReorder = manualAlbumCanDragReorder || userMemoryCanDragReorder;
+  const customCollectionCanDragReorderRef = useRef(customCollectionCanDragReorder);
+  customCollectionCanDragReorderRef.current = customCollectionCanDragReorder;
+  const userMemoryCanDragReorderRef = useRef(userMemoryCanDragReorder);
+  userMemoryCanDragReorderRef.current = userMemoryCanDragReorder;
   const manualAlbumOrderGuardrail = activeAlbumIsManual && !manualAlbumOrderScopeIsWhole
     ? uiText("Clear search and filters before changing custom order.")
     : activeAlbumIsManual && sort !== "manual" && selectedSources.size > 0
@@ -9346,31 +9364,6 @@ export function PhotosView(props: {
     } finally {
       setPhotoMediaPairDeletingId("");
     }
-  }
-
-  function photoContextMenuPosition(x: number, y: number) {
-    if (typeof window === "undefined") return { x, y };
-    const menuWidth = 244;
-    const menuHeight = 360;
-    return {
-      x: Math.max(12, Math.min(x, window.innerWidth - menuWidth - 12)),
-      y: Math.max(12, Math.min(y, window.innerHeight - menuHeight - 12)),
-    };
-  }
-
-  function openPhotoItemContextMenu(event: ReactMouseEvent<HTMLElement>, item: PhotoItem, itemIndex: number) {
-    event.preventDefault();
-    event.stopPropagation();
-    const point = photoContextMenuPosition(event.clientX, event.clientY);
-    setPhotoContextMenu({ kind: "photo", sourcePath: item.sourcePath, itemIndex, ...point });
-  }
-
-  function openPhotoItemContextMenuFromButton(event: ReactMouseEvent<HTMLElement>, item: PhotoItem, itemIndex: number) {
-    event.preventDefault();
-    event.stopPropagation();
-    const rect = event.currentTarget.getBoundingClientRect();
-    const point = photoContextMenuPosition(rect.right - 8, rect.bottom + 6);
-    setPhotoContextMenu({ kind: "photo", sourcePath: item.sourcePath, itemIndex, ...point });
   }
 
   function openRailFolderContextMenu(event: ReactMouseEvent<HTMLElement>, folder: PhotoFolder, sectionId: PhotoRailSectionId, canMoveUp: boolean, canMoveDown: boolean) {
@@ -18609,13 +18602,6 @@ export function PhotosView(props: {
     return event.clientX < rect.left + rect.width / 2 ? "before" : "after";
   }
 
-  function albumItemDragIncludesSource(sourcePath: string): boolean {
-    const draggedSourcePath = albumItemDrag?.sourcePath || "";
-    if (!draggedSourcePath) return false;
-    if (draggedSourcePath === sourcePath) return true;
-    return selectedSources.has(draggedSourcePath) && selectedSources.has(sourcePath);
-  }
-
   async function reorderDraggedManualAlbum(targetSourcePath: string, placement: PhotoAlbumDropPlacement) {
     const draggedSourcePath = albumItemDrag?.sourcePath || "";
     setAlbumItemDrag(null);
@@ -18673,6 +18659,81 @@ export function PhotosView(props: {
       setUserMemorySaving(false);
     }
   }
+
+  const reorderDraggedManualAlbumRef = useRef<(targetSourcePath: string, placement: PhotoAlbumDropPlacement) => Promise<void>>(reorderDraggedManualAlbum);
+  reorderDraggedManualAlbumRef.current = reorderDraggedManualAlbum;
+  const reorderDraggedUserMemoryRef = useRef<(targetSourcePath: string, placement: PhotoAlbumDropPlacement) => Promise<void>>(reorderDraggedUserMemory);
+  reorderDraggedUserMemoryRef.current = reorderDraggedUserMemory;
+
+  const gridDragIncludesSource = useCallback((sourcePath: string) => {
+    const draggedSourcePath = albumItemDragRef.current?.sourcePath || "";
+    if (!draggedSourcePath) return false;
+    if (draggedSourcePath === sourcePath) return true;
+    const selected = selectedSourcesRef.current;
+    return selected.has(draggedSourcePath) && selected.has(sourcePath);
+  }, []);
+
+  const handlePhotoGridTileToggle = useCallback((sourcePath: string) => {
+    setSelectedSources((current) => {
+      const next = new Set(current);
+      if (next.has(sourcePath)) next.delete(sourcePath);
+      else next.add(sourcePath);
+      return next;
+    });
+  }, []);
+
+  const handlePhotoGridTileOpen = useCallback((event: ReactMouseEvent<HTMLButtonElement>, itemIndex: number) => {
+    lightboxTriggerRef.current = event.currentTarget;
+    setLightboxBurstOverrideSource("");
+    setLightbox(itemIndex);
+  }, []);
+
+  const handlePhotoGridTileContextMenu = useCallback((event: ReactMouseEvent<HTMLElement>, item: PhotoItem, itemIndex: number) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const point = photoContextMenuPosition(event.clientX, event.clientY);
+    setPhotoContextMenu({ kind: "photo", sourcePath: item.sourcePath, itemIndex, ...point });
+  }, []);
+
+  const handlePhotoGridTileMenuClick = useCallback((event: ReactMouseEvent<HTMLElement>, item: PhotoItem, itemIndex: number) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const point = photoContextMenuPosition(rect.right - 8, rect.bottom + 6);
+    setPhotoContextMenu({ kind: "photo", sourcePath: item.sourcePath, itemIndex, ...point });
+  }, []);
+
+  const handlePhotoGridTileDragStart = useCallback((event: ReactDragEvent<HTMLDivElement>, sourcePath: string) => {
+    if (!customCollectionCanDragReorderRef.current) return;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", sourcePath);
+    setAlbumItemDrag({ sourcePath });
+  }, []);
+
+  const handlePhotoGridTileDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>, sourcePath: string) => {
+    if (!customCollectionCanDragReorderRef.current || !albumItemDragRef.current?.sourcePath || gridDragIncludesSource(sourcePath)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const placement = photoTileDropPlacement(event);
+    setAlbumItemDrag((current) => {
+      if (!current?.sourcePath) return current;
+      if (current.targetSourcePath === sourcePath && current.placement === placement) return current;
+      return { ...current, targetSourcePath: sourcePath, placement };
+    });
+  }, [gridDragIncludesSource]);
+
+  const handlePhotoGridTileDrop = useCallback((event: ReactDragEvent<HTMLDivElement>, sourcePath: string) => {
+    const current = albumItemDragRef.current;
+    if (!customCollectionCanDragReorderRef.current || !current?.sourcePath || gridDragIncludesSource(sourcePath)) return;
+    event.preventDefault();
+    const placement = current.placement || photoTileDropPlacement(event);
+    if (userMemoryCanDragReorderRef.current) void reorderDraggedUserMemoryRef.current(sourcePath, placement);
+    else void reorderDraggedManualAlbumRef.current(sourcePath, placement);
+  }, [gridDragIncludesSource]);
+
+  const handlePhotoGridTileDragEnd = useCallback(() => {
+    setAlbumItemDrag(null);
+  }, []);
 
   function buildPhotoContextMenuItems(): PhotoContextMenuItem[] {
     if (!photoContextMenu) return [];
@@ -27775,118 +27836,40 @@ export function PhotosView(props: {
                 >
                   {band.rows.map((row) => {
                     const item = row.item;
-                    const itemMissing = Boolean(item.missingAt);
-                    const url = itemMissing ? "" : item.previewUrl || "";
                     const label = itemLabel(item, row.index);
                     const checked = selectedSources.has(item.sourcePath);
+                    const draggedSourcePath = albumItemDrag?.sourcePath || "";
+                    const dragging = draggedSourcePath === item.sourcePath || Boolean(draggedSourcePath && selectedSources.has(draggedSourcePath) && checked);
+                    const dropPlacement = albumItemDrag?.targetSourcePath === item.sourcePath ? albumItemDrag.placement || "" : "";
                     const burstStackCount = Math.max(0, Number(item.burstStack?.count || 0) || 0);
-                    const utilityMatch = item.utilityMatch;
-                    const tileClass = [
-                      "photo-tile-wrap",
-                      checked ? "selected" : "",
-                      itemMissing ? "missing-original" : "",
-                      burstStackCount > 1 ? "burst-stack" : "",
-                      customCollectionCanDragReorder ? "draggable" : "",
-                      albumItemDragIncludesSource(item.sourcePath) ? "dragging" : "",
-                      albumItemDrag?.targetSourcePath === item.sourcePath && albumItemDrag?.placement ? `drop-${albumItemDrag.placement}` : "",
-                      thumbnailAspectMode,
-                    ].filter(Boolean).join(" ");
-                    const tileStyle = {
-                      aspectRatio: thumbnailAspectMode === "aspect" ? photoThumbnailAspectRatio(item) : "1 / 1",
-                    } as CSSProperties;
                     return (
-                      <div
+                      <PhotoGridTile
                         key={row.key}
-                        className={tileClass}
-                        style={tileStyle}
-                        draggable={customCollectionCanDragReorder}
-                        onDragStart={(event) => {
-                          if (!customCollectionCanDragReorder) return;
-                          event.dataTransfer.effectAllowed = "move";
-                          event.dataTransfer.setData("text/plain", item.sourcePath);
-                          setAlbumItemDrag({ sourcePath: item.sourcePath });
-                        }}
-                        onDragOver={(event) => {
-                          if (!customCollectionCanDragReorder || !albumItemDrag?.sourcePath || albumItemDragIncludesSource(item.sourcePath)) return;
-                          event.preventDefault();
-                          event.dataTransfer.dropEffect = "move";
-                          const placement = photoTileDropPlacement(event);
-                          setAlbumItemDrag((current) => {
-                            if (!current?.sourcePath) return current;
-                            if (current.targetSourcePath === item.sourcePath && current.placement === placement) return current;
-                            return { ...current, targetSourcePath: item.sourcePath, placement };
-                          });
-                        }}
-                        onDrop={(event) => {
-                          if (!customCollectionCanDragReorder || !albumItemDrag?.sourcePath || albumItemDragIncludesSource(item.sourcePath)) return;
-                          event.preventDefault();
-                          const placement = albumItemDrag.placement || photoTileDropPlacement(event);
-                          if (userMemoryCanDragReorder) void reorderDraggedUserMemory(item.sourcePath, placement);
-                          else void reorderDraggedManualAlbum(item.sourcePath, placement);
-                        }}
-                        onDragEnd={() => setAlbumItemDrag(null)}
-                        onContextMenu={(event) => openPhotoItemContextMenu(event, item, row.index)}
-                        aria-grabbed={albumItemDragIncludesSource(item.sourcePath) ? "true" : undefined}
-                      >
-                        <label className="photo-select-box" aria-label={`${checked ? uiText("Deselect") : uiText("Select")} ${label}`}>
-                          <input type="checkbox" checked={checked} onChange={() => toggleSource(item.sourcePath)} />
-                        </label>
-                        <button
-                          type="button"
-                          className={thumbnailAspectMode === "aspect" ? "photo-tile contain" : "photo-tile cover"}
-                          onClick={(event) => {
-                            lightboxTriggerRef.current = event.currentTarget;
-                            setLightboxBurstOverrideSource("");
-                            setLightbox(row.index);
-                          }}
-                          aria-label={`${uiText("Open photo")} ${label}`}
-                          title={label}
-                        >
-                          {url ? (
-                            <img loading="lazy" decoding="async" src={url} alt={label} draggable={false} />
-                          ) : (
-                            <span className="photo-tile-fallback">
-                              {itemMissing ? <AlertTriangle size={18} /> : isVideoMediaKind(item.mediaKind) ? <Video size={18} /> : <ImageIcon size={18} />}
-                            </span>
-                          )}
-                          {itemMissing && (
-                            <span className="photo-missing-badge">
-                              <AlertTriangle size={12} />
-                              <span>{uiText("Missing")}</span>
-                            </span>
-                          )}
-                          {item.favorite && (
-                            <span className="photo-favorite-badge" aria-hidden="true">
-                              <Star size={13} fill="currentColor" />
-                            </span>
-                          )}
-                          {burstStackCount > 1 && (
-                            <span className="photo-burst-badge" title={`${formatCount(burstStackCount)} ${uiText("burst frames")}`}>
-                              <Layers size={12} />
-                              <span>{formatCount(burstStackCount)}</span>
-                            </span>
-                          )}
-                          {utilityMatch && (
-                            <span
-                              className="photo-utility-match-badge"
-                              title={`${utilityMatch.classifierName}: ${utilityMatch.fieldLabel} matches "${utilityMatch.term}"`}
-                            >
-                              <Tag size={12} />
-                              <span>{utilityMatch.term}</span>
-                            </span>
-                          )}
-                          <PersonChips people={item.people || []} count={item.personCount || 0} />
-                        </button>
-                        <button
-                          type="button"
-                          className="photo-tile-menu-button"
-                          onClick={(event) => openPhotoItemContextMenuFromButton(event, item, row.index)}
-                          aria-label={`${uiText("Photo actions")} ${label}`}
-                          title={uiText("Photo actions")}
-                        >
-                          <MoreHorizontal size={14} />
-                        </button>
-                      </div>
+                        item={item}
+                        itemIndex={row.index}
+                        label={label}
+                        checked={checked}
+                        burstStackCount={burstStackCount}
+                        burstStackCountLabel={formatCount(burstStackCount)}
+                        canDragReorder={customCollectionCanDragReorder}
+                        dragging={dragging}
+                        dropPlacement={dropPlacement}
+                        thumbnailAspectMode={thumbnailAspectMode}
+                        openPhotoLabel={uiText("Open photo")}
+                        photoActionsLabel={uiText("Photo actions")}
+                        selectLabel={uiText("Select")}
+                        deselectLabel={uiText("Deselect")}
+                        missingLabel={uiText("Missing")}
+                        burstFramesLabel={uiText("burst frames")}
+                        onToggleSource={handlePhotoGridTileToggle}
+                        onOpen={handlePhotoGridTileOpen}
+                        onContextMenu={handlePhotoGridTileContextMenu}
+                        onMenuClick={handlePhotoGridTileMenuClick}
+                        onDragStartTile={handlePhotoGridTileDragStart}
+                        onDragOverTile={handlePhotoGridTileDragOver}
+                        onDropTile={handlePhotoGridTileDrop}
+                        onDragEndTile={handlePhotoGridTileDragEnd}
+                      />
                     );
                   })}
                 </div>
@@ -32840,3 +32823,117 @@ function PersonChips(props: { people: NonNullable<PhotoItem["people"]>; count: n
     </span>
   );
 }
+
+type PhotoGridTileProps = {
+  item: PhotoItem;
+  itemIndex: number;
+  label: string;
+  checked: boolean;
+  burstStackCount: number;
+  burstStackCountLabel: string;
+  canDragReorder: boolean;
+  dragging: boolean;
+  dropPlacement: PhotoAlbumDropPlacement | "";
+  thumbnailAspectMode: PhotoThumbnailAspectMode;
+  openPhotoLabel: string;
+  photoActionsLabel: string;
+  selectLabel: string;
+  deselectLabel: string;
+  missingLabel: string;
+  burstFramesLabel: string;
+  onToggleSource: (sourcePath: string) => void;
+  onOpen: (event: ReactMouseEvent<HTMLButtonElement>, itemIndex: number) => void;
+  onContextMenu: (event: ReactMouseEvent<HTMLElement>, item: PhotoItem, itemIndex: number) => void;
+  onMenuClick: (event: ReactMouseEvent<HTMLElement>, item: PhotoItem, itemIndex: number) => void;
+  onDragStartTile: (event: ReactDragEvent<HTMLDivElement>, sourcePath: string) => void;
+  onDragOverTile: (event: ReactDragEvent<HTMLDivElement>, sourcePath: string) => void;
+  onDropTile: (event: ReactDragEvent<HTMLDivElement>, sourcePath: string) => void;
+  onDragEndTile: () => void;
+};
+
+const PhotoGridTile = memo(function PhotoGridTile(props: PhotoGridTileProps) {
+  const itemMissing = Boolean(props.item.missingAt);
+  const url = itemMissing ? "" : props.item.previewUrl || "";
+  const utilityMatch = props.item.utilityMatch;
+  const tileClass = [
+    "photo-tile-wrap",
+    props.checked ? "selected" : "",
+    itemMissing ? "missing-original" : "",
+    props.burstStackCount > 1 ? "burst-stack" : "",
+    props.canDragReorder ? "draggable" : "",
+    props.dragging ? "dragging" : "",
+    props.dropPlacement ? `drop-${props.dropPlacement}` : "",
+    props.thumbnailAspectMode,
+  ].filter(Boolean).join(" ");
+  const tileStyle = {
+    aspectRatio: props.thumbnailAspectMode === "aspect" ? photoThumbnailAspectRatio(props.item) : "1 / 1",
+  } as CSSProperties;
+  return (
+    <div
+      className={tileClass}
+      style={tileStyle}
+      draggable={props.canDragReorder}
+      onDragStart={(event) => props.onDragStartTile(event, props.item.sourcePath)}
+      onDragOver={(event) => props.onDragOverTile(event, props.item.sourcePath)}
+      onDrop={(event) => props.onDropTile(event, props.item.sourcePath)}
+      onDragEnd={props.onDragEndTile}
+      onContextMenu={(event) => props.onContextMenu(event, props.item, props.itemIndex)}
+      aria-grabbed={props.dragging ? "true" : undefined}
+    >
+      <label className="photo-select-box" aria-label={`${props.checked ? props.deselectLabel : props.selectLabel} ${props.label}`}>
+        <input type="checkbox" checked={props.checked} onChange={() => props.onToggleSource(props.item.sourcePath)} />
+      </label>
+      <button
+        type="button"
+        className={props.thumbnailAspectMode === "aspect" ? "photo-tile contain" : "photo-tile cover"}
+        onClick={(event) => props.onOpen(event, props.itemIndex)}
+        aria-label={`${props.openPhotoLabel} ${props.label}`}
+        title={props.label}
+      >
+        {url ? (
+          <img loading="lazy" decoding="async" src={url} alt={props.label} draggable={false} />
+        ) : (
+          <span className="photo-tile-fallback">
+            {itemMissing ? <AlertTriangle size={18} /> : isVideoMediaKind(props.item.mediaKind) ? <Video size={18} /> : <ImageIcon size={18} />}
+          </span>
+        )}
+        {itemMissing && (
+          <span className="photo-missing-badge">
+            <AlertTriangle size={12} />
+            <span>{props.missingLabel}</span>
+          </span>
+        )}
+        {props.item.favorite && (
+          <span className="photo-favorite-badge" aria-hidden="true">
+            <Star size={13} fill="currentColor" />
+          </span>
+        )}
+        {props.burstStackCount > 1 && (
+          <span className="photo-burst-badge" title={`${props.burstStackCountLabel} ${props.burstFramesLabel}`}>
+            <Layers size={12} />
+            <span>{props.burstStackCountLabel}</span>
+          </span>
+        )}
+        {utilityMatch && (
+          <span
+            className="photo-utility-match-badge"
+            title={`${utilityMatch.classifierName}: ${utilityMatch.fieldLabel} matches "${utilityMatch.term}"`}
+          >
+            <Tag size={12} />
+            <span>{utilityMatch.term}</span>
+          </span>
+        )}
+        <PersonChips people={props.item.people || []} count={props.item.personCount || 0} />
+      </button>
+      <button
+        type="button"
+        className="photo-tile-menu-button"
+        onClick={(event) => props.onMenuClick(event, props.item, props.itemIndex)}
+        aria-label={`${props.photoActionsLabel} ${props.label}`}
+        title={props.photoActionsLabel}
+      >
+        <MoreHorizontal size={14} />
+      </button>
+    </div>
+  );
+});
