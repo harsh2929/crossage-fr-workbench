@@ -30547,34 +30547,37 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         group_rows = 0
         detected_kind = ""
         with self.project.db.connect() as conn:
-            offset = 0
-            page_size = 500
-            while True:
-                page = self.project.db.list_photo_asset_page(
-                    offset=offset,
-                    limit=page_size,
-                    visibility="all",
-                    sort="filename",
+            metadata_pattern = f"%{self._photo_sql_like_escape(old_name.casefold())}%"
+            metadata_rows_to_check = conn.execute(
+                """
+                SELECT asset_id, metadata_json
+                FROM photo_assets
+                WHERE LOWER(COALESCE(metadata_json, '')) LIKE ? ESCAPE '\\'
+                    AND (
+                        LOWER(COALESCE(metadata_json, '')) LIKE '%pet%'
+                        OR LOWER(COALESCE(metadata_json, '')) LIKE '%animal%'
+                    )
+                ORDER BY asset_id ASC
+                """,
+                (metadata_pattern,),
+            ).fetchall()
+            for row in metadata_rows_to_check:
+                try:
+                    metadata = json.loads(str(row["metadata_json"] or "{}"))
+                except (TypeError, ValueError):
+                    metadata = {}
+                if not isinstance(metadata, dict):
+                    continue
+                next_metadata, changed, asset_kind = self._rename_photo_pet_metadata(metadata, old_name, new_name)
+                detected_kind = asset_kind or detected_kind
+                if not changed:
+                    continue
+                self.project.db.update_photo_asset_metadata_json(
+                    asset_id=str(row["asset_id"] or ""),
+                    patch=next_metadata,
                     conn=conn,
                 )
-                assets = page.get("assets", []) if isinstance(page.get("assets"), list) else []
-                if not assets:
-                    break
-                for asset in assets:
-                    metadata = asset.get("metadata", {}) if isinstance(asset.get("metadata"), dict) else {}
-                    next_metadata, changed, asset_kind = self._rename_photo_pet_metadata(metadata, old_name, new_name)
-                    detected_kind = asset_kind or detected_kind
-                    if not changed:
-                        continue
-                    self.project.db.update_photo_asset_metadata_json(
-                        asset_id=str(asset.get("assetId", "") or ""),
-                        patch=next_metadata,
-                        conn=conn,
-                    )
-                    metadata_rows += 1
-                offset += page_size
-                if offset >= int(page.get("total", 0) or 0):
-                    break
+                metadata_rows += 1
 
             old_profile = self.project.db.photo_pet_profile(old_name, conn)
             old_profile_touched = bool(

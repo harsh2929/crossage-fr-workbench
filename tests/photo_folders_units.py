@@ -14693,7 +14693,16 @@ def test_photo_pet_rename_merges_metadata_profiles_and_groups() -> None:
             "memberPets": ["Shadow", "Milo"],
         })
 
-        result = api.handle("rename_photo_pet", {"oldName": "Shadow", "newName": "Milo"})["value"]
+        original_list_photo_asset_page = api.project.db.list_photo_asset_page
+
+        def fail_full_asset_scan(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("rename_photo_pet should prefilter metadata rows without paging the full photo_assets table")
+
+        api.project.db.list_photo_asset_page = fail_full_asset_scan  # type: ignore[method-assign]
+        try:
+            result = api.handle("rename_photo_pet", {"oldName": "Shadow", "newName": "Milo"})["value"]
+        finally:
+            api.project.db.list_photo_asset_page = original_list_photo_asset_page  # type: ignore[method-assign]
         assert result["metadataRows"] == 2, result
         assert result["groupRows"] == 2, result
         assert result["profileMerged"] is True, result
