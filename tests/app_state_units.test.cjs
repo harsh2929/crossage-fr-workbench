@@ -9,6 +9,7 @@ const path = require("path");
 const root = path.resolve(__dirname, "..");
 const source = fs.readFileSync(path.join(root, "src", "App.tsx"), "utf8");
 const appStorageOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-storage-diagnostics-")), "appStorageDiagnostics.cjs");
+const bridgeOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-bridge-validation-")), "bridgeValidation.cjs");
 const i18nOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-i18n-")), "i18n.cjs");
 
 esbuild.buildSync({
@@ -19,6 +20,14 @@ esbuild.buildSync({
   outfile: appStorageOutFile,
 });
 const appStorageDiagnostics = require(appStorageOutFile);
+esbuild.buildSync({
+  entryPoints: [path.join(root, "src", "bridgeValidation.ts")],
+  bundle: true,
+  format: "cjs",
+  platform: "node",
+  outfile: bridgeOutFile,
+});
+const bridgeValidation = require(bridgeOutFile);
 esbuild.buildSync({
   entryPoints: [path.join(root, "src", "i18n.ts")],
   bundle: true,
@@ -162,6 +171,32 @@ run("i18n dev diagnostics warn before raw-key fallback", () => {
   } finally {
     console.warn = originalWarn;
   }
+});
+
+run("renderer boot gate validates the preload bridge shape", () => {
+  const mainSource = fs.readFileSync(path.join(root, "src", "main.tsx"), "utf8");
+  const validBridge = Object.fromEntries(
+    bridgeValidation.REQUIRED_CROSSAGE_METHODS.map((name) => [name, () => undefined])
+  );
+  validBridge.platform = "darwin";
+
+  assert.deepStrictEqual(bridgeValidation.missingCrossAgeBridgeMembers(validBridge), []);
+  assert.strictEqual(bridgeValidation.isCrossAgeBridgeReady(validBridge), true);
+
+  const partialBridge = { invoke: () => undefined, platform: "darwin" };
+  const missing = bridgeValidation.missingCrossAgeBridgeMembers(partialBridge);
+  assert.ok(missing.includes("getInitialState"), missing);
+  assert.ok(missing.includes("onBackendError"), missing);
+  assert.strictEqual(bridgeValidation.isCrossAgeBridgeReady(partialBridge), false);
+
+  const malformedBridge = { ...validBridge, invoke: "not a function", platform: 42 };
+  const malformedMissing = bridgeValidation.missingCrossAgeBridgeMembers(malformedBridge);
+  assert.ok(malformedMissing.includes("invoke"), malformedMissing);
+  assert.ok(malformedMissing.includes("platform"), malformedMissing);
+
+  assert.match(mainSource, /import \{ missingCrossAgeBridgeMembers \} from "\.\/bridgeValidation";/);
+  assert.match(mainSource, /const missingBridgeMembers = missingCrossAgeBridgeMembers\(\(window as \{ crossAge\?: unknown \}\)\.crossAge\);/);
+  assert.match(mainSource, /\} else if \(missingBridgeMembers\.length\) \{/);
 });
 
 console.log("\nall app state unit tests passed");

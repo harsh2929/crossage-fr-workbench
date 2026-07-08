@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import App from "./App";
 import { ToastProvider, ToastHost } from "./shell/ToastHost";
 import appIconUrl from "../desktop/assets/icon-192.webp";
+import { missingCrossAgeBridgeMembers } from "./bridgeValidation";
 import { normalizeLanguage, preloadLanguage, translate } from "./i18n";
 import type { LanguageCode, TranslationKey } from "./i18n";
 import "./styles.css";
@@ -220,9 +221,10 @@ async function startRenderer() {
   await preloadLanguage(language);
 
   const rootElement = document.getElementById("root");
+  const missingBridgeMembers = missingCrossAgeBridgeMembers((window as { crossAge?: unknown }).crossAge);
   if (!rootElement) {
     document.body.innerHTML = `<main class="boot-fallback" role="alert"><section><h1>${escapeHtml(translate(language, "boot.couldNotLoad"))}</h1><p>${escapeHtml(translate(language, "boot.rootMissing"))}</p></section></main>`;
-  } else if (typeof (window as { crossAge?: { invoke?: unknown } }).crossAge?.invoke !== "function") {
+  } else if (missingBridgeMembers.length) {
     createRoot(rootElement).render(
       <BootDiagnostic
         title={bootT("boot.bridgeUnavailable")}
