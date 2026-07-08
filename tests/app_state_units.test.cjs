@@ -79,6 +79,31 @@ run("applyState normalizes against the latest applied state ref", () => {
   assert.match(startupBlock, /normalizeAppState\(next, appStateRef\.current\)/);
 });
 
+run("boot splash clock is scoped to BootScreen", () => {
+  const bootStart = source.indexOf("function BootScreen(");
+  const appStart = source.indexOf("export default function App()");
+  assert.ok(bootStart >= 0, "missing BootScreen component");
+  assert.ok(appStart > bootStart, "BootScreen should live outside App");
+  const bootBlock = source.slice(bootStart, appStart);
+  assert.match(bootBlock, /const \[bootClock, setBootClock\] = useState\(\(\) => Date\.now\(\)\);/);
+  assert.match(bootBlock, /window\.setInterval\(\(\) => setBootClock\(Date\.now\(\)\), 1000\)/);
+  assert.match(bootBlock, /initBootBackground\(canvas, root\)/);
+
+  const appPrelude = source.slice(appStart, source.indexOf("async function loadInitialState", appStart));
+  assert.doesNotMatch(appPrelude, /setBootClock/);
+  assert.doesNotMatch(appPrelude, /bootCanvasRef/);
+  assert.doesNotMatch(appPrelude, /initBootBackground/);
+
+  const loadingStart = source.indexOf("  if (!state) {", appStart);
+  assert.ok(loadingStart > appStart, "missing loading return");
+  const loadingEnd = source.indexOf("  const navMeta", loadingStart);
+  assert.ok(loadingEnd > loadingStart, "missing loading return end marker");
+  const loadingBlock = source.slice(loadingStart, loadingEnd);
+  assert.match(loadingBlock, /<BootScreen[\s\S]*bootStartedAt=\{bootStartedAt\}[\s\S]*onRetry=\{loadInitialState\}/);
+  assert.doesNotMatch(loadingBlock, /bootClock/);
+  assert.doesNotMatch(loadingBlock, /bootCanvasRef/);
+});
+
 run("review page query signature excludes changing counts", () => {
   const signatureStart = source.indexOf("  const querySignature = useMemo(() => JSON.stringify({");
   assert.ok(signatureStart >= 0, "missing review query signature");

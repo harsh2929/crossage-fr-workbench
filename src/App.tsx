@@ -1838,6 +1838,96 @@ function normalizeAppState(incoming: AppState, previous: AppState | null): AppSt
   };
 }
 
+function BootScreen({
+  bootError,
+  bootStartedAt,
+  busy,
+  onRetry
+}: {
+  bootError: string | null;
+  bootStartedAt: number;
+  busy: string | null;
+  onRetry: () => void;
+}) {
+  const [bootClock, setBootClock] = useState(() => Date.now());
+  const bootCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    setBootClock(Date.now());
+    const timer = window.setInterval(() => setBootClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [bootStartedAt]);
+
+  // Living "Plasma Silk" boot background: start the WebGL shader while the boot
+  // screen is mounted; tear it down (rAF + GL context + listeners) the instant
+  // the app state loads and the boot screen unmounts.
+  useEffect(() => {
+    const canvas = bootCanvasRef.current;
+    if (!canvas) {
+      return undefined;
+    }
+    const root = canvas.closest(".boot") as HTMLElement | null;
+    return initBootBackground(canvas, root);
+  }, []);
+
+  const bootElapsedSeconds = Math.floor(Math.max(0, bootClock - bootStartedAt) / 1000);
+  const bootProgress = bootError ? 100 : Math.min(94, 18 + bootElapsedSeconds * 7);
+  const bootStatus = bootError ? "Startup needs attention" : bootElapsedSeconds > 9 ? "Finalizing app folder" : busy ?? "Opening app";
+  const bootDetail = bootError
+    ? bootError
+    : bootElapsedSeconds > 9
+      ? "First launch can take a moment while local model resources settle."
+      : "Loading private on-device review data.";
+  const bootSteps = [
+    { label: "Shell", done: true },
+    { label: "Engine", done: !bootError && bootElapsedSeconds > 1 },
+    { label: "App folder", done: !bootError && bootElapsedSeconds > 3 }
+  ];
+
+  return (
+    <main
+      className={bootError ? "boot boot-failed" : "boot"}
+      aria-busy={!bootError}
+      style={{ "--boot-fill": (bootError ? 100 : bootProgress) / 100 } as CSSProperties}
+    >
+      <canvas className="boot-bg-canvas" ref={bootCanvasRef} aria-hidden="true" />
+      <div className="boot-bg-fallback" aria-hidden="true" />
+      <div className="boot-vignette" aria-hidden="true" />
+      <section className="boot-card" role="status" aria-live="polite" aria-label="Opening Vintrace">
+        <div className="boot-mark" aria-hidden="true">
+          <span className="boot-ring-base" />
+          {!bootError && <span className="boot-ring" />}
+          {!bootError && <span className="boot-sweep" />}
+          <img src={appIconUrl} alt="" />
+        </div>
+        <h1 className="boot-name">Vintrace</h1>
+        <p className="boot-status">
+          <span className="boot-status-dot" />
+          <span>{bootStatus}</span>
+        </p>
+        <p className="boot-sub">{bootDetail}</p>
+        <div className="boot-progress" aria-hidden="true"><span className="boot-fill" /><span className="boot-fill-glint" /></div>
+        {bootError ? (
+          <div className="boot-actions">
+            <button type="button" onClick={onRetry}>
+              <RefreshCcw size={15} />
+              <span>Retry</span>
+            </button>
+          </div>
+        ) : (
+          <div className="boot-chips" aria-hidden="true">
+            {bootSteps.map((step) => (
+              <span key={step.label} className={step.done ? "boot-chip done" : "boot-chip"}>
+                <span className="boot-chip-tick" />{step.label}
+              </span>
+            ))}
+          </div>
+        )}
+      </section>
+    </main>
+  );
+}
+
 export default function App() {
   const [language, setLanguage] = useState<LanguageCode>(() => readInitialLanguage());
   const [state, setState] = useState<AppState | null>(null);
@@ -1849,8 +1939,6 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>("Starting local engine");
   const [bootError, setBootError] = useState<string | null>(null);
   const [bootStartedAt, setBootStartedAt] = useState(() => Date.now());
-  const [bootClock, setBootClock] = useState(() => Date.now());
-  const bootCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [notice, setNotice] = useState<NoticeState | null>(null);
   const [lastPhotoExternalEditorPath, setLastPhotoExternalEditorPath] = useState("");
   const [photoExternalEditors, setPhotoExternalEditors] = useState<ExternalEditorFavorite[]>([]);
@@ -2353,29 +2441,6 @@ export default function App() {
     };
   }, []);
 
-  useEffect(() => {
-    if (state) {
-      return undefined;
-    }
-    const timer = window.setInterval(() => setBootClock(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [state]);
-
-  // Living "Plasma Silk" boot background: start the WebGL shader while the boot
-  // screen is mounted; tear it down (rAF + GL context + listeners) the instant
-  // the app state loads and the boot screen unmounts.
-  useEffect(() => {
-    if (state) {
-      return undefined;
-    }
-    const canvas = bootCanvasRef.current;
-    if (!canvas) {
-      return undefined;
-    }
-    const root = canvas.closest(".boot") as HTMLElement | null;
-    return initBootBackground(canvas, root);
-  }, [state]);
-
   async function loadInitialState() {
     const requestId = startupRequestId.current + 1;
     const startedAt = performance.now();
@@ -2383,7 +2448,6 @@ export default function App() {
     stateReadyRef.current = false;
     setBootError(null);
     setBootStartedAt(Date.now());
-    setBootClock(Date.now());
     setBusy("Starting local engine");
     setNotice(null);
     window.crossAge
@@ -6507,60 +6571,13 @@ export default function App() {
   }
 
   if (!state) {
-    const bootElapsedSeconds = Math.floor(Math.max(0, bootClock - bootStartedAt) / 1000);
-    const bootProgress = bootError ? 100 : Math.min(94, 18 + bootElapsedSeconds * 7);
-    const bootStatus = bootError ? "Startup needs attention" : bootElapsedSeconds > 9 ? "Finalizing app folder" : busy ?? "Opening app";
-    const bootDetail = bootError
-      ? bootError
-      : bootElapsedSeconds > 9
-        ? "First launch can take a moment while local model resources settle."
-        : "Loading private on-device review data.";
-    const bootSteps = [
-      { label: "Shell", done: true },
-      { label: "Engine", done: !bootError && bootElapsedSeconds > 1 },
-      { label: "App folder", done: !bootError && bootElapsedSeconds > 3 }
-    ];
     return (
-      <main
-        className={bootError ? "boot boot-failed" : "boot"}
-        aria-busy={!bootError}
-        style={{ "--boot-fill": (bootError ? 100 : bootProgress) / 100 } as CSSProperties}
-      >
-        <canvas className="boot-bg-canvas" ref={bootCanvasRef} aria-hidden="true" />
-        <div className="boot-bg-fallback" aria-hidden="true" />
-        <div className="boot-vignette" aria-hidden="true" />
-        <section className="boot-card" role="status" aria-live="polite" aria-label="Opening Vintrace">
-          <div className="boot-mark" aria-hidden="true">
-            <span className="boot-ring-base" />
-            {!bootError && <span className="boot-ring" />}
-            {!bootError && <span className="boot-sweep" />}
-            <img src={appIconUrl} alt="" />
-          </div>
-          <h1 className="boot-name">Vintrace</h1>
-          <p className="boot-status">
-            <span className="boot-status-dot" />
-            <span>{bootStatus}</span>
-          </p>
-          <p className="boot-sub">{bootDetail}</p>
-          <div className="boot-progress" aria-hidden="true"><span className="boot-fill" /><span className="boot-fill-glint" /></div>
-          {bootError ? (
-            <div className="boot-actions">
-              <button type="button" onClick={loadInitialState}>
-                <RefreshCcw size={15} />
-                <span>Retry</span>
-              </button>
-            </div>
-          ) : (
-            <div className="boot-chips" aria-hidden="true">
-              {bootSteps.map((step) => (
-                <span key={step.label} className={step.done ? "boot-chip done" : "boot-chip"}>
-                  <span className="boot-chip-tick" />{step.label}
-                </span>
-              ))}
-            </div>
-          )}
-        </section>
-      </main>
+      <BootScreen
+        bootError={bootError}
+        bootStartedAt={bootStartedAt}
+        busy={busy}
+        onRetry={loadInitialState}
+      />
     );
   }
 
