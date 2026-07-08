@@ -267,6 +267,12 @@ import type { PhotoSlideshowProject, PhotoSlideshowThemeTemplate } from "./views
 import { initBootBackground } from "./lib/bootBackground";
 import { formatErrorMessage, formatUiMessage, languageOptions, localizeDom, normalizeLanguage, preloadLanguage, translate, translateUiText } from "./i18n";
 import type { LanguageCode, TranslationKey, UiMessageKey } from "./i18n";
+import {
+  APP_STORAGE_ISSUE_EVENT,
+  appStorageIssueNoticeText,
+  recordAppStorageIssue,
+  type AppStorageDiagnostic
+} from "./appStorageDiagnostics";
 
 type UiMessageValue = string | number | { text: string | number; localize: true };
 type UiMessageValues = Record<string, UiMessageValue>;
@@ -818,8 +824,8 @@ function readInitialLanguage(): LanguageCode {
   try {
     const saved = window.localStorage.getItem(languageStorageKey);
     if (saved) return normalizeLanguage(saved);
-  } catch {
-    // Local storage can be unavailable in restricted renderer contexts.
+  } catch (error) {
+    recordAppStorageIssue("language", "read", languageStorageKey, error);
   }
   return normalizeLanguage(typeof navigator !== "undefined" ? navigator.language : "en");
 }
@@ -827,15 +833,16 @@ function readInitialLanguage(): LanguageCode {
 function writeLanguage(language: LanguageCode) {
   try {
     window.localStorage.setItem(languageStorageKey, language);
-  } catch {
-    // Local storage can be unavailable in restricted renderer contexts.
+  } catch (error) {
+    recordAppStorageIssue("language", "write", languageStorageKey, error);
   }
 }
 
 function readOnboardingDismissed() {
   try {
     return window.localStorage.getItem(onboardingStorageKey) === "dismissed";
-  } catch {
+  } catch (error) {
+    recordAppStorageIssue("onboarding", "read", onboardingStorageKey, error);
     return false;
   }
 }
@@ -843,8 +850,8 @@ function readOnboardingDismissed() {
 function writeOnboardingDismissed() {
   try {
     window.localStorage.setItem(onboardingStorageKey, "dismissed");
-  } catch {
-    // Local storage can be unavailable in restricted renderer contexts.
+  } catch (error) {
+    recordAppStorageIssue("onboarding", "write", onboardingStorageKey, error);
   }
 }
 
@@ -1193,8 +1200,9 @@ function formatTimestampDateTime(value: unknown) {
 }
 
 function readSavedScanSources(workspace: string | null | undefined): SavedScanSource[] {
+  const key = savedScanSourcesKey(workspace);
   try {
-    const rows = JSON.parse(window.localStorage.getItem(savedScanSourcesKey(workspace)) || "[]");
+    const rows = JSON.parse(window.localStorage.getItem(key) || "[]");
     if (!Array.isArray(rows)) return [];
     return rows
       .filter((row) => row && typeof row === "object" && typeof row.path === "string")
@@ -1209,16 +1217,18 @@ function readSavedScanSources(workspace: string | null | undefined): SavedScanSo
         };
       })
       .slice(0, 40);
-  } catch {
+  } catch (error) {
+    recordAppStorageIssue("savedScanSources", "read", key, error);
     return [];
   }
 }
 
 function writeSavedScanSources(workspace: string | null | undefined, sources: SavedScanSource[]) {
+  const key = savedScanSourcesKey(workspace);
   try {
-    window.localStorage.setItem(savedScanSourcesKey(workspace), JSON.stringify(sources.slice(0, 40)));
-  } catch {
-    // Saved scan sources are a convenience; storage failures should not block scans.
+    window.localStorage.setItem(key, JSON.stringify(sources.slice(0, 40)));
+  } catch (error) {
+    recordAppStorageIssue("savedScanSources", "write", key, error);
   }
 }
 
@@ -1227,8 +1237,9 @@ function scanQueueKey(workspace: string | null | undefined) {
 }
 
 function readScanQueue(workspace: string | null | undefined): ScanQueueItem[] {
+  const key = scanQueueKey(workspace);
   try {
-    const rows = JSON.parse(window.localStorage.getItem(scanQueueKey(workspace)) || "[]");
+    const rows = JSON.parse(window.localStorage.getItem(key) || "[]");
     if (!Array.isArray(rows)) return [];
     return rows
       .filter((row) => row && typeof row === "object" && typeof row.path === "string")
@@ -1245,16 +1256,18 @@ function readScanQueue(workspace: string | null | undefined): ScanQueueItem[] {
         };
       })
       .slice(0, 80);
-  } catch {
+  } catch (error) {
+    recordAppStorageIssue("scanQueue", "read", key, error);
     return [];
   }
 }
 
 function writeScanQueue(workspace: string | null | undefined, queue: ScanQueueItem[]) {
+  const key = scanQueueKey(workspace);
   try {
-    window.localStorage.setItem(scanQueueKey(workspace), JSON.stringify(queue.slice(0, 80)));
-  } catch {
-    // The queue is resumable convenience state. Scanning should still work without it.
+    window.localStorage.setItem(key, JSON.stringify(queue.slice(0, 80)));
+  } catch (error) {
+    recordAppStorageIssue("scanQueue", "write", key, error);
   }
 }
 
@@ -1263,8 +1276,9 @@ function savedReviewViewsKey(workspace: string | null | undefined) {
 }
 
 function readSavedReviewViews(workspace: string | null | undefined): SavedReviewView[] {
+  const key = savedReviewViewsKey(workspace);
   try {
-    const rows = JSON.parse(window.localStorage.getItem(savedReviewViewsKey(workspace)) || "[]");
+    const rows = JSON.parse(window.localStorage.getItem(key) || "[]");
     if (!Array.isArray(rows)) return [];
     return rows
       .filter((row) => row && typeof row === "object" && typeof row.label === "string")
@@ -1282,37 +1296,45 @@ function readSavedReviewViews(workspace: string | null | undefined): SavedReview
         };
       })
       .slice(0, 16);
-  } catch {
+  } catch (error) {
+    recordAppStorageIssue("savedReviewViews", "read", key, error);
     return [];
   }
 }
 
 function writeSavedReviewViews(workspace: string | null | undefined, views: SavedReviewView[]) {
+  const key = savedReviewViewsKey(workspace);
   try {
-    window.localStorage.setItem(savedReviewViewsKey(workspace), JSON.stringify(views.slice(0, 16)));
-  } catch {
-    // Saved review views are optional UI state.
+    window.localStorage.setItem(key, JSON.stringify(views.slice(0, 16)));
+  } catch (error) {
+    recordAppStorageIssue("savedReviewViews", "write", key, error);
   }
 }
 
 function readReviewFocusHistory(workspace: string | null | undefined): ReviewFocusHistoryRecord[] {
+  const key = reviewFocusHistoryStorageKey(workspace);
   try {
-    const raw = window.localStorage.getItem(reviewFocusHistoryStorageKey(workspace)) || "[]";
+    const raw = window.localStorage.getItem(key) || "[]";
     // Guard against a pathologically large payload freezing the main thread in
     // JSON.parse (localStorage is user-writable in Electron). Legitimate values
     // are capped to a handful of small records on write.
-    if (raw.length > 262144) return [];
+    if (raw.length > 262144) {
+      recordAppStorageIssue("reviewFocusHistory", "read", key, new Error("Stored payload exceeded the 256 KiB safety limit."));
+      return [];
+    }
     return normalizeReviewFocusHistory(JSON.parse(raw));
-  } catch {
+  } catch (error) {
+    recordAppStorageIssue("reviewFocusHistory", "read", key, error);
     return [];
   }
 }
 
 function writeReviewFocusHistory(workspace: string | null | undefined, history: ReviewFocusHistoryRecord[]) {
+  const key = reviewFocusHistoryStorageKey(workspace);
   try {
-    window.localStorage.setItem(reviewFocusHistoryStorageKey(workspace), JSON.stringify(normalizeReviewFocusHistory(history)));
-  } catch {
-    // Recent focused queues are optional UI state.
+    window.localStorage.setItem(key, JSON.stringify(normalizeReviewFocusHistory(history)));
+  } catch (error) {
+    recordAppStorageIssue("reviewFocusHistory", "write", key, error);
   }
 }
 
@@ -2009,6 +2031,25 @@ export default function App() {
     const details = errorDetails(error, fallback);
     setNotice({ tone: "error", text: details.text, errorCode: details.code, action: details.action });
   }
+
+  useEffect(() => {
+    const handleStorageIssue = (event: Event) => {
+      const detail = (event as CustomEvent<AppStorageDiagnostic>).detail;
+      if (!detail) return;
+      setNotice({ tone: "warn", text: appStorageIssueNoticeText(detail) });
+      recordRendererDiagnostic({
+        type: "renderer_storage_issue",
+        level: "warn",
+        category: "renderer",
+        area: detail.area,
+        operation: detail.operation,
+        key: detail.key,
+        message: detail.message
+      });
+    };
+    window.addEventListener(APP_STORAGE_ISSUE_EVENT, handleStorageIssue);
+    return () => window.removeEventListener(APP_STORAGE_ISSUE_EVENT, handleStorageIssue);
+  }, []);
 
   function confirmDialogMessage(messageKey: UiMessageKey, values: UiMessageValues, fallback: string): Promise<boolean> {
     // H5: route the localized confirmation through the in-app dialog host.
@@ -3300,7 +3341,11 @@ export default function App() {
     if (!value) return null;
     const warningCount = value.failedCount || 0;
     if ((value.importedCount || 0) > 0) {
-      try { window.localStorage?.setItem("vintrace.hasImportedPhotos", "1"); } catch { /* non-fatal */ }
+      try {
+        window.localStorage?.setItem("vintrace.hasImportedPhotos", "1");
+      } catch (error) {
+        recordAppStorageIssue("photoImportFlag", "write", "vintrace.hasImportedPhotos", error);
+      }
     }
     setNotice({
       tone: warningCount ? "warn" : "ok",
@@ -7458,7 +7503,12 @@ function OnboardingGuide({
   const hasReviewed = state.counts.reviewed > 0;
   const safeModeReady = state.config.safeMode;
   let hasPhotos = false;
-  try { hasPhotos = window.localStorage?.getItem("vintrace.hasImportedPhotos") === "1"; } catch { hasPhotos = false; }
+  try {
+    hasPhotos = window.localStorage?.getItem("vintrace.hasImportedPhotos") === "1";
+  } catch (error) {
+    recordAppStorageIssue("photoImportFlag", "read", "vintrace.hasImportedPhotos", error);
+    hasPhotos = false;
+  }
   const completed = [hasWorkspace, state.consentOnFile, hasPhotos, hasReferences, hasScan, hasReviewed, safeModeReady].filter(Boolean).length;
   const progress = Math.round((completed / 7) * 100);
 
@@ -10902,7 +10952,8 @@ function ReviewView(props: {
     try {
       const rows = JSON.parse(window.localStorage.getItem(key) || "[]");
       setMediaActionDestinations(Array.isArray(rows) ? rows.filter((item) => typeof item === "string").slice(0, 6) : []);
-    } catch {
+    } catch (error) {
+      recordAppStorageIssue("mediaDestinations", "read", key, error);
       setMediaActionDestinations([]);
     }
     setMediaActionDestination("");
@@ -11429,10 +11480,11 @@ function ReviewView(props: {
     if (!clean) return;
     const next = [clean, ...mediaActionDestinations.filter((item) => item !== clean)].slice(0, 6);
     setMediaActionDestinations(next);
+    const key = `vintrace:media-destinations:${props.state.workspace || "default"}`;
     try {
-      window.localStorage.setItem(`vintrace:media-destinations:${props.state.workspace || "default"}`, JSON.stringify(next));
-    } catch {
-      // Recent destinations are a convenience only.
+      window.localStorage.setItem(key, JSON.stringify(next));
+    } catch (error) {
+      recordAppStorageIssue("mediaDestinations", "write", key, error);
     }
   }
 

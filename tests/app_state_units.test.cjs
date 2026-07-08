@@ -1,11 +1,23 @@
 "use strict";
 
 const assert = require("assert");
+const esbuild = require("esbuild");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const root = path.resolve(__dirname, "..");
 const source = fs.readFileSync(path.join(root, "src", "App.tsx"), "utf8");
+const appStorageOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-storage-diagnostics-")), "appStorageDiagnostics.cjs");
+
+esbuild.buildSync({
+  entryPoints: [path.join(root, "src", "appStorageDiagnostics.ts")],
+  bundle: true,
+  format: "cjs",
+  platform: "node",
+  outfile: appStorageOutFile,
+});
+const appStorageDiagnostics = require(appStorageOutFile);
 
 function run(name, fn) {
   fn();
@@ -47,6 +59,85 @@ run("review page query signature excludes changing counts", () => {
   assert.ok(!signatureBlock.includes("pendingCount"));
   assert.ok(!signatureBlock.includes("props.state.counts.candidates"));
   assert.ok(!signatureBlock.includes("props.state.counts.pending"));
+});
+
+run("storage diagnostics redact scoped keys and dispatch deduped warnings", () => {
+  const warnings = [];
+  const events = [];
+  const originalWarn = console.warn;
+  const originalWindow = global.window;
+  const originalCustomEvent = global.CustomEvent;
+
+  class TestCustomEvent {
+    constructor(type, init = {}) {
+      this.type = type;
+      this.detail = init.detail;
+    }
+  }
+
+  console.warn = (...args) => warnings.push(args.join(" "));
+  global.CustomEvent = TestCustomEvent;
+  global.window = {
+    dispatchEvent(event) {
+      events.push(event);
+      return true;
+    },
+  };
+
+  try {
+    appStorageDiagnostics.clearAppStorageDiagnosticsForTest();
+    const first = appStorageDiagnostics.recordAppStorageIssue(
+      "scanQueue",
+      "read",
+      "vintrace:scan-queue:/Users/jane/Pictures/family",
+      new Error("Quota denied at /Users/jane/Pictures/family"),
+      1_000
+    );
+    const duplicate = appStorageDiagnostics.recordAppStorageIssue(
+      "scanQueue",
+      "read",
+      "vintrace:scan-queue:/Users/jane/Pictures/family",
+      new Error("Quota denied at /Users/jane/Pictures/family"),
+      2_000
+    );
+    const later = appStorageDiagnostics.recordAppStorageIssue(
+      "scanQueue",
+      "read",
+      "vintrace:scan-queue:/Users/jane/Pictures/family",
+      new Error("Quota denied at /Users/jane/Pictures/family"),
+      62_000
+    );
+
+    assert.strictEqual(first.key, "vintrace:scan-queue:<scope>");
+    assert.ok(!JSON.stringify(first).includes("/Users/jane"), first);
+    assert.strictEqual(duplicate, null);
+    assert.ok(later);
+    assert.strictEqual(appStorageDiagnostics.getAppStorageDiagnostics().length, 2);
+    assert.strictEqual(events.length, 2);
+    assert.strictEqual(warnings.length, 2);
+    assert.match(appStorageDiagnostics.appStorageIssueNoticeText(first), /loading scan queue/);
+  } finally {
+    console.warn = originalWarn;
+    if (originalWindow === undefined) {
+      delete global.window;
+    } else {
+      global.window = originalWindow;
+    }
+    if (originalCustomEvent === undefined) {
+      delete global.CustomEvent;
+    } else {
+      global.CustomEvent = originalCustomEvent;
+    }
+    appStorageDiagnostics.clearAppStorageDiagnosticsForTest();
+  }
+});
+
+run("app localStorage helpers report failures instead of silent fallbacks", () => {
+  assert.match(source, /recordAppStorageIssue\("scanQueue", "read"/);
+  assert.match(source, /recordAppStorageIssue\("scanQueue", "write"/);
+  assert.match(source, /recordAppStorageIssue\("savedScanSources", "read"/);
+  assert.match(source, /recordAppStorageIssue\("savedReviewViews", "write"/);
+  assert.match(source, /window\.addEventListener\(APP_STORAGE_ISSUE_EVENT, handleStorageIssue\)/);
 });
 
 console.log("\nall app state unit tests passed");
