@@ -21151,61 +21151,83 @@ class WorkspaceDb:
             for snapshot in [self._photo_asset_catalog_snapshot(target["assetId"], conn)]
             if snapshot is not None
         ]
-        trash_run_root = self._photo_managed_original_trash_root() / f"catalog-delete-{uuid.uuid4().hex}"
         managed_originals_trashed: list[dict[str, Any]] = []
         managed_original_trash_failures: list[dict[str, str]] = []
-        for snapshot in snapshots:
-            plan = self._photo_catalog_managed_trash_plan(snapshot, trash_run_root, conn)
-            if plan is None:
-                continue
-            try:
-                shutil.move(str(plan["sourcePath"]), str(plan["trashPath"]))
-            except OSError as exc:
-                managed_original_trash_failures.append(
-                    {
-                        "assetId": str(plan.get("assetId", "") or ""),
-                        "sourcePath": str(plan.get("sourcePath", "") or ""),
-                        "reason": str(exc),
-                    }
-                )
-                continue
-            snapshot["managedOriginalTrash"] = plan
-            managed_originals_trashed.append(plan)
-
         candidate_ids: set[str] = set()
         scan_file_rows = 0
         candidate_rows = 0
-        for target in targets:
-            source = target["sourcePath"]
-            asset_key = target["assetId"]
-            for row in conn.execute(
-                """
-                SELECT candidate_id FROM review_candidates
-                WHERE source_path = ? OR media_source_path = ? OR media_path = ?
-                """,
-                (source, source, source),
-            ).fetchall():
-                candidate_id = str(row["candidate_id"] or "")
-                if candidate_id:
-                    candidate_ids.add(candidate_id)
-            scan_file_rows += int(conn.execute("DELETE FROM scan_files WHERE path = ?", (source,)).rowcount or 0)
-            candidate_rows += int(
-                conn.execute(
-                    "DELETE FROM review_candidates WHERE source_path = ? OR media_source_path = ? OR media_path = ?",
-                    (source, source, source),
-                ).rowcount or 0
-            )
-            conn.execute("DELETE FROM photo_search_fts WHERE asset_id = ?", (asset_key,))
-            conn.execute("DELETE FROM photo_ocr_blocks WHERE asset_id = ?", (asset_key,))
-            conn.execute("DELETE FROM photo_object_tags WHERE asset_id = ?", (asset_key,))
-            conn.execute("DELETE FROM photo_assets WHERE asset_id = ?", (asset_key,))
+        operation: dict[str, Any] | None = None
+        trash_run_root = self._photo_managed_original_trash_root() / f"catalog-delete-{uuid.uuid4().hex}"
+        savepoint = f"photo_permanent_delete_{uuid.uuid4().hex}"
+        conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            for snapshot in snapshots:
+                plan = self._photo_catalog_managed_trash_plan(snapshot, trash_run_root, conn)
+                if plan is None:
+                    continue
+                try:
+                    shutil.move(str(plan["sourcePath"]), str(plan["trashPath"]))
+                except OSError as exc:
+                    managed_original_trash_failures.append(
+                        {
+                            "assetId": str(plan.get("assetId", "") or ""),
+                            "sourcePath": str(plan.get("sourcePath", "") or ""),
+                            "reason": str(exc),
+                        }
+                    )
+                    continue
+                snapshot["managedOriginalTrash"] = plan
+                managed_originals_trashed.append(plan)
 
-        operation = self.record_photo_catalog_delete_operation(
-            operation_type="catalog_permanent_delete",
-            label=f"Permanently deleted {len(snapshots)} photo{'s' if len(snapshots) != 1 else ''} from catalog",
-            snapshots=snapshots,
-            conn=conn,
-        ) if snapshots else None
+            for target in targets:
+                source = target["sourcePath"]
+                asset_key = target["assetId"]
+                for row in conn.execute(
+                    """
+                    SELECT candidate_id FROM review_candidates
+                    WHERE source_path = ? OR media_source_path = ? OR media_path = ?
+                    """,
+                    (source, source, source),
+                ).fetchall():
+                    candidate_id = str(row["candidate_id"] or "")
+                    if candidate_id:
+                        candidate_ids.add(candidate_id)
+                scan_file_rows += int(conn.execute("DELETE FROM scan_files WHERE path = ?", (source,)).rowcount or 0)
+                candidate_rows += int(
+                    conn.execute(
+                        "DELETE FROM review_candidates WHERE source_path = ? OR media_source_path = ? OR media_path = ?",
+                        (source, source, source),
+                    ).rowcount or 0
+                )
+                conn.execute("DELETE FROM photo_search_fts WHERE asset_id = ?", (asset_key,))
+                conn.execute("DELETE FROM photo_ocr_blocks WHERE asset_id = ?", (asset_key,))
+                conn.execute("DELETE FROM photo_object_tags WHERE asset_id = ?", (asset_key,))
+                conn.execute("DELETE FROM photo_assets WHERE asset_id = ?", (asset_key,))
+
+            operation = self.record_photo_catalog_delete_operation(
+                operation_type="catalog_permanent_delete",
+                label=f"Permanently deleted {len(snapshots)} photo{'s' if len(snapshots) != 1 else ''} from catalog",
+                snapshots=snapshots,
+                conn=conn,
+            ) if snapshots else None
+            conn.execute(f"RELEASE {savepoint}")
+        except Exception:
+            try:
+                conn.execute(f"ROLLBACK TO {savepoint}")
+            except sqlite3.DatabaseError:
+                pass
+            try:
+                conn.execute(f"RELEASE {savepoint}")
+            except sqlite3.DatabaseError:
+                pass
+            for snapshot in reversed(snapshots):
+                self._restore_photo_managed_original_from_trash(snapshot)
+            try:
+                if trash_run_root.exists():
+                    shutil.rmtree(trash_run_root)
+            except OSError:
+                pass
+            raise
         return {
             "selected": len(targets),
             "deletedAssets": len(targets),

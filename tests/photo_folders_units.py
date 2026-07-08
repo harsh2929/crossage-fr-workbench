@@ -9547,6 +9547,61 @@ def test_photo_operation_journal_undoes_recoverable_permanent_delete() -> None:
     print("ok photo operation journal undo recoverable permanent delete")
 
 
+def test_photo_permanent_delete_rolls_back_catalog_and_managed_trash_on_failure() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        base = Path(tmp)
+        source = base / "rollback-managed-source.jpg"
+        source.write_bytes(b"managed original before rollback")
+        managed_root = base / "managed-root"
+        imported = api.import_photos(
+            {
+                "sourcePaths": [str(source)],
+                "storageMode": "managed",
+                "managedRoot": str(managed_root),
+                "sourceLabel": "Managed rollback import",
+            }
+        )
+        managed_path = Path(imported["importedPaths"][0])
+        assert managed_path.exists(), imported
+        api.update_photo_asset_metadata({"sourcePath": str(managed_path), "deletedAt": "2026-06-20T00:00:00Z"})
+        asset = api.project.db.photo_asset_by_path(str(managed_path))
+        assert asset and asset["sourceKind"] == "managed", asset
+
+        original_record = api.project.db.record_photo_catalog_delete_operation
+
+        def fail_record_photo_catalog_delete_operation(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("forced catalog journal failure")
+
+        api.project.db.record_photo_catalog_delete_operation = fail_record_photo_catalog_delete_operation  # type: ignore[method-assign]
+        try:
+            _expect_raises(
+                RuntimeError,
+                lambda: api.project.db.permanently_delete_photo_assets(source_paths=[str(managed_path)]),
+                "forced catalog journal failure",
+            )
+        finally:
+            api.project.db.record_photo_catalog_delete_operation = original_record  # type: ignore[method-assign]
+
+        assert managed_path.exists()
+        assert managed_path.read_bytes() == b"managed original before rollback"
+        restored = api.project.db.photo_asset_by_path(str(managed_path))
+        assert restored and restored["assetId"] == asset["assetId"], restored
+        metadata = api.project.db.photo_asset_metadata_by_path(str(managed_path))
+        assert metadata["deletedAt"] == "2026-06-20T00:00:00Z", metadata
+        trash_root = api.project.db._photo_managed_original_trash_root()
+        if trash_root.exists():
+            assert not any(path.is_file() for path in trash_root.rglob("*"))
+        with api.project.db.connect() as conn:
+            journal_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS n FROM photo_operation_journal WHERE operation_type = 'catalog_permanent_delete'"
+                ).fetchone()["n"]
+            )
+            assert journal_count == 0
+    print("ok permanent delete rolls back catalog and managed trash on failure")
+
+
 def test_photo_permanent_delete_trashes_managed_original_and_undo_restores() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -19598,6 +19653,7 @@ if __name__ == "__main__":
     test_photo_utility_folders_hide_delete_and_restore()
     test_photo_recently_deleted_retention_cutoff_permanent_cleanup()
     test_photo_operation_journal_undoes_recoverable_permanent_delete()
+    test_photo_permanent_delete_rolls_back_catalog_and_managed_trash_on_failure()
     test_photo_permanent_delete_trashes_managed_original_and_undo_restores()
     test_photo_restore_rehearsal_recovers_catalog_after_managed_trash_cleanup()
     test_photo_operation_journal_undoes_visibility_actions()
