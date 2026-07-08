@@ -9,6 +9,7 @@ const path = require("path");
 const root = path.resolve(__dirname, "..");
 const source = fs.readFileSync(path.join(root, "src", "App.tsx"), "utf8");
 const appLocalStateSource = fs.readFileSync(path.join(root, "src", "appLocalState.ts"), "utf8");
+const appToolStateSource = fs.readFileSync(path.join(root, "src", "appToolState.ts"), "utf8");
 const appStorageOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-storage-diagnostics-")), "appStorageDiagnostics.cjs");
 const appSettingsOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-settings-")), "appSettings.cjs");
 const appLocalStateOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-local-state-")), "appLocalState.cjs");
@@ -239,6 +240,16 @@ run("app persisted scan and review state is extracted from App", () => {
   assert.doesNotMatch(source, /function readSavedReviewViews/);
   assert.match(appLocalStateSource, /export function normalizeScanQueue/);
   assert.match(appLocalStateSource, /export function normalizeSavedReviewViews/);
+});
+
+run("App tool result state lives outside the main component", () => {
+  assert.match(source, /useAppToolPanelState\(\)/);
+  assert.doesNotMatch(source, /const \[backupVerification, setBackupVerification\] = useState/);
+  assert.doesNotMatch(source, /const \[runtimeSelfTest, setRuntimeSelfTest\] = useState/);
+  assert.doesNotMatch(source, /const \[latencySamples, setLatencySamples\] = useState/);
+  assert.match(appToolStateSource, /export function useAppToolPanelState\(\)/);
+  assert.match(appToolStateSource, /const \[backupVerification, setBackupVerification\] = useState/);
+  assert.match(appToolStateSource, /const \[latencySamples, setLatencySamples\] = useState/);
 });
 
 run("app local scan state normalizers cap and repair stored rows", () => {
