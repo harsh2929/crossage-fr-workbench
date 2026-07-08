@@ -5670,6 +5670,73 @@ def test_photo_recovered_orphan_scan_surfaces_unindexed_managed_files() -> None:
     print("ok recovered orphan scan surfaces unindexed managed files")
 
 
+def test_photo_recovered_orphan_scan_streams_index_checks() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        db = WorkspaceDb(base / "workspace.db")
+        managed_root = base / "managed-root"
+        managed_root.mkdir()
+        indexed = managed_root / "indexed.jpg"
+        recorded = managed_root / "recorded.jpg"
+        orphan = managed_root / "orphan.jpg"
+        for path in (indexed, recorded, orphan):
+            path.write_bytes(path.name.encode("utf-8"))
+        now = "2026-07-08T00:00:00Z"
+        with db.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO photo_assets(asset_id, source_path, source_kind, added_at, updated_at)
+                VALUES('asset-indexed', ?, 'referenced', ?, ?)
+                """,
+                (str(indexed.resolve()), now, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO photo_import_sessions(
+                    import_id, source_label, root_path, status,
+                    started_at, completed_at, updated_at, failed_count
+                ) VALUES('previous-recovery', 'Previous recovery', ?, 'completed_with_errors', ?, ?, ?, 1)
+                """,
+                (str(managed_root.resolve()), now, now, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO photo_import_failures(
+                    failure_id, import_id, source_path, reason, recovered_path, created_at
+                ) VALUES('failure-recorded', 'previous-recovery', ?, 'Already recorded', ?, ?)
+                """,
+                (str(recorded.resolve()), str(recorded.resolve()), now),
+            )
+            statements: list[str] = []
+            conn.set_trace_callback(statements.append)
+            try:
+                result = db.scan_photo_recovered_orphans([managed_root], dry_run=True, conn=conn)
+            finally:
+                conn.set_trace_callback(None)
+
+        assert result["scannedFiles"] == 3, result
+        assert result["skippedExistingAssets"] == 1, result
+        assert result["skippedExistingFailures"] == 1, result
+        assert result["orphanCandidates"] == 1, result
+        assert result["failures"][0]["recoveredPath"] == str(orphan.resolve()), result
+        joined = "\n".join(statements)
+        assert "SELECT source_path FROM photo_assets" not in joined, joined
+        assert "SELECT source_path, recovered_path FROM photo_import_failures" not in joined, joined
+        assert "SELECT 1 FROM photo_assets WHERE source_path =" in joined, joined
+        assert "SELECT 1\n                FROM photo_import_failures" in joined, joined
+
+    source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "store" / "workspace_db.py").read_text(encoding="utf-8")
+    scan_method = source[
+        source.index("    def scan_photo_recovered_orphans("):source.index("    def import_photo_files(")
+    ]
+    assert "SELECT source_path FROM photo_assets" not in scan_method, scan_method
+    assert "SELECT source_path, recovered_path" not in scan_method, scan_method
+    assert ".fetchall()" not in scan_method, scan_method
+    assert "SELECT 1 FROM photo_assets WHERE source_path = ? LIMIT 1" in scan_method, scan_method
+    assert "FROM photo_import_failures" in scan_method, scan_method
+    print("ok recovered orphan scan streams indexed lookups")
+
+
 def test_photo_recovered_cleanup_policy_handles_stale_orphan_rows() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         api = _api(tmp)
@@ -19481,6 +19548,7 @@ if __name__ == "__main__":
     test_photo_import_failure_rerecord_preserves_first_failure_timestamp()
     test_photo_import_failure_retry_repairs_original_source()
     test_photo_recovered_orphan_scan_surfaces_unindexed_managed_files()
+    test_photo_recovered_orphan_scan_streams_index_checks()
     test_photo_recovered_cleanup_policy_handles_stale_orphan_rows()
     test_photo_recovered_cleanup_can_delete_expired_recovered_files_when_requested()
     test_photo_recently_saved_uses_app_source_provenance()

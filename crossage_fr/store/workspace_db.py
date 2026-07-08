@@ -262,6 +262,8 @@ class WorkspaceDb:
                 );
                 CREATE INDEX IF NOT EXISTS idx_photo_import_failures_import
                     ON photo_import_failures(import_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_photo_import_failures_source
+                    ON photo_import_failures(source_path);
                 CREATE INDEX IF NOT EXISTS idx_photo_import_failures_recovered
                     ON photo_import_failures(recovered_path);
                 CREATE TABLE IF NOT EXISTS photo_duplicate_groups (
@@ -8265,25 +8267,32 @@ class WorkspaceDb:
             clean_roots.append(resolved_root)
             root_paths.append(str(resolved_root))
 
-        # Stream the cursor (no .fetchall()) so we don't materialise the full
-        # row list on top of the membership set at 100k+ assets.
-        indexed_paths = {
-            norm_path(str(row["source_path"] or ""))
-            for row in conn.execute("SELECT source_path FROM photo_assets")
-        }
-        failure_rows = conn.execute(
-            """
-            SELECT source_path, recovered_path
-            FROM photo_import_failures
-            WHERE COALESCE(source_path, '') != '' OR COALESCE(recovered_path, '') != ''
-            """
-        ).fetchall()
-        existing_failure_paths: set[str] = set()
-        for row in failure_rows:
-            for value in (row["source_path"], row["recovered_path"]):
-                key = norm_path(str(value or ""))
-                if key:
-                    existing_failure_paths.add(key)
+        def asset_indexed(candidate_path: Path, candidate_key: str) -> bool:
+            if not candidate_key:
+                return False
+            row = conn.execute(
+                "SELECT 1 FROM photo_assets WHERE source_path = ? LIMIT 1",
+                (str(candidate_path),),
+            ).fetchone()
+            return row is not None
+
+        recorded_failure_paths: set[str] = set()
+
+        def failure_recorded(candidate_path: Path, candidate_key: str) -> bool:
+            if not candidate_key:
+                return False
+            if candidate_key in recorded_failure_paths:
+                return True
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM photo_import_failures
+                WHERE source_path = ? OR recovered_path = ?
+                LIMIT 1
+                """,
+                (str(candidate_path), str(candidate_path)),
+            ).fetchone()
+            return row is not None
 
         failures: list[dict[str, Any]] = []
         scanned_files = 0
@@ -8346,10 +8355,10 @@ class WorkspaceDb:
                         continue
                     scanned_files += 1
                     candidate_key = norm_path(candidate_path)
-                    if candidate_key in indexed_paths:
+                    if asset_indexed(candidate_path, candidate_key):
                         skipped_existing_assets += 1
                         continue
-                    if candidate_key in existing_failure_paths:
+                    if failure_recorded(candidate_path, candidate_key):
                         skipped_existing_failures += 1
                         continue
                     failure_id = self._photo_import_failure_id(import_id, str(candidate_path))
@@ -8363,7 +8372,7 @@ class WorkspaceDb:
                         "dismissedAt": "",
                     }
                     failures.append(failure)
-                    existing_failure_paths.add(candidate_key)
+                    recorded_failure_paths.add(candidate_key)
                     if not dry_run:
                         ensure_orphan_session()
                         self._record_photo_import_failure(
