@@ -14,11 +14,11 @@ from typing import Sequence
 
 import numpy as np
 
+from crossage_fr.vector_math import l2_normalize
+
 
 def _normalize_rows(values: np.ndarray) -> np.ndarray:
-    norms = np.linalg.norm(values, axis=1, keepdims=True)
-    norms[norms == 0.0] = 1.0
-    return values / norms
+    return l2_normalize(values, axis=1, dtype=np.float64)
 
 
 def self_consistency_weights(vectors: Sequence[Sequence[float]]) -> list[float]:
@@ -32,7 +32,7 @@ def self_consistency_weights(vectors: Sequence[Sequence[float]]) -> list[float]:
     norm = float(np.linalg.norm(mean_dir))
     if norm == 0.0:
         return [1.0] * arr.shape[0]
-    mean_dir = mean_dir / norm
+    mean_dir = l2_normalize(mean_dir, dtype=np.float64)
     return [max(0.0, float(row @ mean_dir)) for row in unit]
 
 
@@ -46,7 +46,7 @@ def template_cosine(vector: Sequence[float], template: Sequence[float]) -> float
     nb = float(np.linalg.norm(b))
     if na == 0.0 or nb == 0.0:
         return 0.0
-    return float((a / na) @ (b / nb))
+    return float(l2_normalize(a, dtype=np.float64) @ l2_normalize(b, dtype=np.float64))
 
 
 def weak_pooled_support(matched_cosine: float, template_cosine_value: float, *, drop: float = 0.10) -> bool:
@@ -84,4 +84,4 @@ def pool_template(
     if norm == 0.0:
         pooled = unit.mean(axis=0)
         norm = float(np.linalg.norm(pooled)) or 1.0
-    return (pooled / norm).astype("float32").tolist()
+    return l2_normalize(pooled, dtype=np.float32).tolist()

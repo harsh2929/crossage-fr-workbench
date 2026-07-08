@@ -20,6 +20,8 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from crossage_fr.vector_math import l2_normalize
+
 
 def _sigmoid(z: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-np.clip(z, -60.0, 60.0)))
@@ -193,11 +195,9 @@ class CohortNormalizer:
         pn = float(np.linalg.norm(probe))
         if pn == 0.0:
             return 0.0
-        probe = probe / pn
+        probe = l2_normalize(probe, dtype=np.float64)
         cohort = np.asarray(self.cohort, dtype="float64")
-        norms = np.linalg.norm(cohort, axis=1, keepdims=True)
-        norms[norms == 0.0] = 1.0
-        cohort = cohort / norms
+        cohort = l2_normalize(cohort, axis=1, dtype=np.float64)
         cohort_scores = (cohort @ probe).tolist()
         return as_norm_score(float(raw_cosine), cohort_scores, top_k=top_k)
 

@@ -26,6 +26,7 @@ from crossage_fr.model_manager import (
 from crossage_fr.models import EmbeddingResult
 from crossage_fr.runtime_env import env_flag
 from crossage_fr.platform_detect import build_platform_report, get_providers, provider_label, split_provider_config
+from crossage_fr.vector_math import l2_normalize
 
 
 _LOG = logging.getLogger(__name__)
@@ -44,21 +45,6 @@ class EmbeddingEngine(ABC):
 
     def embed_loaded_image_rescue(self, image: Image.Image, path: Path | None = None) -> list[EmbeddingResult]:
         return []
-
-
-def _l2_normalize(vector: np.ndarray) -> np.ndarray:
-    # Zero/NaN norm -> returned unchanged (a zero vector stays zero). This is the
-    # degenerate-input case only: such embeddings are rejected upstream by the
-    # quality gate (quality_from_norm==0) and finitude checks in vector_store, and
-    # every cosine consumer guards zero norms, so this never reaches matching.
-    # NOTE: siglip_engine._l2_normalize (epsilon-clip) and match/pooling
-    # (zero->1.0) are separate copies with the same effective result for all
-    # non-degenerate inputs; keep the guards in sync if this convention changes.
-    vector = vector.astype("float32", copy=False)
-    norm = float(np.linalg.norm(vector))
-    if norm == 0.0 or math.isnan(norm):
-        return vector
-    return vector / norm
 
 
 def _engine_error_detail(exc: Exception, limit: int = 240) -> str:
@@ -243,9 +229,9 @@ def flip_average(feat_a: np.ndarray, feat_b: np.ndarray) -> np.ndarray:
     ~0.1-0.4% lift on hard/cross-age sets that every SOTA eval uses. Each side is
     normalized before averaging so neither dominates; the result is unit-norm for cosine.
     """
-    a = _l2_normalize(np.asarray(feat_a, dtype="float32"))
-    b = _l2_normalize(np.asarray(feat_b, dtype="float32"))
-    return _l2_normalize(a + b)
+    a = l2_normalize(feat_a, dtype=np.float32)
+    b = l2_normalize(feat_b, dtype=np.float32)
+    return l2_normalize(a + b, dtype=np.float32)
 
 
 def plan_detect_sizes(
@@ -372,7 +358,7 @@ class FallbackEmbeddingEngine(EmbeddingEngine):
         vector = np.concatenate([low, color_hist, edge_values, detail_stats])
         if vector.shape[0] != 512:
             raise RuntimeError(f"Fallback feature vector has unexpected size {vector.shape[0]}")
-        return _l2_normalize(vector)
+        return l2_normalize(vector, dtype=np.float32)
 
     def _quality_score(self, image: Image.Image) -> float:
         gray = np.asarray(ImageOps.fit(image.convert("L"), (256, 256), Image.Resampling.LANCZOS)).astype("float32") / 255.0
@@ -622,7 +608,7 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
             except Exception:
                 pass
         self.rec_model.get(source_bgr, face)
-        return _l2_normalize(np.asarray(face.embedding, dtype="float32"))
+        return l2_normalize(face.embedding, dtype=np.float32)
 
     def _fiqa_score(self, source_bgr: np.ndarray, kps: np.ndarray | None) -> float | None:
         scorer = getattr(self, "fiqa", None)

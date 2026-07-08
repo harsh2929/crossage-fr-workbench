@@ -13,6 +13,7 @@ from crossage_fr.match.pooling import (
     template_cosine,
     weak_pooled_support,
 )
+from crossage_fr.vector_math import l2_normalize
 from crossage_fr.ingest.video_io import sharpest_index, variance_of_laplacian
 
 
@@ -72,6 +73,23 @@ def test_template_cosine_basic() -> None:
     assert abs(template_cosine(_unit((1, 2.0)), tpl)) < 1e-6         # orthogonal
 
 
+def test_shared_l2_normalize_handles_degenerate_vectors() -> None:
+    vector = l2_normalize([3.0, 4.0], dtype=np.float64)
+    assert np.allclose(vector, np.asarray([0.6, 0.8], dtype="float64"))
+    assert np.allclose(l2_normalize([0.0, 0.0], dtype=np.float64), np.zeros(2, dtype="float64"))
+    assert np.allclose(l2_normalize([float("nan"), 1.0], dtype=np.float64), np.zeros(2, dtype="float64"))
+
+    rows = l2_normalize(
+        np.asarray([[3.0, 4.0], [0.0, 0.0], [float("nan"), 1.0]], dtype="float64"),
+        axis=1,
+        dtype=np.float64,
+    )
+    assert np.allclose(rows[0], np.asarray([0.6, 0.8], dtype="float64"))
+    assert np.allclose(rows[1], np.zeros(2, dtype="float64"))
+    assert np.allclose(rows[2], np.zeros(2, dtype="float64"))
+    assert np.isfinite(rows).all()
+
+
 def main() -> None:
     test_pool_template_of_identical_vectors_is_that_vector()
     test_pool_template_downweights_an_outlier_vs_naive_mean()
@@ -79,6 +97,7 @@ def main() -> None:
     test_variance_of_laplacian_and_sharpest_index()
     test_weak_pooled_support_flags_outlier_lean()
     test_template_cosine_basic()
+    test_shared_l2_normalize_handles_degenerate_vectors()
     print("pooling units ok")
 
 

@@ -27,6 +27,7 @@ from PIL import Image
 from crossage_fr.ingest.image_io import load_image, sha256_file
 from crossage_fr.runtime_env import env_flag, env_value
 from crossage_fr.platform_detect import detect_platform, get_providers, split_provider_config
+from crossage_fr.vector_math import l2_normalize
 
 # SigLIP 2 preprocessing (preprocessor_config.json): 256x256, rescale 1/255,
 # normalize mean/std 0.5 -> pixels in [-1, 1]. Text: lowercase, GemmaTokenizer,
@@ -144,7 +145,7 @@ class _SemanticModel:
     def encode_images(self, images: list[Image.Image]) -> np.ndarray:
         batch = np.concatenate([self._preprocess_image(img) for img in images], axis=0)
         pooled = np.asarray(self.vision.run([self._vision_out], {self._vision_in: batch})[0], dtype=np.float32)
-        return _l2_normalize(pooled)
+        return l2_normalize(pooled, axis=-1, dtype=np.float32, eps=1e-12)
 
     def encode_text(self, text: str) -> np.ndarray:
         ids = list(self.tokenizer.encode(str(text).strip().lower()).ids)
@@ -152,7 +153,7 @@ class _SemanticModel:
             ids = ids[:_TEXT_MAX_TOKENS]
         feed = np.asarray([ids], dtype=np.int64)
         pooled = np.asarray(self.text.run([self._text_out], {self._text_in: feed})[0], dtype=np.float32)
-        return _l2_normalize(pooled)[0]
+        return l2_normalize(pooled, axis=-1, dtype=np.float32, eps=1e-12)[0]
 
     def _preprocess_image(self, image: Image.Image) -> np.ndarray:
         rgb = image.convert("RGB").resize((_IMAGE_SIZE, _IMAGE_SIZE), Image.Resampling.BILINEAR)
@@ -160,11 +161,6 @@ class _SemanticModel:
         arr = (arr - 0.5) / 0.5
         arr = np.transpose(arr, (2, 0, 1))
         return np.expand_dims(arr, axis=0).astype(np.float32)
-
-
-def _l2_normalize(matrix: np.ndarray) -> np.ndarray:
-    norms = np.linalg.norm(matrix, axis=-1, keepdims=True)
-    return matrix / np.clip(norms, 1e-12, None)
 
 
 def _pooler_output_name(session) -> str:
