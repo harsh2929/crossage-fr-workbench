@@ -282,4 +282,13 @@ run("localization checker scans SafeModeReview and gates uncovered literals", ()
   assert.ok(source.includes("`visible literal coverage ${language}`"));
 });
 
+run("playwright config fails e2e flakes instead of retry-masking them", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "playwright.config.ts"), "utf8");
+  assert.match(source, /retries:\s*0/);
+  assert.doesNotMatch(source, /retries:\s*1/);
+  assert.match(source, /trace:\s*"retain-on-failure"/);
+  assert.match(source, /screenshot:\s*"only-on-failure"/);
+  assert.match(source, /video:\s*"retain-on-failure"/);
+});
+
 console.log("\nall desktop script tests passed");
