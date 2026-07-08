@@ -4815,10 +4815,12 @@ export default function App() {
     setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped: localizeUiMessageValue(" from received files."), protected: localizeUiMessageValue(protectedText) }, `Found ${found} possible match${found === 1 ? "" : "es"} from received files.${protectedText}`);
   }
 
-  // External IPC can arrive between a render commit and React effects. Keep the
-  // event bridge pointed at the latest handlers synchronously during render.
-  appCommandHandlerRef.current = handleAppCommand;
-  externalOpenHandlerRef.current = handleExternalOpen;
+  // External IPC should only observe handlers from committed renders. Updating
+  // refs in an effect avoids exposing callbacks from a render React might abort.
+  useEffect(() => {
+    appCommandHandlerRef.current = handleAppCommand;
+    externalOpenHandlerRef.current = handleExternalOpen;
+  });
 
   function startReferenceFix(targetPersonName: string) {
     const target = safeText(targetPersonName).trim();

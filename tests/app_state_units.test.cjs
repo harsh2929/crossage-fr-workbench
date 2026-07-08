@@ -104,6 +104,18 @@ run("boot splash clock is scoped to BootScreen", () => {
   assert.doesNotMatch(loadingBlock, /bootCanvasRef/);
 });
 
+run("external event handler refs update after commit", () => {
+  assert.strictEqual((source.match(/appCommandHandlerRef\.current = handleAppCommand/g) || []).length, 1);
+  assert.strictEqual((source.match(/externalOpenHandlerRef\.current = handleExternalOpen/g) || []).length, 1);
+  const effectStart = source.indexOf("  // External IPC should only observe handlers from committed renders.");
+  assert.ok(effectStart >= 0, "missing external handler ref effect");
+  const effectEnd = source.indexOf("  function startReferenceFix", effectStart);
+  assert.ok(effectEnd > effectStart, "missing external handler ref effect end marker");
+  const effectBlock = source.slice(effectStart, effectEnd);
+  assert.match(effectBlock, /useEffect\(\(\) => \{[\s\S]*appCommandHandlerRef\.current = handleAppCommand;[\s\S]*externalOpenHandlerRef\.current = handleExternalOpen;[\s\S]*\}\);/);
+  assert.doesNotMatch(effectBlock, /synchronously during render/);
+});
+
 run("review page query signature excludes changing counts", () => {
   const signatureStart = source.indexOf("  const querySignature = useMemo(() => JSON.stringify({");
   assert.ok(signatureStart >= 0, "missing review query signature");
