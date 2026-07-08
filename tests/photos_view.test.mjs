@@ -6365,9 +6365,13 @@ run("Photos video time updates stay out of parent render state", () => {
   assert.doesNotMatch(source, /const \[lightboxVideoCurrentMs, setLightboxVideoCurrentMs\]/);
   assert.doesNotMatch(source, /setLightboxVideoCurrentMs/);
   assert.doesNotMatch(source, /onTimeUpdate=\{\(event\) => syncLightboxVideoState\(event\.currentTarget\)\}/);
-  const keydownEffect = source.match(/window\.addEventListener\("keydown", onKey\);[\s\S]*?`items` is intentionally omitted[\s\S]*?\}, \[[^\]]+\]\);/);
-  assert.ok(keydownEffect, "lightbox keydown effect should exist");
-  assert.doesNotMatch(keydownEffect[0], /lightboxVideoCurrentMs/);
+  assert.match(source, /const lightboxKeyHandlerRef = useRef<\(\(event: KeyboardEvent\) => void\) \| null>\(null\);/);
+  const keydownHandler = source.match(/lightboxKeyHandlerRef\.current = \(event: KeyboardEvent\) => \{[\s\S]*?\n  \};\n\n  useEffect\(\(\) => \{\n    const onKey = \(event: KeyboardEvent\) => \{/);
+  assert.ok(keydownHandler, "lightbox keydown handler ref should exist");
+  assert.doesNotMatch(keydownHandler[0], /lightboxVideoCurrentMs/);
+  const keydownEffect = source.match(/useEffect\(\(\) => \{\n    const onKey = \(event: KeyboardEvent\) => \{\n      lightboxKeyHandlerRef\.current\?\.\(event\);\n    \};\n    window\.addEventListener\("keydown", onKey\);\n    return \(\) => window\.removeEventListener\("keydown", onKey\);\n  \}, \[\]\);/);
+  assert.ok(keydownEffect, "lightbox keydown listener should be stable");
+  assert.doesNotMatch(keydownEffect[0], /lightItem|items|imageMarkupAnnotationsDraft|imageRetouchSpotsDraft/);
 });
 
 run("Photos bulk favorite shortcut uses batch metadata update", () => {

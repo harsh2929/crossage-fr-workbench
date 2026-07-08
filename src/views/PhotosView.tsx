@@ -2336,6 +2336,7 @@ export function PhotosView(props: {
   const selectionCountRoll = useCountRoll(selectedSources.size);
   const recentPhotoShortcutRef = useRef<{ shortcut: string; at: number }>({ shortcut: "", at: 0 });
   const photoShortcutKeyHandlerRef = useRef<((event: KeyboardEvent) => void) | null>(null);
+  const lightboxKeyHandlerRef = useRef<((event: KeyboardEvent) => void) | null>(null);
   const [lightbox, setLightbox] = useState<number | null>(null);
   // Wave P2 detail-open: zoom the lightbox image out of the tapped tile on open.
   const { playZoom: playFlipZoom } = useFlipZoom();
@@ -4028,133 +4029,134 @@ export function PhotosView(props: {
     return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
   }, []);
 
-  useEffect(() => {
+  lightboxKeyHandlerRef.current = (event: KeyboardEvent) => {
     if (lightbox === null) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setLightbox(null);
+    } else if (event.key === "Tab") {
+      const dialog = lightboxRef.current;
+      if (!dialog) return;
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>("button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])"))
+        .filter((node) => !node.hasAttribute("disabled") && node.offsetParent !== null);
+      if (!focusable.length) {
         event.preventDefault();
-        setLightbox(null);
-      } else if (event.key === "Tab") {
-        const dialog = lightboxRef.current;
-        if (!dialog) return;
-        const focusable = Array.from(dialog.querySelectorAll<HTMLElement>("button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])"))
-          .filter((node) => !node.hasAttribute("disabled") && node.offsetParent !== null);
-        if (!focusable.length) {
-          event.preventDefault();
-          dialog.focus();
-          return;
-        }
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        if (event.shiftKey && (!active || active === first || !dialog.contains(active))) {
-          event.preventDefault();
-          last.focus();
-        } else if (!event.shiftKey && active === last) {
-          event.preventDefault();
-          first.focus();
-        }
-      } else if (isPhotoShortcutTypingTarget(event.target)) {
+        dialog.focus();
         return;
       }
-      const keyboardLightItem = lightItem;
-      const keyboardLightItemUsesVideoControls = Boolean(
-        keyboardLightItem && (
-          isVideoMediaKind(keyboardLightItem.mediaKind)
-          || (String(keyboardLightItem.mediaKind || "").toLowerCase() === "live_photo" && photoLiveMotionUrl(keyboardLightItem))
-        )
-      );
-      const keyboardLightItemIsVideo = Boolean(keyboardLightItem && isVideoMediaKind(keyboardLightItem.mediaKind));
-      const keyboardCanSaveImageEdit = Boolean(keyboardLightItem && !keyboardLightItem.missingAt && !keyboardLightItemUsesVideoControls);
-      const keyboardCanEditVideo = Boolean(keyboardLightItem && keyboardLightItem.sourcePath && !keyboardLightItem.missingAt && keyboardLightItemIsVideo);
-      const keyboardVideoTransformActive = videoRotateDegrees !== 0 || videoCropAspect !== "none";
-      const keyboardImageTransformActive = imageRotateDegrees !== 0
-        || Math.abs(imageStraightenDegrees) >= 0.01
-        || (imageManualCropEnabled && photoManualCropBoxActive(imageManualCropBox))
-        || imageCropAspect !== "none"
-        || photoImageAdjustmentsActive(imageAdjustments)
-        || (photoImageFilterPresetActive(imageFilterPreset) && normalizePhotoImageFilterIntensity(imageFilterIntensity) > 0)
-        || (imageMarkupOpen && photoImageMarkupActive(imageMarkupAnnotationsDraft))
-        || (imageRetouchOpen && photoImageRetouchActive(imageRetouchSpotsDraft))
-        || imageFlipHorizontal
-        || imageFlipVertical;
-      const imageEditShortcut = photoImageEditShortcutForKeyboardEvent(event, {
-        canEdit: keyboardCanSaveImageEdit,
-        hasActiveEdit: keyboardImageTransformActive,
-        saving: photoEditStackSaving,
-      });
-      if (imageEditShortcut === "save") {
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      if (event.shiftKey && (!active || active === first || !dialog.contains(active))) {
         event.preventDefault();
-        void saveCurrentImageEditStack(keyboardLightItem);
-      } else if (imageEditShortcut === "rotate") {
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
         event.preventDefault();
-        cycleImageRotateEdit();
-      } else if (imageEditShortcut === "cycleCrop") {
-        event.preventDefault();
-        cycleImageCropAspectEdit();
-      } else if (imageEditShortcut === "flipHorizontal") {
-        event.preventDefault();
-        setImageFlipHorizontal((value) => !value);
-      } else if (imageEditShortcut === "flipVertical") {
-        event.preventDefault();
-        setImageFlipVertical((value) => !value);
-      } else {
-        const videoShortcut = photoVideoShortcutForKeyboardEvent(event, {
-          canEdit: keyboardCanEditVideo,
-          hasTransform: keyboardVideoTransformActive,
-        });
-        if (videoShortcut === "markTrimStart") {
-          event.preventDefault();
-          markVideoTrimStart();
-        } else if (videoShortcut === "markTrimEnd") {
-          event.preventDefault();
-          markVideoTrimEnd();
-        } else if (videoShortcut === "scrubBackward") {
-          event.preventDefault();
-          scrubLightboxVideo(currentLightboxVideoPositionMs() - 1000);
-        } else if (videoShortcut === "scrubForward") {
-          event.preventDefault();
-          scrubLightboxVideo(currentLightboxVideoPositionMs() + 1000);
-        } else if (videoShortcut === "rotateVideo") {
-          event.preventDefault();
-          cycleVideoRotateExport();
-        } else if (videoShortcut === "resetVideoTransform") {
-          event.preventDefault();
-          resetVideoExportTransform();
-        } else if ((event.key === " " || event.code === "Space") && lightboxVideoRef.current) {
-          const target = event.target instanceof Element ? event.target : null;
-          const interactiveTarget = Boolean(target?.closest("button, input, textarea, select, video, [role='button'], [role='slider']"));
-          if (interactiveTarget) return;
-          event.preventDefault();
-          void toggleLightboxVideoPlayback();
-        } else if (event.key.toLowerCase() === "m" && lightboxVideoRef.current) {
-          event.preventDefault();
-          toggleLightboxVideoMuted();
-        } else if (event.key === "ArrowLeft") {
-          event.preventDefault();
-          stepLightboxSelectionRef.current?.(-1);
-        } else if (event.key === "ArrowRight") {
-          event.preventDefault();
-          stepLightboxSelectionRef.current?.(1);
-        } else if (event.key === "+" || event.key === "=") {
-          event.preventDefault();
-          setLightboxZoom((value) => clampLightboxZoom(value + 0.2));
-        } else if (event.key === "-" || event.key === "_") {
-          event.preventDefault();
-          setLightboxZoom((value) => clampLightboxZoom(value - 0.2));
-        } else if (event.key === "0") {
-          event.preventDefault();
-          setLightboxZoom(1);
-          setLightboxPan({ x: 0, y: 0 });
-        }
+        first.focus();
       }
+    } else if (isPhotoShortcutTypingTarget(event.target)) {
+      return;
+    }
+    const keyboardLightItem = lightItem;
+    const keyboardLightItemUsesVideoControls = Boolean(
+      keyboardLightItem && (
+        isVideoMediaKind(keyboardLightItem.mediaKind)
+        || (String(keyboardLightItem.mediaKind || "").toLowerCase() === "live_photo" && photoLiveMotionUrl(keyboardLightItem))
+      )
+    );
+    const keyboardLightItemIsVideo = Boolean(keyboardLightItem && isVideoMediaKind(keyboardLightItem.mediaKind));
+    const keyboardCanSaveImageEdit = Boolean(keyboardLightItem && !keyboardLightItem.missingAt && !keyboardLightItemUsesVideoControls);
+    const keyboardCanEditVideo = Boolean(keyboardLightItem && keyboardLightItem.sourcePath && !keyboardLightItem.missingAt && keyboardLightItemIsVideo);
+    const keyboardVideoTransformActive = videoRotateDegrees !== 0 || videoCropAspect !== "none";
+    const keyboardImageTransformActive = imageRotateDegrees !== 0
+      || Math.abs(imageStraightenDegrees) >= 0.01
+      || (imageManualCropEnabled && photoManualCropBoxActive(imageManualCropBox))
+      || imageCropAspect !== "none"
+      || photoImageAdjustmentsActive(imageAdjustments)
+      || (photoImageFilterPresetActive(imageFilterPreset) && normalizePhotoImageFilterIntensity(imageFilterIntensity) > 0)
+      || (imageMarkupOpen && photoImageMarkupActive(imageMarkupAnnotationsDraft))
+      || (imageRetouchOpen && photoImageRetouchActive(imageRetouchSpotsDraft))
+      || imageFlipHorizontal
+      || imageFlipVertical;
+    const imageEditShortcut = photoImageEditShortcutForKeyboardEvent(event, {
+      canEdit: keyboardCanSaveImageEdit,
+      hasActiveEdit: keyboardImageTransformActive,
+      saving: photoEditStackSaving,
+    });
+    if (imageEditShortcut === "save") {
+      event.preventDefault();
+      void saveCurrentImageEditStack(keyboardLightItem);
+    } else if (imageEditShortcut === "rotate") {
+      event.preventDefault();
+      cycleImageRotateEdit();
+    } else if (imageEditShortcut === "cycleCrop") {
+      event.preventDefault();
+      cycleImageCropAspectEdit();
+    } else if (imageEditShortcut === "flipHorizontal") {
+      event.preventDefault();
+      setImageFlipHorizontal((value) => !value);
+    } else if (imageEditShortcut === "flipVertical") {
+      event.preventDefault();
+      setImageFlipVertical((value) => !value);
+    } else {
+      const videoShortcut = photoVideoShortcutForKeyboardEvent(event, {
+        canEdit: keyboardCanEditVideo,
+        hasTransform: keyboardVideoTransformActive,
+      });
+      if (videoShortcut === "markTrimStart") {
+        event.preventDefault();
+        markVideoTrimStart();
+      } else if (videoShortcut === "markTrimEnd") {
+        event.preventDefault();
+        markVideoTrimEnd();
+      } else if (videoShortcut === "scrubBackward") {
+        event.preventDefault();
+        scrubLightboxVideo(currentLightboxVideoPositionMs() - 1000);
+      } else if (videoShortcut === "scrubForward") {
+        event.preventDefault();
+        scrubLightboxVideo(currentLightboxVideoPositionMs() + 1000);
+      } else if (videoShortcut === "rotateVideo") {
+        event.preventDefault();
+        cycleVideoRotateExport();
+      } else if (videoShortcut === "resetVideoTransform") {
+        event.preventDefault();
+        resetVideoExportTransform();
+      } else if ((event.key === " " || event.code === "Space") && lightboxVideoRef.current) {
+        const target = event.target instanceof Element ? event.target : null;
+        const interactiveTarget = Boolean(target?.closest("button, input, textarea, select, video, [role='button'], [role='slider']"));
+        if (interactiveTarget) return;
+        event.preventDefault();
+        void toggleLightboxVideoPlayback();
+      } else if (event.key.toLowerCase() === "m" && lightboxVideoRef.current) {
+        event.preventDefault();
+        toggleLightboxVideoMuted();
+      } else if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        stepLightboxSelectionRef.current?.(-1);
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        stepLightboxSelectionRef.current?.(1);
+      } else if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        setLightboxZoom((value) => clampLightboxZoom(value + 0.2));
+      } else if (event.key === "-" || event.key === "_") {
+        event.preventDefault();
+        setLightboxZoom((value) => clampLightboxZoom(value - 0.2));
+      } else if (event.key === "0") {
+        event.preventDefault();
+        setLightboxZoom(1);
+        setLightboxPan({ x: 0, y: 0 });
+      }
+    }
+  };
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      lightboxKeyHandlerRef.current?.(event);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // `items` is intentionally omitted: the effect body reads `lightItem`
-    // (derived from items[lightbox]), which already triggers re-registration
-    // when the grid changes, so listing `items` too was redundant churn.
-  }, [lightbox, lightItem, imageRotateDegrees, imageStraightenDegrees, imageManualCropEnabled, imageManualCropBox, imageCropAspect, imageAdjustments, imageFilterPreset, imageFilterIntensity, imageMarkupOpen, imageMarkupAnnotationsDraft, imageRetouchOpen, imageRetouchSpotsDraft, imageFlipHorizontal, imageFlipVertical, photoEditStackSaving, videoRotateDegrees, videoCropAspect, videoTrimEndMs, videoTrimStartMs, lightboxVideoDurationMs]);
+  }, []);
 
   useEffect(() => {
     if (lightbox === null || !pendingInfoFocusRef.current) return;
