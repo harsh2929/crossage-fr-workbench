@@ -8729,14 +8729,25 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         now = now_dt.isoformat(timespec="seconds") + "Z"
         cutoff_dt = now_dt - timedelta(days=retention_days)
 
-        def norm_path(value: Any) -> str:
+        def indexed_photo_asset_exists(value: Any, conn: sqlite3.Connection) -> bool:
             text = str(value or "").strip()
             if not text:
-                return ""
+                return False
+            candidates = [text]
             try:
-                return os.path.normcase(str(Path(text).expanduser().resolve()))
+                resolved = str(Path(text).expanduser().resolve())
             except OSError:
-                return os.path.normcase(str(Path(text).expanduser()))
+                resolved = str(Path(text).expanduser())
+            if resolved not in candidates:
+                candidates.append(resolved)
+            for candidate in candidates:
+                row = conn.execute(
+                    "SELECT 1 FROM photo_assets WHERE source_path = ? LIMIT 1",
+                    (candidate,),
+                ).fetchone()
+                if row is not None:
+                    return True
+            return False
 
         def parse_dt(value: Any) -> datetime | None:
             text = str(value or "").strip()
@@ -8780,13 +8791,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
         with self.project.db.connect() as conn:
             self.project.db.backfill_photo_import_sessions_from_scan_runs(conn)
-            # Iterate the cursor lazily (no .fetchall()) so we don't materialise
-            # the full row list on top of the membership set at 100k+ assets.
-            indexed_paths = {
-                norm_path(row["source_path"])
-                for row in conn.execute("SELECT source_path FROM photo_assets")
-                if norm_path(row["source_path"]) and in_cleanup_scope(row["source_path"])
-            }
             rows = conn.execute(
                 """
                 SELECT failure_id, import_id, source_path, reason, recovered_path, created_at, dismissed_at
@@ -8799,17 +8803,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     )
                 ORDER BY created_at DESC, source_path ASC
                 """
-            ).fetchall()
+            )
             for row in rows:
                 failure_id = str(row["failure_id"] or "")
                 source_path = str(row["source_path"] or "")
                 recovered_path = str(row["recovered_path"] or "")
                 if not in_cleanup_scope(source_path, recovered_path):
                     continue
-                recovered_key = norm_path(recovered_path)
                 dismissed_at = str(row["dismissed_at"] or "")
                 active = not dismissed_at
-                indexed = bool(recovered_key and recovered_key in indexed_paths)
+                indexed = indexed_photo_asset_exists(recovered_path, conn)
                 exists = False
                 if recovered_path:
                     try:

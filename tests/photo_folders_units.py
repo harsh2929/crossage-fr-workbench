@@ -5794,6 +5794,14 @@ def test_photo_recovered_cleanup_policy_handles_stale_orphan_rows() -> None:
             if failure.get("dismissedAt")
         ]
         assert len(dismissed_rows) == 2, dismissed_rows
+
+    source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "api_server.py").read_text(encoding="utf-8")
+    cleanup_method = source[
+        source.index("    def photo_recovered_cleanup("):source.index("    def _apply_raw_preview_proxy_rebuilds(")
+    ]
+    assert "SELECT source_path FROM photo_assets" not in cleanup_method, cleanup_method
+    assert ".fetchall()" not in cleanup_method, cleanup_method
+    assert "SELECT 1 FROM photo_assets WHERE source_path = ? LIMIT 1" in cleanup_method, cleanup_method
     print("ok recovered cleanup policy handles stale orphan rows")
 
 
