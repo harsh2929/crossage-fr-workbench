@@ -864,6 +864,46 @@ def test_photo_schema_migrates_legacy_organization_tables_without_losing_rows() 
     print("ok legacy photo organization tables migrate without losing rows")
 
 
+def test_photo_timestamp_default_backfill_uses_static_sql() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        db = WorkspaceDb(base / "workspace.db")
+        photo = base / "legacy-empty-timestamps.jpg"
+        photo.write_bytes(b"legacy timestamp bytes")
+        with db.connect() as conn:
+            conn.execute("DELETE FROM photo_asset_metadata")
+            conn.execute("DELETE FROM photo_assets")
+            conn.execute(
+                "INSERT INTO photo_assets(asset_id, source_path, added_at, updated_at) VALUES(?, ?, ?, ?)",
+                ("asset-empty-timestamps", str(photo), "", ""),
+            )
+            conn.execute(
+                "INSERT INTO photo_asset_metadata(asset_id, updated_at) VALUES(?, ?)",
+                ("asset-empty-timestamps", ""),
+            )
+            db._backfill_photo_timestamp_defaults(conn)
+            asset_row = conn.execute(
+                "SELECT added_at, updated_at FROM photo_assets WHERE asset_id = ?",
+                ("asset-empty-timestamps",),
+            ).fetchone()
+            metadata_row = conn.execute(
+                "SELECT updated_at FROM photo_asset_metadata WHERE asset_id = ?",
+                ("asset-empty-timestamps",),
+            ).fetchone()
+        assert asset_row and str(asset_row["added_at"]) and str(asset_row["updated_at"]), asset_row
+        assert metadata_row and str(metadata_row["updated_at"]), metadata_row
+
+    source = Path(workspace_db_module.__file__).read_text(encoding="utf-8")
+    block = source[
+        source.index("    def _backfill_photo_timestamp_defaults("):source.index("    def _repair_photo_duplicate_group_summaries(")
+    ]
+    assert "f\"UPDATE" not in block
+    assert "assignments" not in block
+    assert "where_parts" not in block
+    assert "UPDATE photo_assets" in block and "UPDATE photo_asset_metadata" in block
+    print("ok photo timestamp defaults backfill uses static SQL")
+
+
 def test_photo_backfills_legacy_scan_rows_into_assets_sessions_and_failures() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
@@ -19580,6 +19620,7 @@ if __name__ == "__main__":
     test_scan_video_metadata_probe_populates_canonical_asset_and_search()
     test_photo_schema_migrates_legacy_album_rows_without_losing_covers()
     test_photo_schema_migrates_legacy_organization_tables_without_losing_rows()
+    test_photo_timestamp_default_backfill_uses_static_sql()
     test_photo_backfills_legacy_scan_rows_into_assets_sessions_and_failures()
     test_photo_import_session_backfill_skips_unchanged_scan_signature()
     test_photo_backfills_stream_without_full_manifest_or_asset_path_sets()

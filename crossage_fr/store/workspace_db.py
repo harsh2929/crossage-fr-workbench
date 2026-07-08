@@ -1246,46 +1246,149 @@ class WorkspaceDb:
 
     def _backfill_photo_timestamp_defaults(self, conn: sqlite3.Connection) -> None:
         now = now_iso()
-        for table, created_column, updated_column in (
-            ("photo_assets", "added_at", "updated_at"),
-            ("photo_import_sessions", "started_at", "updated_at"),
-            ("photo_import_failures", "created_at", ""),
-            ("photo_duplicate_groups", "created_at", "updated_at"),
-            ("photo_asset_metadata", "", "updated_at"),
-            ("photo_people_profiles", "created_at", "updated_at"),
-            ("photo_people_groups", "created_at", "updated_at"),
-            ("photo_pet_profiles", "created_at", "updated_at"),
-            ("photo_keywords", "created_at", "updated_at"),
-            ("photo_album_folders", "created_at", "updated_at"),
-            ("photo_albums", "created_at", "updated_at"),
-            ("photo_saved_filters", "created_at", "updated_at"),
-            ("photo_edit_stacks", "created_at", "updated_at"),
-            ("photo_edit_stack_versions", "created_at", "updated_at"),
+        for table, sql, args in (
+            (
+                "photo_assets",
+                """
+                UPDATE photo_assets
+                SET added_at = COALESCE(NULLIF(added_at, ''), ?),
+                    updated_at = COALESCE(NULLIF(updated_at, ''), ?)
+                WHERE added_at = '' OR updated_at = ''
+                """,
+                (now, now),
+            ),
+            (
+                "photo_import_sessions",
+                """
+                UPDATE photo_import_sessions
+                SET started_at = COALESCE(NULLIF(started_at, ''), ?),
+                    updated_at = COALESCE(NULLIF(updated_at, ''), ?)
+                WHERE started_at = '' OR updated_at = ''
+                """,
+                (now, now),
+            ),
+            (
+                "photo_import_failures",
+                """
+                UPDATE photo_import_failures
+                SET created_at = COALESCE(NULLIF(created_at, ''), ?)
+                WHERE created_at = ''
+                """,
+                (now,),
+            ),
+            (
+                "photo_duplicate_groups",
+                """
+                UPDATE photo_duplicate_groups
+                SET created_at = COALESCE(NULLIF(created_at, ''), ?),
+                    updated_at = COALESCE(NULLIF(updated_at, ''), ?)
+                WHERE created_at = '' OR updated_at = ''
+                """,
+                (now, now),
+            ),
+            (
+                "photo_asset_metadata",
+                """
+                UPDATE photo_asset_metadata
+                SET updated_at = COALESCE(NULLIF(updated_at, ''), ?)
+                WHERE updated_at = ''
+                """,
+                (now,),
+            ),
+            (
+                "photo_people_profiles",
+                """
+                UPDATE photo_people_profiles
+                SET created_at = COALESCE(NULLIF(created_at, ''), ?),
+                    updated_at = COALESCE(NULLIF(updated_at, ''), ?)
+                WHERE created_at = '' OR updated_at = ''
+                """,
+                (now, now),
+            ),
+            (
+                "photo_people_groups",
+                """
+                UPDATE photo_people_groups
+                SET created_at = COALESCE(NULLIF(created_at, ''), ?),
+                    updated_at = COALESCE(NULLIF(updated_at, ''), ?)
+                WHERE created_at = '' OR updated_at = ''
+                """,
+                (now, now),
+            ),
+            (
+                "photo_pet_profiles",
+                """
+                UPDATE photo_pet_profiles
+                SET created_at = COALESCE(NULLIF(created_at, ''), ?),
+                    updated_at = COALESCE(NULLIF(updated_at, ''), ?)
+                WHERE created_at = '' OR updated_at = ''
+                """,
+                (now, now),
+            ),
+            (
+                "photo_keywords",
+                """
+                UPDATE photo_keywords
+                SET created_at = COALESCE(NULLIF(created_at, ''), ?),
+                    updated_at = COALESCE(NULLIF(updated_at, ''), ?)
+                WHERE created_at = '' OR updated_at = ''
+                """,
+                (now, now),
+            ),
+            (
+                "photo_album_folders",
+                """
+                UPDATE photo_album_folders
+                SET created_at = COALESCE(NULLIF(created_at, ''), ?),
+                    updated_at = COALESCE(NULLIF(updated_at, ''), ?)
+                WHERE created_at = '' OR updated_at = ''
+                """,
+                (now, now),
+            ),
+            (
+                "photo_albums",
+                """
+                UPDATE photo_albums
+                SET created_at = COALESCE(NULLIF(created_at, ''), ?),
+                    updated_at = COALESCE(NULLIF(updated_at, ''), ?)
+                WHERE created_at = '' OR updated_at = ''
+                """,
+                (now, now),
+            ),
+            (
+                "photo_saved_filters",
+                """
+                UPDATE photo_saved_filters
+                SET created_at = COALESCE(NULLIF(created_at, ''), ?),
+                    updated_at = COALESCE(NULLIF(updated_at, ''), ?)
+                WHERE created_at = '' OR updated_at = ''
+                """,
+                (now, now),
+            ),
+            (
+                "photo_edit_stacks",
+                """
+                UPDATE photo_edit_stacks
+                SET created_at = COALESCE(NULLIF(created_at, ''), ?),
+                    updated_at = COALESCE(NULLIF(updated_at, ''), ?)
+                WHERE created_at = '' OR updated_at = ''
+                """,
+                (now, now),
+            ),
+            (
+                "photo_edit_stack_versions",
+                """
+                UPDATE photo_edit_stack_versions
+                SET created_at = COALESCE(NULLIF(created_at, ''), ?),
+                    updated_at = COALESCE(NULLIF(updated_at, ''), ?)
+                WHERE created_at = '' OR updated_at = ''
+                """,
+                (now, now),
+            ),
         ):
             if not self._table_exists(conn, table):
                 continue
-            assignments: list[str] = []
-            args: list[str] = []
-            where_parts: list[str] = []
-            if created_column:
-                assignments.append(f"{created_column} = COALESCE(NULLIF({created_column}, ''), ?)")
-                args.append(now)
-                where_parts.append(f"{created_column} = ''")
-            if updated_column:
-                assignments.append(f"{updated_column} = COALESCE(NULLIF({updated_column}, ''), ?)")
-                args.append(now)
-                where_parts.append(f"{updated_column} = ''")
-            if not assignments:
-                continue
-            # SAFE: table, created_column and updated_column come only from the
-            # hardcoded tuple above — never user input — so this f-string SQL is
-            # not injectable. Values (the timestamps) are still bound as params.
-            # Do NOT extend this loop to accept caller-supplied identifiers
-            # without an allow-list check.
-            conn.execute(
-                f"UPDATE {table} SET {', '.join(assignments)} WHERE {' OR '.join(where_parts)}",
-                tuple(args),
-            )
+            conn.execute(sql, args)
 
     def _repair_photo_duplicate_group_summaries(self, conn: sqlite3.Connection) -> None:
         if not self._table_exists(conn, "photo_duplicate_groups") or not self._table_exists(conn, "photo_duplicate_group_items"):
