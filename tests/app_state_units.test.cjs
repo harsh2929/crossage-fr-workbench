@@ -9,6 +9,7 @@ const path = require("path");
 const root = path.resolve(__dirname, "..");
 const source = fs.readFileSync(path.join(root, "src", "App.tsx"), "utf8");
 const appStorageOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-storage-diagnostics-")), "appStorageDiagnostics.cjs");
+const appSettingsOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-settings-")), "appSettings.cjs");
 const bridgeOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-bridge-validation-")), "bridgeValidation.cjs");
 const i18nOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-i18n-")), "i18n.cjs");
 
@@ -20,6 +21,14 @@ esbuild.buildSync({
   outfile: appStorageOutFile,
 });
 const appStorageDiagnostics = require(appStorageOutFile);
+esbuild.buildSync({
+  entryPoints: [path.join(root, "src", "appSettings.ts")],
+  bundle: true,
+  format: "cjs",
+  platform: "node",
+  outfile: appSettingsOutFile,
+});
+const appSettings = require(appSettingsOutFile);
 esbuild.buildSync({
   entryPoints: [path.join(root, "src", "bridgeValidation.ts")],
   bundle: true,
@@ -211,6 +220,99 @@ run("app localStorage helpers report failures instead of silent fallbacks", () =
   assert.match(source, /recordAppStorageIssue\("savedScanSources", "read"/);
   assert.match(source, /recordAppStorageIssue\("savedReviewViews", "write"/);
   assert.match(source, /window\.addEventListener\(APP_STORAGE_ISSUE_EVENT, handleStorageIssue\)/);
+});
+
+run("app settings profile logic is extracted from App", () => {
+  assert.match(source, /from "\.\/appSettings";/);
+  assert.doesNotMatch(source, /function coerceSettingsProfile/);
+  assert.doesNotMatch(source, /const settingsPresets: SettingsPreset/);
+  assert.doesNotMatch(source, /function settingsValuesEqual/);
+});
+
+run("app settings profile import clamps and normalizes hostile values", () => {
+  const current = {
+    ...appSettings.settingsPresets[0].values,
+    modelPack: "antelopev2",
+    mode: "recommended",
+  };
+  const imported = appSettings.coerceSettingsProfile({
+    modelPack: 123,
+    thresholds: {
+      confident: "9",
+      likely: "not-a-number",
+      relaxedChild: "-1",
+      qualityMin: "0.333",
+    },
+    clusterMinSize: "-5",
+    faceDetectorSize: "9999",
+    twoPassScan: "no",
+    verificationDetectorSize: "64",
+    learningMode: "auto-stage",
+    safeMode: "off",
+    safeModeThreshold: "-1",
+    safeModeProfile: 77,
+    storageBudgetBytes: String(99 * 1024 * 1024 * 1024 * 1024),
+    maxMediaFileBytes: "-10",
+    videoDecoder: {
+      ffmpegPath: 42,
+      ffprobePath: null,
+    },
+    reviewRules: {
+      autoRejectBelow: "2",
+      autoUncertainLowQuality: "yes",
+      autoRejectLowQualityVideo: "true",
+    },
+    scanExclusions: {
+      dirNames: "node_modules\nNODE_MODULES,dist",
+      pathKeywords: ["Private", "private", 99, "Screenshots"],
+      extensions: "jpg, JPG, png",
+      filePaths: Array.from({ length: 1005 }, (_, index) => `/tmp/${index}.jpg`),
+    },
+  }, current);
+
+  assert.strictEqual(imported.mode, "custom");
+  assert.strictEqual(imported.modelPack, "123");
+  assert.deepStrictEqual(imported.thresholds, {
+    confident: 1,
+    likely: current.thresholds.likely,
+    relaxedChild: 0,
+    qualityMin: 0.333,
+  });
+  assert.strictEqual(imported.clusterMinSize, 1);
+  assert.strictEqual(imported.faceDetectorSize, 2048);
+  assert.strictEqual(imported.twoPassScan, false);
+  assert.strictEqual(imported.verificationDetectorSize, 128);
+  assert.strictEqual(imported.learningMode, "auto_stage");
+  assert.strictEqual(imported.safeMode, false);
+  assert.strictEqual(imported.safeModeThreshold, 0);
+  assert.strictEqual(imported.safeModeProfile, "77");
+  assert.strictEqual(imported.storageBudgetBytes, 10 * 1024 * 1024 * 1024 * 1024);
+  assert.strictEqual(imported.maxMediaFileBytes, 0);
+  assert.deepStrictEqual(imported.videoDecoder, { ffmpegPath: "42", ffprobePath: "" });
+  assert.deepStrictEqual(imported.reviewRules, {
+    autoRejectBelow: 1,
+    autoUncertainLowQuality: true,
+    autoRejectLowQualityVideo: true,
+  });
+  assert.deepStrictEqual(imported.scanExclusions.dirNames, ["node_modules", "dist"]);
+  assert.deepStrictEqual(imported.scanExclusions.pathKeywords, ["Private", "Screenshots"]);
+  assert.deepStrictEqual(imported.scanExclusions.extensions, ["jpg", "png"]);
+  assert.strictEqual(imported.scanExclusions.filePaths.length, 1000);
+});
+
+run("app settings preset inference is unit-testable", () => {
+  const recommended = appSettings.settingsPresets.find((preset) => preset.key === "recommended").values;
+  assert.strictEqual(appSettings.inferSettingsMode(recommended), "recommended");
+  assert.strictEqual(appSettings.settingsValuesEqual(recommended, { ...recommended, safeModeThreshold: recommended.safeModeThreshold + 0.001 }), true);
+  assert.strictEqual(appSettings.inferSettingsMode({
+    ...recommended,
+    thresholds: { ...recommended.thresholds, confident: recommended.thresholds.confident + 0.02 },
+  }), "custom");
+  assert.deepStrictEqual(appSettings.parseListText("Alpha, alpha\nBeta"), ["Alpha", "Beta"]);
+  assert.strictEqual(appSettings.listText(["Alpha", "Beta"]), "Alpha, Beta");
+  assert.strictEqual(appSettings.normalizeLearningMode("OFF"), "off");
+  assert.strictEqual(appSettings.normalizeLearningMode("AUTO-STAGE"), "auto_stage");
+  assert.strictEqual(appSettings.normalizeLearningMode("surprise"), "manual");
 });
 
 run("i18n dev diagnostics warn before raw-key fallback", () => {
