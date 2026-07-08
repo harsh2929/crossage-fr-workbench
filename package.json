@@ -87,6 +87,7 @@
     "test:flip-zoom": "node tests/flip_zoom_units.test.mjs",
     "test:safety-overlay": "node tests/safety_overlay.test.mjs",
     "test:sensitive-collections": "node tests/sensitive_collections.test.mjs",
+    "test:photos-view-state": "playwright test tests/e2e/photos-view-state.spec.ts",
     "test:model-validation": "node desktop/scripts/run-python.cjs tests/model_validation_units.py",
     "test:external-open": "node tests/external_open.test.cjs",
     "test:onnx-training-row-split": "node desktop/scripts/run-python.cjs tests/onnx_training_row_split.py",
