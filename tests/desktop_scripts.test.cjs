@@ -1,9 +1,11 @@
 "use strict";
 
 const assert = require("assert");
+const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { spawnSync } = require("child_process");
 const { resolveMcpbRunner, runMcpbStep } = require("../desktop/scripts/build-mcp-bundle.cjs");
 const { isReleaseArtifactName, releaseArtifactFiles, checksumLines } = require("../desktop/scripts/create-release-artifacts.cjs");
 const { runFirstPython } = require("../desktop/scripts/python-runner.cjs");
@@ -180,14 +182,95 @@ run("release workflows verify drafts before publishing", () => {
 });
 
 run("backend packaging gate verifies sidecar checksum manifest", () => {
-  const builder = fs.readFileSync(path.join(__dirname, "..", "desktop", "scripts", "build-backend.cjs"), "utf8");
-  assert.ok(builder.includes("crossage-backend.sha256"));
-  assert.ok(builder.includes("crossage-backend-manifest.json"));
-  assert.ok(builder.includes("sha256File(exePath)"));
-  const checker = fs.readFileSync(path.join(__dirname, "..", "desktop", "scripts", "check-package-artifacts.cjs"), "utf8");
-  assert.ok(checker.includes("backendChecksumStatus"));
-  assert.ok(checker.includes("packaged backend checksum"));
-  assert.ok(checker.includes("sha256File(path.join(backendDist, backendExecutablePath))"));
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "vintrace-package-check-"));
+  const checkerSource = path.join(__dirname, "..", "desktop", "scripts", "check-package-artifacts.cjs");
+  const checkerPath = path.join(fixture, "desktop", "scripts", "check-package-artifacts.cjs");
+  const digest = (data) => crypto.createHash("sha256").update(data).digest("hex");
+  const writeJson = (file, value) => fs.writeFileSync(file, JSON.stringify(value, null, 2), "utf8");
+
+  function runChecker() {
+    const result = spawnSync(process.execPath, [checkerPath], {
+      cwd: fixture,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        VINTRACE_PACKAGE_REQUIRED: "1",
+        VINTRACE_PACKAGE_PLATFORM: "darwin",
+      },
+    });
+    return {
+      status: result.status,
+      output: JSON.parse(result.stdout),
+      stderr: result.stderr,
+    };
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(checkerPath), { recursive: true });
+    fs.copyFileSync(checkerSource, checkerPath);
+    fs.mkdirSync(path.join(fixture, "desktop", "assets"), { recursive: true });
+    fs.writeFileSync(path.join(fixture, "desktop", "main.cjs"), "");
+    fs.writeFileSync(path.join(fixture, "desktop", "preload.cjs"), "");
+    fs.writeFileSync(path.join(fixture, "desktop", "assets", "icon.png"), "");
+    writeJson(path.join(fixture, "package.json"), {
+      build: {
+        productName: "Vintrace",
+        appId: "com.vintrace.test",
+        extraResources: [
+          { to: "backend" },
+          { to: "models/insightface" },
+          { to: "mcp" },
+        ],
+      },
+    });
+
+    const dist = path.join(fixture, "dist");
+    fs.mkdirSync(dist, { recursive: true });
+    const releaseArtifacts = new Map([
+      ["Vintrace-1.0.0-arm64.dmg", "fake dmg"],
+      ["Vintrace-1.0.0-mac.zip", "fake zip"],
+      ["latest-mac.yml", "path: Vintrace-1.0.0-mac.zip\n"],
+    ]);
+    for (const [name, body] of releaseArtifacts) {
+      fs.writeFileSync(path.join(dist, name), body, "utf8");
+    }
+    fs.writeFileSync(
+      path.join(dist, "SHA256SUMS.txt"),
+      Array.from(releaseArtifacts)
+        .map(([name, body]) => `${digest(body)}  ${name}`)
+        .join("\n") + "\n",
+      "utf8"
+    );
+    writeJson(path.join(dist, "vintrace-sbom.json"), { packages: [] });
+    writeJson(path.join(dist, "vintrace-provenance.json"), { artifacts: [] });
+
+    const backendDist = path.join(fixture, "backend-dist");
+    const backendRelative = "crossage-backend/crossage-backend";
+    const backendPath = path.join(backendDist, backendRelative);
+    const backendBody = "fake backend executable";
+    fs.mkdirSync(path.dirname(backendPath), { recursive: true });
+    fs.writeFileSync(backendPath, backendBody, "utf8");
+    const backendDigest = digest(backendBody);
+    fs.writeFileSync(path.join(backendDist, "crossage-backend.sha256"), `${backendDigest}  ${backendRelative}\n`, "utf8");
+    writeJson(path.join(backendDist, "crossage-backend-manifest.json"), {
+      executable: backendRelative,
+      bytes: Buffer.byteLength(backendBody),
+      sha256: backendDigest,
+    });
+
+    const clean = runChecker();
+    assert.strictEqual(clean.status, 0, clean.stderr || JSON.stringify(clean.output, null, 2));
+    assert.strictEqual(clean.output.checks.find((check) => check.name === "packaged backend checksum").ok, true);
+
+    fs.appendFileSync(backendPath, "tampered");
+    const tampered = runChecker();
+    assert.strictEqual(tampered.status, 1, JSON.stringify(tampered.output, null, 2));
+    const backendCheck = tampered.output.checks.find((check) => check.name === "packaged backend checksum");
+    assert.strictEqual(backendCheck.ok, false);
+    assert.match(backendCheck.detail, /checksum or manifest does not match executable/);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 run("localization checker scans SafeModeReview and gates uncovered literals", () => {
