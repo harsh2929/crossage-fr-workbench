@@ -311,6 +311,7 @@ import {
   type LatencySample,
   type LatencySummary
 } from "./appToolState";
+import { useFolderTreeSelectionState } from "./appFolderTreeState";
 
 type UiMessageValue = string | number | { text: string | number; localize: true };
 type UiMessageValues = Record<string, UiMessageValue>;
@@ -1556,36 +1557,32 @@ export default function App() {
   const [modelDownloadProgress, setModelDownloadProgress] = useState<ModelDownloadProgress | null>(null);
   const [mediaActionProgress, setMediaActionProgress] = useState<MediaActionProgress | null>(null);
   const [folderAnalysis, setFolderAnalysis] = useState<FolderAnalysis | null>(null);
-  // Subfolder include/exclude picker — ephemeral per pick, never persisted. One
-  // set of state each for the Scan and Enroll folder pickers. The excluded sets
-  // hold only top-most excluded branch paths (see lib/folderTreeSelection).
-  const [scanFolderTree, setScanFolderTree] = useState<FolderTree | null>(null);
-  const [scanTreeLoading, setScanTreeLoading] = useState(false);
-  const [scanTreeError, setScanTreeError] = useState<string | null>(null);
-  const [scanRecursive, setScanRecursive] = useState(true);
-  const [scanExcludedDirs, setScanExcludedDirs] = useState<Set<string>>(() => new Set());
-  const [enrollFolderTree, setEnrollFolderTree] = useState<FolderTree | null>(null);
-  const [enrollTreeLoading, setEnrollTreeLoading] = useState(false);
-  const [enrollTreeError, setEnrollTreeError] = useState<string | null>(null);
-  const [enrollRecursive, setEnrollRecursive] = useState(true);
-  const [enrollExcludedDirs, setEnrollExcludedDirs] = useState<Set<string>>(() => new Set());
+  // Subfolder include/exclude picker state is ephemeral per selected folder.
+  const {
+    folderTree: scanFolderTree,
+    setFolderTree: setScanFolderTree,
+    loading: scanTreeLoading,
+    setLoading: setScanTreeLoading,
+    error: scanTreeError,
+    setError: setScanTreeError,
+    recursive: scanRecursive,
+    setRecursive: setScanRecursive,
+    excludedDirs: scanExcludedDirs,
+    setExcludedDirs: setScanExcludedDirs,
+  } = useFolderTreeSelectionState(scanFolder);
+  const {
+    folderTree: enrollFolderTree,
+    setFolderTree: setEnrollFolderTree,
+    loading: enrollTreeLoading,
+    setLoading: setEnrollTreeLoading,
+    error: enrollTreeError,
+    setError: setEnrollTreeError,
+    recursive: enrollRecursive,
+    setRecursive: setEnrollRecursive,
+    excludedDirs: enrollExcludedDirs,
+    setExcludedDirs: setEnrollExcludedDirs,
+  } = useFolderTreeSelectionState(enrollFolder);
   const folderTreeRequestId = useRef(0);
-  // Whenever the chosen folder changes — picked, typed, or set programmatically
-  // (camera/resume) — discard the previous folder's tree and exclusions. Without
-  // this, exclusions from folder A would be sent for a later folder B and the
-  // backend would (correctly) reject them as outside the chosen folder.
-  useEffect(() => {
-    setScanFolderTree(null);
-    setScanTreeError(null);
-    setScanExcludedDirs(new Set());
-    setScanRecursive(true);
-  }, [scanFolder]);
-  useEffect(() => {
-    setEnrollFolderTree(null);
-    setEnrollTreeError(null);
-    setEnrollExcludedDirs(new Set());
-    setEnrollRecursive(true);
-  }, [enrollFolder]);
   const [savedScanSources, setSavedScanSources] = useState<SavedScanSource[]>([]);
   const [scanQueue, setScanQueue] = useState<ScanQueueItem[]>([]);
   const [scanQueueRunning, setScanQueueRunning] = useState(false);

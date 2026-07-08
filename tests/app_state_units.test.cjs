@@ -10,6 +10,7 @@ const root = path.resolve(__dirname, "..");
 const source = fs.readFileSync(path.join(root, "src", "App.tsx"), "utf8");
 const appLocalStateSource = fs.readFileSync(path.join(root, "src", "appLocalState.ts"), "utf8");
 const appToolStateSource = fs.readFileSync(path.join(root, "src", "appToolState.ts"), "utf8");
+const appFolderTreeStateSource = fs.readFileSync(path.join(root, "src", "appFolderTreeState.ts"), "utf8");
 const appStorageOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-storage-diagnostics-")), "appStorageDiagnostics.cjs");
 const appSettingsOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-settings-")), "appSettings.cjs");
 const appLocalStateOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-local-state-")), "appLocalState.cjs");
@@ -250,6 +251,22 @@ run("App tool result state lives outside the main component", () => {
   assert.match(appToolStateSource, /export function useAppToolPanelState\(\)/);
   assert.match(appToolStateSource, /const \[backupVerification, setBackupVerification\] = useState/);
   assert.match(appToolStateSource, /const \[latencySamples, setLatencySamples\] = useState/);
+});
+
+run("App folder tree picker state lives outside the main component", () => {
+  assert.match(source, /from "\.\/appFolderTreeState";/);
+  assert.strictEqual((source.match(/useFolderTreeSelectionState\(/g) || []).length, 2);
+  assert.match(source, /useFolderTreeSelectionState\(scanFolder\)/);
+  assert.match(source, /useFolderTreeSelectionState\(enrollFolder\)/);
+  assert.doesNotMatch(source, /const \[scanFolderTree, setScanFolderTree\] = useState/);
+  assert.doesNotMatch(source, /const \[enrollFolderTree, setEnrollFolderTree\] = useState/);
+  assert.doesNotMatch(source, /setScanFolderTree\(null\);/);
+  assert.doesNotMatch(source, /setEnrollFolderTree\(null\);/);
+
+  assert.match(appFolderTreeStateSource, /export function useFolderTreeSelectionState\(folder: string\)/);
+  assert.match(appFolderTreeStateSource, /const \[folderTree, setFolderTree\] = useState<FolderTree \| null>\(null\);/);
+  assert.match(appFolderTreeStateSource, /const \[excludedDirs, setExcludedDirs\] = useState<Set<string>>\(\(\) => new Set\(\)\);/);
+  assert.match(appFolderTreeStateSource, /useEffect\(\(\) => \{[\s\S]*setFolderTree\(null\);[\s\S]*setError\(null\);[\s\S]*setExcludedDirs\(new Set<string>\(\)\);[\s\S]*setRecursive\(true\);[\s\S]*\}, \[folder\]\);/);
 });
 
 run("app local scan state normalizers cap and repair stored rows", () => {
