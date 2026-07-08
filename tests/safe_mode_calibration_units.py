@@ -152,6 +152,35 @@ binary_spec = safety_module._SafetyModelSpec(
 binary_pair = safety_model_for_logits(binary_spec, [1.0, 3.0, 2.0]).nsfw_logit_pair(None)
 check("binary calibration keeps nsfw_index semantics", binary_pair == [2.0, 3.0])
 
+mismatched_spec = safety_module._SafetyModelSpec(
+    path=Path("mismatched-test.onnx"),
+    model_name="mismatched-test",
+    source="test",
+    license="test",
+    input_size=384,
+    labels=("sfw", "maybe", "nsfw"),
+    nsfw_index=2,
+    mean=(0.5, 0.5, 0.5),
+    std=(0.5, 0.5, 0.5),
+    interpolation="bilinear",
+    threshold_hint="test",
+)
+mismatched_heuristic = safety_module.SafetyAssessment(
+    sensitive=False,
+    score=0.0,
+    reason="low sensitive-content signal",
+    skin_ratio=0.0,
+    lower_skin_ratio=0.0,
+    largest_region_ratio=0.0,
+)
+mismatched_assessment = safety_model_for_logits(mismatched_spec, [0.0, 5.0]).assess(
+    None,
+    threshold=0.5,
+    heuristic=mismatched_heuristic,
+)
+check("mismatched safety manifest clamps nsfw_index to model output", mismatched_assessment.model_score > 0.99)
+check("mismatched safety manifest does not emit nonexistent class labels", "nsfw" not in mismatched_assessment.labels)
+
 with tempfile.TemporaryDirectory() as tmp:
     registry = str(Path(tmp) / "registry")
     os.environ["VINTRACE_REGISTRY_HOME"] = registry
