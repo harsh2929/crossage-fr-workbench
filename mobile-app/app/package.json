@@ -1,0 +1,37 @@
+{
+  "name": "app",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "@op-engineering/op-sqlite": "^17.1.2",
+    "@shopify/flash-list": "2.0.2",
+    "expo": "~57.0.4",
+    "expo-asset": "~57.0.3",
+    "expo-build-properties": "~57.0.3",
+    "expo-file-system": "~57.0.0",
+    "expo-image": "~57.0.0",
+    "expo-image-manipulator": "~57.0.2",
+    "expo-media-library": "~57.0.1",
+    "expo-status-bar": "~57.0.0",
+    "react": "19.2.3",
+    "react-native": "0.86.0",
+    "react-native-executorch": "^0.9.2",
+    "react-native-executorch-expo-resource-fetcher": "^0.9.1"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web"
+  },
+  "private": true,
+  "op-sqlite": {
+    "sqlcipher": true,
+    "sqliteVec": true,
+    "fts5": true
+  }
+}

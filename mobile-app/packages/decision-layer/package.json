@@ -1,0 +1,18 @@
+{
+  "name": "@vintrace/decision-layer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The desktop face-match decision layer (AS-Norm, Platt, adaptive calibration, age-gap banding) ported to TypeScript for on-device, offline re-ranking. Conformance-tested against the Python reference.",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "fixtures": "cd ../../.. && PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 python3 tools/gen_decision_layer_fixtures.py"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.1",
+    "typescript": "^5.6.0"
+  }
+}

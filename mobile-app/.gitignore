@@ -1,0 +1,11 @@
+node_modules/
+.expo/
+dist/
+*.log
+.DS_Store
+ios/
+android/
+*.tsbuildinfo
+app/build.log
+app/metro.log
+docs-library-grid.png
