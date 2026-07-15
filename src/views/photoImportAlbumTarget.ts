@@ -8,6 +8,23 @@ export type PhotoImportAlbumOption = {
   name?: string;
 };
 
+export type PhotoImportAlbumCreateDraft = {
+  name: string;
+  albumKind: "manual";
+  description: string;
+  includePeople: string[];
+  excludePeople: string[];
+  rules: Record<string, never>;
+  coverSourcePath: string;
+};
+
+export type PhotoImportAlbumAttachDraft = {
+  targetId: string;
+  albumId: string;
+  sourcePaths: string[];
+  createAlbum: PhotoImportAlbumCreateDraft | null;
+};
+
 export function photoImportAlbumOptionId(album: PhotoImportAlbumOption): string {
   const directId = String(album.albumId || "").trim();
   if (directId) return directId;
@@ -45,4 +62,39 @@ export function photoImportResultFinalSourcePaths(result: PhotoImportResult | nu
     ? result.assets.map(photoAssetSourcePath).filter(Boolean)
     : [];
   return [...new Set(importedPaths.length ? importedPaths : assetPaths)];
+}
+
+export function photoImportAlbumAttachDraft(input: {
+  result: PhotoImportResult | null | undefined;
+  targetId: unknown;
+  newAlbumName?: unknown;
+}): PhotoImportAlbumAttachDraft | null {
+  const targetId = String(input.targetId || "").trim();
+  if (!targetId) return null;
+  const sourcePaths = photoImportResultFinalSourcePaths(input.result);
+  if (!sourcePaths.length) return null;
+  if (photoImportAlbumTargetNeedsName(targetId)) {
+    const name = String(input.newAlbumName || "").trim();
+    if (!name) return null;
+    return {
+      targetId,
+      albumId: "",
+      sourcePaths,
+      createAlbum: {
+        name,
+        albumKind: "manual",
+        description: "",
+        includePeople: [],
+        excludePeople: [],
+        rules: {},
+        coverSourcePath: sourcePaths[0] || "",
+      },
+    };
+  }
+  return {
+    targetId,
+    albumId: targetId,
+    sourcePaths,
+    createAlbum: null,
+  };
 }

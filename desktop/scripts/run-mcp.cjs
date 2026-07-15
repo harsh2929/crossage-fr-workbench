@@ -1,21 +1,17 @@
-const { spawnSync } = require("child_process");
-const fs = require("fs");
 const path = require("path");
+const { runFirstPython } = require("./python-runner.cjs");
 
 const root = path.resolve(__dirname, "..", "..");
-const venvPython =
-  process.platform === "win32"
-    ? path.join(root, ".venv", "Scripts", "python.exe")
-    : path.join(root, ".venv", "bin", "python3");
-const python = fs.existsSync(venvPython) ? venvPython : process.platform === "win32" ? "python" : "python3";
 
-const result = spawnSync(python, ["-m", "crossage_fr.mcp_server", ...process.argv.slice(2)], {
-  cwd: root,
+const result = runFirstPython({
+  repoRoot: root,
+  args: ["-m", "crossage_fr.mcp_server", ...process.argv.slice(2)],
+  extraEnv: { VINTRACE_REQUIRE_DB_ENCRYPTION: "1" },
   stdio: "inherit",
-  env: {
-    ...process.env,
-    PYTHONPATH: root
-  }
+  onWarning: (message) => console.error(message)
 });
 
-process.exit(result.status ?? 1);
+if (!result.ran) {
+  console.error("Could not find Python. Create .venv or set PYTHON.");
+}
+process.exit(result.exitCode);

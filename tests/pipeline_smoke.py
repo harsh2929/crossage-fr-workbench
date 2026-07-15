@@ -240,9 +240,10 @@ def assert_pipeline_state() -> None:
     assert state["config"]["safeMode"] is True
     assert all("memoryPressure" in event for event in progress_events)
     assert all("processMemoryBytes" in event for event in progress_events)
-    assert any(event["phase"] == "candidate" and "state" in event for event in progress_events)
-    assert any(event["phase"] == "complete" and "state" in event for event in progress_events)
-    assert all("state" not in event for event in progress_events if event["phase"] in {"started", "processing", "processed", "protected"})
+    assert any(event["phase"] == "candidate" for event in progress_events)
+    assert all("state" not in event for event in progress_events if event["phase"] == "candidate")
+    assert any(event["phase"] == "complete" and "state" not in event for event in progress_events)
+    assert all("state" not in event for event in progress_events if event["phase"] != "cancelled")
 
 
 def assert_memory_pressure_progress() -> None:
@@ -287,6 +288,12 @@ def assert_video_pipeline_state() -> None:
     assert scanned["metrics"]["processed"] == 1
     assert scanned["metrics"]["videoFiles"] == 1
     assert scanned["metrics"]["videoFrames"] >= 2
+    assert scanned["metrics"]["videoTrackObservations"] >= 2
+    assert scanned["metrics"]["videoTracks"] >= 1
+    assert scanned["metrics"]["videoTrackTemplates"] >= 1
+    assert scanned["metrics"]["videoTrackKeyframes"] >= 2
+    assert scanned["metrics"]["videoTrackMatches"] >= 1
+    assert scanned["metrics"]["videoTracks"] < scanned["metrics"]["videoTrackObservations"]
     assert scanned["state"]["scanTotals"]["videoFiles"] == 1
     assert scanned["state"]["scanTotals"]["videoFrames"] >= 2
     video_candidates = [
@@ -296,6 +303,10 @@ def assert_video_pipeline_state() -> None:
     ]
     assert video_candidates, "Video scan should queue at least one candidate with video metadata."
     assert all(candidate["videoTimestampMs"] is not None for candidate in video_candidates)
+    assert all(candidate["videoTrackId"] for candidate in video_candidates)
+    assert all(candidate["videoTrackFrameCount"] >= 2 for candidate in video_candidates)
+    assert all(1 < len(candidate["videoTrackKeyframeIndices"]) <= 5 for candidate in video_candidates)
+    assert all("video-track-template" in candidate["riskFlags"] for candidate in video_candidates)
     assert all(Path(candidate["sourcePath"]).exists() for candidate in video_candidates)
 
 

@@ -1,5 +1,9 @@
 export type PhotoDateViewMode = "all" | "years" | "months" | "days" | "recentDays";
 
+export function isPhotoDateBucketViewMode(value: unknown): value is Exclude<PhotoDateViewMode, "all"> {
+  return value === "years" || value === "months" || value === "days" || value === "recentDays";
+}
+
 export interface PhotoDateItemLike {
   sourcePath?: unknown;
   title?: unknown;
@@ -38,6 +42,16 @@ export interface PhotoDateBucket<T extends PhotoDateItemLike> {
   coverItem: T;
   items: T[];
 }
+
+export type PhotoDateBucketCard = {
+  key: string;
+  label: string;
+  count: number;
+  coverUrl: string;
+  coverTitle: string;
+  coverReason: string;
+  summaryBadges: string[];
+};
 
 const MONTH_NAMES = [
   "January",

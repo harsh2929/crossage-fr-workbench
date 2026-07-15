@@ -11,10 +11,17 @@ Run: PYTHONPATH=. .venv/bin/python tests/scoring_units.py
 from __future__ import annotations
 
 from crossage_fr.config import Thresholds
-from crossage_fr.match import accuracy_at_threshold, accuracy_from_label_rows, valid_candidate, valid_reference
+from crossage_fr.match import apply_cohort_separation, accuracy_at_threshold, accuracy_from_label_rows, valid_candidate, valid_reference
 from crossage_fr.match.age_gap import CROSS_AGE_GAP_FLAG, ESTIMATED_BAND, compute_age_gap
 from crossage_fr.match.review_order import review_lane, review_priority
-from crossage_fr.match.scoring import band_for_score, finite_number, group_hits, valid_vector
+from crossage_fr.match.scoring import (
+    SYNTHETIC_AGE_EVIDENCE_FLAG,
+    band_for_score,
+    finite_number,
+    group_hits,
+    pose_review_supported,
+    valid_vector,
+)
 from crossage_fr.models import ReferenceFace, ReviewCandidate
 from crossage_fr.store import SearchHit
 
@@ -68,6 +75,57 @@ def _ref_dated(ref_id: str, name: str, capture_date: str | None) -> ReferenceFac
     )
 
 
+def _synthetic_ref(ref_id: str, name: str) -> ReferenceFace:
+    return ReferenceFace(
+        ref_id=ref_id,
+        person_name=name,
+        age_bucket="adult",
+        source_path=f"synthetic://{ref_id}",
+        capture_date=None,
+        quality=0.8,
+        model_name="m",
+        vector=[0.0] * 512,
+        capture_date_provenance="synthetic-age-trajectory",
+        reference_kind="synthetic-age-trajectory",
+        synthetic_method_version="test-v1",
+        synthetic_target_age_bucket="adult",
+        parent_ref_ids=["parent-a", "parent-b"],
+        derivation_provenance={"test": True},
+    )
+
+
+def test_synthetic_age_evidence_requires_independent_confident_score() -> None:
+    thresholds = Thresholds()
+    refs = {
+        "real": _ref("real", "Alice"),
+        "synthetic": _synthetic_ref("synthetic", "Alice"),
+    }
+    weak_only = group_hits([SearchHit(item_id="synthetic", score=thresholds.confident - 0.001)], refs, thresholds)
+    assert weak_only is None
+
+    real_only = group_hits([SearchHit(item_id="real", score=0.23)], refs, thresholds)
+    weak_augmented = group_hits(
+        [SearchHit(item_id="real", score=0.23), SearchHit(item_id="synthetic", score=0.39)],
+        refs,
+        thresholds,
+    )
+    assert weak_augmented == real_only
+    assert not pose_review_supported(
+        [SearchHit(item_id="real", score=0.18), SearchHit(item_id="synthetic", score=0.19)],
+        refs,
+        thresholds,
+        "profile",
+    )
+
+    strong = group_hits(
+        [SearchHit(item_id="real", score=0.43), SearchHit(item_id="synthetic", score=0.45)],
+        refs,
+        thresholds,
+    )
+    assert strong is not None and strong.best_ref_id == "synthetic"
+    assert SYNTHETIC_AGE_EVIDENCE_FLAG in strong.flags
+
+
 def test_age_consistent_same_era_support_is_additive_and_degrade_safe() -> None:
     th = Thresholds()
     refs = {"r1": _ref_dated("r1", "Alice", "2010-07-01")}
@@ -98,6 +156,20 @@ def test_misaligned_face_cannot_be_confident_but_cross_age_unharmed() -> None:
     # faces are often the hardest to align).
     relaxed = group_hits([SearchHit(item_id="r1", score=0.22)], refs, th, candidate_align_error=0.30)
     assert "alignment-suspect" not in relaxed.flags
+
+
+def test_precomputed_symmetric_cohort_guard_is_precision_only() -> None:
+    refs = {"r1": _ref("r1", "Alice")}
+    thresholds = Thresholds()
+    decision = group_hits([SearchHit(item_id="r1", score=0.50)], refs, thresholds)
+    assert decision is not None and decision.band == "confident"
+    demoted = apply_cohort_separation(decision, thresholds, 0.2)
+    assert demoted.band == "likely"
+    assert "low-cohort-separation" in demoted.flags
+    assert apply_cohort_separation(decision, thresholds, 0.8) == decision
+    relaxed = group_hits([SearchHit(item_id="r1", score=0.22)], refs, thresholds)
+    assert relaxed is not None
+    assert apply_cohort_separation(relaxed, thresholds, -5.0) == relaxed
 
 
 def test_weak_pooled_support_cannot_be_confident_but_cross_age_unharmed() -> None:
@@ -238,6 +310,12 @@ def test_valid_reference_and_candidate() -> None:
         best_ref_path="/r.jpg", score=0.7, band="likely", quality=0.8, model_name="m", status="pending",
     )
     assert valid_candidate(good_cand) is True
+    invalid_probability = ReviewCandidate(
+        candidate_id="c2", source_path="/x.jpg", person_name="Alice", best_ref_id="r1",
+        best_ref_path="/r.jpg", score=0.7, band="likely", quality=0.8, model_name="m",
+        calibrated_probability=float("inf"), calibration_source="adaptive-linear",
+    )
+    assert valid_candidate(invalid_probability) is False
     bad_cand = ReviewCandidate(
         candidate_id="c1", source_path="/x.jpg", person_name="Alice", best_ref_id="r1",
         best_ref_path="/r.jpg", score=float("nan"), band="likely", quality=0.8, model_name="m", status="bogus",
@@ -265,12 +343,14 @@ def test_multi_reference_support_bonus_uses_support_count() -> None:
 
 
 def main() -> None:
+    test_synthetic_age_evidence_requires_independent_confident_score()
     test_multi_reference_support_bonus_uses_support_count()
     test_review_lane_abstains_information_limited_faces()
     test_review_priority_orders_surface_then_review_then_low_info()
     test_accuracy_from_label_rows()
     test_age_consistent_same_era_support_is_additive_and_degrade_safe()
     test_misaligned_face_cannot_be_confident_but_cross_age_unharmed()
+    test_precomputed_symmetric_cohort_guard_is_precision_only()
     test_weak_pooled_support_cannot_be_confident_but_cross_age_unharmed()
     test_low_cohort_separation_cannot_be_confident_but_cross_age_unharmed()
     test_low_quality_crop_cannot_be_confident_but_cross_age_unharmed()

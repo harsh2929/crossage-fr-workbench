@@ -7,6 +7,7 @@ __pycache__/
 
 # Build output
 dist/
+mobile-dist/
 backend-dist/
 build/
 pyinstaller/
@@ -26,6 +27,15 @@ benchmarks/public-data/prepared/*/
 benchmarks/public-data/prepared/*.json
 benchmarks/public-data/workspaces/
 benchmarks/results/
+!benchmarks/results/
+benchmarks/results/*
+!benchmarks/results/synthetic-enrollment-screen-benchmark-20260712.json
+!benchmarks/results/global-clustering-benchmark-20260712.json
+!benchmarks/results/ppocrv6-benchmark-20260712.json
+!benchmarks/results/photo-vlm-benchmark-20260712.json
+!benchmarks/results/photo-agent-benchmark-20260712.json
+!benchmarks/results/multimodal-safety-benchmark-20260713.json
+!benchmarks/results/multimodal-safety-low-memory-negative-20260713.json
 
 # Local workspace/runtime state
 crossage_project/
@@ -60,12 +70,20 @@ models/depth/*
 # Runtime / generated workspace artifacts (the repo root doubles as a dev
 # workspace). These are written by the app at runtime, not source.
 workspace.sqlite3
+workspace.sqlite3-wal
+workspace.sqlite3-shm
+.vintrace-db-key.json
+references.json
+review_candidates.json
+reference-vectors.npz
+reference-vectors.npz.faiss
 .vintrace-workspace.json
 audit_log.jsonl
 accuracy_validation_history.json
 validation-packs/
 previews/
 video-frames/
+.artifacts/
 
 # Downloaded benchmark datasets (multi-GB; see benchmarks/README.md to fetch).
 # benchmarks/evidence/ IS tracked (consumed by release:check).
@@ -74,3 +92,6 @@ benchmarks/public-data/
 # Playwright test output
 test-results/
 playwright-report/
+
+# Model weights — kept out of git history (use Git LFS or release assets)
+models/

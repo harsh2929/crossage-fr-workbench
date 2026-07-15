@@ -1,0 +1,224 @@
+.photo-compare-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(10, 12, 16, 0.82);
+}
+
+.photo-compare-dialog {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(1500px, 100%);
+  height: min(940px, 100%);
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: #17191e;
+  color: #f7f7f8;
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.48);
+}
+
+.photo-compare-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-height: 54px;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: #202329;
+}
+
+.photo-compare-toolbar h2 {
+  margin: 0 4px 0 0;
+  font-size: 16px;
+  line-height: 1.2;
+  letter-spacing: 0;
+}
+
+.photo-compare-mode {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+}
+
+.photo-compare-mode button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.68);
+  box-shadow: none;
+}
+
+.photo-compare-mode button[aria-selected="true"] {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+
+.photo-compare-toolbar .photo-pro-curation-controls {
+  flex: 1 1 auto;
+}
+
+.photo-compare-toolbar .photo-pro-rating,
+.photo-compare-toolbar .photo-pro-color-labels,
+.photo-compare-toolbar .photo-pro-pick-status {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.photo-compare-toolbar .photo-pro-icon-button,
+.photo-compare-toolbar .photo-pro-color-button,
+.photo-compare-close {
+  color: rgba(255, 255, 255, 0.76);
+}
+
+.photo-compare-toolbar .photo-pro-icon-button.star {
+  color: #ffd15c;
+}
+
+.photo-compare-close {
+  margin-left: auto;
+}
+
+.photo-compare-grid {
+  display: grid;
+  min-height: 0;
+  gap: 8px;
+  padding: 8px;
+  overflow: auto;
+  background: #0e1014;
+}
+
+.photo-compare-grid.compare {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.photo-compare-grid.survey {
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-auto-rows: minmax(220px, 1fr);
+}
+
+.photo-compare-tile {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 2px solid transparent;
+  border-radius: 6px;
+  background: #181b20;
+  color: #f7f7f8;
+  box-shadow: none;
+  text-align: left;
+}
+
+.photo-compare-tile:hover,
+.photo-compare-tile.active {
+  border-color: #4ca2ef;
+}
+
+.photo-compare-tile.rejected .photo-compare-media {
+  opacity: 0.58;
+}
+
+.photo-compare-media {
+  display: grid;
+  min-height: 0;
+  place-items: center;
+  overflow: hidden;
+  background: #090a0d;
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.photo-compare-media img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+}
+
+.photo-compare-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  min-height: 38px;
+  padding: 7px 9px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.photo-compare-meta > strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-compare-badges,
+.photo-compare-badges > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.photo-compare-badges {
+  flex: 0 0 auto;
+  color: #ffd15c;
+  font-size: 11px;
+}
+
+.photo-compare-badges .pick { color: #61cf7d; }
+.photo-compare-badges .reject { color: #ff737b; }
+
+.photo-compare-footer {
+  display: flex;
+  justify-content: flex-end;
+  min-height: 30px;
+  padding: 6px 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 11px;
+}
+
+@media (max-width: 720px) {
+  .photo-compare-backdrop {
+    padding: 6px;
+  }
+
+  .photo-compare-dialog {
+    width: 100%;
+    height: 100%;
+  }
+
+  .photo-compare-grid.compare {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: repeat(2, minmax(260px, 1fr));
+  }
+
+  .photo-compare-grid.survey {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-auto-rows: minmax(190px, 1fr);
+  }
+
+  .photo-compare-toolbar .photo-pro-curation-controls {
+    flex-basis: 100%;
+    order: 3;
+  }
+}

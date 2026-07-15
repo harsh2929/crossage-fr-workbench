@@ -4,7 +4,7 @@ Deep-research-backed plan to integrate best-in-class open-source models for ever
 
 > Status legend: **INTEGRATED** = working offline today; **ACTIVATE** = code/seam ready (or trivially addable), needs a one-time weight/pip fetch on an online build machine; **N/A here** = blocked by the offline sandbox (no network) — run the install on an online host.
 
-## Integration status (updated 2026-06-30, after network was enabled)
+## Integration status (updated 2026-07-12)
 
 Validated end-to-end with the **actual open-source weights** running locally on onnxruntime-CPU, fully offline (socket-blocked tests). Each engine mirrors the `crossage_fr/ingest/safety.py` seam (disk discovery, lru session, in-code SHA-256 pin, graceful degradation); weights are vendored under `models/<role>/` (gitignored, `README.md` per pack with source URL + sha256), runtime deps pinned in `requirements*.txt`.
 
@@ -12,7 +12,7 @@ Validated end-to-end with the **actual open-source weights** running locally on 
 |---|---|---|---|---|
 | rawpy DHT+sRGB | RAW fidelity | **INTEGRATED** | `ingest/image_io._raw_postprocess_kwargs` | `tests/photo_raw_fidelity_units.py` |
 | reverse_geocode | offline reverse geocode | **INTEGRATED** | `api_server._photo_reverse_geocode_offline_lookup` | `tests/photo_offline_reverse_geocode_units.py` |
-| RapidOCR (PP-OCRv5) | on-device OCR | **INTEGRATED** | `api_server._photo_ocr_text_from_rapidocr` | `tests/photo_rapidocr_units.py` |
+| RapidOCR 3.9.1 (PP-OCRv6 small) | on-device OCR | **INTEGRATED + RELEASE-VERIFIED** | `photo_ocr.run_ppocrv6` -> `api_server._photo_ocr_text_from_rapidocr` | `tests/photo_rapidocr_units.py` |
 | BiRefNet_lite | subject cutout / bg removal | **INTEGRATED** | `ingest/matting.py` → `export_photo_subject_cutout` | `tests/photo_subject_cutout_units.py` |
 | SigLIP 2 | natural-language search | **INTEGRATED** | `embed/siglip_engine.py` → `semantic_search_photos` | `tests/photo_semantic_search_units.py` |
 | Depth-Anything-V2 | depth / portrait blur | **INTEGRATED** | `depth/engine.py` → `export_photo_portrait_blur` | `tests/photo_depth_units.py` |
@@ -29,6 +29,12 @@ Validated end-to-end with the **actual open-source weights** running locally on 
 
 ## Per-category SOTA picks + activation
 ### On-device OCR / text + region detection
+- **Current implementation (2026-07-12):** RapidOCR 3.9.1 with the PP-OCRv6 small multilingual detector/recognizer and orientation classifier, all exact-version/hash/size/license pinned under `models/ocr`. CPU ONNX inference uses explicit local paths, no runtime downloads, and Tesseract only as an availability fallback. Windows-folder persistence/search, multilingual offline inference, tamper handling, benchmark gates, and a frozen `/tmp` run are recorded in `docs/2026-07-12-cutting-edge-expansion-implementation-ledger.md#pp-ocrv6-completion-evidence-photo-01`.
+
+#### Superseded PP-OCRv5 research snapshot
+
+The notes below describe the 2026-06-30 selection. They are retained as historical decision context and are not the shipped dependency/model contract.
+
 - **Pick:** RapidOCR (RapidAI/RapidOCR) running the PP-OCRv5 ONNX model set via the onnxruntime backend. Concretely: pip package `rapidocr` (>=3.x, latest v3.9.0 June 2026) with `onnxruntime`, OR the still-maintained `rapidocr-onnxruntime` (1.4.4, Jan 2025) for a frozen-pin build. Models: PP-OCRv5_mobile_det + PP-OCRv5_mobile_rec + PP-LCNet text-direction cls, all in ONNX, sourced from RapidAI/PaddlePaddle on HuggingFace/ModelScope. Repo: https://github.com/RapidAI/RapidOCR (Apache-2.0).
 - **Why best (verified):** Adversarially verified across independent sources. ACCURACY: (1) Official PaddleOCR PP-OCRv5 docs — mobile det F1 0.770 vs v4 0.624; mobile rec weighted accuracy 0.8015 vs v4 0.5301; server rec 0.8401; handwritten-English det 0.841 vs v4's 0.249. (2) Baidu HuggingFace blog — PP-OCRv5 tops OmniDocBench 1-edit-distance over Gemini 2.5 Pro / Qwen2.5-VL / GPT-4o at 0.07B params. (3) Independent CodeSOTA (Apr 2026) invoice test — PaddleOCR family: 0 character errors vs Tesseract 5.5's 3 character errors, confirming the accuracy edge. PERFORMANCE/LATENCY (CPU, the relevant axis): PP-OCRv5 mobile ~1.
 - **Format/runtime:** ONNX models executed by onnxruntime (CPU ExecutionProvider) — a perfect match for the app's stated "ideally onnxruntime" runtime, which it already uses for ONNX export/training (crossage_fr/experiments/onnx_training.py). RapidOCR's `rapidoc
@@ -53,7 +59,7 @@ Validated end-to-end with the **actual open-source weights** running locally on 
 ### Subject isolation / image matting (cutout)
 - **Pick:** BiRefNet (Bilateral Reference Network) by ZhengPeng7 — specifically the pre-exported ONNX weights at onnx-community/BiRefNet_lite-ONNX (Swin-Tiny backbone) as the default CPU pack, with onnx-community/BiRefNet-ONNX (Swin-Large) as the optional max-quality pack. Source repo: https://github.com/ZhengPeng7/BiRefNet (CAAI AIR'24). ONNX weights: https://huggingface.co/onnx-community/BiRefNet_lite-ONNX and https://huggingface.co/onnx-community/BiRefNet-ONNX. For trimap-free alpha matting (soft hair/fur edges) use the BiRefNet-matting checkpoint family (https://huggingface.co/ZhengPeng7/BiRefNet-matting) exported to ONNX via the repo's tutorials/onnx export script.
 - **Why best (verified):** QUALITY (two independent sources): (1) Cloudflare's production model bake-off selected BiRefNet for their background-removal feature — BiRefNet-general IoU 0.87 / Dice 0.92 averaged across datasets, beating IS-Net (0.82/0.89) and exposing U2-Net's collapse on hard data (U2-Net IoU 0.89/Dice 0.94 on Humans but only 0.39/0.52 on DIS5K) — https://blog.cloudflare.com/background-removal/. (2) BiRefNet README/paper reports DIS-VD S-measure 0.911 / F-measure 0.875 (standard) and 0.882/0.830 (lite), SOTA across DIS, COD, HRSOD — https://github.com/ZhengPeng7/BiRefNet. A third, production-flavored sour
-- **Format/runtime:** ONNX, run via onnxruntime CPUExecutionProvider — exactly the runtime this app already ships (requirements-production.txt pins onnxruntime>=1.23; lock has onnxruntime==1.26.0). Single-input image -> single-channel logits/alpha map; postproce
+- **Format/runtime:** ONNX, run via ONNX Runtime CPUExecutionProvider - exactly the runtime this app ships (`onnxruntime==1.27.0` in both the production input and universal hash lock). Single-input image -> single-channel logits/alpha map; postproce
 - **Size:** Verified exact sizes via HuggingFace LFS pointers (resolve/main): BiRefNet_lite-ONNX model.onnx = 224.0 MB (224,005,088 B), model_fp16.onnx = 114.5 MB (114,538,  ·  **License:** MIT (verified on https://github.com/ZhengPeng7/BiRefNet, the base weights https://huggingface.co/ZhengPeng7/BiRefNet, an
 - **Offline:** yes. Weights are static ONNX files bundlable in the app or fetched once via the existing explicit, user-triggered download_model_pack() in crossage_fr/model_manager.py (which already does sha256 + size verification and writes a .model-integrity.json manifest).
 - **Activate (online build host):** No new pip package required (onnxruntime + numpy + pillow + opencv already pinned). DOWNLOAD WEIGHTS (exact URLs, MIT): Default CPU pack (lite, fp16, ~115 MB): https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/model_fp16.onnx ; lite fp32 (~224 MB): https://huggingface.co/onnx-community/BiRefNet_lite-ONNX/resolve/main/onnx/model.onnx . Optional max-quality pack (full Swin-L, fp16 ~490 MB): https://huggingface.co/onnx-community/BiRefNet-ONNX/resolve/main/onnx/model_fp16.on

@@ -132,6 +132,27 @@ def atomic_write_text(path: Path, text: str, *, fsync: bool = True) -> None:
     atomic_write(path, lambda handle: handle.write(text), fsync=fsync)
 
 
+def atomic_write_bytes(path: Path, data: bytes, *, fsync: bool = True) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    restrict_file_mode(path.parent, 0o700)
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temp.open("wb") as handle:
+            handle.write(data)
+            handle.flush()
+            if fsync:
+                os.fsync(handle.fileno())
+        restrict_file_mode(temp, 0o600)
+        os.replace(temp, path)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+    if fsync:
+        _fsync_dir(path.parent)
+
+
 def write_json_atomic(path: Path, value: object) -> None:
     atomic_write_text(path, json.dumps(value, indent=2, sort_keys=True))
 

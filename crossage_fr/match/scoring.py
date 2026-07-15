@@ -5,7 +5,12 @@ from typing import Any
 import math
 
 from crossage_fr.config import Thresholds
-from crossage_fr.match.age_gap import compute_age_gap
+from crossage_fr.match.age_gap import VERIFIED_AGE_GAP_REVIEW_FLAG, compute_age_gap, review_threshold_for_gap
+from crossage_fr.match.age_trajectory import (
+    IMAGE_AGE_AUGMENTATION_METHOD_VERSION,
+    is_generated_age_image_reference,
+    is_synthetic_age_reference,
+)
 from crossage_fr.match.calibration import as_norm_score
 from crossage_fr.match.pooling import weak_pooled_support
 from crossage_fr.models import ReferenceFace, ReviewCandidate
@@ -31,6 +36,11 @@ LOW_QUALITY_CONFIDENT_FLOOR = 0.25
 # faces are often the hardest to align, so penalizing them would cut the very recall
 # the product exists for). Conservative default; only clearly-broken geometry fires.
 ALIGNMENT_SUSPECT_THRESHOLD = 0.15
+# Derived age-trajectory vectors are interpolations, not independent observations.
+# They may influence identity scoring only when the derived vector itself reaches
+# the normal confident floor. This prevents several weak interpolations from
+# accumulating into a new review candidate while retaining strong cross-age signal.
+SYNTHETIC_AGE_EVIDENCE_FLAG = "synthetic-age-evidence"
 
 
 def _demote_alignment_suspect(
@@ -73,6 +83,8 @@ def _apply_age_consistency(
     for hit, ref in hit_refs[:5]:
         if not isinstance(hit, SearchHit) or not isinstance(ref, ReferenceFace):
             continue
+        if is_synthetic_age_reference(ref):
+            continue
         if float(hit.score) < thresholds.relaxed_child:
             continue
         gap_years, _, _ = compute_age_gap(candidate_capture_date, getattr(ref, "capture_date", None))
@@ -94,13 +106,19 @@ def _apply_age_consistency(
 COHORT_SEPARATION_FLOOR = 0.5
 
 
-def _demote_low_cohort_separation(
-    decision: MatchDecision, thresholds: Thresholds, candidate_cohort_scores: list[float] | None
+def apply_cohort_separation(
+    decision: MatchDecision,
+    thresholds: Thresholds,
+    cohort_z: float | None,
 ) -> MatchDecision:
-    if not candidate_cohort_scores or decision.band != "confident" or decision.raw_cosine is None:
+    """Apply a precomputed (including symmetric) AS-Norm precision guard."""
+    if cohort_z is None or decision.band != "confident" or decision.raw_cosine is None:
         return decision
-    z = as_norm_score(float(decision.raw_cosine), candidate_cohort_scores)
-    if z >= COHORT_SEPARATION_FLOOR:
+    try:
+        normalized = float(cohort_z)
+    except (TypeError, ValueError):
+        return decision
+    if not math.isfinite(normalized) or normalized >= COHORT_SEPARATION_FLOOR:
         return decision
     demoted_score = min(decision.score, thresholds.confident - 1e-4)
     return replace(
@@ -109,6 +127,34 @@ def _demote_low_cohort_separation(
         band=band_for_score(float(demoted_score), thresholds),
         flags=tuple(dict.fromkeys((*decision.flags, "low-cohort-separation"))),
     )
+
+
+def apply_verified_age_gap_review(
+    decision: MatchDecision,
+    thresholds: Thresholds,
+    age_gap_years: float | None,
+    age_gap_confidence: str | None,
+) -> MatchDecision:
+    """Surface borderline verified wide-gap pairs for review, never automation."""
+    if decision.band != "below-review":
+        return decision
+    review_floor = review_threshold_for_gap(thresholds.relaxed_child, age_gap_years, age_gap_confidence)
+    if review_floor >= thresholds.relaxed_child or decision.score < review_floor:
+        return decision
+    return replace(
+        decision,
+        band="cross-age maybe",
+        flags=tuple(dict.fromkeys((*decision.flags, VERIFIED_AGE_GAP_REVIEW_FLAG))),
+    )
+
+
+def _demote_low_cohort_separation(
+    decision: MatchDecision, thresholds: Thresholds, candidate_cohort_scores: list[float] | None
+) -> MatchDecision:
+    if not candidate_cohort_scores or decision.band != "confident" or decision.raw_cosine is None:
+        return decision
+    z = as_norm_score(float(decision.raw_cosine), candidate_cohort_scores)
+    return apply_cohort_separation(decision, thresholds, z)
 
 
 def _demote_weak_pooled_support(
@@ -210,7 +256,7 @@ def pose_review_supported(hits: list[SearchHit], refs: dict[str, ReferenceFace],
     grouped: dict[str, list[float]] = {}
     for hit in hits:
         ref = refs.get(hit.item_id)
-        if ref is None:
+        if ref is None or is_synthetic_age_reference(ref):
             continue
         grouped.setdefault(ref.person_name, []).append(float(hit.score))
     for scores in grouped.values():
@@ -241,9 +287,17 @@ def group_hits(
         ref = refs.get(hit.item_id)
         if ref is None:
             continue
-        row = grouped.setdefault(ref.person_name, {"best_hit": hit, "best_ref": ref, "scores": [], "hit_refs": []})
+        synthetic = is_synthetic_age_reference(ref)
+        if synthetic and float(hit.score) < thresholds.confident:
+            continue
+        row = grouped.setdefault(
+            ref.person_name,
+            {"best_hit": hit, "best_ref": ref, "scores": [], "hit_refs": [], "synthetic_evidence": False},
+        )
         row["scores"].append(float(hit.score))  # type: ignore[union-attr]
         row["hit_refs"].append((hit, ref))  # type: ignore[union-attr]
+        if synthetic:
+            row["synthetic_evidence"] = True
         best_hit = row["best_hit"]
         if isinstance(best_hit, SearchHit) and hit.score > best_hit.score:
             row["best_hit"] = hit
@@ -272,6 +326,8 @@ def group_hits(
             support_margin = sum(score - thresholds.relaxed_child for score in support_scores) / max(1, len(support_scores))
             support_bonus = min(0.03, max(0.0, support_margin) * 0.08)
         flags: list[str] = []
+        if bool(row.get("synthetic_evidence")):
+            flags.append(SYNTHETIC_AGE_EVIDENCE_FLAG)
         pose_bonus = 0.0
         hard_pose_penalty = 0.0
         pose_supported = False
@@ -280,6 +336,8 @@ def group_hits(
             if isinstance(hit_refs, list):
                 for hit, ref in hit_refs[:5]:
                     if not isinstance(hit, SearchHit) or not isinstance(ref, ReferenceFace):
+                        continue
+                    if is_synthetic_age_reference(ref):
                         continue
                     ref_pose = _reference_pose(ref)
                     compatible_profile = candidate_pose in {"profile", "edge-face"} and ref_pose in {"profile", "edge-face", "three-quarter"}
@@ -342,15 +400,17 @@ def group_hits(
     best_decision = _apply_age_consistency(best_decision, grouped, thresholds, candidate_capture_date)
     # §5.5: derive the probe's impostor cohort from its hits to OTHER people (free, no new
     # store) when not given explicitly; empty (single enrolled person) -> graceful no-op.
-    cohort_scores = candidate_cohort_scores
-    if cohort_scores is None and best_decision is not None:
+    cohort_scores = list(candidate_cohort_scores or [])
+    if best_decision is not None:
         derived = [
             float(hit.score)
             for hit in hits
-            if refs.get(hit.item_id) is not None and refs[hit.item_id].person_name != best_decision.person_name
+            if refs.get(hit.item_id) is not None
+            and not is_synthetic_age_reference(refs[hit.item_id])
+            and refs[hit.item_id].person_name != best_decision.person_name
         ]
-        cohort_scores = derived or None
-    best_decision = _demote_low_cohort_separation(best_decision, thresholds, cohort_scores)
+        cohort_scores.extend(derived)
+    best_decision = _demote_low_cohort_separation(best_decision, thresholds, cohort_scores or None)
     best_decision = _demote_weak_pooled_support(best_decision, thresholds, candidate_template_cosines)
     best_decision = _demote_low_quality_confident(best_decision, thresholds, candidate_quality)
     return _demote_alignment_suspect(best_decision, thresholds, candidate_align_error)
@@ -426,6 +486,40 @@ def valid_vector(vector: object) -> bool:
 
 
 def valid_reference(ref: ReferenceFace) -> bool:
+    reference_kind = str(getattr(ref, "reference_kind", "real") or "real")
+    parent_ref_ids = getattr(ref, "parent_ref_ids", [])
+    derivation_provenance = getattr(ref, "derivation_provenance", {})
+    synthetic_method = str(getattr(ref, "synthetic_method_version", "") or "")
+    minimum_parent_count = 1 if synthetic_method == IMAGE_AGE_AUGMENTATION_METHOD_VERSION else 2
+    image_provenance_valid = bool(
+        synthetic_method != IMAGE_AGE_AUGMENTATION_METHOD_VERSION
+        or (
+            isinstance(derivation_provenance, dict)
+            and derivation_provenance.get("kind") == "reviewed-ai-generated-age-image"
+            and derivation_provenance.get("generatedImage") is True
+            and derivation_provenance.get("aiGenerated") is True
+            and derivation_provenance.get("authenticCapture") is False
+            and derivation_provenance.get("humanReviewed") is True
+            and bool(str(derivation_provenance.get("reviewArtifactId", "") or ""))
+            and bool(str(derivation_provenance.get("reviewArtifactHash", "") or ""))
+            and bool(str(derivation_provenance.get("outputHash", "") or ""))
+        )
+    )
+    synthetic_valid = (
+        reference_kind == "real"
+        or (
+            reference_kind == "synthetic-age-trajectory"
+            and bool(synthetic_method)
+            and bool(str(getattr(ref, "synthetic_target_age_bucket", "") or ""))
+            and isinstance(parent_ref_ids, list)
+            and minimum_parent_count <= len(parent_ref_ids) <= 8
+            and all(isinstance(item, str) and bool(item) for item in parent_ref_ids)
+            and isinstance(derivation_provenance, dict)
+            and len(derivation_provenance) <= 32
+            and str(getattr(ref, "capture_date_provenance", "")) == "synthetic-age-trajectory"
+            and image_provenance_valid
+        )
+    )
     return (
         isinstance(ref.ref_id, str)
         and bool(ref.ref_id)
@@ -436,10 +530,33 @@ def valid_reference(ref: ReferenceFace) -> bool:
         and isinstance(ref.model_name, str)
         and finite_number(ref.quality)
         and valid_vector(ref.vector)
+        and isinstance(parent_ref_ids, list)
+        and len(parent_ref_ids) <= 8
+        and isinstance(derivation_provenance, dict)
+        and len(derivation_provenance) <= 32
+        and synthetic_valid
     )
 
 
 def valid_candidate(candidate: ReviewCandidate) -> bool:
+    track_id = getattr(candidate, "video_track_id", "")
+    keyframe_timestamps = getattr(candidate, "video_track_keyframe_timestamps_ms", [])
+    keyframe_indices = getattr(candidate, "video_track_keyframe_indices", [])
+    track_valid = (
+        not track_id
+        or (
+            isinstance(track_id, str)
+            and len(track_id) <= 80
+            and candidate.media_kind == "video"
+            and bool(str(getattr(candidate, "video_track_version", "") or ""))
+            and isinstance(keyframe_timestamps, list)
+            and isinstance(keyframe_indices, list)
+            and 1 <= len(keyframe_timestamps) == len(keyframe_indices) <= 8
+            and all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in keyframe_timestamps)
+            and all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in keyframe_indices)
+            and int(getattr(candidate, "video_track_frame_count", 0) or 0) >= len(keyframe_indices)
+        )
+    )
     return (
         isinstance(candidate.candidate_id, str)
         and bool(candidate.candidate_id)
@@ -450,4 +567,14 @@ def valid_candidate(candidate: ReviewCandidate) -> bool:
         and candidate.status in {"pending", "accepted", "rejected", "uncertain"}
         and finite_number(candidate.score)
         and finite_number(candidate.quality)
+        and (
+            candidate.calibrated_probability is None
+            or (
+                finite_number(candidate.calibrated_probability)
+                and 0.0 <= float(candidate.calibrated_probability) <= 1.0
+            )
+        )
+        and isinstance(candidate.calibration_source, str)
+        and isinstance(candidate.calibration_version, str)
+        and track_valid
     )

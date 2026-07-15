@@ -5,7 +5,7 @@
  *
  * Covered: add_workspace (Settings>General), list_jurisdictions +
  * audit_chain_status (Settings>Privacy), accuracy_validation_history
- * (Settings>Advanced), storage_io_benchmark (Settings>Storage),
+ * (Settings>Advanced), storage_io_benchmark (Settings>Advanced),
  * model_distribution_audit (Tools>Models), list_photo_assets (Tools>Diagnostics).
  *
  * NOTE: e2e runs the prebuilt dist bundle — run `npm run build` after src edits.
@@ -48,7 +48,7 @@ test("Newly wired backend capabilities reach the backend and render", async () =
   const app = await electron.launch({ args: [path.join(root, "desktop/main.cjs")], cwd: root, env });
   const page = await app.firstWindow();
   page.on("pageerror", (e) => pageErrors.push(e.message));
-  await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByText("Backend ready.")).toBeAttached({ timeout: 120_000 });
   await page.locator(".sidebar-footer .language-picker select").selectOption("en").catch(() => undefined);
   await dismissModals(page);
 
@@ -84,8 +84,9 @@ test("Newly wired backend capabilities reach the backend and render", async () =
   await gotoSettings("Advanced");
   await expect(page.locator(".validation-history")).toBeVisible({ timeout: 20_000 });
 
-  // storage_io_benchmark — Settings > Storage: run a small drive test
-  await gotoSettings("Storage & Data");
+  // storage_io_benchmark — Settings > Advanced: run a small drive test
+  await gotoSettings("Advanced");
+  await page.getByText("Technical storage readiness").click();
   await expect(page.getByText("Drive speed test")).toBeVisible();
   await page.getByRole("button", { name: "Test drive speed" }).click();
   await expect(page.locator(".panel", { hasText: "Drive speed test" }).locator(".workspace-health-grid")).toBeVisible({ timeout: 60_000 });

@@ -22,6 +22,7 @@ export type TranslationKey =
   | "nav.memories"
   | "nav.albums"
   | "nav.search"
+  | "nav.agents"
   | "nav.peoplePets"
   | "nav.tools"
   | "nav.toolsOverview"
@@ -79,6 +80,9 @@ export type TranslationKey =
   | "onboarding.safe.title"
   | "onboarding.safe.detail"
   | "onboarding.safe.action"
+  | "onboarding.agents.title"
+  | "onboarding.agents.detail"
+  | "onboarding.agents.action"
   | "onboarding.guard.permission"
   | "onboarding.guard.safe"
   | "onboarding.guard.local"
@@ -179,7 +183,7 @@ type TranslationTable = Record<TranslationKey, string>;
 type UiMessageTable = Record<UiMessageKey, string>;
 
 const en: TranslationTable = {
-  "app.subtitle": "Photo Review",
+  "app.subtitle": "Local Image Platform",
   "nav.dashboard": "Dashboard",
   "nav.enroll": "People",
   "nav.scan": "Scan",
@@ -190,6 +194,7 @@ const en: TranslationTable = {
   "nav.memories": "Memories",
   "nav.albums": "Albums",
   "nav.search": "Search",
+  "nav.agents": "AI Agents",
   "nav.peoplePets": "People & Pets",
   "nav.tools": "Tools",
   "nav.toolsOverview": "Overview",
@@ -226,7 +231,7 @@ const en: TranslationTable = {
   "onboarding.title": "Set up your first scan",
   "onboarding.body": "Add a person, choose a folder of photos or videos, and review possible matches. Everything stays local, and Safe Mode stays on.",
   "onboarding.progress": "Onboarding {progress}% complete",
-  "onboarding.ready": "{completed}/6 ready",
+  "onboarding.ready": "{completed}/8 ready",
   "onboarding.complete": "{progress}% complete",
   "onboarding.workspace.title": "Choose an app folder",
   "onboarding.workspace.detail": "This is where Vintrace keeps saved people, possible matches, notes, and exports.",
@@ -247,6 +252,9 @@ const en: TranslationTable = {
   "onboarding.safe.title": "Keep private photos protected",
   "onboarding.safe.detail": "Safe Mode keeps likely intimate photos out of matching, previews, groups, and exports.",
   "onboarding.safe.action": "See settings",
+  "onboarding.agents.title": "Connect an AI agent",
+  "onboarding.agents.detail": "Use Codex, Claude, or another MCP client to work with your library through reviewed, permission-aware tools.",
+  "onboarding.agents.action": "Explore agents",
   "onboarding.guard.permission": "Permission required",
   "onboarding.guard.safe": "Safe Mode on",
   "onboarding.guard.local": "Saved locally",

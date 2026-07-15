@@ -6,6 +6,7 @@ import type {
   AuditChainStatus,
   AuditEventsResult,
   CalibrationLearningStatus,
+  ComplianceStatus,
   DatabaseRepairResult,
   EmbeddingAdapterStatus,
   FolderWatchStatus,
@@ -15,6 +16,7 @@ import type {
   ModelDistributionAudit,
   ModelDriftReport,
   ModelIntegrityResult,
+  ModelLifecycleStatus,
   ModelSwitchDryRun,
   PrivacyReport,
   PublicDatasetBenchmarkResult,
@@ -72,12 +74,14 @@ export function useAppToolPanelState() {
   const [auditChain, setAuditChain] = useState<AuditChainStatus | null>(null);
   const [jurisdictions, setJurisdictions] = useState<Jurisdiction[]>([]);
   const [jurisdictionDisclaimer, setJurisdictionDisclaimer] = useState("");
+  const [complianceStatus, setComplianceStatus] = useState<ComplianceStatus | null>(null);
   const [accuracyValidationHistory, setAccuracyValidationHistory] = useState<AccuracyValidationRun[]>([]);
   const [storageIo, setStorageIo] = useState<StorageIoBenchmarkResult | null>(null);
   const [storageIoPath, setStorageIoPath] = useState("");
   const [modelDistribution, setModelDistribution] = useState<ModelDistributionAudit | null>(null);
   const [runtimeSelfTest, setRuntimeSelfTest] = useState<RuntimeSelfTestResult | null>(null);
   const [modelIntegrity, setModelIntegrity] = useState<ModelIntegrityResult | null>(null);
+  const [modelLifecycleStatus, setModelLifecycleStatus] = useState<ModelLifecycleStatus | null>(null);
   const [runtimeBenchmark, setRuntimeBenchmark] = useState<RuntimeBenchmarkResult | null>(null);
   const [releaseReadiness, setReleaseReadiness] = useState<ReleaseReadinessResult | null>(null);
   const [accuracyEvaluation, setAccuracyEvaluation] = useState<AccuracyEvaluation | null>(null);
@@ -127,6 +131,8 @@ export function useAppToolPanelState() {
     setJurisdictions,
     jurisdictionDisclaimer,
     setJurisdictionDisclaimer,
+    complianceStatus,
+    setComplianceStatus,
     accuracyValidationHistory,
     setAccuracyValidationHistory,
     storageIo,
@@ -139,6 +145,8 @@ export function useAppToolPanelState() {
     setRuntimeSelfTest,
     modelIntegrity,
     setModelIntegrity,
+    modelLifecycleStatus,
+    setModelLifecycleStatus,
     runtimeBenchmark,
     setRuntimeBenchmark,
     releaseReadiness,

@@ -1,4 +1,4 @@
-import type { PhotoItem } from "../types";
+import type { PhotoContentCredentialSummary, PhotoItem } from "../types";
 
 export interface PhotoXmpMetadataConflict {
   field: string;
@@ -29,6 +29,19 @@ export interface PhotoTechnicalMetadata {
   xmpSidecar: string;
   xmpRating: string;
   xmpConflicts: PhotoXmpMetadataConflict[];
+  contentCredentials: PhotoContentCredentialDisplay[];
+}
+
+export interface PhotoContentCredentialDisplay {
+  scope: "active" | "original";
+  state: "valid" | "invalid" | "absent";
+  label: string;
+  summary: string;
+  trust: string;
+  aiHistory: string;
+  manifestId: string;
+  error: string;
+  valid: boolean;
 }
 
 export type PhotoLocalDepthMode = "" | "portrait" | "cinematic";
@@ -193,11 +206,6 @@ const DEPTH_METADATA_PATHS: readonly MetadataPath[] = [
   "cinematic",
   "cinematicMode",
   "cinematicFocus",
-  "focusDistance",
-  "subjectDistance",
-  "focusPoint",
-  "aperture",
-  "fNumber",
   "auxiliaryImageType",
   ["exif", "depthMetadata"],
   ["exif", "depth"],
@@ -531,9 +539,57 @@ function normalizePhotoXmpConflicts(value: unknown): PhotoXmpMetadataConflict[] 
   }).filter(Boolean) as PhotoXmpMetadataConflict[];
 }
 
+function photoContentCredentialDisplay(
+  value: unknown,
+  scope: "active" | "original",
+): PhotoContentCredentialDisplay | null {
+  const record = metadataRecord(value) as Partial<PhotoContentCredentialSummary>;
+  if (!Object.keys(record).length) return null;
+  const present = record.present === true;
+  const embedded = record.embedded === true;
+  const valid = record.cryptographicallyValid === true;
+  const absent = !present && record.validationState === "absent" && !metadataCleanText(record.error);
+  const summary = present
+    ? [embedded ? "Embedded" : "External", valid ? "Signature valid" : "Validation failed"].join(" · ")
+    : absent
+      ? "No Content Credential"
+      : "Credential unreadable";
+  const trust = absent
+    ? ""
+    : record.globallyTrusted === true
+    ? "Global C2PA trust"
+    : record.locallyTrusted === true
+      ? "Workspace-local trust (not global)"
+      : valid
+        ? "Valid signature, signer untrusted"
+        : "Untrusted";
+  const aiHistory = absent
+    ? ""
+    : record.containsAiHistory === true
+    ? record.topLevelAiEdit === true
+      ? "AI edit in this manifest"
+      : "AI edit in ingredient history"
+    : "No AI action declared";
+  return {
+    scope,
+    state: absent ? "absent" : valid ? "valid" : "invalid",
+    label: scope === "active" ? "Active edit" : "Original",
+    summary,
+    trust,
+    aiHistory,
+    manifestId: metadataCleanText(record.manifestId),
+    error: metadataCleanText(record.error),
+    valid,
+  };
+}
+
 export function buildPhotoTechnicalMetadata(item: PhotoItem | null | undefined): PhotoTechnicalMetadata {
   const metadata = metadataRecord(item?.assetMetadata);
   const xmp = metadataRecord(metadata.xmp);
+  const contentCredentials = [
+    photoContentCredentialDisplay(metadata.editContentCredentials, "active"),
+    photoContentCredentialDisplay(metadata.contentCredentials, "original"),
+  ].filter((value): value is PhotoContentCredentialDisplay => Boolean(value));
   return {
     camera: compactMetadataValues(metadata, CAMERA_PATHS, " "),
     lens: compactMetadataValues(metadata, LENS_PATHS, " "),
@@ -555,5 +611,6 @@ export function buildPhotoTechnicalMetadata(item: PhotoItem | null | undefined):
     xmpSidecar: metadataTextValues(xmp.sidecarPath)[0] || "",
     xmpRating: metadataTextValues(xmp.rating)[0] || "",
     xmpConflicts: normalizePhotoXmpConflicts(xmp.conflicts),
+    contentCredentials,
   };
 }

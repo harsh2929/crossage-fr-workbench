@@ -1,38 +1,58 @@
 {
   "name": "vintrace",
+  "mcpName": "io.github.harsh2929/vintrace",
   "version": "0.1.0",
   "description": "Local face and photo review workbench",
+  "homepage": "https://github.com/harsh2929/crossage-fr-workbench",
+  "desktopName": "Vintrace",
   "author": "Vintrace",
   "license": "UNLICENSED",
   "main": "desktop/main.cjs",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.12.0 <25"
+  },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "electron:install": "install-electron --no",
     "electron:dev": "cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 node desktop/scripts/run-electron.cjs .",
+    "prestart": "npm run electron:install",
     "start": "npm-run-all --parallel dev electron:dev",
-    "desktop": "npm run build && node desktop/scripts/run-electron.cjs .",
-    "build": "npm-run-all --parallel build:typecheck build:vite",
+    "desktop": "npm run electron:install && npm run build && node desktop/scripts/run-electron.cjs .",
+    "build": "npm-run-all --parallel build:typecheck build:vite build:mobile",
     "build:typecheck": "tsc --noEmit",
     "build:vite": "vite build",
+    "build:mobile": "vite build --config mobile.vite.config.ts",
     "backend:check": "node desktop/scripts/backend-check.cjs",
     "mcp": "node desktop/scripts/run-mcp.cjs",
     "mcp:http": "node desktop/scripts/run-mcp.cjs --transport streamable-http",
     "mcp:bundle": "npm run build:backend && node desktop/scripts/build-mcp-bundle.cjs",
-    "build:backend": "node desktop/scripts/build-backend.cjs",
+    "mcp:bundle:package": "node desktop/scripts/build-mcp-bundle.cjs",
+    "mcp:registry:prepare": "node desktop/scripts/prepare-mcp-registry.cjs",
+    "build:mcp-app": "node desktop/scripts/build-mcp-app.cjs",
+    "check:mcp-app": "node desktop/scripts/build-mcp-app.cjs --check",
+    "build:backend": "npm-run-all --parallel build:mcp-app build:mobile && node desktop/scripts/build-backend.cjs",
     "pack": "npm run build && npm run build:backend && electron-builder --dir",
-    "pack:unsigned": "npm run build && npm run build:backend && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir",
+    "pack:unsigned": "npm run build && npm run build:backend && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir --config.mac.forceCodeSigning=false --config.mac.hardenedRuntime=false --config.mac.notarize=false --config.win.forceCodeSigning=false",
     "dist:mac": "node desktop/scripts/require-platform.cjs darwin && npm run build && npm run build:backend && electron-builder --mac dmg zip --publish never",
-    "dist:mac:unsigned": "node desktop/scripts/require-platform.cjs darwin && npm run build && npm run build:backend && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dmg zip --publish never",
+    "dist:mac:unsigned": "node desktop/scripts/require-platform.cjs darwin && npm run build && npm run build:backend && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dmg zip --publish never --config.mac.forceCodeSigning=false --config.mac.hardenedRuntime=false --config.mac.notarize=false",
     "dist:win": "node desktop/scripts/require-platform.cjs win32 && npm run build && npm run build:backend && electron-builder --win nsis --publish never",
-    "dist:all": "npm run dist:mac && npm run dist:win",
+    "dist:win:unsigned": "node desktop/scripts/require-platform.cjs win32 && npm run build && npm run build:backend && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win nsis --publish never --config.win.forceCodeSigning=false",
+    "dist:linux": "node desktop/scripts/require-platform.cjs linux && npm run build && npm run build:backend && electron-builder --linux AppImage deb rpm --x64 --publish never",
+    "dist:all": "npm run dist:mac && npm run dist:win && npm run dist:linux",
     "test:pipeline": "node desktop/scripts/run-python.cjs tests/pipeline_smoke.py",
     "test:edge": "node desktop/scripts/run-python.cjs tests/edge_cases.py",
     "test:age-gap": "node desktop/scripts/run-python.cjs tests/age_gap_units.py",
+    "test:age-trajectory": "node desktop/scripts/run-python.cjs tests/age_trajectory_units.py",
+    "test:cross-age-benchmark": "node desktop/scripts/run-python.cjs tests/cross_age_benchmark_units.py",
+    "test:synthetic-age-image-benchmark": "node desktop/scripts/run-python.cjs tests/synthetic_age_image_benchmark_units.py",
     "test:scoring": "node desktop/scripts/run-python.cjs tests/scoring_units.py",
     "test:quality": "node desktop/scripts/run-python.cjs tests/quality_units.py",
     "test:detection": "node desktop/scripts/run-python.cjs tests/detection_units.py",
     "test:calibration": "node desktop/scripts/run-python.cjs tests/calibration_units.py",
+    "test:adaptive-calibration": "node desktop/scripts/run-python.cjs tests/adaptive_calibration_units.py",
+    "test:cohort": "node desktop/scripts/run-python.cjs tests/cohort_units.py",
     "test:learning-loop": "node desktop/scripts/run-python.cjs tests/learning_loop_units.py",
     "test:onnx-training-feasibility": "node desktop/scripts/run-python.cjs tests/onnx_training_feasibility.py",
     "test:retraining-governance": "node desktop/scripts/run-python.cjs tests/retraining_governance_units.py",
@@ -41,22 +61,84 @@
     "test:benchmark-units": "node desktop/scripts/run-python.cjs tests/benchmark_units.py",
     "test:det-eval": "node desktop/scripts/run-python.cjs tests/det_eval_units.py",
     "test:clustering": "node desktop/scripts/run-python.cjs tests/clustering_units.py",
+    "benchmark:global-clustering": "node desktop/scripts/run-python.cjs benchmarks/run_global_clustering_benchmark.py",
+    "benchmark:ppocrv6": "node desktop/scripts/run-python.cjs benchmarks/run_ppocrv6_benchmark.py",
+    "benchmark:photo-vlm": "node desktop/scripts/run-python.cjs benchmarks/run_photo_vlm_benchmark.py",
+    "benchmark:photo-agent": "node desktop/scripts/run-python.cjs benchmarks/run_photo_agent_benchmark.py",
+    "eval:mcp-traces": "node desktop/scripts/run-python.cjs benchmarks/run_mcp_trace_evals.py",
+    "benchmark:photo-generative": "node desktop/scripts/run-python.cjs benchmarks/run_photo_generative_benchmark.py",
+    "benchmark:photo-story": "node desktop/scripts/run-python.cjs benchmarks/run_photo_story_benchmark.py",
+    "benchmark:photo-culling": "node desktop/scripts/run-python.cjs benchmarks/run_photo_culling_benchmark.py",
+    "benchmark:photo-relationships": "node desktop/scripts/run-python.cjs benchmarks/run_photo_relationship_benchmark.py",
     "test:fiqa": "node desktop/scripts/run-python.cjs tests/fiqa_units.py",
+    "test:model-lifecycle": "node desktop/scripts/run-python.cjs tests/model_lifecycle_units.py",
+    "test:model-lifecycle-ui": "playwright test tests/e2e/model-lifecycle.spec.ts",
+    "test:frozen-model-lifecycle": "node desktop/scripts/run-python.cjs tests/frozen_model_lifecycle.py",
+    "eval:model-lifecycle": "node desktop/scripts/run-python.cjs benchmarks/run_model_lifecycle_evals.py",
+    "test:synthetic-enrollment-screen": "node desktop/scripts/run-python.cjs tests/synthetic_enrollment_screen_units.py && node tests/synthetic_enrollment_screen_ui.test.cjs",
     "test:validation": "node desktop/scripts/run-python.cjs tests/validation_units.py",
     "test:pooling": "node desktop/scripts/run-python.cjs tests/pooling_units.py",
     "test:image-io": "node desktop/scripts/run-python.cjs tests/image_io_units.py",
     "test:video-io": "node desktop/scripts/run-python.cjs tests/video_io_units.py",
+    "test:video-tracks": "node desktop/scripts/run-python.cjs tests/video_track_units.py",
     "test:folder-tree": "node desktop/scripts/run-python.cjs tests/folder_tree_units.py",
     "test:enroll-paths": "node desktop/scripts/run-python.cjs tests/enroll_paths_units.py",
     "test:folder-tree-selection": "node tests/folder_tree_selection.test.mjs",
     "test:people-grouping": "node tests/people_grouping.test.mjs",
     "test:photo-sources": "node tests/photo_sources.test.cjs",
+    "test:photo-source-adapters": "node desktop/scripts/run-python.cjs tests/photo_source_adapters_units.py",
+    "test:photo-source-service": "node desktop/scripts/run-python.cjs tests/photo_source_service_units.py",
+    "test:photo-source-api": "node desktop/scripts/run-python.cjs tests/photo_source_api_units.py",
+    "test:dam-catalog": "node desktop/scripts/run-python.cjs tests/dam_catalog_units.py",
+    "test:photo-open-catalog": "node desktop/scripts/run-python.cjs tests/photo_open_catalog_units.py && node tests/photo_catalog_portability_ui.test.mjs",
+    "test:photo-portability": "npm run test:dam-catalog && npm run test:photo-open-catalog",
+    "test:photo-portability:e2e": "playwright test tests/e2e/photo-catalog-portability.spec.ts",
+    "test:frozen-photo-portability": "node desktop/scripts/run-python.cjs tests/frozen_photo_portability.py",
+    "test:vector-store": "node desktop/scripts/run-python.cjs tests/vector_store_units.py",
+    "test:inbound-connectors": "node desktop/scripts/run-python.cjs tests/inbound_connector_units.py && node tests/inbound_connectors.test.cjs",
+    "test:frozen-inbound-connector": "node desktop/scripts/run-python.cjs tests/frozen_inbound_connector.py",
+    "test:photo-source-scale": "node desktop/scripts/run-python.cjs tests/photo_source_scale.py",
+    "test:photo-source-mac": "node desktop/scripts/run-python.cjs tests/mac_photo_source_acceptance.py --require-fixtures",
+    "bench:photo-source-startup": "node desktop/scripts/run-python.cjs tests/photo_source_startup_benchmark.py --require-frozen",
+    "test:photo-source-e2e": "playwright test tests/e2e/photo-source-import.spec.ts",
     "test:photo-folders": "node desktop/scripts/run-python.cjs tests/photo_folders_units.py",
     "test:photo-scale": "node desktop/scripts/run-python.cjs tests/photo_scale_smoke.py",
     "test:photo-golden": "node desktop/scripts/run-python.cjs tests/photo_golden_fixtures.py",
-    "test:photo-semantic-search": "node desktop/scripts/run-python.cjs tests/photo_semantic_search_units.py",
+    "test:photo-semantic-search": "cross-env CROSSAGE_FORCE_FALLBACK=0 node desktop/scripts/run-python.cjs tests/photo_semantic_search_units.py",
+    "test:video-semantic-search": "node desktop/scripts/run-python.cjs tests/video_semantic_search_units.py",
+    "test:video-semantic-ui": "node tests/video_semantic_ui.test.mjs",
+    "benchmark:video-semantic": "env -u CROSSAGE_FORCE_FALLBACK CROSSAGE_SEMANTIC_ENGINE=auto PYTHONPATH=. .venv/bin/python benchmarks/run_video_semantic_benchmark.py",
+    "test:frozen-video-semantic": "node desktop/scripts/run-python.cjs tests/frozen_video_semantic.py",
+    "test:audio-intelligence": "node desktop/scripts/run-python.cjs tests/audio_intelligence_units.py",
+    "benchmark:audio-intelligence": "node desktop/scripts/run-python.cjs benchmarks/run_audio_intelligence_benchmark.py",
+    "test:frozen-audio-intelligence": "node desktop/scripts/run-python.cjs tests/frozen_audio_intelligence.py",
+    "test:local-sync": "node desktop/scripts/run-python.cjs tests/local_sync_units.py",
+    "benchmark:local-sync": "node desktop/scripts/run-python.cjs benchmarks/run_local_sync_benchmark.py",
+    "test:frozen-local-sync": "node desktop/scripts/run-python.cjs tests/frozen_local_sync.py",
+    "test:local-sync-ui": "playwright test tests/e2e/local-sync.spec.ts",
     "test:photo-depth": "node desktop/scripts/run-python.cjs tests/photo_depth_units.py",
+    "test:photo-spatial": "node desktop/scripts/run-python.cjs tests/photo_spatial_portability_units.py && node tests/photo_spatial_media.test.mjs",
     "test:photo-rapidocr": "node desktop/scripts/run-python.cjs tests/photo_rapidocr_units.py",
+    "test:photo-vlm": "node desktop/scripts/run-python.cjs tests/photo_vlm_units.py",
+    "test:photo-agent": "node desktop/scripts/run-python.cjs tests/photo_agent_units.py",
+    "test:photo-generative": "node desktop/scripts/run-python.cjs tests/photo_generative_units.py",
+    "test:content-credentials": "node desktop/scripts/run-python.cjs tests/content_credentials_units.py",
+    "test:photo-story": "node desktop/scripts/run-python.cjs tests/photo_story_units.py",
+    "test:photo-culling": "node desktop/scripts/run-python.cjs tests/photo_culling_units.py",
+    "test:photo-culling-ui": "node tests/photo_culling_ui.test.mjs",
+    "test:photo-pro-workflow": "node desktop/scripts/run-python.cjs tests/photo_pro_workflow_units.py && node tests/photo_pro_workflow_ui.test.mjs",
+    "test:photo-pro-workflow:e2e": "npm run build:vite && playwright test tests/e2e/photo-pro-culling.spec.ts",
+    "test:photo-tether": "node desktop/scripts/run-python.cjs tests/photo_tether_units.py && node tests/photo_tether_runtime.test.cjs && node tests/photo_tether_ui.test.mjs",
+    "test:photo-tether:e2e": "npm run build:vite && playwright test tests/e2e/photo-tether.spec.ts",
+    "test:photo-relationships": "node desktop/scripts/run-python.cjs tests/photo_relationship_suggestions_units.py",
+    "test:photo-relationships-ui": "node tests/photo_relationship_ui.test.mjs",
+    "test:frozen-photo-vlm": "node desktop/scripts/run-python.cjs tests/frozen_photo_vlm.py",
+    "test:frozen-multimodal-safety": "node desktop/scripts/run-python.cjs tests/frozen_multimodal_safety.py",
+    "test:frozen-photo-generative": "node desktop/scripts/run-python.cjs tests/frozen_photo_generative.py",
+    "test:frozen-content-credentials": "node desktop/scripts/run-python.cjs tests/frozen_content_credentials.py",
+    "test:frozen-photo-story": "node desktop/scripts/run-python.cjs tests/frozen_photo_story.py",
+    "test:frozen-photo-culling": "node desktop/scripts/run-python.cjs tests/frozen_photo_culling.py",
+    "test:frozen-photo-relationships": "node desktop/scripts/run-python.cjs tests/frozen_photo_relationships.py",
     "test:photo-subject-cutout": "node desktop/scripts/run-python.cjs tests/photo_subject_cutout_units.py",
     "test:photo-broad-scan": "node desktop/scripts/run-python.cjs tests/photo_broad_scan_units.py",
     "test:photo-consolidation-missing-source": "node desktop/scripts/run-python.cjs tests/photo_consolidation_missing_source_units.py",
@@ -74,6 +156,10 @@
     "test:photo-scale:50k": "cross-env VINTRACE_PHOTO_SCALE_ASSETS=50000 node desktop/scripts/run-python.cjs tests/photo_scale_smoke.py",
     "test:photo-scale:100k": "cross-env VINTRACE_PHOTO_SCALE_ASSETS=100000 node desktop/scripts/run-python.cjs tests/photo_scale_smoke.py",
     "test:photos-view": "node tests/photos_view.test.mjs",
+    "test:photo-video-transcript": "node tests/photo_video_transcript.test.mjs",
+    "test:photo-agent-ui": "node tests/photo_library_agent_ui.test.mjs",
+    "test:photo-generative-ui": "node tests/photo_generative_ui.test.mjs",
+    "test:photo-story-ui": "node tests/photo_story_ui.test.mjs",
     "test:photo-qr-actions": "node tests/photo_qr_actions.test.mjs",
     "test:photo-live-text-actions": "node tests/photo_live_text_actions.test.mjs",
     "test:photo-info-metadata": "node tests/photo_info_metadata.test.mjs",
@@ -92,15 +178,45 @@
     "test:external-open": "node tests/external_open.test.cjs",
     "test:onnx-training-row-split": "node desktop/scripts/run-python.cjs tests/onnx_training_row_split.py",
     "test:public-dataset-onnx-export": "node desktop/scripts/run-python.cjs tests/public_dataset_onnx_export.py",
-    "test:mcp": "node desktop/scripts/run-python.cjs tests/mcp_smoke.py",
+    "test:mcp": "node desktop/scripts/run-python.cjs tests/mcp_telemetry.py && node desktop/scripts/run-python.cjs tests/mcp_smoke.py && node desktop/scripts/run-python.cjs tests/mcp_resource_links.py && node desktop/scripts/run-python.cjs tests/mcp_tasks_units.py && node desktop/scripts/run-python.cjs tests/mcp_tasks_restart.py && node desktop/scripts/run-python.cjs tests/mcp_delegation_units.py && node desktop/scripts/run-python.cjs tests/mcp_elicitation.py && node desktop/scripts/run-python.cjs tests/mcp_stateless_http.py",
     "test:mcp-redaction": "node desktop/scripts/run-python.cjs tests/mcp_redaction.py",
+    "test:agent-untrusted": "node desktop/scripts/run-python.cjs tests/agent_untrusted_units.py",
+    "test:mcp-injection-boundary": "node desktop/scripts/run-python.cjs tests/mcp_injection_boundary.py",
+    "test:agent-images": "node desktop/scripts/run-python.cjs tests/agent_images_units.py",
+    "test:catalog-change-feed": "node desktop/scripts/run-python.cjs tests/catalog_change_feed_units.py",
+    "test:agent-auth": "node desktop/scripts/run-python.cjs tests/agent_auth_units.py",
+    "test:mobile-credentials": "node tests/mobile_companion_credentials.test.cjs",
+    "test:mobile-companion": "npm run test:mobile-credentials && node desktop/scripts/run-python.cjs tests/mobile_companion_units.py && npm run build:mobile && node desktop/scripts/run-python.cjs tests/mobile_companion_http.py",
+    "test:frozen-mobile-companion": "node desktop/scripts/run-python.cjs tests/mobile_companion_http.py",
+    "test:agent-oauth-http": "node desktop/scripts/run-python.cjs tests/agent_oauth_http.py",
+    "test:agent-http": "node desktop/scripts/run-python.cjs tests/agent_http_api.py",
+    "test:agent-frontend": "node desktop/scripts/run-python.cjs tests/agent_frontend_catalog.py",
+    "test:agent-workflows": "node desktop/scripts/run-python.cjs tests/agent_workflow_conformance.py",
+    "test:agent-dogfood-contract": "node desktop/scripts/run-python.cjs tests/agent_dogfood_contract.py",
+    "test:mcp-image-profile": "node desktop/scripts/run-python.cjs tests/mcp_image_profile.py",
+    "test:mcp-app-hosts": "node tests/mcp_app_hosts.test.mjs",
+    "test:mcp-registry": "node tests/mcp_registry.test.cjs",
+    "agent:dogfood:prepare": "node desktop/scripts/run-python.cjs tests/agent_dogfood/dogfood.py prepare",
+    "test:agent-images-scale": "node desktop/scripts/run-python.cjs tests/agent_images_scale.py",
+    "test:agent-images-scale:100k": "cross-env VINTRACE_AGENT_IMAGE_SCALE_ASSETS=100000 node desktop/scripts/run-python.cjs tests/agent_images_scale.py",
     "test:filesystem-chaos": "node desktop/scripts/run-python.cjs tests/filesystem_chaos.py",
     "test:backup-roundtrip": "node desktop/scripts/run-python.cjs tests/workspace_backup_roundtrip.py",
+    "test:workspace-encryption": "node tests/workspace_encryption_keyring.test.cjs && node desktop/scripts/run-python.cjs tests/workspace_encryption_units.py",
+    "test:compliance-policy": "node desktop/scripts/run-python.cjs tests/compliance_policy_units.py && node desktop/scripts/run-python.cjs tests/compliance_consent_units.py",
+    "test:compliance-ui": "node tests/compliance_ui.test.mjs",
+    "test:frozen-workspace-encryption": "node desktop/scripts/run-python.cjs tests/frozen_workspace_encryption.py",
+    "test:frozen-compliance": "node desktop/scripts/run-python.cjs tests/frozen_compliance_consent.py",
     "test:dataset-benchmark": "node desktop/scripts/run-python.cjs tests/public_dataset_benchmark.py",
     "test:dataset-gates": "node desktop/scripts/run-python.cjs tests/dataset_regression_gates.py",
     "test:e2e": "playwright test",
     "test:clean": "node desktop/scripts/run-python.cjs tests/clean_workspace_smoke.py",
     "bench:scale": "node desktop/scripts/run-python.cjs tests/scale_benchmark.py",
+    "bench:vector-ann": "cross-env VINTRACE_VECTOR_SCALE_COUNT=250000 node desktop/scripts/run-python.cjs tests/vector_store_scale.py",
+    "bench:alignment-recovery": "node desktop/scripts/run-python.cjs tests/alignment_recovery_benchmark.py --require-fixtures",
+    "bench:adaptive-calibration": "node desktop/scripts/run-python.cjs tests/alignment_recovery_benchmark.py --require-fixtures",
+    "bench:cross-age": "node desktop/scripts/run-python.cjs benchmarks/run_cross_age_trajectory_benchmarks.py --acknowledge-research-terms",
+    "bench:synthetic-age-images": "node desktop/scripts/run-python.cjs benchmarks/run_synthetic_age_image_benchmark.py",
+    "bench:video-tracks": "node desktop/scripts/run-python.cjs benchmarks/run_video_track_benchmark.py --acknowledge-research-terms",
     "bench:accuracy": "node desktop/scripts/run-python.cjs tests/accuracy_benchmark.py",
     "bench:onnx-training": "node desktop/scripts/run-python.cjs -m crossage_fr.experiments.onnx_training",
     "bench:retraining-governance": "node desktop/scripts/run-python.cjs -m crossage_fr.experiments.retraining_governance",
@@ -108,20 +224,31 @@
     "update:dry-run": "node desktop/scripts/check-update-feed.cjs",
     "package:check": "node desktop/scripts/check-package-artifacts.cjs",
     "release:artifacts": "node desktop/scripts/create-release-artifacts.cjs",
+    "release:assemble": "node desktop/scripts/assemble-release.cjs",
+    "release:verify-platform-evidence": "node desktop/scripts/verify-platform-release-evidence.cjs",
+    "release:sign": "node desktop/scripts/sign-release-artifacts.cjs",
+    "release:attest:verify": "node desktop/scripts/verify-github-attestations.cjs",
     "release:verify": "node desktop/scripts/verify-release-assets.cjs",
     "release:check": "node desktop/scripts/run-python.cjs tests/release_check.py",
     "test:model-downloader": "node desktop/scripts/run-python.cjs tests/model_downloader_failures.py",
     "test:safety-model": "node desktop/scripts/run-python.cjs tests/safety_model_inference.py",
+    "test:multimodal-safety": "node desktop/scripts/run-python.cjs tests/multimodal_safety_units.py",
     "test:safe-mode-profiles": "node desktop/scripts/run-python.cjs tests/safe_mode_profiles_units.py",
     "test:safe-mode-calibration": "node desktop/scripts/run-python.cjs tests/safe_mode_calibration_units.py",
     "test:safety-explain": "node desktop/scripts/run-python.cjs tests/safety_explain_units.py",
     "test:safe-mode-levels": "node desktop/scripts/run-python.cjs tests/safe_mode_levels_units.py",
     "test:safe-mode-override": "node desktop/scripts/run-python.cjs tests/safe_mode_override_units.py",
     "test:perf-budget": "node desktop/scripts/run-python.cjs tests/performance_budget.py",
+    "test:photo-bundle-budget": "node desktop/scripts/check-photo-bundle-budget.cjs",
+    "test:photo-frontend-architecture": "node tests/photo_frontend_architecture.test.mjs",
     "test:localization": "node desktop/scripts/check-localization.cjs",
     "test:main-util": "node tests/main_util.test.cjs",
     "test:update-feed": "node tests/check_update_feed.test.cjs",
-    "test:desktop-scripts": "node tests/desktop_scripts.test.cjs",
+    "test:linux-distribution": "node tests/linux_distribution.test.cjs",
+    "linux:package:check": "node desktop/scripts/check-linux-artifacts.cjs",
+    "test:desktop-scripts": "node tests/desktop_scripts.test.cjs && node tests/release_assembly.test.cjs && node tests/supply_chain_release.test.cjs",
+    "test:release-signing-policy": "node tests/release_signing_policy.test.cjs && node desktop/scripts/run-python.cjs tests/release_readiness_units.py",
+    "test:cutting-edge-audit": "node tests/cutting_edge_audit_contract.test.cjs",
     "test:styles": "node tests/styles_units.test.cjs",
     "test:app-state": "node tests/app_state_units.test.cjs",
     "test:types": "node tests/types_units.test.cjs",
@@ -130,33 +257,56 @@
     "test:crypto": "node desktop/scripts/run-python.cjs tests/crypto_roundtrip.py",
     "test:workspace-registry": "node desktop/scripts/run-python.cjs tests/workspace_registry_units.py",
     "test:command-contract": "node desktop/scripts/run-python.cjs tests/command_contract.py",
+    "test:agent-hidden-asset-gate": "node desktop/scripts/run-python.cjs tests/agent_hidden_asset_gate_units.py",
+    "test:asset-identity-rehome": "node desktop/scripts/run-python.cjs tests/asset_identity_rehome_units.py",
+    "test:catalog-only-no-media-bytes": "node desktop/scripts/run-python.cjs tests/catalog_only_no_media_bytes_units.py",
+    "test:mcp-workspace-lock-warm-cache": "node desktop/scripts/run-python.cjs tests/mcp_workspace_lock_warm_cache_units.py",
+    "test:preview-dimension-honesty": "node desktop/scripts/run-python.cjs tests/preview_dimension_honesty_units.py",
+    "test:safe-mode-cross-process": "node desktop/scripts/run-python.cjs tests/safe_mode_cross_process_units.py",
+    "test:telemetry-default-off": "node desktop/scripts/run-python.cjs tests/telemetry_default_off_units.py",
+    "test:workspace-backup-cross-machine": "node desktop/scripts/run-python.cjs tests/workspace_backup_cross_machine_units.py",
     "test:coverage-contract": "node desktop/scripts/check-test-coverage.cjs",
-    "test:js-units": "npm-run-all test:main-util test:update-feed test:desktop-scripts test:styles test:app-state test:types test:calibration-artifacts test:mcp-connection test:folder-tree-selection test:people-grouping test:photo-sources test:photos-view test:photo-qr-actions test:photo-live-text-actions test:photo-info-metadata test:photo-search-suggestions test:photo-review-more test:toast test:reduced-motion test:save-settle test:count-roll test:reveal-stagger test:flip-zoom test:safety-overlay test:sensitive-collections test:external-open",
-    "test:previously-orphaned:python": "npm-run-all test:onnx-training-row-split test:photo-broad-scan test:photo-consolidation-missing-source test:photo-depth test:photo-edit-stack-video-preview test:photo-export-render-error test:photo-group-cover test:photo-import-backup-policy test:photo-import-bulk-provenance test:photo-import-keep-folder test:photo-media-pair-backup-check test:photo-object-tag-smart-rules test:photo-offline-reverse-geocode test:photo-rapidocr test:photo-raw-fidelity test:photo-recovered-permission-edge test:photo-semantic-search test:photo-subject-cutout test:public-dataset-onnx-export",
+    "test:js-units": "npm-run-all test:main-util test:update-feed test:linux-distribution test:desktop-scripts test:release-signing-policy test:cutting-edge-audit test:workspace-encryption test:mobile-credentials test:styles test:app-state test:types test:calibration-artifacts test:mcp-connection test:folder-tree-selection test:people-grouping test:photo-sources test:photos-view test:photo-video-transcript test:photo-agent-ui test:photo-frontend-architecture test:photo-qr-actions test:photo-live-text-actions test:photo-info-metadata test:photo-search-suggestions test:photo-review-more test:toast test:reduced-motion test:save-settle test:count-roll test:reveal-stagger test:flip-zoom test:safety-overlay test:sensitive-collections test:external-open",
+    "test:previously-orphaned:python": "npm-run-all test:agent-hidden-asset-gate test:asset-identity-rehome test:catalog-change-feed test:catalog-only-no-media-bytes test:mcp-workspace-lock-warm-cache test:preview-dimension-honesty test:safe-mode-cross-process test:telemetry-default-off test:workspace-backup-cross-machine test:onnx-training-row-split test:content-credentials test:photo-broad-scan test:photo-consolidation-missing-source test:photo-depth test:photo-edit-stack-video-preview test:photo-export-render-error test:photo-group-cover test:photo-import-backup-policy test:photo-import-bulk-provenance test:photo-import-keep-folder test:photo-media-pair-backup-check test:photo-object-tag-smart-rules test:photo-offline-reverse-geocode test:photo-rapidocr test:photo-vlm test:photo-agent test:photo-raw-fidelity test:photo-recovered-permission-edge test:photo-semantic-search test:photo-subject-cutout test:public-dataset-onnx-export",
     "test:previously-orphaned": "npm-run-all test:photo-qr-actions test:photo-live-text-actions test:photo-info-metadata test:photo-search-suggestions test:photo-review-more test:external-open test:previously-orphaned:python",
     "test:e2e:buttons": "cross-env VINTRACE_BUTTON_AUDIT=1 playwright test tests/e2e/button-regression.spec.ts",
     "test:e2e:i18n": "cross-env VINTRACE_I18N_LAYOUT=1 playwright test tests/e2e/localization-layout.spec.ts",
+    "test:e2e:compliance": "playwright test tests/e2e/compliance-consent-retention.spec.ts --reporter=list",
     "test:e2e:ipc": "cross-env VINTRACE_IPC_FUZZ=1 playwright test tests/e2e/ipc-security.spec.ts",
-    "test:e2e:a11y": "cross-env VINTRACE_A11Y=1 playwright test tests/e2e/accessibility-keyboard.spec.ts",
+    "test:e2e:a11y-keyboard": "cross-env VINTRACE_A11Y=1 playwright test tests/e2e/accessibility-keyboard.spec.ts",
+    "test:e2e:a11y-axe": "cross-env VINTRACE_AXE=1 playwright test tests/e2e/accessibility-axe.spec.ts",
+    "test:e2e:a11y-adaptive": "cross-env VINTRACE_ADAPTIVE_VISUAL=1 playwright test tests/e2e/adaptive-visual-accessibility.spec.ts",
+    "test:e2e:a11y-media": "playwright test tests/e2e/photos-view-state.spec.ts --grep \"video playback exposes synchronized generated captions\"",
+    "test:e2e:a11y": "npm run build:vite && npm-run-all test:e2e:a11y-keyboard test:e2e:a11y-axe test:e2e:a11y-adaptive test:e2e:a11y-media",
+    "test:e2e:agents": "playwright test tests/e2e/agent-platform.spec.ts",
+    "test:e2e:mobile": "npm run build:mobile && playwright test tests/e2e/mobile-companion.spec.ts",
     "test:e2e:packaged": "cross-env VINTRACE_PACKAGED_SMOKE=1 playwright test tests/e2e/packaged.spec.ts",
     "test:e2e:soak": "cross-env VINTRACE_SOAK=1 playwright test tests/e2e/memory-soak.spec.ts",
-    "test": "npm run build && npm run test:localization && npm run test:main-util && npm run test:desktop-scripts && npm run test:styles && npm run test:app-state && npm run test:types && npm run test:calibration-artifacts && npm run test:mcp-connection && npm run test:pipeline && npm run test:age-gap && npm run test:scoring && npm run test:quality && npm run test:detection && npm run test:calibration && npm run test:learning-loop && npm run test:onnx-training-feasibility && npm run test:retraining-governance && npm run test:self-learning-audit && npm run test:self-learning-plan && npm run test:benchmark-units && npm run test:det-eval && npm run test:clustering && npm run test:fiqa && npm run test:validation && npm run test:pooling && npm run test:image-io && npm run test:video-io && npm run test:folder-tree && npm run test:enroll-paths && npm run test:folder-tree-selection && npm run test:people-grouping && npm run test:photo-sources && npm run test:photo-folders && npm run test:photo-scale && npm run test:photo-golden && npm run test:photos-view && npm run test:model-validation && npm run test:edge && npm run test:filesystem-chaos && npm run test:backup-roundtrip && npm run test:clean && npm run test:crypto && npm run test:workspace-registry && npm run test:command-contract && npm run test:dataset-benchmark && npm run test:dataset-gates && npm run test:model-downloader && npm run test:safety-model && npm run test:safe-mode-override && npm run test:mcp && npm run test:mcp-redaction && npm run test:perf-budget && npm run test:previously-orphaned && npm run test:coverage-contract && npm run test:e2e"
+    "test:dependency-currency": "node desktop/scripts/check-dependency-currency.cjs && node desktop/scripts/run-python.cjs tests/dependency_currency.py",
+    "test:frozen-dependency-currency": "node desktop/scripts/run-python.cjs tests/frozen_dependency_currency.py",
+    "test": "npm run build && npm run test:dependency-currency && npm run test:localization && npm run test:main-util && npm run test:desktop-scripts && npm run test:release-signing-policy && npm run test:cutting-edge-audit && npm run test:workspace-encryption && npm run test:styles && npm run test:app-state && npm run test:types && npm run test:calibration-artifacts && npm run test:mcp-connection && npm run test:pipeline && npm run test:age-gap && npm run test:age-trajectory && npm run test:cross-age-benchmark && npm run test:synthetic-age-image-benchmark && npm run test:scoring && npm run test:quality && npm run test:detection && npm run test:calibration && npm run test:adaptive-calibration && npm run test:cohort && npm run test:learning-loop && npm run test:onnx-training-feasibility && npm run test:retraining-governance && npm run test:self-learning-audit && npm run test:self-learning-plan && npm run test:benchmark-units && npm run test:det-eval && npm run test:clustering && npm run test:fiqa && npm run test:model-lifecycle && npm run test:synthetic-enrollment-screen && npm run test:validation && npm run test:pooling && npm run test:image-io && npm run test:video-io && npm run test:audio-intelligence && npm run test:local-sync && npm run test:video-tracks && npm run test:folder-tree && npm run test:enroll-paths && npm run test:folder-tree-selection && npm run test:people-grouping && npm run test:photo-sources && npm run test:photo-source-adapters && npm run test:photo-source-service && npm run test:photo-source-api && npm run test:photo-portability && npm run test:vector-store && npm run test:inbound-connectors && npm run test:photo-source-scale && npm run test:photo-folders && npm run test:photo-spatial && npm run test:photo-scale && npm run test:photo-golden && npm run test:photos-view && npm run test:photo-video-transcript && npm run test:photo-agent-ui && npm run test:model-validation && npm run test:edge && npm run test:filesystem-chaos && npm run test:backup-roundtrip && npm run test:clean && npm run test:crypto && npm run test:workspace-registry && npm run test:command-contract && npm run test:dataset-benchmark && npm run test:dataset-gates && npm run test:model-downloader && npm run test:safety-model && npm run test:safe-mode-override && npm run test:mcp && npm run test:mcp-app-hosts && npm run test:mcp-registry && npm run test:mcp-redaction && npm run test:agent-untrusted && npm run test:mcp-injection-boundary && npm run test:agent-images && npm run test:agent-auth && npm run test:mobile-companion && npm run test:agent-oauth-http && npm run test:agent-workflows && npm run test:agent-images-scale && npm run test:agent-http && npm run test:agent-frontend && npm run test:perf-budget && npm run test:previously-orphaned && npm run test:coverage-contract && npm run test:e2e"
   },
   "dependencies": {
     "electron-updater": "^6.8.9",
     "lucide-react": "^0.468.0",
+    "qrcode": "1.5.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@modelcontextprotocol/ext-apps": "^1.7.4",
     "@playwright/test": "^1.49.0",
     "@types/node": "^22.10.0",
+    "@types/qrcode": "1.5.6",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^5.0.0",
     "cross-env": "^10.0.0",
-    "electron": "^39.0.0",
+    "electron": "43.1.0",
     "electron-builder": "^26.0.0",
+    "esbuild": "^0.25.12",
+    "js-yaml": "4.2.0",
     "npm-run-all": "^4.1.5",
     "typescript": "^5.7.0",
     "vite": "^6.0.0"
@@ -291,8 +441,23 @@
         "to": "requirements-production.txt"
       },
       {
+        "from": "requirements-production.lock.txt",
+        "to": "requirements-production.lock.txt"
+      },
+      {
         "from": "requirements.txt",
         "to": "requirements.txt"
+      },
+      {
+        "from": "THIRD_PARTY_NOTICES.md",
+        "to": "THIRD_PARTY_NOTICES.md"
+      },
+      {
+        "from": "licenses",
+        "to": "licenses",
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "mcp",
@@ -316,6 +481,34 @@
         ]
       },
       {
+        "from": "models/cohort",
+        "to": "models/cohort",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "models/generative",
+        "to": "models/generative",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "models/lifecycle",
+        "to": "models/lifecycle",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "models/audio",
+        "to": "models/audio",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
         "from": "report.md",
         "to": "report.md"
       }
@@ -323,23 +516,130 @@
     "mac": {
       "category": "public.app-category.photography",
       "icon": "desktop/assets/icon.icns",
+      "minimumSystemVersion": "14.0",
+      "forceCodeSigning": true,
       "extendInfo": {
-        "NSCameraUsageDescription": "Vintrace uses the camera to capture local review photos for face matching."
+        "NSCameraUsageDescription": "Vintrace uses the camera to capture local review photos for face matching.",
+        "NSLocalNetworkUsageDescription": "Vintrace uses your private network only when you enable encrypted device-to-device catalog sync.",
+        "NSBonjourServices": [
+          "_vintrace-sync._tcp"
+        ]
       },
       "hardenedRuntime": true,
+      "notarize": true,
       "gatekeeperAssess": false,
       "entitlements": "desktop/assets/entitlements.mac.plist",
       "entitlementsInherit": "desktop/assets/entitlements.mac.plist",
       "target": [
-        "dmg",
-        "zip"
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
       ]
     },
     "win": {
       "icon": "desktop/assets/icon.ico",
+      "forceCodeSigning": true,
+      "signExts": [
+        ".exe"
+      ],
       "target": [
-        "nsis"
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
+    },
+    "linux": {
+      "category": "Graphics;Photography;",
+      "description": "Private local face recognition and photo intelligence workbench.",
+      "desktop": {
+        "entry": {
+          "Name": "Vintrace",
+          "Keywords": "photos;images;faces;organize;privacy;",
+          "StartupWMClass": "Vintrace",
+          "Terminal": "false",
+          "Type": "Application"
+        }
+      },
+      "executableName": "vintrace",
+      "icon": "desktop/assets/icon.png",
+      "maintainer": "Vintrace",
+      "synopsis": "Private local photo intelligence",
+      "syncDesktopName": true,
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "rpm",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "vendor": "Vintrace"
+    },
+    "appImage": {
+      "artifactName": "${productName}-${version}-linux-${arch}.${ext}",
+      "compression": "zstd"
+    },
+    "deb": {
+      "artifactName": "${name}_${version}_${arch}.${ext}",
+      "compression": "xz",
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0"
+      ],
+      "packageCategory": "graphics",
+      "packageName": "vintrace",
+      "recommends": []
+    },
+    "rpm": {
+      "artifactName": "${name}-${version}.${arch}.${ext}",
+      "compression": "gzip",
+      "depends": [
+        "gtk3",
+        "libnotify",
+        "nss",
+        "libXScrnSaver",
+        "libXtst",
+        "xdg-utils",
+        "at-spi2-core",
+        "libuuid",
+        "libsecret"
+      ],
+      "packageCategory": "Graphics",
+      "packageName": "vintrace"
+    },
+    "toolsets": {
+      "appimage": "1.0.3"
     },
     "nsis": {
       "oneClick": false,

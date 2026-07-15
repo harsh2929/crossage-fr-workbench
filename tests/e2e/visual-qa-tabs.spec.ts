@@ -39,15 +39,57 @@ test("Visual QA: screenshot every tab", async () => {
 
   const app = await electron.launch({ args: [path.join(root, "desktop/main.cjs")], cwd: root, env });
   const page = await app.firstWindow();
-  await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
+  if (process.env.VINTRACE_VISUAL_DARK === "1") await page.emulateMedia({ colorScheme: "dark" });
+  if (process.env.VINTRACE_VISUAL_COMPACT === "1") {
+    // Electron pages keep the BrowserWindow layout viewport when only the page
+    // viewport is changed, which produces a misleading crop of a desktop layout.
+    // Resize the native window so responsive CSS is exercised for real.
+    const browserWindow = await app.browserWindow(page);
+    await browserWindow.evaluate((window) => window.setSize(800, 900));
+    await page.waitForTimeout(200);
+  }
+  page.on("pageerror", (error) => console.log("VQA_PAGE_ERROR=" + (error.stack || error.message)));
+  page.on("console", (message) => {
+    if (message.type() === "error") console.log("VQA_CONSOLE_ERROR=" + message.text());
+  });
+  await expect(page.getByText("Backend ready.")).toBeAttached({ timeout: 120_000 });
   await page.locator(".sidebar-footer .language-picker select").selectOption("en").catch(() => undefined);
   await dismiss(page);
+  await page.screenshot({ path: path.join(SHOT, "startup.png") });
+  await expect(page.locator(".nav-list")).toBeVisible({ timeout: 5_000 });
 
-  for (const tab of ["Library", "Memories", "Albums", "Search", "People & Pets", "Tools", "Settings"]) {
-    await page.locator(".nav-list").getByRole("button", { name: tab }).click();
+  const tabs = [
+    ["library", "Library"],
+    ["memories", "Memories"],
+    ["albums", "Albums"],
+    ["search", "Search"],
+    ["agents", "AI Agents"],
+    ["people", "People & Pets"],
+    ["tools", "Tools"],
+    ["settings", "Settings"],
+  ] as const;
+  for (const [key, tab] of tabs) {
+    // data-tab is the stable navigation contract. The accessible name can
+    // legitimately include a live count/status badge and changes by locale.
+    await page.locator(`.nav-list [data-tab="${key}"]`).click();
     await page.waitForTimeout(700);
     await dismiss(page);
     await page.screenshot({ path: path.join(SHOT, `tab-${tab.replace(/[^a-z]+/gi, "-").toLowerCase()}.png`) });
   }
+
+  const captureSections = async (tabKey: string, labels: string[]) => {
+    await page.locator(`.nav-list [data-tab="${tabKey}"]`).click();
+    for (const label of labels) {
+      await page.locator(".section-tabs .section-tab", { hasText: label }).click();
+      await page.waitForTimeout(450);
+      await dismiss(page);
+      const slug = label.replace(/[^a-z]+/gi, "-").replace(/^-|-$/g, "").toLowerCase();
+      await page.screenshot({ path: path.join(SHOT, `${tabKey}-${slug}.png`) });
+    }
+  };
+
+  await captureSections("people", ["Browse", "Add person", "Review"]);
+  await captureSections("tools", ["Overview", "Scan", "Models", "Diagnostics"]);
+  await captureSections("settings", ["General", "Engine & Models", "Privacy & Safety", "Storage & Data", "AI Agents", "Advanced"]);
   await app.close();
 });

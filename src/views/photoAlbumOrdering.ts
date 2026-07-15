@@ -1,6 +1,12 @@
 export type PhotoAlbumMoveDirection = "first" | "earlier" | "later" | "last";
 export type PhotoAlbumDropPlacement = "before" | "after";
 
+export type PhotoAlbumItemDragState = {
+  sourcePath: string;
+  targetSourcePath?: string;
+  placement?: PhotoAlbumDropPlacement;
+};
+
 export type PhotoAlbumReorderResult = {
   updated?: number;
   requested?: number;

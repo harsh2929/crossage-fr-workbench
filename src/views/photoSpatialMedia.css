@@ -1,0 +1,57 @@
+.photos-spatial-viewer {
+  display: grid;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.photos-spatial-viewer > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.photos-spatial-viewer > span > span {
+  display: grid;
+  min-width: 0;
+}
+
+.photos-spatial-viewer strong,
+.photos-spatial-viewer small {
+  overflow-wrap: anywhere;
+}
+
+.photos-spatial-viewer small {
+  color: var(--secondary);
+}
+
+.photos-spatial-modes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+  gap: 4px;
+  min-height: 36px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-muted);
+}
+
+.photos-spatial-modes button {
+  min-width: 0;
+  min-height: 30px;
+  box-shadow: none;
+}
+
+.photos-spatial-modes button[aria-pressed="true"] {
+  border-color: var(--selection-border);
+  background: var(--selection-bg);
+  box-shadow: var(--selection-shadow);
+  color: #ffffff;
+}
+
+@media (max-width: 520px) {
+  .photos-spatial-modes {
+    grid-template-columns: 1fr;
+  }
+}

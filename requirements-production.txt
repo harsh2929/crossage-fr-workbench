@@ -1,5 +1,5 @@
 -r requirements.txt
-onnxruntime>=1.23
+onnxruntime==1.27.0
 insightface>=0.7
 faiss-cpu>=1.8
 hdbscan>=0.8
@@ -8,7 +8,11 @@ pyinstaller>=6.0
 
 # Offline reverse geocoding (APL-PLACE-01): bundled GeoNames gazetteer, no runtime network.
 reverse_geocode>=1.6
-# On-device OCR (APL-INTEL-01/META-07): RapidOCR PP-OCRv5 ONNX over onnxruntime, offline.
-rapidocr-onnxruntime>=1.4
+# On-device OCR (PHOTO-01): Python 3.13-compatible RapidOCR with pinned PP-OCRv6 ONNX models.
+rapidocr==3.9.1
 # On-device tokenizer for SigLIP2 semantic search (APL-SEARCH-SEMANTIC): loads tokenizer.json from disk, offline at inference.
 tokenizers>=0.20
+# Offline multilingual video transcription via the pinned local whisper.cpp model.
+pywhispercpp==1.5.0
+# Opt-in Bonjour/mDNS discovery for encrypted local-first catalog sync.
+zeroconf==0.149.17

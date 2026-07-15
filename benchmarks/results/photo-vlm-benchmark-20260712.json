@@ -1,0 +1,153 @@
+{
+  "benchmarkId": "vintrace-photo-vlm-offline-v1",
+  "catalog": {
+    "runtimeRevision": "76f2798059575a96a12e4d34342165a4b6a6a312",
+    "runtimeTag": "b9969",
+    "sha256": "63a31351f11b68fdeb9f739061df5e1fc85fae6dd25914bb589eabe8af19cc75",
+    "version": "2026-07-12.1"
+  },
+  "fixture": {
+    "name": "paddleocr-general-ocr-002.jpg",
+    "sha256": "4425af33dd163cf73bdff502bd35ee527e9bdd5725501db1da78bfdae9f538f4",
+    "sizeBytes": 128713
+  },
+  "generatedAt": "2026-07-12T12:06:56Z",
+  "network": {
+    "llamaOfflineFlagRequired": true,
+    "loopbackOnlyGuard": true,
+    "outboundAttempts": []
+  },
+  "passed": true,
+  "results": [
+    {
+      "boardingPassRecovered": true,
+      "caption": "A boarding pass for a flight from Fuzhou to Taipei, with the flight number MU 2379, departing on December 3rd, 2019.",
+      "coldWallMs": 3674.339,
+      "deterministic": true,
+      "model": {
+        "artifacts": [
+          {
+            "filename": "SmolVLM2-2.2B-Instruct-Q4_K_M.gguf",
+            "role": "language-model",
+            "sha256": "0cf76814555b8665149075b74ab6b5c1d428ea1d3d01c1918c12012e8d7c9f58",
+            "sizeBytes": 1112602656
+          },
+          {
+            "filename": "mmproj-SmolVLM2-2.2B-Instruct-Q8_0.gguf",
+            "role": "vision-projector",
+            "sha256": "ae07ea1facd07dd3230c4483b63e8cda96c6944ad2481f33d531f79e892dd024",
+            "sizeBytes": 592523200
+          }
+        ],
+        "catalogSha256": "63a31351f11b68fdeb9f739061df5e1fc85fae6dd25914bb589eabe8af19cc75",
+        "catalogVersion": "2026-07-12.1",
+        "humanReviewRequired": true,
+        "modelId": "ggml-org/SmolVLM2-2.2B-Instruct-GGUF",
+        "modelLicense": "Apache-2.0",
+        "modelRevision": "1bc3c9f74ceafd4c8d4411cc9cf188bba3798f91",
+        "modelTier": "low-memory",
+        "offline": true,
+        "promptVersion": "photo-caption-tags-v1",
+        "runtime": {
+          "archiveSha256": "8f55884245763dc6c5c79729481e684f8c2c7e76420aa37f2fdeacf53398e18e",
+          "id": "llama.cpp",
+          "license": "MIT",
+          "platform": "darwin-arm64",
+          "revision": "76f2798059575a96a12e4d34342165a4b6a6a312",
+          "tag": "b9969"
+        },
+        "upstreamModel": "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
+        "upstreamRevision": "482adb537c021c86670beed01cd58990d01e72e4"
+      },
+      "offline": true,
+      "reportedWarmInferenceMs": 835.574,
+      "route": {
+        "reason": "SmolVLM2 is the verified installed route for this memory budget.",
+        "requested": "low-memory",
+        "tier": "low-memory",
+        "totalMemoryBytes": 25769803776
+      },
+      "source": "vlm-smolvlm2",
+      "tags": [
+        "flight",
+        "boarding pass",
+        "fuzhou",
+        "taipei",
+        "mu 2379",
+        "december 3rd, 2019",
+        "gate",
+        "etk",
+        "gate closes 10 minutes before departure"
+      ],
+      "tier": "low-memory",
+      "warmWallMs": 1464.579
+    },
+    {
+      "boardingPassRecovered": true,
+      "caption": "boarding pass for flight mu 2379 from taiyuan to fuzhou",
+      "coldWallMs": 5604.567,
+      "deterministic": true,
+      "model": {
+        "artifacts": [
+          {
+            "filename": "Qwen3VL-4B-Instruct-Q4_K_M.gguf",
+            "role": "language-model",
+            "sha256": "66358cb18bb6b3b1b6675aa412c7a88ef01d228f481184d13668e5201c730a0a",
+            "sizeBytes": 2497281664
+          },
+          {
+            "filename": "mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf",
+            "role": "vision-projector",
+            "sha256": "30ba2c7dd3127a4561b6cba9d13d0f711c91bdb38742e2f56d73c8cb596bd06d",
+            "sizeBytes": 453974304
+          }
+        ],
+        "catalogSha256": "63a31351f11b68fdeb9f739061df5e1fc85fae6dd25914bb589eabe8af19cc75",
+        "catalogVersion": "2026-07-12.1",
+        "humanReviewRequired": true,
+        "modelId": "Qwen/Qwen3-VL-4B-Instruct-GGUF",
+        "modelLicense": "Apache-2.0",
+        "modelRevision": "1cd86afb9a95c410a6038ab3b40d8b578c892266",
+        "modelTier": "quality",
+        "offline": true,
+        "promptVersion": "photo-caption-tags-v1",
+        "runtime": {
+          "archiveSha256": "8f55884245763dc6c5c79729481e684f8c2c7e76420aa37f2fdeacf53398e18e",
+          "id": "llama.cpp",
+          "license": "MIT",
+          "platform": "darwin-arm64",
+          "revision": "76f2798059575a96a12e4d34342165a4b6a6a312",
+          "tag": "b9969"
+        },
+        "upstreamModel": "Qwen/Qwen3-VL-4B-Instruct",
+        "upstreamRevision": "ebb281ec70b05090aa6165b016eac8ec08e71b17"
+      },
+      "offline": true,
+      "reportedWarmInferenceMs": 2720.109,
+      "route": {
+        "reason": "Qwen3-VL is installed and the detected memory budget supports the quality tier.",
+        "requested": "quality",
+        "tier": "quality",
+        "totalMemoryBytes": 25769803776
+      },
+      "source": "vlm-qwen3-vl",
+      "tags": [
+        "boarding pass",
+        "flight mu 2379",
+        "taiyuan airport",
+        "fuzhou",
+        "gates close 10 minutes before departure",
+        "seat 12f",
+        "no smoking",
+        "etkt ticket number",
+        "flight date 03dec",
+        "w class",
+        "g11 gate",
+        "15:55 boarding time"
+      ],
+      "tier": "quality",
+      "warmWallMs": 3356.067
+    }
+  ],
+  "schemaVersion": 1
+}

@@ -1,6 +1,6 @@
 // Presentational status row: busy ▸ notice ▸ ready three-state + simple-engine
 // banner + inline scan-cancel. Extracted verbatim from App.tsx (behavior-identical).
-import { AlertCircle, Check, Loader2, X } from "lucide-react";
+import { AlertCircle, Check, Loader2, Pause, Play, X } from "lucide-react";
 import type { LanguageCode, TranslationKey, UiMessageKey } from "../i18n";
 
 type UiMessageValue = string | number | { text: string | number; localize: true };
@@ -19,7 +19,9 @@ interface StatusRowProps {
   uiText: (source: string) => string;
   scanInFlight: boolean;
   cancelActiveScan: () => void;
+  resumeActiveScan: () => void;
   scanCancelRequested: boolean;
+  scanPaused: boolean;
   notice: ShellNotice | null;
   language: LanguageCode;
   formatErrorMessage: (language: LanguageCode, code: string | null | undefined, fallback: string, action?: string) => string;
@@ -29,12 +31,27 @@ interface StatusRowProps {
 }
 
 export function StatusRow(props: StatusRowProps) {
-  const { busy, uiText, notice, language, t, isDemoMode } = props;
+  const { busy, uiText, notice, language } = props;
+  // Operational feedback is transient UI, not permanent page chrome. Engine
+  // mode already has a dedicated, actionable home in the sidebar.
+  if (!busy && !notice) return null;
   return (
-    <div className="status-row">
+    <div className="status-row" aria-label="Activity status">
       {busy ? (
         <div className="notice busy" role="status" aria-live="polite" aria-atomic="true">
-          <Loader2 className="spin" size={16} /> {uiText(busy)}
+          {props.scanPaused ? <Pause size={16} /> : <Loader2 className="spin" size={16} />}
+          {props.scanCancelRequested ? uiText("Cancelling scan…") : props.scanPaused ? uiText("Scan paused") : uiText(busy)}
+          {props.scanPaused && !props.scanCancelRequested && (
+            <button
+              type="button"
+              className="ghost compact-action inline-resume-scan"
+              onClick={props.resumeActiveScan}
+              aria-label="Resume scan"
+            >
+              <Play size={14} />
+              <span>Resume scan</span>
+            </button>
+          )}
           {props.scanInFlight && (
             <button
               type="button"
@@ -62,10 +79,7 @@ export function StatusRow(props: StatusRowProps) {
             ? props.uiMessage(notice.messageKey, notice.values)
             : uiText(notice.text)}
         </div>
-      ) : (
-        <div className="notice neutral" role="status" aria-live="polite" aria-atomic="true">{t("status.ready")}</div>
-      )}
-      {isDemoMode && <div className="notice warn">{t("status.simpleMatching")}</div>}
+      ) : null}
     </div>
   );
 }

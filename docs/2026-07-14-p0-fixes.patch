@@ -1,0 +1,93 @@
+# P0 fixes — 2026-07-14
+
+Applied to the working tree and verified green. NOT committed: the files they touch are part of
+the paused Codex in-flight work (agent_images.py and agent_telemetry.py are not even tracked in
+git yet), so committing would sweep up ~88k lines that are not mine. Land the Codex batch first,
+then these go on top as a small, reviewable diff.
+
+## Fixes and their tests (all new tests are mine and pass)
+
+1. Safe Mode fail-open across the desktop <-> MCP process boundary
+   - crossage_fr/enroll/manager.py : ProjectState.refresh_config_from_disk() (stat-guarded re-read)
+   - crossage_fr/agent_images.py   : _safe_mode_status() calls it at the enforcement boundary
+   - test: tests/safe_mode_cross_process_units.py
+
+2. Telemetry on by default + plaintext trace log shipped in backups
+   - crossage_fr/agent_telemetry.py : MCP_OTEL_ENABLED default False (opt-in)
+   - crossage_fr/enroll/manager.py  : export_workspace_backup excludes the trace log
+   - mcp/README.md                  : documents tracing as opt-in, never in backups
+   - test: tests/telemetry_default_off_units.py
+
+3. Moving/renaming a file destroyed its identity (live data loss)
+   - crossage_fr/store/workspace_db.py : _photo_asset_id_for_moved_file() content-hash rehoming,
+     guarded by content_hash AND file signature (size+mtime) AND old-path-gone AND single-candidate.
+     The signature guard is what makes it safe: "path missing" is not proof of a move (external drive
+     unplugged), so a copy imported from a backup must not hijack the vanished asset.
+   - test: tests/asset_identity_rehome_units.py
+
+4. Hidden / Recently-Deleted assets reachable by a paired phone that knows the asset id
+   - crossage_fr/agent_images.py : _metadata_restricts_agent_access() filtered in _hydrate_assets
+     (covers fetch_assets + analyze_assets) and checked in preview(). Reported as "not found", never
+     "forbidden", so it is not an existence oracle.
+   - test: tests/agent_hidden_asset_gate_units.py
+
+5. Warm-cache workspace-lock bypass on the mobile/MCP surface
+   - crossage_fr/mcp_server.py : _image_service() calls _assert_unlocked() UNCONDITIONALLY (per
+     request), not only at singleton construction. Before this, a phone paired while unlocked kept
+     reading the library after the user enabled + locked Workspace Lock; and the no-consent
+     capabilities() route was never lock-gated at all. Confirmed independently by the trace workflow,
+     which recommended this exact root fix.
+   - test: tests/mcp_workspace_lock_warm_cache_units.py
+
+6. Cross-machine backup restore was impossible (disaster-recovery ship-blocker)
+   - crossage_fr/enroll/manager.py : restore/verify treated a cross-machine SQLCipher key mismatch as
+     an uncaught WorkspaceEncryptionError and aborted before extracting a file. Now the backup manifest
+     records workspaceKeyId, and verify distinguishes a genuine key mismatch (host key id != archived
+     key id -> recoverable, restore proceeds) from corruption (key id matches but the DB won't open ->
+     hard fail). Same-machine full integrity checking is unchanged.
+   - test: tests/workspace_backup_cross_machine_units.py
+
+7. Preview API advertised maxPreviewDimension=2048 but silently returned 768 (PIL.thumbnail never
+   upscales, and the base image was always the 768px list thumbnail).
+   - crossage_fr/enroll/manager.py : preview_path_for(...)/_preview_cache_path(...) accept a max_edge
+     (default 768, so existing callers and caches are byte-identical); larger previews are generated
+     from the original and cached per-edge.
+   - crossage_fr/agent_images.py   : preview() requests the base preview at the dimension it serves.
+     Honest up to the source's own resolution; small originals are not upscaled.
+   - test: tests/preview_dimension_honesty_units.py
+
+8. "Catalog-only" Open Photo Catalog export still shipped media bytes (Live Photo .mov halves, depth
+   maps, RAW/XMP companions) when include_sidecars was true (the default) — a privacy + size surprise.
+   - crossage_fr/photo_catalog_portability.py : sidecar byte export now requires include_originals;
+     catalog-only ships zero media bytes and the manifest reports includeSidecars truthfully. The
+     pairing relationship is still exported as photo_media_pairs metadata rows.
+   - test: tests/catalog_only_no_media_bytes_units.py
+
+Dispositioned (NOT spot-fixed, with reasons) — see 2026-07-14-remaining-work-disposition.md:
+  - B14 keyword LWW data loss: correct fix is an OR-Set (wire-format v1->v2); a partial CRDT would be
+    wrong. Belongs to E1.1. local_sync.py is dormant.
+  - E0.7 SQLite contention: empirically the RLock serializes ALL in-process connections; the correct
+    fix is connection pooling + RLock-scope reduction, validatable only under concurrent load. Not a
+    safe blind change on churned workspace_db.py.
+  - E0.1 canonical asset_uid, E0.6 serial loop, and the mobile app itself (E1-E3): net-new build work.
+  - LAN bind / Info.plist / recovery UI / consent gate: Electron/native, unverifiable in this env.
+
+## Corrected (claims from the audit / spec that tracing overturned)
+
+- "A paired phone bypasses the workspace lock." Half wrong. The COLD-process claim is false
+  (_api() -> _assert_unlocked() fails closed). But the WARM-cache path was a real bug (fix 5).
+- "Recovery is decorative / the Emergency Kit cannot open the backup." WRONG at the crypto layer:
+  the scrypt+AES-GCM recovery envelope is bundled in the ZIP and the printed code alone opens the
+  inner SQLCipher DB (proven end-to-end). The real bug was the cross-machine restore crash (fix 6).
+- "SecureEnclave can hold the Ed25519/X25519 identity." FALSE — CryptoKit exposes only
+  SecureEnclave.P256. Recorded in the recovery design; no code depends on it yet.
+
+## Verification (all green)
+
+    for t in safe_mode_cross_process telemetry_default_off asset_identity_rehome \
+             agent_hidden_asset_gate mcp_workspace_lock_warm_cache workspace_backup_cross_machine; do
+      PYTHONPATH=. CROSSAGE_FORCE_FALLBACK=1 .venv/bin/python tests/${t}_units.py
+    done
+    # plus regression sweeps: agent_images_units, mcp_smoke, mcp_redaction, mcp_delegation_units,
+    # workspace_backup_roundtrip, workspace_encryption_units, photo_folders_units, command_contract,
+    # photo_import_backup_policy_units, photo_media_pair_backup_check_units

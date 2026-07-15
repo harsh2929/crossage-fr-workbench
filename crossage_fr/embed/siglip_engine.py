@@ -1,7 +1,8 @@
-"""On-device natural-language photo search (SigLIP 2 ONNX).
+"""On-device natural-language photo and video-segment search (SigLIP 2 ONNX).
 
-A dual-encoder (image + text) that embeds photos and free-text queries into one
-shared space so a query can be ranked against a photo library entirely on-device.
+A dual-encoder (image + text) that embeds visual media and free-text queries into
+one shared space so a query can be ranked against a media library entirely
+on-device.
 Mirrors the discovery/caching/graceful-degradation pattern of
 ``crossage_fr/ingest/safety.py`` and ``crossage_fr/ingest/matting.py``.
 
@@ -42,6 +43,7 @@ _TOKENIZER_NAME = "tokenizer.json"
 _PINNED_SEMANTIC_HASHES = {
     "vision_model_uint8.onnx": "f2eb8ccfa3dc0b3761d9ea9a39554fe0f2be71b247ad7f68a80720ec88895650",
     "text_model_uint8.onnx": "8c6d2827118d6d0e50db7392588d73133c7d2147997da522a1b2d144df535aed",
+    "tokenizer.json": "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322",
 }
 
 
@@ -72,6 +74,8 @@ def semantic_model_report() -> dict[str, Any]:
         "imageSize": _IMAGE_SIZE,
         "license": "Apache-2.0",
         "source": "google/siglip2-base-patch16-256 (onnx-community export)",
+        "appleExecutionProvider": "CPUExecutionProvider",
+        "appleProviderReason": "The ONNX export uses dynamic image batches and text sequence lengths that CoreML EP cannot compile safely.",
     }
 
 
@@ -126,6 +130,14 @@ def encode_image_path_cached(path: Path) -> np.ndarray | None:
     return cached
 
 
+def _truncate_text_token_ids(ids: list[int]) -> list[int]:
+    if len(ids) <= _TEXT_MAX_TOKENS:
+        return ids
+    if _TEXT_MAX_TOKENS <= 1:
+        return ids[:_TEXT_MAX_TOKENS]
+    return [*ids[: _TEXT_MAX_TOKENS - 1], ids[-1]]
+
+
 class _SemanticModel:
     def __init__(self, spec: _SemanticModelSpec):
         from tokenizers import Tokenizer
@@ -148,9 +160,7 @@ class _SemanticModel:
         return l2_normalize(pooled, axis=-1, dtype=np.float32, eps=1e-12)
 
     def encode_text(self, text: str) -> np.ndarray:
-        ids = list(self.tokenizer.encode(str(text).strip().lower()).ids)
-        if len(ids) > _TEXT_MAX_TOKENS:
-            ids = ids[:_TEXT_MAX_TOKENS]
+        ids = _truncate_text_token_ids(list(self.tokenizer.encode(str(text).strip().lower()).ids))
         feed = np.asarray([ids], dtype=np.int64)
         pooled = np.asarray(self.text.run([self._text_out], {self._text_in: feed})[0], dtype=np.float32)
         return l2_normalize(pooled, axis=-1, dtype=np.float32, eps=1e-12)[0]
@@ -186,10 +196,10 @@ def _stat_token(path: Path) -> tuple[int, int]:
 
 
 def _verify_semantic_integrity(spec: _SemanticModelSpec) -> bool:
-    for path in (spec.vision_path, spec.text_path):
+    for path in (spec.vision_path, spec.text_path, spec.tokenizer_path):
         expected = _PINNED_SEMANTIC_HASHES.get(path.name.lower())
         if not expected:
-            continue
+            return False
         try:
             if sha256_file(path).lower() != expected.lower():
                 return False
@@ -198,12 +208,38 @@ def _verify_semantic_integrity(spec: _SemanticModelSpec) -> bool:
     return True
 
 
+@lru_cache(maxsize=8)
+def _verify_semantic_integrity_cached(
+    vision_path: str,
+    vision_stat: tuple[int, int],
+    text_path: str,
+    text_stat: tuple[int, int],
+    tokenizer_path: str,
+    tokenizer_stat: tuple[int, int],
+) -> bool:
+    del vision_stat, text_stat, tokenizer_stat
+    return _verify_semantic_integrity(_SemanticModelSpec(
+        Path(vision_path),
+        Path(text_path),
+        Path(tokenizer_path),
+    ))
+
+
+def _semantic_integrity_is_valid(spec: _SemanticModelSpec) -> bool:
+    return _verify_semantic_integrity_cached(
+        str(spec.vision_path), _stat_token(spec.vision_path),
+        str(spec.text_path), _stat_token(spec.text_path),
+        str(spec.tokenizer_path), _stat_token(spec.tokenizer_path),
+    )
+
+
 _SEMANTIC_MODEL_CACHE: dict[tuple, _SemanticModel] = {}
 
 
 def _reset_caches_for_test() -> None:
     _SEMANTIC_MODEL_CACHE.clear()
     _IMAGE_EMBED_CACHE.clear()
+    _verify_semantic_integrity_cached.cache_clear()
     _session_for_model.cache_clear()
 
 
@@ -216,10 +252,11 @@ def _load_semantic_model() -> _SemanticModel | None:
     cache_key = (
         str(spec.vision_path), _stat_token(spec.vision_path),
         str(spec.text_path), _stat_token(spec.text_path),
+        str(spec.tokenizer_path), _stat_token(spec.tokenizer_path),
     )
     model = _SEMANTIC_MODEL_CACHE.get(cache_key)
     if model is None:
-        if not _verify_semantic_integrity(spec):
+        if not _semantic_integrity_is_valid(spec):
             return None  # fail closed
         try:
             import tokenizers  # noqa: F401  (required for text encoding)
@@ -249,7 +286,9 @@ def _find_semantic_model() -> _SemanticModelSpec | None:
         text = sorted(directory.glob(_TEXT_GLOB))
         tokenizer = directory / _TOKENIZER_NAME
         if vision and text and tokenizer.exists():
-            return _SemanticModelSpec(vision[0].resolve(), text[0].resolve(), tokenizer.resolve())
+            spec = _SemanticModelSpec(vision[0].resolve(), text[0].resolve(), tokenizer.resolve())
+            if _semantic_integrity_is_valid(spec):
+                return spec
     return None
 
 
@@ -284,7 +323,16 @@ def _session_for_model(model_path: str, cache_token: tuple[int, int] = (0, 0)):
 
     sess_options = ort.SessionOptions()
     sess_options.log_severity_level = 3
-    selected = get_providers(detect_platform())
+    platform_key = detect_platform()
+    # This export has a dynamic image batch and dynamic text sequence length.
+    # CoreML EP emits compiler diagnostics directly to stdout for those shapes,
+    # which can corrupt the desktop backend's JSON-lines protocol before ORT
+    # falls back. Keep SigLIP on CPU on Apple; other engines retain CoreML.
+    selected = (
+        ["CPUExecutionProvider"]
+        if platform_key in {"apple_silicon", "apple_silicon_rosetta"}
+        else get_providers(platform_key)
+    )
     providers, provider_options = split_provider_config(selected)
     try:
         if provider_options is not None:

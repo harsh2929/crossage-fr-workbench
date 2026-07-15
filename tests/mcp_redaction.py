@@ -25,6 +25,7 @@ from pathlib import Path
 
 import crossage_fr.model_manager as mm
 import crossage_fr.mcp_server as mcp
+from mcp.types import CallToolResult, ImageContent, TextContent
 
 
 LEAK_PATH = "/Users/jane/Pictures/evidence/minors-2024/jane_doe_2009-04-12.jpg"
@@ -96,6 +97,42 @@ def test_embedded_path_redacted_in_tool_output() -> None:
     assert LEAK_PATH not in out
 
 
+def test_image_agent_paths_hidden_but_legacy_destinations_and_resource_ids_survive() -> None:
+    payload = {
+        "targetPath": "/private/exports/contact-sheet.png",
+        "manifestPath": "/private/exports/manifest.json",
+        "mimeType": "image/png",
+        "resourceUri": "vintrace://agent/outputs/op_123/out_456",
+        "scope": "all",
+    }
+    legacy_output = mcp._redact_tool_output(payload)
+    assert legacy_output["targetPath"] == "/private/exports/contact-sheet.png"
+    assert legacy_output["manifestPath"] == "/private/exports/manifest.json"
+    output = mcp._redact_tool_output(mcp._agent_safe_value(payload, keep_path_names=False))
+    assert output["targetPath"] == "[hidden]"
+    assert output["manifestPath"] == "[hidden]"
+    assert output["mimeType"] == "image/png"
+    assert output["resourceUri"] == "vintrace://agent/outputs/op_123/out_456"
+    assert output["scope"] == "all"
+
+
+def test_embedded_hash_redacted_in_tool_freetext() -> None:
+    leak_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    out = json.dumps(mcp._redact_tool_output({"errorSamples": [f"content hash {leak_hash} failed safety decode"]}))
+    assert leak_hash not in out, "biometric hash leaked in tool free-text"
+
+
+def test_connector_urls_redacted_by_key_and_value() -> None:
+    payload = {
+        "metadata": {
+            "permalink": "https://workspace.slack.com/files/F123/private.png",
+            "connectorConfig": {"urls": ["https://example.com/gallery"], "channelIds": ["C123"]},
+        }
+    }
+    output = json.dumps(mcp._redact_tool_output(payload), sort_keys=True)
+    assert "slack.com" not in output and "example.com" not in output and "C123" not in output, output
+
+
 def test_hash_fields_redacted_in_tool_output() -> None:
     # MCP-04 regression: image hashes are biometric fingerprints and must be
     # hidden in tool output, matching resource redaction. A raw SHA-256 in a
@@ -113,10 +150,29 @@ def test_hash_fields_redacted_in_tool_output() -> None:
     assert leak_hash not in json.dumps(mcp._agent_safe_value(payload, keep_path_names=False))
 
 
+def test_rich_multimodal_result_preserves_image_and_redacts_text_and_structure() -> None:
+    result = CallToolResult(
+        content=[
+            TextContent(type="text", text=f"Preview created from {LEAK_PATH}"),
+            ImageContent(type="image", data="aW1hZ2U=", mimeType="image/jpeg"),
+        ],
+        structuredContent={"metadata": {"sourcePath": LEAK_PATH, "note": f"asset {LEAK_NAME}"}},
+    )
+    redacted = mcp._redact_tool_output(result)
+    assert isinstance(redacted, CallToolResult)
+    assert getattr(redacted.content[1], "data", "") == "aW1hZ2U=", "image content must remain intact"
+    visible = json.dumps(redacted.model_dump(), sort_keys=True)
+    assert LEAK_PATH not in visible and LEAK_NAME not in visible
+
+
 def test_exception_text_redacted_before_mcp_framework_sees_it() -> None:
-    message = mcp._redacted_exception_message(ValueError(f"failed to open {LEAK_PATH}; thumbnail {LEAK_NAME} unavailable"))
+    leak_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    message = mcp._redacted_exception_message(
+        ValueError(f"failed to open {LEAK_PATH}; thumbnail {LEAK_NAME} unavailable; content hash {leak_hash}")
+    )
     assert LEAK_PATH not in message, "absolute path leaked in exception text"
     assert LEAK_NAME not in message, "biometric filename leaked in exception text"
+    assert leak_hash not in message, "biometric hash leaked in exception text"
 
 
 def test_safe_tool_redacts_exceptions_at_the_central_wrapper() -> None:
@@ -125,7 +181,9 @@ def test_safe_tool_redacts_exceptions_at_the_central_wrapper() -> None:
     assert "async def wrapper" in block
     assert "anyio.to_thread.run_sync" in block
     assert "except Exception as exc" in block
-    assert "raise ValueError(_redacted_exception_message(exc)) from None" in block
+    assert "message = _redacted_exception_message(exc)" in block
+    assert "raise ValueError(message) from None" in block
+    assert "AGENT_IMAGES.record_failure" in block
 
 
 def test_scan_tools_are_async_and_report_progress_from_worker_thread() -> None:
@@ -166,6 +224,10 @@ def test_probe_video_requires_consent_before_path_or_decoder_work() -> None:
 
     class FakeApi:
         consent_on_file = False
+        class project:
+            @staticmethod
+            def refresh_consent_from_disk() -> bool:
+                return False
 
     def fail_path_check(_path: str) -> Path:
         raise AssertionError("path was checked before consent")
@@ -217,7 +279,11 @@ def main() -> None:
     test_embedded_path_redacted_in_resource_freetext()
     test_embedded_path_redacted_in_audit_message()
     test_embedded_path_redacted_in_tool_output()
+    test_image_agent_paths_hidden_but_legacy_destinations_and_resource_ids_survive()
+    test_embedded_hash_redacted_in_tool_freetext()
+    test_connector_urls_redacted_by_key_and_value()
     test_hash_fields_redacted_in_tool_output()
+    test_rich_multimodal_result_preserves_image_and_redacts_text_and_structure()
     test_exception_text_redacted_before_mcp_framework_sees_it()
     test_safe_tool_redacts_exceptions_at_the_central_wrapper()
     test_scan_tools_are_async_and_report_progress_from_worker_thread()

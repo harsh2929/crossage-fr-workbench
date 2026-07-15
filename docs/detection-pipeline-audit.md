@@ -185,12 +185,18 @@ floor admits *any* pair ≥0.20 into the "child-bucket maybe" band with zero age
 floor with genuine cross-age matches. The "cross-age product" is, at the decision level, an age-agnostic
 cosine-kNN with an honest labeling layer on top.
 
-### 3.4 🔴 Clustering fragments by design at scale
-`flush_unmatched()` calls `cluster_vectors()` **per 1000-face batch** and increments a
-`cluster_label_offset` ([manager.py:812,945,1173](../crossage_fr/enroll/manager.py#L812)), so **one
-person is structurally guaranteed to fragment across batches** at the 100k–1M scale the product targets.
-Also: unmatched candidate embeddings are **never persisted** (`ReviewCandidate` has no vector field,
-[models.py:52-77](../crossage_fr/models.py#L52-L77)), and the DBSCAN fallback is O(n²) in memory.
+### 3.4 ✅ Per-batch clustering fragmentation resolved (2026-07-12)
+The historical implementation clustered periodic batches and advanced a `cluster_label_offset`, which
+could split one identity at an overflow boundary. ML-08 removed both paths. Unmatched vectors now spool
+to a connection-local SQLite TEMP table and enter one terminal pass, isolated by recognizer model and
+dimension. Stable member hashes replace cross-run ordinal-name reuse, duplicate media does not inflate
+cluster cardinality, FAISS unions neighbors in query batches, and the NumPy fallback has a dynamic 96 MiB
+temporary-memory budget. A 20,100-row x 512-dimensional benchmark and a frozen real-model scan passed;
+see the [completion evidence](2026-07-12-cutting-edge-expansion-implementation-ledger.md#global-clustering-completion-evidence-ml-08).
+
+`ReviewCandidate` still does not persist unmatched embeddings after a scan, so incremental reclustering
+against historical unknown groups remains a separate future capability; it is no longer a within-scan
+batch-fragmentation defect.
 
 ### 3.5 🟠 Free accuracy left on the table
 - **No flip/TTA.** The current path is a single `rec_model.get` call
@@ -312,7 +318,7 @@ Every item below is offline and (unless flagged) license-clean.
 | # | Change | File(s) | Effort | Why |
 |---|---|---|:--:|---|
 | 2.1 | **Age-gap-stratified calibration** (overlay on 1.1 with min-N gate + global fallback) + **weight the age-nearest reference** in `group_hits` so a child query isn't out-competed by a person's larger adult cluster. | scoring.py, manager.py, age_gap.py | M–L | The cheapest way to make the headline feature operate on decisions, not just labels. **Caveat:** today's "age gap" is a **photo-date** gap (EXIF→mtime fallback), *not* a subject-age gap — bin honestly, scope impact to the dated subset, and don't double-count the existing display flag. |
-| 2.2 | **Add eDifFIQA(T)** (MIT ONNX, ~7.3 MB) as the per-face quality head; use it for gating, **quality-weighted pooling**, and **best-frame selection**. | new `embed/` scorer, scoring.py, manager.py | L | Moves EDC pAUC from naive-norm ~0.77 toward SOTA ~0.68, biggest gains exactly where the app is hardest (cross-quality, pose). License-clean; the FR backbone keeps its own license. |
+| 2.2 | **Add eDifFIQA(T)** (CC-BY-4.0 ONNX, ~7.3 MB) as the per-face quality head; use it for gating, **quality-weighted pooling**, and **best-frame selection**. | new `embed/` scorer, scoring.py, manager.py | L | Moves EDC pAUC from naive-norm ~0.77 toward SOTA ~0.68, biggest gains exactly where the app is hardest (cross-quality, pose). Commercial redistribution requires attribution; the FR backbone keeps its own license. |
 | 2.3 | **Build the measurement harness:** genuine/impostor **TAR@FAR + DET/ROC**, open-set **FNIR@FPIR / DIR@FPIR**, **bootstrap-by-identity** 95% CIs, real **age-gap-in-years** buckets, **per-demographic** slices, and CMC vs growing distractor galleries. Wire as a required release gate. | new `benchmarks/det_eval.py`, [public_dataset.py](../crossage_fr/benchmarks/public_dataset.py), dataset_benchmarks.py, release_check.py | L | Makes every other lever measurable. **Caveat:** lead with accuracy@EER (the leaderboard-comparable number) and report TAR@FAR only to the FAR floor your impostor pool supports (AgeDB ~1e-3; reserve 1e-4+ for IJB-C-scale pools). |
 | 2.4 | **Fix clustering:** one **global** pass (kill the per-batch label offset) built on a **faiss cosine-kNN graph + connected-components** (license-clean), precision-first defaults, human merge UI. | [manager.py](../crossage_fr/enroll/manager.py) `flush_unmatched`, [clusterer.py](../crossage_fr/cluster/clusterer.py), config.py:51 | M–L | Makes grouping work at scale. **Caveats:** the cross-scan *incremental* version needs net-new candidate-embedding persistence (`ReviewCandidate` has no vector) — defer it; and **do not** ship `infomap`/Leiden(`igraph`) and call them permissive — both are copyleft. Age-aware clustering is **blocked** (unknown faces have no `age_bucket` and there's no age model). |
 
@@ -433,7 +439,7 @@ Pitched as "the single biggest accuracy lever," this was **refuted (isReal=false
   multi-racial); **CALFW/CPLFW/AgeDB-30/FG-NET** cross-age.
 - **AdaFace** (CVPR 2022, arXiv 2204.00964, MIT code); **LVFace** (ByteDance, ICCV 2025, MIT + ONNX);
   **TopoFR** (NeurIPS 2024); **MagFace** (CVPR 2021, Apache-2.0); **CAFace** set pooling (NeurIPS 2022).
-- **CR-FIQA** (CVPR 2023), **eDifFIQA/DifFIQA** (TBIOM 2024, MIT ONNX in OpenCV Zoo).
+- **CR-FIQA** (CVPR 2023), **eDifFIQA/DifFIQA** (TBIOM 2024, CC-BY-4.0 ONNX in OpenCV Zoo).
 - **SCRFD** (ICLR 2022); **YuNet** (OpenCV Zoo, MIT); WIDER FACE.
 - **Score normalization for demographic fairness** — Linghu et al., IJCB 2024 (arXiv 2407.14087);
   **FairCal** (ICLR 2022, arXiv 2106.03761).

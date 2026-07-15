@@ -411,6 +411,14 @@ def test_photo_golden_fixture_pack_manifest_and_import() -> None:
         qr_entry = _entry_by_filename(manifest, "qr-ticket.png")
         qr_asset = asset("qr-ticket.png")
         if qr_entry["expected"].get("realQr"):
+            # Local intelligence is intentionally indexed out of band rather
+            # than making every import pay decoder cost. Exercise the durable
+            # barcode path before asserting the golden QR metadata.
+            barcode_result = api.index_photo_barcodes(
+                {"assetIds": [qr_asset["assetId"]], "ignoreSettings": True, "force": True}
+            )
+            assert barcode_result["progress"]["updated"] == 1, barcode_result
+            qr_asset = api.project.db.photo_asset_by_id(qr_asset["assetId"]) or qr_asset
             qr_metadata = qr_asset["metadata"]
             assert qr_metadata["barcodeType"] == "QR Code", qr_metadata
             assert qr_metadata["barcodeText"] == GOLDEN_QR_PAYLOAD, qr_metadata

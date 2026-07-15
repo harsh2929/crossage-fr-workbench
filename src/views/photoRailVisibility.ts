@@ -19,6 +19,13 @@ export interface PhotoRailVisibilityOptions {
   activeId?: string;
 }
 
+export type PhotoRailDisplayPreferenceKey =
+  | "showUtilityCollections"
+  | "showSensitiveCollections"
+  | "showScreenshotCollections"
+  | "showSharedCollections"
+  | "showLowValueCollections";
+
 const SENSITIVE_PHOTO_FOLDER_IDS = new Set(["hidden", "recentlyDeleted", "utility:sensitive"]);
 const SENSITIVE_PHOTO_VISIBILITY_FILTERS = new Set(["hidden", "deleted"]);
 const SCREENSHOT_PHOTO_FOLDER_IDS = new Set(["media:screenshot", "media:screen_recording"]);
@@ -35,6 +42,25 @@ export function isSensitivePhotoScope(folderId: string, visibilityFilter = ""): 
 
 export function isUtilityPhotoFolder(folder: PhotoRailFolderLike): boolean {
   return folder.kind === "utility" && folder.id !== "memories";
+}
+
+export function isUtilityCoverAllowed<T extends PhotoRailFolderLike>(folder: T | null | undefined): folder is T {
+  if (!folder || folder.kind !== "utility") return false;
+  if (folder.id.startsWith("media:") || folder.id.startsWith("utility:")) return true;
+  return [
+    "favorites",
+    "recentlyAdded",
+    "recentlySaved",
+    "recentlyEdited",
+    "recentlyViewed",
+    "recentlyShared",
+    "duplicates",
+    "places",
+    "trips",
+    "memories",
+    "pets",
+    "petReview",
+  ].includes(folder.id);
 }
 
 export function shouldShowPhotoRailFolder(folder: PhotoRailFolderLike, options: PhotoRailVisibilityOptions): boolean {
@@ -70,6 +96,51 @@ export interface PhotoRailSection<T extends PhotoRailFolderLike> {
 }
 
 export type PhotoRailItemOrder = Partial<Record<PhotoRailSectionId, string[]>>;
+
+export interface PhotoAlbumGalleryFolderCard<T extends PhotoRailFolderLike> {
+  folder: T;
+  folderKey: string;
+  childCount: number;
+}
+
+export interface PhotoAlbumGalleryState<T extends PhotoRailFolderLike> {
+  browsedFolder: T | null;
+  breadcrumbFolders: T[];
+  folderCards: Array<PhotoAlbumGalleryFolderCard<T>>;
+  albumCards: T[];
+}
+
+export type PhotoAlbumTreeDragState = {
+  draggedId: string;
+  targetId?: string;
+  placement?: PhotoRailAlbumTreeDropPlacement;
+  valid?: boolean;
+};
+
+export type PhotoRailDropPlacement = "before" | "after";
+
+export type PhotoPeopleRailDragState = {
+  draggedId: string;
+  targetId?: string;
+  placement?: PhotoRailDropPlacement;
+  kind: "person" | "group";
+  valid?: boolean;
+};
+
+export type PhotoLocalRailItemDragState = {
+  draggedId: string;
+  sectionId: PhotoRailSectionId;
+  targetId?: string;
+  placement?: PhotoRailDropPlacement;
+  valid?: boolean;
+};
+
+export type PhotoRailSectionDragState = {
+  draggedId: PhotoRailSectionId;
+  targetId?: PhotoRailSectionId;
+  placement?: PhotoRailDropPlacement;
+  valid?: boolean;
+};
 
 const PHOTO_RAIL_SECTION_ORDER: PhotoRailSectionId[] = [
   "library",
@@ -162,6 +233,45 @@ function sortPhotoRailAlbumTree<T extends PhotoRailFolderLike>(folders: T[]): T[
 
 export function photoRailSectionSupportsItemOrder(sectionId: PhotoRailSectionId): boolean {
   return REORDERABLE_PHOTO_RAIL_ITEM_SECTIONS.has(sectionId);
+}
+
+export function photoRailDropPlacementFromRatio(ratio: number): PhotoRailDropPlacement {
+  return Number.isFinite(ratio) && ratio < 0.5 ? "before" : "after";
+}
+
+export function photoRailDropPlacementFromBounds(clientY: number, top: number, height: number): PhotoRailDropPlacement {
+  const ratio = height > 0 ? (clientY - top) / height : 0.5;
+  return photoRailDropPlacementFromRatio(ratio);
+}
+
+export function photoRailSectionDragTargetState(
+  current: PhotoRailSectionDragState | null | undefined,
+  sectionId: PhotoRailSectionId,
+  draggedId: PhotoRailSectionId | "",
+  visibleOrder: Iterable<string>,
+  placement: PhotoRailDropPlacement,
+): PhotoRailSectionDragState | null {
+  if (!draggedId || sectionId === "pinned") return null;
+  const visible = new Set(visibleOrder);
+  const valid = draggedId !== sectionId && visible.has(draggedId) && visible.has(sectionId);
+  const base = current || { draggedId };
+  if (current && current.targetId === sectionId && current.placement === placement && current.valid === valid) return current;
+  return { ...base, targetId: sectionId, placement, valid };
+}
+
+export function photoLocalRailItemDragTargetState(
+  current: PhotoLocalRailItemDragState | null | undefined,
+  sectionId: PhotoRailSectionId,
+  targetId: string,
+  draggedId: string,
+  draggedSectionId: PhotoRailSectionId,
+  placement: PhotoRailDropPlacement,
+): PhotoLocalRailItemDragState | null {
+  if (!draggedId || !photoRailSectionSupportsItemOrder(sectionId)) return null;
+  const valid = draggedSectionId === sectionId && targetId !== draggedId;
+  const base = current || { draggedId, sectionId: draggedSectionId };
+  if (current && current.targetId === targetId && current.placement === placement && current.valid === valid) return current;
+  return { ...base, targetId, placement, valid };
 }
 
 export function normalizePhotoRailItemOrder<T extends PhotoRailFolderLike>(
@@ -283,9 +393,72 @@ function photoRailAlbumTreeDepthFromMap(folder: PhotoRailFolderLike, byFolderId:
   return Math.max(0, Math.min(depth, 5));
 }
 
+function photoRailAlbumTreeAncestorIdsFromMap(folder: PhotoRailFolderLike, byFolderId: Map<string, PhotoRailFolderLike>): string[] {
+  const kind = photoRailAlbumTreeItemKind(folder);
+  if (!kind) return [];
+  const ancestors: string[] = [];
+  const seen = new Set<string>();
+  let parentId = photoRailAlbumTreeParentId(folder);
+  while (parentId && byFolderId.has(parentId) && !seen.has(parentId)) {
+    seen.add(parentId);
+    ancestors.push(parentId);
+    const parent = byFolderId.get(parentId);
+    if (!parent) break;
+    parentId = photoRailAlbumTreeParentId(parent);
+  }
+  return ancestors;
+}
+
 export function buildPhotoRailAlbumTreeDepthMap(folders: PhotoRailFolderLike[]): Map<string, number> {
   const byFolderId = photoRailAlbumFolderMap(folders);
   return new Map(folders.map((folder) => [folder.id, photoRailAlbumTreeDepthFromMap(folder, byFolderId)]));
+}
+
+export function buildPhotoRailAlbumTreeAncestorIdMap(folders: PhotoRailFolderLike[]): Map<string, string[]> {
+  const byFolderId = photoRailAlbumFolderMap(folders);
+  return new Map(folders.map((folder) => [folder.id, photoRailAlbumTreeAncestorIdsFromMap(folder, byFolderId)]));
+}
+
+export function buildPhotoAlbumGalleryState<T extends PhotoRailFolderLike>(
+  albumFolders: T[],
+  albums: T[],
+  browsedAlbumFolderId: string,
+): PhotoAlbumGalleryState<T> {
+  const browsedFolderId = String(browsedAlbumFolderId || "");
+  const folderByKey = new Map<string, T>();
+  albumFolders.forEach((folder) => {
+    const folderKey = photoRailAlbumTreeItemId(folder);
+    if (folderKey) folderByKey.set(folderKey, folder);
+  });
+  const childCountByFolderKey = new Map<string, number>();
+  [...albumFolders, ...albums].forEach((folder) => {
+    const parentId = photoRailAlbumTreeParentId(folder);
+    if (!parentId) return;
+    childCountByFolderKey.set(parentId, (childCountByFolderKey.get(parentId) || 0) + 1);
+  });
+  const browsedFolder = browsedFolderId ? folderByKey.get(browsedFolderId) || null : null;
+  const breadcrumbFolders = browsedFolder
+    ? photoRailAlbumTreeAncestorIdsFromMap(browsedFolder, folderByKey)
+      .slice()
+      .reverse()
+      .map((folderId) => folderByKey.get(folderId))
+      .filter((folder): folder is T => Boolean(folder))
+    : [];
+  return {
+    browsedFolder,
+    breadcrumbFolders,
+    folderCards: albumFolders
+      .filter((folder) => photoRailAlbumTreeParentId(folder) === browsedFolderId)
+      .map((folder) => {
+        const folderKey = photoRailAlbumTreeItemId(folder);
+        return {
+          folder,
+          folderKey,
+          childCount: childCountByFolderKey.get(folderKey) || 0,
+        };
+      }),
+    albumCards: albums.filter((folder) => photoRailAlbumTreeParentId(folder) === browsedFolderId),
+  };
 }
 
 export function photoRailAlbumTreeDepth(folder: PhotoRailFolderLike, folders: PhotoRailFolderLike[]): number {
@@ -308,6 +481,30 @@ export interface PhotoRailAlbumTreeDropPlan {
   insertIndex: number;
 }
 
+export interface PhotoRailAlbumTreeReorderDraft extends Record<string, unknown> {
+  parentFolderId: string;
+  items: Array<{ kind: PhotoRailAlbumTreeItemKind; id: string }>;
+}
+
+export type PhotoRailAlbumTreeMoveDraft =
+  | {
+    kind: "albumFolder";
+    payload: {
+      folderId: string;
+      name: string;
+      parentFolderId: string;
+      position: number;
+    };
+  }
+  | {
+    kind: "album";
+    payload: {
+      albumId: string;
+      folderId: string;
+      position: number;
+    };
+  };
+
 export function photoRailAlbumTreeItemKind(folder: PhotoRailFolderLike): PhotoRailAlbumTreeItemKind | "" {
   return folder.kind === "album" || folder.kind === "albumFolder" ? folder.kind : "";
 }
@@ -324,6 +521,48 @@ export function photoRailAlbumTreeParentId(folder: PhotoRailFolderLike): string 
   return "";
 }
 
+export function photoRailAlbumTreePosition(folder: PhotoRailFolderLike): number {
+  const value = folder.kind === "album" ? folder.folderPosition : folder.position;
+  return typeof value === "number" && Number.isFinite(value) ? value : 2_147_483_647;
+}
+
+export function photoRailAlbumTreeDropPlacementFromRatio(
+  folder: PhotoRailFolderLike,
+  ratio: number,
+): PhotoRailAlbumTreeDropPlacement {
+  const value = Number.isFinite(ratio) ? ratio : 0.5;
+  if (folder.kind === "albumFolder") {
+    if (value < 0.1) return "before";
+    if (value > 0.9) return "after";
+    return "inside";
+  }
+  return photoRailDropPlacementFromRatio(value);
+}
+
+export function photoRailAlbumTreeDropPlacementFromBounds(
+  folder: PhotoRailFolderLike,
+  clientY: number,
+  top: number,
+  height: number,
+): PhotoRailAlbumTreeDropPlacement {
+  const ratio = height > 0 ? (clientY - top) / height : 0.5;
+  return photoRailAlbumTreeDropPlacementFromRatio(folder, ratio);
+}
+
+export function photoRailAlbumTreeDragTargetState(
+  current: PhotoAlbumTreeDragState | null | undefined,
+  folders: PhotoRailFolderLike[],
+  targetFolder: PhotoRailFolderLike,
+  draggedId: string,
+  placement: PhotoRailAlbumTreeDropPlacement,
+): PhotoAlbumTreeDragState | null {
+  if (!draggedId || !photoRailAlbumTreeItemKind(targetFolder)) return null;
+  const plan = planPhotoRailAlbumTreeDrop(folders, draggedId, targetFolder.id, placement);
+  const base = current || { draggedId };
+  if (current && current.targetId === targetFolder.id && current.placement === placement && current.valid === plan.valid) return current;
+  return { ...base, targetId: targetFolder.id, placement, valid: plan.valid };
+}
+
 export function photoRailAlbumTreeChildren<T extends PhotoRailFolderLike>(parentFolderId: string, folders: T[]): T[] {
   const parentId = String(parentFolderId || "");
   return folders
@@ -338,6 +577,17 @@ export function photoRailAlbumTreeChildren<T extends PhotoRailFolderLike>(parent
         || left[1].localeCompare(right[1])
         || photoRailAlbumTreeItemId(a).localeCompare(photoRailAlbumTreeItemId(b));
     });
+}
+
+export function photoRailAlbumTreeSiblings<T extends PhotoRailFolderLike>(folder: T | null | undefined, folders: T[]): T[] {
+  const kind = folder ? photoRailAlbumTreeItemKind(folder) : "";
+  if (!folder || !kind) return [];
+  return photoRailAlbumTreeChildren(photoRailAlbumTreeParentId(folder), folders);
+}
+
+export function photoRailAlbumTreeAncestorIds(folder: PhotoRailFolderLike | undefined, folders: PhotoRailFolderLike[]): string[] {
+  if (!folder) return [];
+  return photoRailAlbumTreeAncestorIdsFromMap(folder, photoRailAlbumFolderMap(folders));
 }
 
 function photoRailAlbumTreeDescendantFolderIds(folderId: string, folders: PhotoRailFolderLike[]): Set<string> {
@@ -415,6 +665,63 @@ export function planPhotoRailAlbumTreeDrop(
       id: photoRailAlbumTreeItemId(folder),
     })),
     insertIndex,
+  };
+}
+
+export function photoRailAlbumTreeReorderDraft(
+  activeFolder: PhotoRailFolderLike | null | undefined,
+  siblings: PhotoRailFolderLike[],
+  activeIndex: number,
+  direction: "up" | "down",
+): PhotoRailAlbumTreeReorderDraft | null {
+  if (!activeFolder || activeIndex < 0) return null;
+  const resolvedActiveIndex = siblings[activeIndex]?.id === activeFolder.id
+    ? activeIndex
+    : siblings.findIndex((folder) => folder.id === activeFolder.id);
+  if (resolvedActiveIndex < 0) return null;
+  const targetIndex = direction === "up" ? resolvedActiveIndex - 1 : resolvedActiveIndex + 1;
+  if (targetIndex < 0 || targetIndex >= siblings.length) return null;
+  const nextSiblings = [...siblings];
+  [nextSiblings[resolvedActiveIndex], nextSiblings[targetIndex]] = [nextSiblings[targetIndex], nextSiblings[resolvedActiveIndex]];
+  const items = nextSiblings.map((folder) => ({
+    kind: photoRailAlbumTreeItemKind(folder),
+    id: photoRailAlbumTreeItemId(folder),
+  }));
+  if (items.some((item) => !item.kind || !item.id)) return null;
+  return {
+    parentFolderId: photoRailAlbumTreeParentId(activeFolder),
+    items: items as PhotoRailAlbumTreeReorderDraft["items"],
+  };
+}
+
+export function photoRailAlbumTreeMoveDraft(
+  draggedFolder: PhotoRailFolderLike | null | undefined,
+  plan: PhotoRailAlbumTreeDropPlan | null | undefined,
+): PhotoRailAlbumTreeMoveDraft | null {
+  if (!draggedFolder || !plan?.valid) return null;
+  const draggedKind = photoRailAlbumTreeItemKind(draggedFolder);
+  const draggedId = plan.dragged.id || photoRailAlbumTreeItemId(draggedFolder);
+  if (!draggedKind || !draggedId || plan.dragged.kind !== draggedKind) return null;
+  if (photoRailAlbumTreeParentId(draggedFolder) === plan.parentFolderId) return null;
+  const position = Number.isFinite(plan.insertIndex) && plan.insertIndex >= 0 ? Math.floor(plan.insertIndex) : 0;
+  if (draggedKind === "albumFolder") {
+    return {
+      kind: "albumFolder",
+      payload: {
+        folderId: draggedId,
+        name: String(draggedFolder.name || ""),
+        parentFolderId: plan.parentFolderId,
+        position,
+      },
+    };
+  }
+  return {
+    kind: "album",
+    payload: {
+      albumId: draggedId,
+      folderId: plan.parentFolderId,
+      position,
+    },
   };
 }
 

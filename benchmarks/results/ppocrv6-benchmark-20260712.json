@@ -1,0 +1,70 @@
+{
+  "benchmarkId": "vintrace-ppocrv6-offline-v1",
+  "correctness": {
+    "bilingualContains": [
+      "BOARDING PASS",
+      "登机牌",
+      "张祺伟"
+    ],
+    "outputDigest": "7a0d85c4a80d20dbe3c77bfaaf1b7d382ecca9891e23782a8cd59146fa6bf1a6",
+    "renderedPassed": 16,
+    "renderedTotal": 16
+  },
+  "environment": {
+    "machine": "arm64",
+    "platform": "macOS-26.4.1-arm64-arm-64bit-Mach-O",
+    "python": "3.13.12"
+  },
+  "fixtures": {
+    "bilingualFilename": "paddleocr-general-ocr-002.jpg",
+    "bilingualLines": 31,
+    "bilingualSha256": "4425af33dd163cf73bdff502bd35ee527e9bdd5725501db1da78bfdae9f538f4",
+    "renderedCount": 16
+  },
+  "gates": {
+    "allRenderedTokensRecognized": true,
+    "bilingualCjkRecognized": true,
+    "bilingualEnglishRecognized": true,
+    "deterministicSecondPass": true,
+    "fixtureCount": true,
+    "offlineSocketGuard": true,
+    "verifiedModelPack": true,
+    "warmP95Under1500Ms": true
+  },
+  "generatedAt": "2026-07-12T11:17:22Z",
+  "model": {
+    "artifacts": {
+      "detector": {
+        "filename": "PP-OCRv6_det_small.onnx",
+        "sha256": "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f",
+        "sizeBytes": 9929594
+      },
+      "orientation-classifier": {
+        "filename": "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+        "sha256": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c",
+        "sizeBytes": 585532
+      },
+      "recognizer": {
+        "filename": "PP-OCRv6_rec_small.onnx",
+        "sha256": "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884",
+        "sizeBytes": 21234383
+      }
+    },
+    "license": "Apache-2.0",
+    "manifestSha256": "d6edb509c8f5b302004bd68787fdc3e5e266a2b230915fec7455bd264d282d2f",
+    "modelId": "vintrace-ppocrv6-small-rapidocr",
+    "modelVersion": "2026-07-12.1",
+    "offline": true,
+    "runtimeVersion": "3.9.1"
+  },
+  "ok": true,
+  "performance": {
+    "bilingualModelElapsedMs": 1068.186,
+    "coldStartAndFirstImageMs": 816.47,
+    "warmImages": 15,
+    "warmMeanMs": 363.205,
+    "warmP50Ms": 356.578,
+    "warmP95Ms": 399.465
+  },
+  "schemaVersion": 1
+}

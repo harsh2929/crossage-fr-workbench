@@ -43,11 +43,31 @@ Epics are ordered by **dependency, not priority** — later epics genuinely cann
 
 **Nothing mobile can start until these land. Five are live bugs today.**
 
-## E0.1 — Stable asset identity (`asset_uid`) 🔴 **THE blocker**
+## E0.1 — Stable asset identity 🟡 **Data-loss half FIXED; canonical key still open**
 
-**Why.** Three disjoint identity spaces (audit §9.1). `assetId = "asset_" + sha256(expanduser(path))[:32]` — note **no `.resolve()`**. The upsert (`workspace_db.py:8318-8335`) resolves rows by `WHERE asset_id = ? OR source_path = ?` **only**; there is **no content-hash rehoming anywhere in the codebase**.
+> ✅ **DONE (2026-07-14): content-hash rehoming.** The live data-loss bug is closed. A moved or
+> renamed file now keeps its identity, and with it its faces, people, albums, keywords, rating,
+> favourite and edit stacks. `WorkspaceDb._photo_asset_id_for_moved_file()` +
+> `tests/asset_identity_rehome_units.py` (16 checks).
+>
+> **⚠️ The guard that makes it safe, and why:** rehoming requires the content hash to match
+> **AND** the stored file signature (size + mtime) to match **AND** the old path to be gone
+> **AND** exactly one candidate to qualify. *"The path is missing" is NOT evidence of a move* —
+> it is evidence of absence, and absence has other causes. The one that bites: **an asset on an
+> external drive has a missing path whenever the drive is unplugged.** A first version of this
+> fix, guarded only on "hash matches + path gone", would have let an identical photo imported
+> from a backup **hijack the external-drive asset** and destroy the record of where the original
+> lives. The existing suite caught it. Size+mtime is the discriminator: a move preserves both;
+> a separate copy does not.
+>
+> **STILL OPEN — the canonical key.** `asset_id` remains `sha256(path)`, and the three identity
+> spaces are still disjoint. Mobile sync needs the UUID `asset_uid` + resolvable axes below,
+> because a phone's PHAsset has no desktop path to hash. The rehoming fix stops the bleeding;
+> it does not unify identity.
 
-> **Move or rename a file today and it becomes a brand-new asset** — orphaning its faces, people, albums, keywords, embeddings, edit stacks, favorite, and rating. **This is a live data-loss bug on the desktop, right now, with no mobile involved.**
+### The remaining work (the canonical key)
+
+**Why.** Three identity spaces remain disjoint (audit §9.1). The path-derived `assetId`, content-hash CRDT key, and provider external id still need one canonical cross-device key. The live move/rename defect described by the original audit is fixed by `_photo_asset_id_for_moved_file()`; this subsection now covers only canonicalization.
 
 And `local_sync` keys on the SHA-256 of original bytes, while **iOS re-encodes on export** — so phone/desktop convergence would be near-zero.
 
@@ -55,8 +75,8 @@ And `local_sync` keys on the SHA-256 of original bytes, while **iOS re-encodes o
 1. Add `asset_uid TEXT` (UUIDv7) to `photo_assets`; backfill; make it the canonical key.
 2. Keep `content_hash`, `(provider, library_id, external_id)`, and legacy `path_hash` as **resolvable axes** that map *to* `asset_uid`.
 3. Resolution order on ingest: `external_id` → `content_hash` → `perceptual_hash` (**suggest-only, requires user confirmation — never auto-merge**) → mint new.
-4. Add content-hash rehoming to the upsert so a moved file keeps its identity.
-5. Expose `assetUid`, `contentHash`, `externalIds`, `updatedAt`, `deletedAt` in `_public_asset()` (`agent_images.py:562-588` — it exposes **none** of these today).
+4. Preserve the existing conservative content-hash rehoming guard during the migration.
+5. Expose `assetUid`, `contentHash`, `externalIds`, and deletion/revision state in the authenticated asset contract. (`updatedAt` is now exposed; the other canonical-axis fields remain open.)
 
 **⚠️** `photo_asset_external_ids` is **not** an unused table — it is actively upserted (`photo_sources/catalog.py:350`) and state-updated (`photo_sources/service.py:1727, :2150`) for connector assets. **The migration must preserve its contents.**
 
@@ -66,11 +86,11 @@ And `local_sync` keys on the SHA-256 of original bytes, while **iOS re-encodes o
 
 ---
 
-## E0.2 — Proxy ladder (kill the 768px ceiling)
+## E0.2 — Proxy ladder 🟡 **API HONESTY FIXED; LADDER STILL OPEN**
 
-**Why.** Audit §9.2. `write_preview_image(..., max_edge=768)` — and **both call sites pass no override**, so 768 is an *absolute ceiling*, not a default. `AgentImageService.preview()` then calls `PIL.thumbnail()`, **which never upscales**.
+> ✅ `maxDimension=2048` now produces a real 2048px preview when the source permits it; 1536 and smaller requests are likewise honored, and small originals are never upscaled. `preview_path_for(..., max_edge=...)` keys generated previews by requested edge. Test: `tests/preview_dimension_honesty_units.py`.
 
-> **The API lies.** `MAX_PREVIEW_DIMENSION = 2048` is **published in the OpenAPI schema**. Even the *default* of 1536 silently returns 768. And it is **non-uniform**: an *edited* photo previews at 1600px, an unedited one at 768px — through the same function.
+**Why it remains open.** The original 768px/API-contract defect is closed. A Photos-grade client still needs a content-addressed multi-tier cache, asset-addressable thumbnails, ThumbHash, and incremental pruning; the current edge-keyed preview cache is an honest endpoint, not the complete media tier.
 
 **Do.** Content-hash-keyed ladder: `thumb` (256px WebP) / `screen` (1536px) / `full`. An **asset-addressable** thumbnail store (there is none — previews are content-hash-named JPEGs on disk with no DB row). Cache keyed on **content hash, not mtime+path** (today a `mtime` touch from a cloud re-download busts it, and two identical files cache twice). Add incremental pruning (today the only removal is a total wipe).
 
@@ -82,7 +102,13 @@ And `local_sync` keys on the SHA-256 of original bytes, while **iOS re-encodes o
 
 ---
 
-## E0.3 — Safe Mode cache coherence 🔴 **Security, fail-open**
+## E0.3 — Safe Mode cache coherence ✅ **FIXED (2026-07-14)**
+
+> `ProjectState.refresh_config_from_disk()` — a `(size, mtime_ns)`-guarded re-read, mirroring
+> the `refresh_consent_from_disk()` precedent that sat one function away — called from
+> `AgentImageService._safe_mode_status()`, the gate the mobile preview route actually consults.
+> One `stat` on the hot path; re-parses only when config.json changed.
+> Test: `tests/safe_mode_cross_process_units.py`.
 
 **Why.** Audit §9.3. The MCP process caches `RuntimeConfig` at `DesktopApi` construction and **never re-reads `config.json`**.
 
@@ -97,7 +123,24 @@ And `local_sync` keys on the SHA-256 of original bytes, while **iOS re-encodes o
 
 ---
 
-## E0.4 — Move workspace-lock + Touch ID enforcement into the backend 🔴 **Privacy**
+## E0.4 — Hidden/Deleted asset gate on the agent surface ✅ **FIXED (2026-07-14)** — and the lock half was a non-bug
+
+> **The workspace-lock half of this epic was WRONG and is retracted.** `_api()` already calls
+> `_assert_unlocked()` on every backend access (`mcp_server.py:220`), and `_workspace_lock_enabled()`
+> **fails closed** — a separate process cannot see the desktop's in-session unlock, so it treats a
+> lock-enabled workspace as permanently locked and refuses MCP entirely. A paired phone is held to a
+> *stricter* standard than the desktop, not a looser one. No fix needed; the claim would have wasted a sprint.
+>
+> **The Hidden / Recently-Deleted half was REAL, and worse than framed.** Verified empirically:
+> `fetch_assets`, `analyze_assets`, and `preview` **all returned a hidden asset — and a recently-deleted
+> one — to any agent/mobile principal that knew the asset id.** Only `search` filtered them. So the Face ID
+> gate on Hidden was, from a paired phone's perspective, client-side decoration: a phone that saw the photo
+> before it was hidden kept the pixels via `get_image_preview(asset_id)`.
+>
+> **Fixed:** `AgentImageService._metadata_restricts_agent_access()` — a shared predicate filtered in
+> `_hydrate_assets` (covers fetch + analyze) and checked in `preview`. Restricted assets report as
+> **not found**, never "forbidden", so the reply is not an existence oracle for hidden photos. Unhiding
+> restores access. Test: `tests/agent_hidden_asset_gate_units.py` (11 checks).
 
 **Why.** Audit §7. Both are enforced **only in the Electron main process**. There is **no lock check in the MCP request path**, and the Touch ID gate for Hidden / Recently Deleted is macOS-only Electron code.
 
@@ -109,7 +152,13 @@ And `local_sync` keys on the SHA-256 of original bytes, while **iOS re-encodes o
 
 ---
 
-## E0.5 — Telemetry off by default 🔴 **Legal**
+## E0.5 — Telemetry off by default ✅ **FIXED (2026-07-14)**
+
+> `MCP_OTEL_ENABLED` now defaults to **False** (opt-in), and `export_workspace_backup` now
+> **excludes the plaintext trace log** — verified: the backup does `os.walk(root)` with only
+> WAL/SHM/lock exclusions, so the log really was riding along in every archive (and in an
+> *unencrypted* ZIP when no backup passphrase is set). `mcp/README.md` updated to document
+> tracing as opt-in. Test: `tests/telemetry_default_off_units.py`.
 
 **Why.** Audit §9.5. `enabled = env_flag("MCP_OTEL_ENABLED", default=True)` — **on by default**, writing `mcp-traces.jsonl` **synchronously on every tool call**, with no product config and no UI toggle. This contradicts the documented *"genuinely no telemetry"* posture (`docs/security-audit.md:28,153`).
 
@@ -172,11 +221,13 @@ And `local_sync` keys on the SHA-256 of original bytes, while **iOS re-encodes o
 
 **Effort.** **L**
 
-## E1.2 — Change feed (T4)
+## E1.2 — Change feed (T4) ✅ **BUILT (2026-07-15)**
+
+> `photo_catalog_changes` is an unconditional append-only SQLite journal with monotonic integer cursors. Triggers cover asset, metadata, keyword, album-membership, people-link, edit-stack, and external-id mutations; existing catalogs receive a one-time baseline. `GET /v1/changes?afterSeq=&limit=` is authenticated, mobile-readable, path-free, and emits current snapshots plus hard-delete and protected-removal tombstones. Tests: `tests/catalog_change_feed_units.py` and `tests/mobile_companion_http.py`.
 
 **Why.** Audit §9.7. ⚠️ **The "~90% built" claim was refuted — it is ~35%.** The 9 triggers write only to `photo_sync_dirty`, a **coalescing dirty-set, not a log**. `photo_sync_operations` has one writer, **gated on SQLCipher** — so the op-log is **empty on any unencrypted workspace**. And `photo_asset_events` **hard-rejects any event type outside `{viewed, shared}`**.
 
-**Do.** Make the op-log populate unconditionally; expose it as an authenticated, cursor-paged delta feed.
+**Decision.** Do **not** manufacture unsigned rows in `photo_sync_operations`: valid CRDT rows require the encrypted signing identity. Keep the signed peer-sync op-log encryption-bound and use the dedicated unconditional catalog journal for T4. `photo_asset_events` remains correctly scoped to viewed/shared activity.
 **Effort.** **M**
 
 ## E1.3 — Media tier (T2)
@@ -211,7 +262,9 @@ Then extend `photo_indexing_jobs` with `origin='mobile'` + a blob staging area. 
 
 # Phase 2 — The mobile app
 
-## E2.1 — Replica + storage
+## E2.1 — Replica + storage ✅ **FIRST CUT (2026-07-14)**
+
+> ✅ **Running on-device.** `mobile-app/app/src/replica.ts`: a SQLCipher-encrypted op-sqlite DB (WAL) holding the camera-roll assets keyed by a stable `asset_uid` (external_id → PHAsset localIdentifier), plus a `sqlite-vec` `int8[512]` table for the SigLIP embeddings the desktop will sync. **The grid renders FROM the replica** (offline-first: ingest camera roll once → read back from the encrypted DB), and a real on-device sqlite-vec KNN runs (126 ms over 20k int8[512], Debug/cold — SP-2 measured 26.8 ms/100k Release/warm). Screenshot: `mobile-app/docs-replica-grid.png`. Follows spec §6: raw-BLOB vectors (never JSON), keychain-key + 3-file split are the production hardening still to do.
 
 Spec §6. op-sqlite + SQLCipher + FTS5 + sqlite-vec. Three DB files (`meta` / `vec` / `sensitive`), separately keyed.
 
@@ -219,7 +272,9 @@ Spec §6. op-sqlite + SQLCipher + FTS5 + sqlite-vec. Three DB files (`meta` / `v
 
 **Effort.** **M**
 
-## E2.2 — The grid 🔴 **SP-1 gates this**
+## E2.2 — The grid ✅ **FIRST CUT RUNS (2026-07-14)** — SP-1 unblocked it
+
+> ✅ **Runnable on the iPhone 17 Pro simulator.** `mobile-app/app` reads the real camera roll via `expo-media-library` `exeForMetadata()` (96 photos indexed in 79 ms), renders a FlashList grid with `expo-image` resolving `ph://` at cell size, and composes `@vintrace/decision-layer` (live on-device band badge). Screenshots: `mobile-app/docs-library-grid.png` (grid), `mobile-app/docs-detail-view.png` (full-screen pager detail view — swipe + filename/dimensions/date). Remaining for production scale: `PHCachingImageManager` prefetch native module (spec §7) + a 100k-asset device test.
 
 Spec §9.2. **The list virtualizer is not the bottleneck** and no FlashList tuning will save a bad pipeline.
 
@@ -229,7 +284,9 @@ Spec §9.2. **The list virtualizer is not the bottleneck** and no FlashList tuni
 
 **Effort.** **L**
 
-## E2.3 — Decision layer in TypeScript ⭐ *the moat, and it's cheap*
+## E2.3 — Decision layer in TypeScript ✅ **BUILT (2026-07-14)** ⭐ *the moat*
+
+> ✅ **Done.** Ported to `mobile-app/packages/decision-layer` (Platt, AS-Norm, CohortNormalizer, adaptive linear calibrator, fuseScores, cross-age banding, pose thresholds). **Conformance-verified** against the real Python reference: `tools/gen_decision_layer_fixtures.py` dumps 128 golden cases from `crossage_fr.match`; `test/conformance.test.ts` requires the TS output to match within 1e-9. Typecheck clean, 12/12 test groups green, runnable demo composes it into live offline re-banding. Zero native deps.
 
 **Why.** `crossage_fr/match/` is **pure NumPy with zero model weights** — AS-Norm (cohorts are **246 KB total**), Platt, the `AdaptiveLinearCalibrator` (JSON-serializable via `to_payload`/`from_payload`), age-gap widening (pure `datetime`).
 
@@ -238,6 +295,8 @@ Spec §9.2. **The list virtualizer is not the bottleneck** and no FlashList tuni
 **Effort.** **S** — genuinely an afternoon, and it is the highest value-per-hour item in the entire plan.
 
 ## E2.4 — Semantic search ⭐ *the elegant split*
+
+> 🟡 **Runtime spike implemented, architecture gate still open.** The mobile prototype has no `onnxruntime-react-native` dependency. It uses `react-native-executorch` 0.9.2 plus the Expo resource fetcher for real CLIP image/text embeddings, and the TypeScript build and Expo Doctor pass. The runtime remains isolated to `src/semantic.ts`; do not make it the permanent SigLIP2 contract until an Expo 57 / RN 0.86 release build passes on physical iOS and Android devices. The vendor's published 0.9.x compatibility table currently stops at RN 0.85 / Expo 55.
 
 **Why.** Spec §5.4(a). Sync the **768-d vectors** to the phone (int8 ≈ 768 B/photo ≈ **51 MB at 100k**) and run **only the SigLIP2 *text* encoder** on-device. **The vision tower never ships.**
 
@@ -338,7 +397,7 @@ Every comparable product uses the same three-part shape:
 
 **Effort.** **L**, and it is a **ship-blocker**, not a nice-to-have.
 
-> ✅ **NOW DESIGNED.** See `2026-07-14-mobile-spike-results.md` §6 for the full key hierarchy (Workspace Master Key above the DB key), the two-artifact recovery model, the six scenario walkthroughs, and the 🔴 finding that **today's backup passphrase has no relationship to the recovery envelope — so when the disk dies, the Emergency Kit cannot open the backup.**
+> ✅ **DESIGNED + a real ship-blocker FIXED (2026-07-14).** The design (Workspace Master Key, two-artifact recovery, scenario walkthroughs) is in `2026-07-14-mobile-spike-results.md` §6. **Correction:** tracing proved recovery is NOT decorative — the recovery envelope is bundled in the backup ZIP and the printed code alone opens the encrypted DB. But tracing found a worse, real bug: **`restore_workspace_backup()` crashed on any cross-machine restore** (it verified the archived DB with the host key, which differs on a new machine). A user whose disk died could not restore. **FIXED:** the backup manifest now records `workspaceKeyId`, and verify distinguishes a genuine key mismatch (recoverable) from corruption (hard fail). Test: `tests/workspace_backup_cross_machine_units.py`. Still open: wiring an in-app "restore + enter recovery code" flow (fix 4 in the plan) and the full WMK refactor.
 
 ## X.3 — Compliance checklist
 

@@ -10,6 +10,7 @@ from itertools import combinations
 from pathlib import Path
 import argparse
 import csv
+import functools
 import gc
 import hashlib
 import heapq
@@ -17,6 +18,7 @@ import html
 import importlib.util
 import json
 import math
+import mimetypes
 import os
 import re
 import shutil
@@ -29,31 +31,200 @@ import traceback
 import unicodedata
 import zipfile
 from time import monotonic, sleep
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import quote, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from crossage_fr import __version__
-from crossage_fr.benchmark_quality import calibrate_public_labels
+from crossage_fr.audio_intelligence import (
+    AUDIO_INDEX_VERSION,
+    AUDIO_MAX_DURATION_SECONDS,
+    AudioSegment,
+    analyze_media_audio,
+    audio_model_report,
+)
+from crossage_fr.benchmark_quality import calibrate_public_labels, evaluate_dataset_gates, model_pack_quality_matrix
 from crossage_fr.config import LEARNING_MODES, MAX_CLUSTER_MIN_SIZE, MAX_FACE_DETECTOR_SIZE, MIN_FACE_DETECTOR_SIZE, PERFORMANCE_MODES, SAFE_MODE_PROFILES, normalize_safe_mode_profile, safe_mode_threshold_for_profile
 from crossage_fr.dataset_benchmarks import identity_media_index, inspect_identity_dataset, materialize_file, prepare_cfp_dataset, prepare_lfw_subset, public_dataset_catalog
+from crossage_fr.dependency_currency import onnxruntime_runtime_report
 from crossage_fr.embed import EmbeddingEngine, create_embedding_engine
+from crossage_fr.embed.fiqa import fiqa_model_report
 from crossage_fr.enroll import ProjectState
+from crossage_fr.enroll.synthetic_screen import synthetic_enrollment_screen_report
 from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, RAW_IMAGE_EXTENSIONS, image_decoder_report, image_record_for_path, iter_image_paths, load_image, sha256_file
 from crossage_fr.ingest.safety import safety_model_report
 from crossage_fr.ingest.safety_explain import explain_model_report
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, VideoLoadError, probe_video, sample_video_frames, video_decoder_report
-from crossage_fr.model_manager import MODEL_PACKAGES, download_model_pack, model_governance, model_pack_ready, model_root_for_config, model_roots_for_engine, model_status, set_model_root
+from crossage_fr.local_sync import LocalSyncManager
+from crossage_fr.model_manager import MODEL_PACKAGES, download_model_pack, model_governance, model_pack_ready, model_root_for_config, model_roots_for_engine, model_status, set_model_root, verify_model_files
+from crossage_fr.model_lifecycle import ModelLifecycleGateError, ModelLifecycleStore
+from crossage_fr.match.cohort import fixed_cohort_report
 from crossage_fr.models import ReferenceFace, ReviewCandidate, new_id, normalize_risk_flags
 from crossage_fr.platform_detect import build_platform_report, memory_available_bytes, process_memory_bytes
+from crossage_fr.photo_catalog_portability import OpenPhotoCatalogService
+from crossage_fr.photo_sources.service import (
+    APPLE_PHOTOS_PROVIDER,
+    CAPTURE_ONE_CATALOG_PROVIDER,
+    DAM_CATALOG_PROVIDERS,
+    LIGHTROOM_CATALOG_PROVIDER,
+    REMOTE_PHOTO_SOURCE_PROVIDERS,
+    WINDOWS_FOLDERS_PROVIDER,
+    PhotoSourceService,
+    normalize_provider,
+)
+from crossage_fr.photo_sources.remote_connectors import connector_uri
+from crossage_fr.photo_ocr import (
+    PpOcrV6InferenceError,
+    PpOcrV6IntegrityError,
+    PpOcrV6UnavailableError,
+    ppocrv6_model_report,
+    run_ppocrv6,
+)
+from crossage_fr.photo_agent import (
+    execute_photo_library_agent_plan,
+    photo_library_agent_status,
+    query_photo_library_agent,
+)
+from crossage_fr.photo_vlm import (
+    PhotoVlmError,
+    PhotoVlmIntegrityError,
+    PhotoVlmUnavailableError,
+    install_photo_vlm,
+    photo_vlm_status as portable_photo_vlm_status,
+    run_photo_vlm,
+    run_photo_vlm_chat,
+)
+from crossage_fr.photo_generative import (
+    HEAVY_ACKNOWLEDGEMENT,
+    PhotoGenerativeError,
+    PhotoGenerativeIntegrityError,
+    PhotoGenerativeUnavailableError,
+    hash_file as hash_generative_file,
+    install_photo_generative_pack,
+    photo_generative_status as local_photo_generative_status,
+    run_photo_generative_edit,
+)
+from crossage_fr.photo_story import (
+    MAX_STORY_ASSETS,
+    STORY_GENERATOR_VERSION,
+    build_generated_story,
+    clean_photo_story_record,
+    clean_story_fact,
+    clean_story_text,
+    select_story_facts,
+    story_content_sha256,
+    story_history_snapshot,
+    story_slideshow_payload,
+)
+from crossage_fr.photo_culling import (
+    MAX_CULLING_FRAMES,
+    PHOTO_CULLING_VERSION,
+    analyze_culling_frame,
+    build_photo_culling_result,
+    photo_culling_runtime_status,
+)
+from crossage_fr.photo_relationships import rank_relationship_name_suggestions
+from crossage_fr.content_credentials import (
+    ContentCredentialError,
+    ContentCredentialService,
+)
+from crossage_fr.video_semantic import (
+    VIDEO_SEMANTIC_INDEX_VERSION,
+    VIDEO_SEMANTIC_MAX_FRAMES,
+    VIDEO_SEMANTIC_SAMPLE_INTERVAL_SECONDS,
+    build_video_visual_segments,
+    video_source_fingerprint,
+)
 from crossage_fr.storage import inspect_storage_path, safe_resolve
 from crossage_fr.store import VectorStore
+from crossage_fr.store.workspace_encryption import parse_workspace_key
 from crossage_fr.workspace_registry import resolve_workspace, write_active_workspace
 from crossage_fr.benchmarks.public_dataset import PublicDatasetBenchmarkMixin
 
 
 SQLITE_IN_CLAUSE_CHUNK_SIZE = 800
 SAFE_MODE_CALIBRATION_EXAMPLE_CAP = 4000
+PHOTO_INDEXING_COST_RANK = {"light": 0, "medium": 1, "heavy": 2}
+PRODUCTION_MACOS_SIGNING_ENV = (
+    "MACOS_CERTIFICATE",
+    "MACOS_CERTIFICATE_PASSWORD",
+    "APPLE_API_KEY_BASE64",
+    "APPLE_API_KEY_ID",
+    "APPLE_API_ISSUER",
+)
+PRODUCTION_WINDOWS_SIGNING_ENV = (
+    "AZURE_CLIENT_ID",
+    "AZURE_TENANT_ID",
+    "AZURE_SUBSCRIPTION_ID",
+    "AZURE_ARTIFACT_SIGNING_ENDPOINT",
+    "AZURE_ARTIFACT_SIGNING_ACCOUNT",
+    "AZURE_ARTIFACT_SIGNING_PROFILE",
+    "AZURE_ARTIFACT_SIGNING_PUBLISHER",
+)
+PHOTO_INDEXING_JOB_COSTS = {
+    "search": "light",
+    "barcode": "light",
+    "generated_collections": "light",
+    "smart_albums": "light",
+    "ocr": "medium",
+    "reference_suggestions": "medium",
+    "objects": "heavy",
+    "semantic": "heavy",
+    "safe_mode_calibration": "heavy",
+    "audio": "heavy",
+}
+
+
+def release_signing_environment_readiness(environment: Mapping[str, str] | None = None) -> dict[str, Any]:
+    values = os.environ if environment is None else environment
+
+    def present(name: str) -> bool:
+        return bool(str(values.get(name, "") or "").strip())
+
+    mac_missing = [name for name in PRODUCTION_MACOS_SIGNING_ENV if not present(name)]
+    windows_missing = [name for name in PRODUCTION_WINDOWS_SIGNING_ENV if not present(name)]
+    endpoint = str(values.get("AZURE_ARTIFACT_SIGNING_ENDPOINT", "") or "").strip()
+    endpoint_valid = False
+    if endpoint and "\\" not in endpoint and not any(character.isspace() or ord(character) < 32 for character in endpoint):
+        try:
+            parsed_endpoint = urlparse(endpoint)
+            parsed_endpoint.port  # Access validates malformed and out-of-range ports.
+            endpoint_valid = bool(
+                parsed_endpoint.scheme.casefold() == "https"
+                and parsed_endpoint.hostname
+                and not parsed_endpoint.username
+                and not parsed_endpoint.password
+                and not parsed_endpoint.query
+                and not parsed_endpoint.fragment
+            )
+        except ValueError:
+            endpoint_valid = False
+    windows_errors: list[str] = []
+    if endpoint and not endpoint_valid:
+        windows_errors.append("AZURE_ARTIFACT_SIGNING_ENDPOINT must be an absolute HTTPS URL without credentials, query, or fragment.")
+    return {
+        "macos": {
+            "ready": not mac_missing,
+            "required": list(PRODUCTION_MACOS_SIGNING_ENV),
+            "missing": mac_missing,
+        },
+        "windows": {
+            "ready": not windows_missing and endpoint_valid,
+            "required": list(PRODUCTION_WINDOWS_SIGNING_ENV),
+            "missing": windows_missing,
+            "errors": windows_errors,
+            "endpointValid": endpoint_valid,
+        },
+    }
+
+
+def _normalize_photo_indexing_cost_class(value: Any, default: str = "heavy") -> str:
+    clean = str(value or default).strip().lower()
+    return clean if clean in PHOTO_INDEXING_COST_RANK else default
+
+
+class PhotoExportJobCancelled(RuntimeError):
+    pass
 
 
 def _sqlite_in_chunks(values: list[str]) -> Iterable[list[str]]:
@@ -170,6 +341,14 @@ try:
     PHOTO_SMART_ALBUM_SCALE_WARNING_ASSETS = max(1_000, int(os.environ.get("CROSSAGE_PHOTO_SMART_ALBUM_SCALE_WARNING_ASSETS", "1000")))
 except ValueError:
     PHOTO_SMART_ALBUM_SCALE_WARNING_ASSETS = 1_000
+
+try:
+    PHOTO_SMART_ALBUM_SQL_ASSET_PAGE_LIMIT = max(
+        100,
+        min(2_000, int(os.environ.get("CROSSAGE_PHOTO_SMART_ALBUM_SQL_ASSET_PAGE_LIMIT", "500"))),
+    )
+except ValueError:
+    PHOTO_SMART_ALBUM_SQL_ASSET_PAGE_LIMIT = 500
 
 PHOTO_OCR_SCRIPT_RANGES: tuple[tuple[int, int, str], ...] = (
     (0x0041, 0x007A, "Latin"),
@@ -374,6 +553,25 @@ PHOTO_UTILITY_CLASSIFIERS: dict[str, dict[str, Any]] = {
     },
 }
 PHOTO_UTILITY_CLASSIFIER_IDS = frozenset(PHOTO_UTILITY_CLASSIFIERS.keys())
+PHOTO_UTILITY_CLASSIFIER_TERMS = {
+    classifier_id: tuple(
+        (
+            re.sub(r"\s+", " ", str(term or "").strip()),
+            re.sub(r"[^a-z0-9]+", " ", str(term or "").casefold()).strip(),
+        )
+        for term in classifier.get("terms", ())
+        if str(term or "").strip()
+    )
+    for classifier_id, classifier in PHOTO_UTILITY_CLASSIFIERS.items()
+}
+PhotoUtilityClassifierFieldContext = tuple[str, str, str, str, str, str]
+PhotoUtilityClassifierMatchContext = tuple[
+    list[PhotoUtilityClassifierFieldContext],
+    str,
+    str,
+    str,
+    str,
+]
 PHOTO_MEDIA_KINDS = frozenset({
     "image",
     "video",
@@ -531,12 +729,18 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         self._verification_engine_cache: tuple[str, Any] | None = None
         self._photo_matches_cache_generation = 0
         self._photo_matches_by_source_cache: tuple[tuple[int, int, int, int], dict[str, list[ReviewCandidate]]] | None = None
+        self._photo_folder_rail_cache: dict[
+            str,
+            tuple[tuple[tuple[str, int, int], ...], tuple[int, int, int], dict[str, Any]],
+        ] = {}
+        self._photo_folder_rail_cache_lock = threading.Lock()
+        self._photo_folder_enrichment_executor: ThreadPoolExecutor | None = None
+        self._photo_folder_enrichment_future: Future[dict[str, Any]] | None = None
+        self._photo_folder_enrichment_lock = threading.Lock()
         self._startup("workspace", f"Workspace ready: {self.project.root}")
         self._startup("engine", "Recognition engine will load when needed")
         self._startup("platform", "Detecting platform acceleration")
         self.platform_report = build_platform_report()
-        self._last_progress_state_at = 0.0
-        self._last_progress_state_added = 0
         self._last_resource_status_at = 0.0
         self._last_resource_status: dict[str, Any] = {}
         self._photo_reverse_geocode_cache: dict[str, dict[str, Any]] = {}
@@ -544,6 +748,39 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         self._photo_reverse_geocode_http_jobs: dict[str, Future[dict[str, Any]]] = {}
         self._photo_reverse_geocode_http_lock = threading.Lock()
         self._photo_reverse_geocode_provider = None
+        self._photo_export_job_executor: ThreadPoolExecutor | None = None
+        self._photo_export_jobs: dict[str, dict[str, Any]] = {}
+        self._photo_export_jobs_lock = threading.Lock()
+        self._photo_source_service_instance: PhotoSourceService | None = None
+        self._photo_source_job_executor: ThreadPoolExecutor | None = None
+        self._photo_source_job_futures: dict[str, Future[dict[str, Any]]] = {}
+        self._photo_source_jobs_lock = threading.Lock()
+        self._photo_semantic_index_cache: dict[str, dict[str, Any]] = {}
+        self._photo_semantic_index_lock = threading.Lock()
+        self._video_semantic_index_cache: dict[str, dict[str, Any]] = {}
+        self._video_semantic_index_lock = threading.Lock()
+        self._photo_generative_previews: dict[str, dict[str, Any]] = {}
+        self._photo_generative_applied: dict[str, dict[str, Any]] = {}
+        self._photo_generative_lock = threading.Lock()
+        self._content_credentials = ContentCredentialService(
+            self.project.root,
+            self.project.workspace_encryption,
+            app_version=__version__,
+        )
+        self._local_sync = LocalSyncManager(
+            self.project.root,
+            self.project.db,
+            self.project.workspace_encryption,
+        )
+        self._photo_story_lock = threading.RLock()
+        self._photo_culling_lock = threading.RLock()
+        stale_generative_previews = self.project.root / "photo-generative-previews"
+        if stale_generative_previews.is_dir():
+            for stale_preview in stale_generative_previews.glob("*.png"):
+                try:
+                    stale_preview.unlink()
+                except OSError:
+                    pass
         self._startup("ready", "Backend ready")
 
     def _startup(self, phase: str, message: str) -> None:
@@ -647,6 +884,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     def _effective_engine_config(self) -> Any:
         config = deepcopy(self.project.config)
         mode = self._effective_performance_mode()
+        config.performance_mode = mode
         if mode == "fast":
             config.face_detector_size = min(int(config.face_detector_size), 384)
             config.multi_scale_detect = False
@@ -756,13 +994,65 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "bulk_set_status": ("candidateIds", "status"),
         "set_candidate_note": ("candidateId",),
         "block_false_match": ("candidateId",),
+        "bulk_block_false_matches": ("candidateIds",),
         "reassign_candidate_person": ("candidateId", "personName"),
+        "bulk_reassign_candidate_person": ("candidateIds", "personName"),
         "semantic_search_photos": ("query",),
+        "query_photo_library_agent": ("query",),
+        "execute_photo_library_agent_plan": ("planId", "confirm", "idempotencyKey"),
+        "render_photo_generative_preview": ("assetId", "mode"),
+        "apply_photo_generative_edit": ("previewId", "confirm", "idempotencyKey"),
+        "discard_photo_generative_preview": ("previewId",),
+        "generate_photo_story": ("confirm", "idempotencyKey"),
+        "save_photo_story": ("storyId", "expectedRevision"),
+        "delete_photo_story": ("storyId", "confirm"),
+        "restore_photo_story_version": ("storyId", "versionId", "expectedRevision"),
+        "export_photo_story": ("storyId",),
+        "create_photo_story_slideshow": ("storyId",),
+        "analyze_photo_burst_culling": ("stackId",),
+        "apply_photo_culling_recommendation": ("stackId", "analysisId", "confirm", "idempotencyKey"),
         "delete_reference": ("refId",),
+        "build_age_trajectory_references": ("personName",),
+        "remove_age_trajectory_references": ("personName",),
+        "generate_synthetic_age_image_reviews": ("personName", "targetAgeBuckets", "acknowledgeAiAgeGeneration"),
+        "approve_synthetic_age_image_review": ("artifactId", "acknowledgeVisualReview"),
+        "reject_synthetic_age_image_review": ("artifactId",),
+        "approve_synthetic_enrollment_review": ("artifactId",),
+        "reject_synthetic_enrollment_review": ("artifactId",),
         "delete_person": ("personName",),
+        "delete_subject_data": ("personName", "confirm"),
+        "acknowledge_ai_disclosure": ("confirm",),
+        "enforce_retention_policy": ("confirm",),
         "rename_person": ("oldName", "newName"),
         "rename_photo_pet": ("oldName", "newName"),
+        "review_photo_relationship_name_suggestion": ("suggestionId", "sourceCluster", "targetPerson", "decision"),
         "assign_photo_pet": ("petName",),
+        "bulk_assign_photo_pet": ("petName", "items"),
+        "bulk_dismiss_photo_pet_review": ("items",),
+        "configure_inbound_connector": ("provider",),
+        "forget_inbound_connector": ("provider", "connectionId"),
+        "preview_inbound_connector": ("provider", "connectionId"),
+        "import_inbound_connector": ("provider", "connectionId"),
+        "sync_inbound_connector": ("provider", "connectionId"),
+        "run_cross_age_trajectory_benchmark": ("datasetId", "folder"),
+        "rotate_workspace_database_key": ("newKey",),
+        "local_sync_accept_invitation": ("invitation",),
+        "local_sync_sync_peer": ("deviceId",),
+        "local_sync_revoke_peer": ("deviceId",),
+        "local_sync_export_recovery": ("passphrase",),
+        "local_sync_restore_recovery": ("bundle", "passphrase", "confirm"),
+        "stage_model_lifecycle_candidate": ("componentId", "reportPath"),
+        "promote_model_lifecycle_candidate": ("componentId", "confirm"),
+        "rollback_model_lifecycle_baseline": ("componentId", "confirm"),
+        "rollback_model_configuration": ("confirm",),
+        "inspect_open_photo_catalog": ("catalogPath",),
+        "export_open_photo_catalog": ("destination",),
+        "import_open_photo_catalog": ("catalogPath",),
+        "dam_catalog_status": ("provider",),
+        "list_dam_catalogs": ("provider",),
+        "preview_dam_catalog": ("provider", "libraryPath"),
+        "import_dam_catalog": ("provider", "libraryPath"),
+        "sync_dam_catalog": ("provider", "libraryPath"),
     }
 
     def handle(self, command: str, params: dict[str, Any], progress: Any | None = None) -> Any:
@@ -791,16 +1081,21 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "bulk_set_status",
         "set_candidate_note",
         "block_false_match",
+        "bulk_block_false_matches",
         "reassign_candidate_person",
+        "bulk_reassign_candidate_person",
         "apply_review_rules",
         "clear_queue",
         "purge_candidates",
         "purge_duplicate_candidates",
         "purge_old_candidates",
         "delete_person",
+        "delete_subject_data",
         "rename_person",
+        "review_photo_relationship_name_suggestion",
         "relink_workspace_paths",
         "manage_candidate_media",
+        "approve_synthetic_enrollment_review",
         "permanently_delete_photos",
         "undo_photo_operation",
     }
@@ -809,6 +1104,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "ping": "_cmd_ping",
         "get_state": "_cmd_get_state",
         "model_status": "_cmd_model_status",
+        "model_lifecycle_status": "_cmd_model_lifecycle_status",
+        "run_model_lifecycle_evaluation": "_cmd_run_model_lifecycle_evaluation",
+        "stage_model_lifecycle_candidate": "_cmd_stage_model_lifecycle_candidate",
+        "promote_model_lifecycle_candidate": "_cmd_promote_model_lifecycle_candidate",
+        "rollback_model_lifecycle_baseline": "_cmd_rollback_model_lifecycle_baseline",
+        "rollback_model_configuration": "_cmd_rollback_model_configuration",
         "model_switch_dry_run": "_cmd_model_switch_dry_run",
         "set_performance_mode": "_cmd_set_performance_mode",
         "set_model_root": "_cmd_set_model_root",
@@ -818,6 +1119,15 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "enroll": "_cmd_enroll",
         "enroll_paths": "_cmd_enroll_paths",
         "enroll_age_groups": "_cmd_enroll_age_groups",
+        "synthetic_enrollment_screen_status": "_cmd_synthetic_enrollment_screen_status",
+        "approve_synthetic_enrollment_review": "_cmd_approve_synthetic_enrollment_review",
+        "reject_synthetic_enrollment_review": "_cmd_reject_synthetic_enrollment_review",
+        "build_age_trajectory_references": "_cmd_build_age_trajectory_references",
+        "remove_age_trajectory_references": "_cmd_remove_age_trajectory_references",
+        "synthetic_age_image_review_status": "_cmd_synthetic_age_image_review_status",
+        "generate_synthetic_age_image_reviews": "_cmd_generate_synthetic_age_image_reviews",
+        "approve_synthetic_age_image_review": "_cmd_approve_synthetic_age_image_review",
+        "reject_synthetic_age_image_review": "_cmd_reject_synthetic_age_image_review",
         "scan": "_cmd_scan",
         "scan_paths": "_cmd_scan_paths",
         "analyze_folder": "_cmd_analyze_folder",
@@ -830,16 +1140,24 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "bulk_set_status": "_cmd_bulk_set_status",
         "set_candidate_note": "_cmd_set_candidate_note",
         "block_false_match": "_cmd_block_false_match",
+        "bulk_block_false_matches": "_cmd_bulk_block_false_matches",
         "reassign_candidate_person": "_cmd_reassign_candidate_person",
+        "bulk_reassign_candidate_person": "_cmd_bulk_reassign_candidate_person",
         "duplicate_people": "_cmd_duplicate_people",
         "apply_review_rules": "_cmd_apply_review_rules",
         "query_candidates": "_cmd_query_candidates",
+        "ordered_review_candidates": "_cmd_ordered_review_candidates",
         "suggest_photo_review_more_candidates": "_cmd_suggest_photo_review_more_candidates",
+        "suggest_photo_relationship_names": "_cmd_suggest_photo_relationship_names",
+        "review_photo_relationship_name_suggestion": "_cmd_review_photo_relationship_name_suggestion",
         "list_photo_folders": "_cmd_list_photo_folders",
         "list_photo_folder_items": "_cmd_list_photo_folder_items",
         "list_photo_date_buckets": "_cmd_list_photo_date_buckets",
         "search_photo_library": "_cmd_search_photo_library",
         "semantic_search_photos": "_cmd_semantic_search_photos",
+        "photo_library_agent_status": "_cmd_photo_library_agent_status",
+        "query_photo_library_agent": "_cmd_query_photo_library_agent",
+        "execute_photo_library_agent_plan": "_cmd_execute_photo_library_agent_plan",
         "list_photo_assets": "_cmd_list_photo_assets",
         "list_photo_burst_stacks": "_cmd_list_photo_burst_stacks",
         "set_photo_burst_selection": "_cmd_set_photo_burst_selection",
@@ -854,7 +1172,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "save_photo_utility_profile": "_cmd_save_photo_utility_profile",
         "rename_photo_pet": "_cmd_rename_photo_pet",
         "assign_photo_pet": "_cmd_assign_photo_pet",
+        "bulk_assign_photo_pet": "_cmd_bulk_assign_photo_pet",
         "dismiss_photo_pet_review": "_cmd_dismiss_photo_pet_review",
+        "bulk_dismiss_photo_pet_review": "_cmd_bulk_dismiss_photo_pet_review",
         "save_photo_people_group": "_cmd_save_photo_people_group",
         "delete_photo_people_group": "_cmd_delete_photo_people_group",
         "update_photo_asset_metadata": "_cmd_update_photo_asset_metadata",
@@ -872,6 +1192,24 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "create_photo_edit_stack_version": "_cmd_create_photo_edit_stack_version",
         "restore_photo_edit_stack_version": "_cmd_restore_photo_edit_stack_version",
         "delete_photo_edit_stack_version": "_cmd_delete_photo_edit_stack_version",
+        "photo_generative_status": "_cmd_photo_generative_status",
+        "photo_content_credentials_status": "_cmd_photo_content_credentials_status",
+        "inspect_photo_content_credentials": "_cmd_inspect_photo_content_credentials",
+        "install_photo_generative_pack": "_cmd_install_photo_generative_pack",
+        "render_photo_generative_preview": "_cmd_render_photo_generative_preview",
+        "apply_photo_generative_edit": "_cmd_apply_photo_generative_edit",
+        "discard_photo_generative_preview": "_cmd_discard_photo_generative_preview",
+        "photo_story_status": "_cmd_photo_story_status",
+        "photo_stories": "_cmd_photo_stories",
+        "generate_photo_story": "_cmd_generate_photo_story",
+        "save_photo_story": "_cmd_save_photo_story",
+        "delete_photo_story": "_cmd_delete_photo_story",
+        "restore_photo_story_version": "_cmd_restore_photo_story_version",
+        "export_photo_story": "_cmd_export_photo_story",
+        "create_photo_story_slideshow": "_cmd_create_photo_story_slideshow",
+        "photo_culling_status": "_cmd_photo_culling_status",
+        "analyze_photo_burst_culling": "_cmd_analyze_photo_burst_culling",
+        "apply_photo_culling_recommendation": "_cmd_apply_photo_culling_recommendation",
         "duplicate_photo_asset_version": "_cmd_duplicate_photo_asset_version",
         "duplicate_photo_asset_rendered_version": "_cmd_duplicate_photo_asset_rendered_version",
         "record_photo_asset_event": "_cmd_record_photo_asset_event",
@@ -884,6 +1222,51 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "merge_photo_duplicates": "_cmd_merge_photo_duplicates",
         "dismiss_photo_duplicate_group": "_cmd_dismiss_photo_duplicate_group",
         "import_photos": "_cmd_import_photos",
+        "photo_catalog_status": "_cmd_photo_catalog_status",
+        "inspect_open_photo_catalog": "_cmd_inspect_open_photo_catalog",
+        "export_open_photo_catalog": "_cmd_export_open_photo_catalog",
+        "import_open_photo_catalog": "_cmd_import_open_photo_catalog",
+        "create_photo_tether_session": "_cmd_create_photo_tether_session",
+        "photo_tether_status": "_cmd_photo_tether_status",
+        "update_photo_tether_session_status": "_cmd_update_photo_tether_session_status",
+        "reserve_photo_tether_sequence": "_cmd_reserve_photo_tether_sequence",
+        "claim_photo_tether_capture": "_cmd_claim_photo_tether_capture",
+        "complete_photo_tether_capture": "_cmd_complete_photo_tether_capture",
+        "fail_photo_tether_capture": "_cmd_fail_photo_tether_capture",
+        "recover_photo_tether_sessions": "_cmd_recover_photo_tether_sessions",
+        "photo_source_status": "_cmd_photo_source_status",
+        "dam_catalog_status": "_cmd_dam_catalog_status",
+        "list_dam_catalogs": "_cmd_list_dam_catalogs",
+        "preview_dam_catalog": "_cmd_preview_dam_catalog",
+        "import_dam_catalog": "_cmd_import_dam_catalog",
+        "sync_dam_catalog": "_cmd_sync_dam_catalog",
+        "photo_source_jobs": "_cmd_photo_source_jobs",
+        "photo_source_job_status": "_cmd_photo_source_job_status",
+        "run_photo_source_job": "_cmd_run_photo_source_job",
+        "cancel_photo_source_job": "_cmd_cancel_photo_source_job",
+        "retry_photo_source_job": "_cmd_retry_photo_source_job",
+        "dismiss_photo_source_job": "_cmd_dismiss_photo_source_job",
+        "list_photo_source_people_hints": "_cmd_list_photo_source_people_hints",
+        "review_photo_source_people_hint": "_cmd_review_photo_source_people_hint",
+        "revoke_photo_source_consent": "_cmd_revoke_photo_source_consent",
+        "inbound_connector_catalog": "_cmd_inbound_connector_catalog",
+        "configure_inbound_connector": "_cmd_configure_inbound_connector",
+        "forget_inbound_connector": "_cmd_forget_inbound_connector",
+        "list_inbound_connector_sources": "_cmd_list_inbound_connector_sources",
+        "preview_inbound_connector": "_cmd_preview_inbound_connector",
+        "import_inbound_connector": "_cmd_import_inbound_connector",
+        "sync_inbound_connector": "_cmd_sync_inbound_connector",
+        "apple_photos_status": "_cmd_apple_photos_status",
+        "list_apple_photos_libraries": "_cmd_list_apple_photos_libraries",
+        "preview_apple_photos_library": "_cmd_preview_apple_photos_library",
+        "import_apple_photos_library": "_cmd_import_apple_photos_library",
+        "sync_apple_photos_library": "_cmd_sync_apple_photos_library",
+        "export_apple_photos_assets": "_cmd_export_apple_photos_assets",
+        "windows_photo_source_status": "_cmd_windows_photo_source_status",
+        "list_windows_photo_folders": "_cmd_list_windows_photo_folders",
+        "preview_windows_photo_folder": "_cmd_preview_windows_photo_folder",
+        "import_windows_photo_folder": "_cmd_import_windows_photo_folder",
+        "sync_windows_photo_folder": "_cmd_sync_windows_photo_folder",
         "update_photo_import_session_provenance": "_cmd_update_photo_import_session_provenance",
         "bulk_update_photo_import_session_provenance": "_cmd_bulk_update_photo_import_session_provenance",
         "archive_photo_import_sessions": "_cmd_archive_photo_import_sessions",
@@ -907,8 +1290,24 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "photo_ocr_index_status": "_cmd_photo_ocr_index_status",
         "index_photo_barcodes": "_cmd_index_photo_barcodes",
         "photo_barcode_index_status": "_cmd_photo_barcode_index_status",
+        "photo_vlm_status": "_cmd_photo_vlm_status",
+        "install_photo_vlm": "_cmd_install_photo_vlm",
         "index_photo_objects": "_cmd_index_photo_objects",
         "photo_object_index_status": "_cmd_photo_object_index_status",
+        "photo_audio_status": "_cmd_photo_audio_status",
+        "photo_audio_segments": "_cmd_photo_audio_segments",
+        "index_photo_audio": "_cmd_index_photo_audio",
+        "local_sync_status": "_cmd_local_sync_status",
+        "local_sync_initialize": "_cmd_local_sync_initialize",
+        "local_sync_start": "_cmd_local_sync_start",
+        "local_sync_stop": "_cmd_local_sync_stop",
+        "local_sync_create_invitation": "_cmd_local_sync_create_invitation",
+        "local_sync_accept_invitation": "_cmd_local_sync_accept_invitation",
+        "local_sync_sync_peer": "_cmd_local_sync_sync_peer",
+        "local_sync_revoke_peer": "_cmd_local_sync_revoke_peer",
+        "local_sync_conflicts": "_cmd_local_sync_conflicts",
+        "local_sync_export_recovery": "_cmd_local_sync_export_recovery",
+        "local_sync_restore_recovery": "_cmd_local_sync_restore_recovery",
         "enqueue_photo_indexing_job": "_cmd_enqueue_photo_indexing_job",
         "photo_indexing_jobs": "_cmd_photo_indexing_jobs",
         "run_photo_indexing_job": "_cmd_run_photo_indexing_job",
@@ -918,6 +1317,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "photo_curation_preferences": "_cmd_photo_curation_preferences",
         "save_photo_curation_preferences": "_cmd_save_photo_curation_preferences",
         "photo_user_memories": "_cmd_photo_user_memories",
+        "photo_user_memory_source_order": "_cmd_photo_user_memory_source_order",
         "save_photo_user_memory": "_cmd_save_photo_user_memory",
         "delete_photo_user_memory": "_cmd_delete_photo_user_memory",
         "photo_slideshow_theme_templates": "_cmd_photo_slideshow_theme_templates",
@@ -943,12 +1343,17 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "delete_photo_album_folder": "_cmd_delete_photo_album_folder",
         "move_photo_album_to_folder": "_cmd_move_photo_album_to_folder",
         "reorder_photo_album_folder_children": "_cmd_reorder_photo_album_folder_children",
+        "photo_album_source_order": "_cmd_photo_album_source_order",
         "add_photo_album_items": "_cmd_add_photo_album_items",
         "remove_photo_album_items": "_cmd_remove_photo_album_items",
         "reorder_photo_album_items": "_cmd_reorder_photo_album_items",
         "suggest_photo_albums": "_cmd_suggest_photo_albums",
         "photo_color_profile_status": "_cmd_photo_color_profile_status",
         "validate_photo_color_profile": "_cmd_validate_photo_color_profile",
+        "start_photo_export_job": "_cmd_start_photo_export_job",
+        "photo_export_job_status": "_cmd_photo_export_job_status",
+        "photo_export_jobs": "_cmd_photo_export_jobs",
+        "cancel_photo_export_job": "_cmd_cancel_photo_export_job",
         "export_photo_selection": "_cmd_export_photo_selection",
         "export_photo_contact_sheet": "_cmd_export_photo_contact_sheet",
         "export_photo_video_frame": "_cmd_export_photo_video_frame",
@@ -966,6 +1371,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "prepare_previews": "_cmd_prepare_previews",
         "delete_reference": "_cmd_delete_reference",
         "delete_person": "_cmd_delete_person",
+        "delete_subject_data": "_cmd_delete_subject_data",
         "rename_person": "_cmd_rename_person",
         "clear_references": "_cmd_clear_references",
         "purge_old_candidates": "_cmd_purge_old_candidates",
@@ -999,6 +1405,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "cleanup_media_trash": "_cmd_cleanup_media_trash",
         "export_media_bundle": "_cmd_export_media_bundle",
         "workspace_health": "_cmd_workspace_health",
+        "workspace_encryption_status": "_cmd_workspace_encryption_status",
+        "rotate_workspace_database_key": "_cmd_rotate_workspace_database_key",
         "runtime_self_test": "_cmd_runtime_self_test",
         "runtime_benchmark": "_cmd_runtime_benchmark",
         "benchmark_history": "_cmd_benchmark_history",
@@ -1012,6 +1420,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "public_dataset_catalog": "_cmd_public_dataset_catalog",
         "inspect_public_dataset": "_cmd_inspect_public_dataset",
         "run_public_dataset_benchmark": "_cmd_run_public_dataset_benchmark",
+        "run_cross_age_trajectory_benchmark": "_cmd_run_cross_age_trajectory_benchmark",
         "compare_public_dataset_models": "_cmd_compare_public_dataset_models",
         "apply_model_recommendation": "_cmd_apply_model_recommendation",
         "calibration_summary": "_cmd_calibration_summary",
@@ -1048,6 +1457,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         "audit_chain_status": "_cmd_audit_chain_status",
         "list_jurisdictions": "_cmd_list_jurisdictions",
         "set_jurisdiction_preset": "_cmd_set_jurisdiction_preset",
+        "compliance_status": "_cmd_compliance_status",
+        "biometric_retention_policy": "_cmd_biometric_retention_policy",
+        "acknowledge_ai_disclosure": "_cmd_acknowledge_ai_disclosure",
+        "enforce_retention_policy": "_cmd_enforce_retention_policy",
+        "export_biometric_retention_policy": "_cmd_export_biometric_retention_policy",
+        "record_biometric_policy_publication": "_cmd_record_biometric_policy_publication",
         "export_compliance_pack": "_cmd_export_compliance_pack",
         "export_examination_report": "_cmd_export_examination_report",
         "list_workspaces": "_cmd_list_workspaces",
@@ -1073,6 +1488,388 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     def _cmd_model_status(self, params, progress=None):
         return self._model_status()
 
+    def _model_lifecycle_store(self) -> ModelLifecycleStore:
+        return ModelLifecycleStore(self.project.root)
+
+    def _model_lifecycle_configuration(self) -> dict[str, Any]:
+        local_settings = self._photo_local_settings()
+        return {
+            "modelPack": str(self.project.config.model_pack or "antelopev2"),
+            "modelRoot": str(self.project.config.model_root or ""),
+            "visionModelTier": str(local_settings.get("visionModelTier", "auto") or "auto"),
+            "safeModeMultimodal": bool(self.project.config.safe_mode_multimodal),
+        }
+
+    def _record_model_lifecycle_configuration(self, reason: str) -> dict[str, Any]:
+        return self._model_lifecycle_store().record_configuration(
+            self._model_lifecycle_configuration(),
+            reason=reason,
+        )
+
+    def _model_lifecycle_fingerprint(self, value: Any) -> str:
+        return hashlib.sha256(
+            json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str).encode("utf-8")
+        ).hexdigest()
+
+    def _model_lifecycle_runtime_inventory(self) -> dict[str, dict[str, Any]]:
+        inventory: dict[str, dict[str, Any]] = {}
+
+        def add(
+            component_id: str,
+            *,
+            installed: bool,
+            available: bool,
+            verified: bool,
+            version: str,
+            fingerprint_source: Any,
+            reason: str,
+        ) -> None:
+            inventory[component_id] = {
+                "installed": bool(installed),
+                "available": bool(available),
+                "verified": bool(verified),
+                "version": str(version or ""),
+                "fingerprint": self._model_lifecycle_fingerprint(fingerprint_source) if installed else "",
+                "reason": str(reason or "")[:500],
+            }
+
+        face = self._model_status()
+        face_pack = str(face.get("currentPack", self.project.config.model_pack) or "")
+        face_row = next(
+            (item for item in face.get("packages", []) if isinstance(item, dict) and item.get("pack") == face_pack),
+            {},
+        )
+        face_installed = bool(face_row.get("available"))
+        face_verified = face_installed
+        face_reason = str(face.get("recommendation", "") or "")
+        if face_installed:
+            try:
+                verify_model_files(Path(str(face_row.get("path", ""))), face_pack)
+            except Exception as exc:
+                face_verified = False
+                face_reason = str(exc)
+        add(
+            "face-recognition",
+            installed=face_installed,
+            available=face_installed,
+            verified=face_verified,
+            version=face_pack,
+            fingerprint_source={
+                "pack": face_pack,
+                "archiveSha256": face_row.get("sha256", ""),
+                "embeddingSpace": face_row.get("embedding_space", ""),
+                "thresholds": face_row.get("thresholds", {}),
+            },
+            reason=face_reason,
+        )
+
+        fiqa = fiqa_model_report(validate_runtime=False)
+        add(
+            "face-quality",
+            installed=bool(fiqa.get("sha256") or fiqa.get("available")),
+            available=bool(fiqa.get("available")),
+            verified=bool(fiqa.get("verified")),
+            version=str(fiqa.get("version", fiqa.get("modelVersion", "")) or ""),
+            fingerprint_source={
+                "modelId": fiqa.get("modelId", ""),
+                "sha256": fiqa.get("sha256", ""),
+                "manifestSha256": fiqa.get("manifestSha256", ""),
+            },
+            reason=str(fiqa.get("reason", "") or fiqa.get("modelName", "")),
+        )
+
+        ocr = ppocrv6_model_report(validate_runtime=False)
+        add(
+            "photo-ocr",
+            installed=bool(ocr.get("manifestSha256") or ocr.get("available")),
+            available=bool(ocr.get("available")),
+            verified=bool(ocr.get("verified")),
+            version=str(ocr.get("modelVersion", "") or ""),
+            fingerprint_source={
+                "modelId": ocr.get("modelId", ""),
+                "modelVersion": ocr.get("modelVersion", ""),
+                "manifestSha256": ocr.get("manifestSha256", ""),
+                "artifacts": ocr.get("artifacts", {}),
+            },
+            reason=str(ocr.get("reason", "") or ocr.get("modelId", "")),
+        )
+
+        try:
+            vlm = self._photo_vlm_model_report()
+        except Exception as exc:
+            vlm = {"verified": False, "available": False, "installedPackCount": 0, "reason": str(exc)}
+        vlm_installed = int(vlm.get("installedPackCount", 0) or 0) > 0
+        vlm_quality_installed = any(
+            isinstance(item, dict)
+            and str(item.get("tier", "") or "") == "quality"
+            and bool(item.get("installed"))
+            for item in (vlm.get("packs") if isinstance(vlm.get("packs"), list) else [])
+        )
+        add(
+            "photo-vlm",
+            installed=vlm_installed,
+            available=bool(vlm.get("available")),
+            verified=bool(vlm.get("verified")) if vlm_installed else True,
+            version=str(vlm.get("catalogVersion", "") or ""),
+            fingerprint_source={
+                "catalogSha256": vlm.get("catalogSha256", ""),
+                "runtime": vlm.get("runtime", {}),
+                "packs": vlm.get("packs", []),
+            },
+            reason=str(vlm.get("reason", "") or ""),
+        )
+
+        try:
+            from crossage_fr.embed import siglip_engine
+
+            semantic = siglip_engine.semantic_model_report()
+        except Exception as exc:
+            semantic = {"available": False, "reason": str(exc)}
+        semantic_installed = bool(semantic.get("available"))
+        add(
+            "semantic-embedding",
+            installed=semantic_installed,
+            available=semantic_installed,
+            verified=semantic_installed,
+            version=str(semantic.get("modelName", "") or ""),
+            fingerprint_source={
+                "modelName": semantic.get("modelName", ""),
+                "engine": semantic.get("engine", ""),
+                "imageSize": semantic.get("imageSize", 0),
+                "license": semantic.get("license", ""),
+                "source": semantic.get("source", ""),
+            },
+            reason=str(semantic.get("reason", "") or semantic.get("modelName", "")),
+        )
+
+        try:
+            generative = local_photo_generative_status()
+            light = generative.get("light") if isinstance(generative.get("light"), dict) else {}
+            heavy = generative.get("heavy") if isinstance(generative.get("heavy"), dict) else {}
+            cleanup = light.get("cleanup") if isinstance(light.get("cleanup"), dict) else {}
+            upscale = light.get("upscale") if isinstance(light.get("upscale"), dict) else {}
+            heavy_models = heavy.get("models") if isinstance(heavy.get("models"), dict) else {}
+            heavy_runtime = heavy.get("runtime") if isinstance(heavy.get("runtime"), dict) else {}
+            generative_installed = bool(
+                cleanup.get("available")
+                or cleanup.get("installed")
+                or upscale.get("available")
+                or upscale.get("installed")
+                or int(heavy_models.get("installedFileCount", 0) or 0)
+                or heavy_models.get("available")
+                or heavy_runtime.get("installed")
+                or heavy_runtime.get("available")
+            )
+            generative_verified = bool(
+                (not cleanup.get("installed") or cleanup.get("verified") or cleanup.get("available"))
+                and (not upscale.get("installed") or upscale.get("verified") or upscale.get("available"))
+                and (not int(heavy_models.get("installedFileCount", 0) or 0) or heavy_models.get("verified"))
+                and (not heavy_runtime.get("installed") or heavy_runtime.get("verified") or heavy_runtime.get("available"))
+            )
+        except Exception as exc:
+            generative = {"catalogVersion": "", "catalogSha256": "", "modes": {}, "reason": str(exc)}
+            generative_installed = False
+            generative_verified = False
+        add(
+            "photo-generative",
+            installed=generative_installed,
+            available=bool(any((generative.get("modes") or {}).values())) if isinstance(generative.get("modes"), dict) else False,
+            verified=generative_verified,
+            version=str(generative.get("catalogVersion", "") or ""),
+            fingerprint_source={
+                "catalogSha256": generative.get("catalogSha256", ""),
+                "light": generative.get("light", {}),
+                "heavy": generative.get("heavy", {}),
+            },
+            reason=str((generative.get("heavy") or {}).get("reason", "") if isinstance(generative.get("heavy"), dict) else generative.get("reason", "")),
+        )
+
+        try:
+            from crossage_fr.ingest.multimodal_safety import multimodal_guardrail_status
+
+            safety = multimodal_guardrail_status(preference="quality")
+        except Exception as exc:
+            safety = {"available": False, "reason": str(exc)}
+        safety_installed = vlm_quality_installed
+        add(
+            "multimodal-safety",
+            installed=safety_installed,
+            available=bool(safety.get("available")),
+            verified=bool(safety.get("available") and safety.get("categoryAware") and safety.get("offlineInference")) if safety_installed else True,
+            version=str(safety.get("policyVersion", "") or ""),
+            fingerprint_source={
+                "cacheVersion": safety.get("cacheVersion", ""),
+                "modelRevision": safety.get("modelRevision", ""),
+                "policyVersion": safety.get("policyVersion", ""),
+            },
+            reason=str(safety.get("reason", "") or ""),
+        )
+
+        try:
+            audio = audio_model_report()
+        except Exception as exc:
+            audio = {"available": False, "reason": str(exc), "artifacts": []}
+        audio_installed = bool(str(audio.get("manifestPath", "") or "")) and any(
+            int(item.get("bytes", -1) or -1) > 0
+            for item in (audio.get("artifacts") if isinstance(audio.get("artifacts"), list) else [])
+            if isinstance(item, dict)
+        )
+        add(
+            "audio-intelligence",
+            installed=audio_installed,
+            available=bool(audio.get("available")),
+            verified=bool(audio.get("available")),
+            version=str(audio.get("packVersion", "") or ""),
+            fingerprint_source={
+                "packVersion": audio.get("packVersion", ""),
+                "indexVersion": audio.get("indexVersion", ""),
+                "asr": {
+                    key: (audio.get("asr") or {}).get(key)
+                    for key in ("modelName", "runtime", "runtimeVersion", "nativeModulePresent", "multilingual")
+                },
+                "soundEvents": {
+                    key: (audio.get("soundEvents") or {}).get(key)
+                    for key in ("modelName", "runtime", "runtimeVersion", "classCount")
+                },
+                "artifacts": [
+                    {
+                        "file": item.get("file", ""),
+                        "sha256": item.get("sha256", ""),
+                        "valid": item.get("valid", False),
+                    }
+                    for item in (audio.get("artifacts") if isinstance(audio.get("artifacts"), list) else [])
+                    if isinstance(item, dict)
+                ],
+            },
+            reason=str(audio.get("reason", "") or audio.get("packVersion", "")),
+        )
+
+        synthetic = synthetic_enrollment_screen_report(validate_runtime=False)
+        add(
+            "synthetic-enrollment-screen",
+            installed=bool(synthetic.get("artifactSha256") or synthetic.get("available")),
+            available=bool(synthetic.get("available")),
+            verified=bool(synthetic.get("verified")),
+            version=str(synthetic.get("version", "") or ""),
+            fingerprint_source={
+                "modelId": synthetic.get("modelId", ""),
+                "version": synthetic.get("version", ""),
+                "artifactSha256": synthetic.get("artifactSha256", ""),
+                "manifestSha256": synthetic.get("manifestSha256", ""),
+            },
+            reason=str(synthetic.get("reason", "") or synthetic.get("modelId", "")),
+        )
+        return inventory
+
+    def _cmd_model_lifecycle_status(self, params, progress=None):
+        store = self._model_lifecycle_store()
+        store.record_configuration(self._model_lifecycle_configuration(), reason="lifecycle status baseline")
+        return store.status(self._model_lifecycle_runtime_inventory())
+
+    def _cmd_run_model_lifecycle_evaluation(self, params, progress=None):
+        result = self._cmd_model_lifecycle_status(params, progress)
+        self.project._append_audit(
+            {
+                "action": "run_model_lifecycle_evaluation",
+                "policy_version": result.get("policyVersion", ""),
+                "components": int((result.get("counts") or {}).get("components", 0)),
+                "blocked": int((result.get("counts") or {}).get("blocked", 0)),
+                "ready": bool(result.get("ready")),
+            }
+        )
+        return result
+
+    def _cmd_stage_model_lifecycle_candidate(self, params, progress=None):
+        staged = self._model_lifecycle_store().stage_candidate(
+            str(params.get("componentId", "") or ""),
+            Path(str(params.get("reportPath", "") or "")),
+        )
+        self.project._append_audit(
+            {
+                "action": "stage_model_lifecycle_candidate",
+                "component_id": staged.get("componentId", ""),
+                "report_sha256": staged.get("reportSha256", ""),
+            }
+        )
+        return {"staged": staged, "status": self._model_lifecycle_store().status(self._model_lifecycle_runtime_inventory())}
+
+    def _cmd_promote_model_lifecycle_candidate(self, params, progress=None):
+        component_id = str(params.get("componentId", "") or "")
+        runtime = self._model_lifecycle_runtime_inventory().get(component_id, {})
+        fingerprint = str(runtime.get("fingerprint", "") or "")
+        if not runtime.get("installed") or not runtime.get("verified") or not fingerprint:
+            raise ModelLifecycleGateError("The installed runtime must pass integrity verification before promotion.")
+        promoted = self._model_lifecycle_store().promote_candidate(
+            component_id,
+            runtime_fingerprint=fingerprint,
+            confirm=bool(params.get("confirm")),
+        )
+        self.project._append_audit(
+            {
+                "action": "promote_model_lifecycle_candidate",
+                "component_id": component_id,
+                "report_sha256": promoted.get("reportSha256", ""),
+                "runtime_fingerprint": fingerprint,
+            }
+        )
+        return {"promoted": promoted, "status": self._model_lifecycle_store().status(self._model_lifecycle_runtime_inventory())}
+
+    def _cmd_rollback_model_lifecycle_baseline(self, params, progress=None):
+        component_id = str(params.get("componentId", "") or "")
+        result = self._model_lifecycle_store().rollback_baseline(component_id, confirm=bool(params.get("confirm")))
+        self.project._append_audit(
+            {
+                "action": "rollback_model_lifecycle_baseline",
+                "component_id": component_id,
+                "restored_report_sha256": (result.get("restored") or {}).get("reportSha256", ""),
+            }
+        )
+        return {"value": result, "status": self._model_lifecycle_store().status(self._model_lifecycle_runtime_inventory())}
+
+    def _cmd_rollback_model_configuration(self, params, progress=None):
+        if not bool(params.get("confirm")):
+            raise ModelLifecycleGateError("Model configuration rollback requires confirmation.")
+        store = self._model_lifecycle_store()
+        current = self._model_lifecycle_configuration()
+        previous = store.previous_configuration(current)
+        target = previous.get("configuration") if isinstance(previous.get("configuration"), dict) else {}
+        target_pack = str(target.get("modelPack", current["modelPack"]) or current["modelPack"])
+        target_root = str(target.get("modelRoot", current["modelRoot"]) or "")
+        target_vlm = str(target.get("visionModelTier", current["visionModelTier"]) or "auto")
+        if target_pack not in MODEL_PACKAGES:
+            raise ModelLifecycleGateError("The rollback face model is no longer present in the signed model catalog.")
+        if target_vlm not in {"auto", "quality", "low-memory"}:
+            raise ModelLifecycleGateError("The rollback photo VLM tier is invalid.")
+        rollback_root = Path(target_root).expanduser() if target_root else model_root_for_config(self.project.config)
+        if not model_pack_ready(rollback_root, target_pack):
+            raise ModelLifecycleGateError("The rollback face-model files are no longer available offline.")
+        self.project.config.model_pack = target_pack
+        self.project.config.model_root = target_root
+        self.project.config.safe_mode_multimodal = bool(target.get("safeModeMultimodal", current["safeModeMultimodal"]))
+        local_settings = dict(self._photo_local_settings())
+        local_settings["visionModelTier"] = target_vlm
+        self.project.db.save_photo_library_settings(local_settings=local_settings)
+        self.project._append_audit(
+            {
+                "action": "rollback_model_configuration",
+                "from_model_pack": current["modelPack"],
+                "to_model_pack": target_pack,
+                "from_vlm_tier": current["visionModelTier"],
+                "to_vlm_tier": target_vlm,
+                "safe_mode_multimodal": self.project.config.safe_mode_multimodal,
+                "snapshot_sha256": previous.get("configurationSha256", ""),
+            }
+        )
+        self.project.save()
+        self._reset_engine()
+        restored = store.record_configuration(self._model_lifecycle_configuration(), reason="model configuration rollback")
+        return {
+            "rolledBack": True,
+            "configuration": restored,
+            "status": store.status(self._model_lifecycle_runtime_inventory()),
+            "state": self.state(preview_create_budget=0),
+        }
+
     def _cmd_model_switch_dry_run(self, params, progress=None):
         return self._model_switch_dry_run(str(params.get("targetPack", params.get("pack", self.project.config.model_pack))))
 
@@ -1092,15 +1889,23 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         root_value = str(params.get("root", "")).strip()
         if not root_value:
             raise ValueError("Choose a model download folder first.")
+        previous_root = str(self.project.config.model_root or "")
+        if str(Path(root_value).expanduser()) != previous_root:
+            self._record_model_lifecycle_configuration("before face model root change")
         root = set_model_root(self.project.config, Path(root_value))
         self.project._append_audit({"action": "set_model_root", "root": str(root), "source": str(params.get("source", "desktop"))})
         self.project.save()
         self._reset_engine()
+        self._record_model_lifecycle_configuration("after face model root change")
         return self.state()
 
     def _cmd_download_model(self, params, progress=None):
         pack = str(params.get("pack", self.project.config.model_pack or "antelopev2"))
+        previous_pack = self.project.config.model_pack
+        previous_root = str(self.project.config.model_root or "")
         root_param = str(params.get("root", "")).strip()
+        if pack != previous_pack or (root_param and str(Path(root_param).expanduser()) != previous_root):
+            self._record_model_lifecycle_configuration("before face model install or switch")
         root = set_model_root(self.project.config, Path(root_param)) if root_param else set_model_root(self.project.config, model_root_for_config(self.project.config, prefer_ready=False))
         result = download_model_pack(
             pack,
@@ -1110,6 +1915,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         )
         self.project.config.model_pack = pack
         self.project.config.model_root = str(root)
+        invalidated_synthetic = len(self.project._remove_age_trajectory_references()) if pack != previous_pack else 0
         self.project._append_audit(
             {
                 "action": "download_model",
@@ -1118,10 +1924,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "sha256": result.get("sha256"),
                 "bytes": result.get("bytes"),
                 "source": str(params.get("source", "desktop")),
+                "invalidatedSyntheticAgeReferences": invalidated_synthetic,
             }
         )
         self.project.save()
         self._reset_engine()
+        self._record_model_lifecycle_configuration("after face model install or switch")
         return {"value": result, "state": self.state()}
 
     def _cmd_set_workspace(self, params, progress=None):
@@ -1138,6 +1946,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             scope=str(params.get("scope", "")),
             person_name=person_name,
             lawful_basis=str(params.get("lawfulBasis", "")),
+            release=params.get("release") if isinstance(params.get("release"), dict) else None,
         )
         # A per-subject grant must never flip the workspace-level gate.
         if not person_name:
@@ -1149,7 +1958,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         engine = self._engine_instance()
         folder = Path(str(params.get("folder", ""))).expanduser()
         recursive, excluded_dirs = self._parse_scan_scope(params, folder)
-        added, errors = self.project.enroll_folder(
+        added, errors, reviews = self.project.enroll_folder(
             str(params.get("personName", "")),
             str(params.get("ageBucket", "unknown")),
             folder,
@@ -1157,7 +1966,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             recursive=recursive,
             excluded_dirs=excluded_dirs,
         )
-        return {"added": added, "errors": errors, "state": self.state()}
+        return {
+            "added": added,
+            "errors": errors,
+            "reviews": reviews,
+            "screened": added + reviews,
+            "state": self.state(),
+        }
 
     def _cmd_enroll_paths(self, params, progress=None):
         self._require_consent_for_person(str(params.get("personName", "")))
@@ -1165,13 +1980,19 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         paths_param = params.get("paths", [])
         if not isinstance(paths_param, list):
             raise ValueError("enroll_paths expects a list of file or folder paths.")
-        added, errors = self.project.enroll_paths(
+        added, errors, reviews = self.project.enroll_paths(
             str(params.get("personName", "")),
             str(params.get("ageBucket", "unknown")),
             [str(item) for item in paths_param],
             engine,
         )
-        return {"added": added, "errors": errors, "state": self.state()}
+        return {
+            "added": added,
+            "errors": errors,
+            "reviews": reviews,
+            "screened": added + reviews,
+            "state": self.state(),
+        }
 
     def _cmd_enroll_age_groups(self, params, progress=None):
         self._require_consent_for_person(str(params.get("personName", "")))
@@ -1179,12 +2000,107 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if not isinstance(groups_param, list):
             raise ValueError("Age-group enrollment expects a list of folders.")
         engine = self._engine_instance()
-        added, errors, groups = self.project.enroll_age_groups(
+        added, errors, groups, reviews = self.project.enroll_age_groups(
             str(params.get("personName", "")),
             groups_param,
             engine,
         )
-        return {"added": added, "errors": errors, "value": {"groups": groups}, "state": self.state()}
+        return {
+            "added": added,
+            "errors": errors,
+            "reviews": reviews,
+            "screened": added + reviews,
+            "value": {"groups": groups},
+            "state": self.state(),
+        }
+
+    def _cmd_synthetic_enrollment_screen_status(self, params, progress=None):
+        return self.project.synthetic_enrollment_review_status(limit=int(params.get("limit", 20) or 20))
+
+    def _cmd_approve_synthetic_enrollment_review(self, params, progress=None):
+        artifact_id = str(params.get("artifactId", "") or "").strip()
+        artifact = self.project.db.learned_artifact_by_id(artifact_id)
+        payload = artifact.get("payload") if artifact and isinstance(artifact.get("payload"), dict) else {}
+        self._require_consent_for_person(str(payload.get("personName", "") or ""))
+        result = self.project.approve_synthetic_enrollment_review(
+            artifact_id,
+            self._engine_instance(),
+            allow_synthetic_override=bool(params.get("allowSyntheticOverride", False)),
+            operator=str(params.get("operator", self.actor) or self.actor),
+        )
+        return {"value": result, "state": self.state()}
+
+    def _cmd_reject_synthetic_enrollment_review(self, params, progress=None):
+        result = self.project.reject_synthetic_enrollment_review(
+            str(params.get("artifactId", "") or ""),
+            reason=str(params.get("reason", "") or ""),
+        )
+        return {"value": result, "state": self.state()}
+
+    def _cmd_build_age_trajectory_references(self, params, progress=None):
+        person_name = str(params.get("personName", ""))
+        self._require_consent_for_person(person_name)
+        result = self.project.build_age_trajectory_references(
+            person_name,
+            acknowledge_embedding_derivation=bool(params.get("acknowledgeEmbeddingDerivation", False)),
+            source=str(params.get("source", self.actor)),
+        )
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_remove_age_trajectory_references(self, params, progress=None):
+        result = self.project.remove_age_trajectory_references(
+            str(params.get("personName", "")),
+            source=str(params.get("source", self.actor)),
+        )
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_synthetic_age_image_review_status(self, params, progress=None):
+        return self.project.synthetic_age_image_review_status(limit=int(params.get("limit", 20) or 20))
+
+    def _cmd_generate_synthetic_age_image_reviews(self, params, progress=None):
+        person_name = str(params.get("personName", "") or "")
+        self._require_consent_for_person(person_name)
+        raw_targets = params.get("targetAgeBuckets", [])
+        if not isinstance(raw_targets, list):
+            raise ValueError("Synthetic age-image generation expects a list of target age ranges.")
+
+        def emit(payload: dict[str, Any]) -> None:
+            if progress:
+                progress(payload, "synthetic_age_generation")
+
+        result = self.project.generate_synthetic_age_image_reviews(
+            person_name,
+            [str(item) for item in raw_targets],
+            self._engine_instance(),
+            run_photo_generative_edit,
+            acknowledge_ai_age_generation=params.get("acknowledgeAiAgeGeneration") is True,
+            source=str(params.get("source", self.actor) or self.actor),
+            generative_root=str(params.get("root", "") or "") or None,
+            seed=int(params.get("seed", 42) or 42),
+            steps=int(params.get("steps", 20) or 20),
+            on_progress=emit,
+        )
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_approve_synthetic_age_image_review(self, params, progress=None):
+        artifact_id = str(params.get("artifactId", "") or "").strip()
+        artifact = self.project.db.learned_artifact_by_id(artifact_id)
+        payload = artifact.get("payload") if artifact and isinstance(artifact.get("payload"), dict) else {}
+        self._require_consent_for_person(str(payload.get("personName", "") or ""))
+        result = self.project.approve_synthetic_age_image_review(
+            artifact_id,
+            self._engine_instance(),
+            operator=str(params.get("operator", self.actor) or self.actor),
+            acknowledge_visual_review=params.get("acknowledgeVisualReview") is True,
+        )
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_reject_synthetic_age_image_review(self, params, progress=None):
+        result = self.project.reject_synthetic_age_image_review(
+            str(params.get("artifactId", "") or ""),
+            reason=str(params.get("reason", "") or ""),
+        )
+        return {"value": result, "state": self.state(preview_create_budget=0)}
 
     def _cmd_scan(self, params, progress=None):
         self._require_consent()
@@ -1302,18 +2218,22 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         self.project.set_candidate_status(str(params["candidateId"]), str(params["status"]))
         return self.state()
 
-    def _cmd_bulk_set_status(self, params, progress=None):
-        candidate_ids = params["candidateIds"]
+    def _candidate_ids_param(self, params: dict[str, Any], key: str = "candidateIds") -> list[str]:
+        candidate_ids = params[key]
         if not isinstance(candidate_ids, list):
-            raise ValueError("candidateIds must be a list.")
+            raise ValueError(f"{key} must be a list.")
         normalized_ids: list[str] = []
         for candidate_id in candidate_ids:
             candidate_id_text = str(candidate_id).strip()
             if not candidate_id_text:
-                raise ValueError("candidateIds must contain non-empty candidate ids.")
+                raise ValueError(f"{key} must contain non-empty candidate ids.")
             normalized_ids.append(candidate_id_text)
         if not normalized_ids:
-            raise ValueError("candidateIds must contain at least one candidate id.")
+            raise ValueError(f"{key} must contain at least one candidate id.")
+        return normalized_ids
+
+    def _cmd_bulk_set_status(self, params, progress=None):
+        normalized_ids = self._candidate_ids_param(params)
         count = self.project.bulk_set_candidate_status(normalized_ids, str(params["status"]))
         return {"updated": count, "state": self.state()}
 
@@ -1325,9 +2245,24 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         result = self.project.block_false_match(str(params["candidateId"]), str(params.get("note", "")))
         return {"value": result, "state": self.state(preview_create_budget=0)}
 
+    def _cmd_bulk_block_false_matches(self, params, progress=None):
+        result = self.project.bulk_block_false_matches(
+            self._candidate_ids_param(params),
+            str(params.get("note", "")),
+        )
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
     def _cmd_reassign_candidate_person(self, params, progress=None):
         result = self.project.reassign_candidate_person(
             str(params["candidateId"]),
+            str(params["personName"]),
+            clear_reference=bool(params.get("clearReference", True)),
+        )
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_bulk_reassign_candidate_person(self, params, progress=None):
+        result = self.project.bulk_reassign_candidate_person(
+            self._candidate_ids_param(params),
             str(params["personName"]),
             clear_reference=bool(params.get("clearReference", True)),
         )
@@ -1345,6 +2280,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def _cmd_query_candidates(self, params, progress=None):
         return self.query_candidates(params)
+
+    def _cmd_ordered_review_candidates(self, params, progress=None):
+        return self.ordered_review_candidates(params)
 
     def _cmd_suggest_photo_review_more_candidates(self, params, progress=None):
         result = self.suggest_photo_review_more_candidates(params)
@@ -1367,6 +2305,15 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         # item's previewPath into a vintrace-media:// previewUrl (thumbnails).
         return self.semantic_search_photos(params)
 
+    def _cmd_photo_library_agent_status(self, params, progress=None):
+        return {"value": photo_library_agent_status(self, params)}
+
+    def _cmd_query_photo_library_agent(self, params, progress=None):
+        return {"value": query_photo_library_agent(self, params)}
+
+    def _cmd_execute_photo_library_agent_plan(self, params, progress=None):
+        return {"value": execute_photo_library_agent_plan(self, params)}
+
     def _cmd_list_photo_assets(self, params, progress=None):
         return self.list_photo_assets(params)
 
@@ -1384,6 +2331,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def _cmd_import_photo_keywords(self, params, progress=None):
         return {"value": self.import_photo_keywords(params)}
+
+    def _cmd_suggest_photo_relationship_names(self, params, progress=None):
+        return {"value": self.suggest_photo_relationship_names(params)}
+
+    def _cmd_review_photo_relationship_name_suggestion(self, params, progress=None):
+        result = self.review_photo_relationship_name_suggestion(params)
+        response = {"value": result}
+        if result.get("applied"):
+            response["state"] = self.state()
+        return response
 
     def _cmd_save_photo_person_profile(self, params, progress=None):
         return {"value": self.save_photo_person_profile(params)}
@@ -1403,8 +2360,14 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     def _cmd_assign_photo_pet(self, params, progress=None):
         return {"value": self.assign_photo_pet(params)}
 
+    def _cmd_bulk_assign_photo_pet(self, params, progress=None):
+        return {"value": self.bulk_assign_photo_pet(params)}
+
     def _cmd_dismiss_photo_pet_review(self, params, progress=None):
         return {"value": self.dismiss_photo_pet_review(params)}
+
+    def _cmd_bulk_dismiss_photo_pet_review(self, params, progress=None):
+        return {"value": self.bulk_dismiss_photo_pet_review(params)}
 
     def _cmd_save_photo_people_group(self, params, progress=None):
         return {"value": self.save_photo_people_group(params)}
@@ -1457,6 +2420,90 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     def _cmd_delete_photo_edit_stack_version(self, params, progress=None):
         return {"value": self.delete_photo_edit_stack_version(params)}
 
+    def _cmd_photo_generative_status(self, params, progress=None):
+        status = local_photo_generative_status(
+            root=str(params.get("root", "") or "") or None,
+        )
+        credentials = self._content_credentials.status()
+        status["contentCredentials"] = credentials
+        status["applyRequiresContentCredentials"] = True
+        status["applyAvailable"] = bool(status.get("available") and credentials.get("available"))
+        return {
+            "value": status
+        }
+
+    def _cmd_photo_content_credentials_status(self, params, progress=None):
+        return {"value": self._content_credentials.status()}
+
+    def _cmd_inspect_photo_content_credentials(self, params, progress=None):
+        return {"value": self.inspect_photo_content_credentials(params)}
+
+    def _cmd_install_photo_generative_pack(self, params, progress=None):
+        tier = str(params.get("tier", "light") or "light").strip().lower()
+        result = install_photo_generative_pack(
+            tier,
+            root=str(params.get("root", "") or "") or None,
+            acknowledge_large_download=params.get("acknowledgeLargeDownload", False),
+            force=bool(params.get("force", False)),
+            on_progress=(lambda payload: progress(payload, "photo_generative_install")) if progress else None,
+        )
+        self.project._append_audit(
+            {
+                "action": "install_photo_generative_pack",
+                "tier": tier,
+                "catalog_version": result.get("catalogVersion", ""),
+                "catalog_sha256": result.get("catalogSha256", ""),
+                "offline_inference": bool(result.get("offlineInference", False)),
+                "large_download_acknowledged": bool(
+                    params.get("acknowledgeLargeDownload") is True
+                    or str(params.get("acknowledgeLargeDownload", "") or "").strip() == HEAVY_ACKNOWLEDGEMENT
+                ),
+            }
+        )
+        return {"value": result}
+
+    def _cmd_render_photo_generative_preview(self, params, progress=None):
+        return {"value": self.render_photo_generative_preview(params, progress=progress)}
+
+    def _cmd_apply_photo_generative_edit(self, params, progress=None):
+        return {"value": self.apply_photo_generative_edit(params)}
+
+    def _cmd_discard_photo_generative_preview(self, params, progress=None):
+        return {"value": self.discard_photo_generative_preview(params)}
+
+    def _cmd_photo_story_status(self, params, progress=None):
+        return {"value": self.photo_story_status(params)}
+
+    def _cmd_photo_stories(self, params, progress=None):
+        return {"value": self.photo_stories(params)}
+
+    def _cmd_generate_photo_story(self, params, progress=None):
+        return {"value": self.generate_photo_story(params, progress=progress)}
+
+    def _cmd_save_photo_story(self, params, progress=None):
+        return {"value": self.save_photo_story(params)}
+
+    def _cmd_delete_photo_story(self, params, progress=None):
+        return {"value": self.delete_photo_story(params)}
+
+    def _cmd_restore_photo_story_version(self, params, progress=None):
+        return {"value": self.restore_photo_story_version(params)}
+
+    def _cmd_export_photo_story(self, params, progress=None):
+        return {"value": self.export_photo_story(params)}
+
+    def _cmd_create_photo_story_slideshow(self, params, progress=None):
+        return {"value": self.create_photo_story_slideshow(params)}
+
+    def _cmd_photo_culling_status(self, params, progress=None):
+        return {"value": self.photo_culling_status(params)}
+
+    def _cmd_analyze_photo_burst_culling(self, params, progress=None):
+        return {"value": self.analyze_photo_burst_culling(params, progress=progress)}
+
+    def _cmd_apply_photo_culling_recommendation(self, params, progress=None):
+        return {"value": self.apply_photo_culling_recommendation(params)}
+
     def _cmd_duplicate_photo_asset_version(self, params, progress=None):
         return {"value": self.duplicate_photo_asset_version(params)}
 
@@ -1492,6 +2539,147 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def _cmd_import_photos(self, params, progress=None):
         return {"value": self.import_photos(params)}
+
+    def _cmd_photo_catalog_status(self, params, progress=None):
+        return {"value": self.photo_catalog_status(params)}
+
+    def _cmd_inspect_open_photo_catalog(self, params, progress=None):
+        return {"value": self.inspect_open_photo_catalog(params, progress=progress)}
+
+    def _cmd_export_open_photo_catalog(self, params, progress=None):
+        return {"value": self.export_open_photo_catalog(params, progress=progress)}
+
+    def _cmd_import_open_photo_catalog(self, params, progress=None):
+        return {"value": self.import_open_photo_catalog(params, progress=progress)}
+
+    def _cmd_create_photo_tether_session(self, params, progress=None):
+        return {"value": self.create_photo_tether_session(params)}
+
+    def _cmd_photo_tether_status(self, params, progress=None):
+        return {"value": self.photo_tether_status(params)}
+
+    def _cmd_update_photo_tether_session_status(self, params, progress=None):
+        return {"value": self.update_photo_tether_session_status(params)}
+
+    def _cmd_reserve_photo_tether_sequence(self, params, progress=None):
+        return {"value": self.reserve_photo_tether_sequence(params)}
+
+    def _cmd_claim_photo_tether_capture(self, params, progress=None):
+        return {"value": self.claim_photo_tether_capture(params)}
+
+    def _cmd_complete_photo_tether_capture(self, params, progress=None):
+        return {"value": self.complete_photo_tether_capture(params)}
+
+    def _cmd_fail_photo_tether_capture(self, params, progress=None):
+        return {"value": self.fail_photo_tether_capture(params)}
+
+    def _cmd_recover_photo_tether_sessions(self, params, progress=None):
+        return {"value": self.recover_photo_tether_sessions(params)}
+
+    def _cmd_photo_source_status(self, params, progress=None):
+        return {"value": self.photo_source_status(params)}
+
+    def _cmd_dam_catalog_status(self, params, progress=None):
+        return {"value": self.dam_catalog_status(params)}
+
+    def _cmd_list_dam_catalogs(self, params, progress=None):
+        return {"value": self.list_dam_catalogs(params)}
+
+    def _cmd_preview_dam_catalog(self, params, progress=None):
+        if bool(params.get("runAsJob", False)):
+            return {"value": self.start_dam_catalog_job("preview", params, progress=progress)}
+        return {"value": self.preview_dam_catalog(params)}
+
+    def _cmd_import_dam_catalog(self, params, progress=None):
+        return {"value": self.start_dam_catalog_job("import", params, progress=progress)}
+
+    def _cmd_sync_dam_catalog(self, params, progress=None):
+        return {"value": self.start_dam_catalog_job("sync", params, progress=progress)}
+
+    def _cmd_photo_source_jobs(self, params, progress=None):
+        return {"value": self.photo_source_jobs(params)}
+
+    def _cmd_photo_source_job_status(self, params, progress=None):
+        return {"value": self.photo_source_job_status(params)}
+
+    def _cmd_run_photo_source_job(self, params, progress=None):
+        return {"value": self.run_photo_source_job(params, progress=progress)}
+
+    def _cmd_cancel_photo_source_job(self, params, progress=None):
+        return {"value": self.cancel_photo_source_job(params)}
+
+    def _cmd_retry_photo_source_job(self, params, progress=None):
+        return {"value": self.retry_photo_source_job(params, progress=progress)}
+
+    def _cmd_dismiss_photo_source_job(self, params, progress=None):
+        return {"value": self.dismiss_photo_source_job(params)}
+
+    def _cmd_list_photo_source_people_hints(self, params, progress=None):
+        return {"value": self.list_photo_source_people_hints(params)}
+
+    def _cmd_review_photo_source_people_hint(self, params, progress=None):
+        return {"value": self.review_photo_source_people_hint(params)}
+
+    def _cmd_revoke_photo_source_consent(self, params, progress=None):
+        return {"value": self.revoke_photo_source_consent(params, progress=progress)}
+
+    def _cmd_inbound_connector_catalog(self, params, progress=None):
+        return {"value": self.inbound_connector_catalog(params)}
+
+    def _cmd_configure_inbound_connector(self, params, progress=None):
+        return {"value": self.configure_inbound_connector(params)}
+
+    def _cmd_forget_inbound_connector(self, params, progress=None):
+        return {"value": self.forget_inbound_connector(params)}
+
+    def _cmd_list_inbound_connector_sources(self, params, progress=None):
+        return {"value": self.list_inbound_connector_sources(params)}
+
+    def _cmd_preview_inbound_connector(self, params, progress=None):
+        return {"value": self.preview_inbound_connector(params)}
+
+    def _cmd_import_inbound_connector(self, params, progress=None):
+        return {"value": self.start_inbound_connector_job("import", params, progress=progress)}
+
+    def _cmd_sync_inbound_connector(self, params, progress=None):
+        return {"value": self.start_inbound_connector_job("sync", params, progress=progress)}
+
+    def _cmd_apple_photos_status(self, params, progress=None):
+        return {"value": self.photo_source_provider_status(APPLE_PHOTOS_PROVIDER)}
+
+    def _cmd_list_apple_photos_libraries(self, params, progress=None):
+        return {"value": self.list_photo_source_libraries(APPLE_PHOTOS_PROVIDER)}
+
+    def _cmd_preview_apple_photos_library(self, params, progress=None):
+        if bool(params.get("runAsJob", False)):
+            return {"value": self.start_photo_source_job(APPLE_PHOTOS_PROVIDER, "preview", params, progress=progress)}
+        return {"value": self.preview_photo_source(APPLE_PHOTOS_PROVIDER, params)}
+
+    def _cmd_import_apple_photos_library(self, params, progress=None):
+        return {"value": self.start_photo_source_job(APPLE_PHOTOS_PROVIDER, "import", params, progress=progress)}
+
+    def _cmd_sync_apple_photos_library(self, params, progress=None):
+        return {"value": self.start_photo_source_job(APPLE_PHOTOS_PROVIDER, "sync", params, progress=progress)}
+
+    def _cmd_export_apple_photos_assets(self, params, progress=None):
+        return {"value": self.start_photo_source_job(APPLE_PHOTOS_PROVIDER, "export", params, progress=progress)}
+
+    def _cmd_windows_photo_source_status(self, params, progress=None):
+        return {"value": self.photo_source_provider_status(WINDOWS_FOLDERS_PROVIDER)}
+
+    def _cmd_list_windows_photo_folders(self, params, progress=None):
+        return {"value": self.list_photo_source_libraries(WINDOWS_FOLDERS_PROVIDER)}
+
+    def _cmd_preview_windows_photo_folder(self, params, progress=None):
+        if bool(params.get("runAsJob", False)):
+            return {"value": self.start_photo_source_job(WINDOWS_FOLDERS_PROVIDER, "preview", params, progress=progress)}
+        return {"value": self.preview_photo_source(WINDOWS_FOLDERS_PROVIDER, params)}
+
+    def _cmd_import_windows_photo_folder(self, params, progress=None):
+        return {"value": self.start_photo_source_job(WINDOWS_FOLDERS_PROVIDER, "import", params, progress=progress)}
+
+    def _cmd_sync_windows_photo_folder(self, params, progress=None):
+        return {"value": self.start_photo_source_job(WINDOWS_FOLDERS_PROVIDER, "sync", params, progress=progress)}
 
     def _cmd_update_photo_import_session_provenance(self, params, progress=None):
         return {"value": self.update_photo_import_session_provenance(params)}
@@ -1562,11 +2750,148 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     def _cmd_photo_barcode_index_status(self, params, progress=None):
         return {"value": self.photo_barcode_index_status(params)}
 
+    def _cmd_photo_vlm_status(self, params, progress=None):
+        local_settings = self._photo_local_settings()
+        return {
+            "value": portable_photo_vlm_status(
+                root=str(params.get("root", "") or "") or None,
+                preference=str(
+                    params.get(
+                        "tier",
+                        params.get("preference", local_settings.get("visionModelTier", "auto")),
+                    )
+                    or "auto"
+                ),
+                power_mode=str(local_settings.get("indexingPowerMode", "balanced") or "balanced"),
+            )
+        }
+
+    def _cmd_install_photo_vlm(self, params, progress=None):
+        tier = str(params.get("tier", "low-memory") or "low-memory").strip().lower()
+        result = install_photo_vlm(
+            tier,
+            root=str(params.get("root", "") or "") or None,
+            force=bool(params.get("force", False)),
+            on_progress=(lambda payload: progress(payload, "photo_vlm_install")) if progress else None,
+        )
+        from crossage_fr.ingest.multimodal_safety import clear_multimodal_guardrail_status_cache
+
+        clear_multimodal_guardrail_status_cache()
+        self.project._append_audit(
+            {
+                "action": "install_photo_vlm",
+                "tier": tier,
+                "catalog_version": result.get("catalogVersion", ""),
+                "catalog_sha256": result.get("catalogSha256", ""),
+                "runtime_revision": (result.get("runtime") or {}).get("revision", ""),
+                "offline_inference": bool(result.get("offlineInference", False)),
+            }
+        )
+        return {"value": result}
+
     def _cmd_index_photo_objects(self, params, progress=None):
         return {"value": self.index_photo_objects(params)}
 
     def _cmd_photo_object_index_status(self, params, progress=None):
         return {"value": self.photo_object_index_status(params)}
+
+    def _cmd_photo_audio_status(self, params, progress=None):
+        return {"value": self.photo_audio_status(params)}
+
+    def _cmd_photo_audio_segments(self, params, progress=None):
+        return {"value": self.photo_audio_segments(params)}
+
+    def _cmd_index_photo_audio(self, params, progress=None):
+        return {"value": self.index_photo_audio(params)}
+
+    def _local_sync_audit(self, action: str, result: dict[str, Any] | None = None) -> None:
+        value = result if isinstance(result, dict) else {}
+        peer_id = str(value.get("peerDeviceId", "") or value.get("deviceId", ""))
+        self.project._append_audit(
+            {
+                "action": action,
+                "protocol": "vintrace-local-sync-v1",
+                "peer_device_id_prefix": peer_id[:12],
+                "sent_operations": int(value.get("sent", 0) or 0),
+                "received_operations": int(value.get("received", 0) or 0),
+                "inserted_operations": int(value.get("inserted", 0) or 0),
+                "applied_assets": int(value.get("appliedAssets", 0) or 0),
+                "pending_assets": int(value.get("pendingAssets", 0) or 0),
+                "offline": True,
+                "media_transfer": False,
+                "biometric_transfer": False,
+            }
+        )
+
+    def _cmd_local_sync_status(self, params, progress=None):
+        return {"value": self._local_sync.status()}
+
+    def _cmd_local_sync_initialize(self, params, progress=None):
+        result = self._local_sync.initialize(str(params.get("label", "") or ""))
+        self._local_sync_audit("local_sync_initialize", {"deviceId": result.get("deviceId", "")})
+        return {"value": result}
+
+    def _cmd_local_sync_start(self, params, progress=None):
+        result = self._local_sync.start_server(
+            port=int(params.get("port", 0) or 0),
+            discovery=params.get("discovery") is True,
+        )
+        self._local_sync_audit("local_sync_start")
+        return {"value": result}
+
+    def _cmd_local_sync_stop(self, params, progress=None):
+        result = self._local_sync.stop_server()
+        self._local_sync_audit("local_sync_stop")
+        return {"value": result}
+
+    def _cmd_local_sync_create_invitation(self, params, progress=None):
+        result = self._local_sync.create_invitation(
+            host=str(params.get("host", "") or ""),
+            expires_in_seconds=int(params.get("expiresInSeconds", 600) or 600),
+        )
+        self._local_sync_audit("local_sync_create_invitation")
+        return {"value": result}
+
+    def _cmd_local_sync_accept_invitation(self, params, progress=None):
+        result = self._local_sync.accept_invitation(
+            str(params["invitation"]),
+            label=str(params.get("label", "") or ""),
+            host=str(params.get("host", "") or ""),
+        )
+        peer = result.get("peer", {}) if isinstance(result.get("peer"), dict) else {}
+        self._local_sync_audit("local_sync_accept_invitation", {"deviceId": peer.get("deviceId", "")})
+        return {"value": result}
+
+    def _cmd_local_sync_sync_peer(self, params, progress=None):
+        result = self._local_sync.sync_peer(
+            str(params["deviceId"]),
+            max_rounds=int(params.get("maxRounds", 20) or 20),
+        )
+        self._local_sync_audit("local_sync_sync_peer", result)
+        return {"value": result}
+
+    def _cmd_local_sync_revoke_peer(self, params, progress=None):
+        result = self._local_sync.revoke_peer(str(params["deviceId"]))
+        peer = result.get("peer", {}) if isinstance(result.get("peer"), dict) else {}
+        self._local_sync_audit("local_sync_revoke_peer", {"deviceId": peer.get("deviceId", "")})
+        return {"value": result}
+
+    def _cmd_local_sync_conflicts(self, params, progress=None):
+        return {"value": self._local_sync.conflicts(limit=int(params.get("limit", 25) or 25))}
+
+    def _cmd_local_sync_export_recovery(self, params, progress=None):
+        bundle = self._local_sync.export_recovery_bundle(str(params["passphrase"]))
+        self._local_sync_audit("local_sync_export_recovery")
+        return {"value": {"bundle": bundle, "scope": "device-identity-and-peer-roster-only"}}
+
+    def _cmd_local_sync_restore_recovery(self, params, progress=None):
+        result = self._local_sync.restore_recovery_bundle(
+            str(params["bundle"]),
+            str(params["passphrase"]),
+            confirm=params.get("confirm") is True,
+        )
+        self._local_sync_audit("local_sync_restore_recovery", {"deviceId": result.get("deviceId", "")})
+        return {"value": result}
 
     def _cmd_enqueue_photo_indexing_job(self, params, progress=None):
         return {"value": self.enqueue_photo_indexing_job(params)}
@@ -1594,6 +2919,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def _cmd_photo_user_memories(self, params, progress=None):
         return {"value": self.photo_user_memories(params)}
+
+    def _cmd_photo_user_memory_source_order(self, params, progress=None):
+        return {"value": self.photo_user_memory_source_order(params)}
 
     def _cmd_save_photo_user_memory(self, params, progress=None):
         return {"value": self.save_photo_user_memory(params)}
@@ -1676,6 +3004,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     def _cmd_reorder_photo_album_folder_children(self, params, progress=None):
         return {"value": self.reorder_photo_album_folder_children(params)}
 
+    def _cmd_photo_album_source_order(self, params, progress=None):
+        return {"value": self.photo_album_source_order(params)}
+
     def _cmd_add_photo_album_items(self, params, progress=None):
         return {"value": self.add_photo_album_items(params)}
 
@@ -1693,6 +3024,440 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def _cmd_validate_photo_color_profile(self, params, progress=None):
         return {"value": self.validate_photo_color_profile(params)}
+
+    def _cmd_start_photo_export_job(self, params, progress=None):
+        return {"value": self.start_photo_export_job(params)}
+
+    def _cmd_photo_export_job_status(self, params, progress=None):
+        return {"value": self.photo_export_job_status(params)}
+
+    def _cmd_photo_export_jobs(self, params, progress=None):
+        return {"value": self.photo_export_jobs(params)}
+
+    def _cmd_cancel_photo_export_job(self, params, progress=None):
+        return {"value": self.cancel_photo_export_job(params)}
+
+    _PHOTO_EXPORT_JOB_COMMANDS = {
+        "export_photo_selection": "_cmd_export_photo_selection",
+        "export_photo_contact_sheet": "_cmd_export_photo_contact_sheet",
+        "export_photo_video_frame": "_cmd_export_photo_video_frame",
+        "export_photo_video_trim": "_cmd_export_photo_video_trim",
+        "export_photo_live_motion": "_cmd_export_photo_live_motion",
+        "export_photo_subject_cutout": "_cmd_export_photo_subject_cutout",
+        "export_photo_portrait_blur": "_cmd_export_photo_portrait_blur",
+    }
+
+    _PHOTO_EXPORT_JOB_ALIASES = {
+        "selection": "export_photo_selection",
+        "photo_selection": "export_photo_selection",
+        "contact_sheet": "export_photo_contact_sheet",
+        "video_frame": "export_photo_video_frame",
+        "video_still": "export_photo_video_frame",
+        "video_trim": "export_photo_video_trim",
+        "live_motion": "export_photo_live_motion",
+        "subject_cutout": "export_photo_subject_cutout",
+        "cutout": "export_photo_subject_cutout",
+        "portrait_blur": "export_photo_portrait_blur",
+        "portrait": "export_photo_portrait_blur",
+    }
+
+    def _photo_export_job_jsonable(self, value: Any) -> Any:
+        try:
+            return json.loads(json.dumps(value, default=str))
+        except Exception:
+            return str(value)
+
+    def _photo_export_job_command(self, params: dict[str, Any]) -> tuple[str, bool]:
+        command = str(
+            params.get(
+                "command",
+                params.get("exportCommand", params.get("jobCommand", params.get("kind", params.get("type", "")))),
+            )
+            or ""
+        ).strip()
+        command_from_action = False
+        if not command:
+            action_value = str(params.get("action", "") or "").strip()
+            if action_value.startswith("export_photo_") or action_value in self._PHOTO_EXPORT_JOB_ALIASES:
+                command = action_value
+                command_from_action = True
+        command = command.strip().lower().replace("-", "_")
+        command = self._PHOTO_EXPORT_JOB_ALIASES.get(command, command)
+        if command not in self._PHOTO_EXPORT_JOB_COMMANDS:
+            allowed = ", ".join(sorted(self._PHOTO_EXPORT_JOB_COMMANDS))
+            raise ValueError(f"Photo export job command must be one of: {allowed}.")
+        return command, command_from_action
+
+    def _photo_export_job_params(self, params: dict[str, Any], *, command_from_action: bool) -> dict[str, Any]:
+        for key in ("params", "payload", "exportParams"):
+            payload = params.get(key)
+            if isinstance(payload, dict):
+                return self._photo_export_job_jsonable(payload)
+        ignored = {
+            "command",
+            "exportCommand",
+            "jobCommand",
+            "kind",
+            "type",
+            "params",
+            "payload",
+            "exportParams",
+            "async",
+            "runAsync",
+            "background",
+            "includeResult",
+            "status",
+            "limit",
+        }
+        if command_from_action:
+            ignored.add("action")
+        return self._photo_export_job_jsonable({key: value for key, value in params.items() if key not in ignored})
+
+    def _photo_export_job_progress_seed(self, command: str, params: dict[str, Any]) -> dict[str, Any]:
+        source_paths = params.get("sourcePaths", [])
+        if command in {"export_photo_selection", "export_photo_contact_sheet"} and isinstance(source_paths, list):
+            total = len([path for path in source_paths if str(path or "").strip()])
+        elif str(params.get("sourcePath", params.get("path", "")) or "").strip():
+            total = 1
+        else:
+            total = 0
+        return {
+            "stage": "queued",
+            "total": total,
+            "processed": 0,
+            "updated": 0,
+            "failed": 0,
+            "message": "Queued photo export job.",
+        }
+
+    def _photo_export_executor(self) -> ThreadPoolExecutor:
+        with self._photo_export_jobs_lock:
+            if self._photo_export_job_executor is None:
+                self._photo_export_job_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="photo-export")
+            return self._photo_export_job_executor
+
+    def _photo_export_job_counts_locked(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for job in self._photo_export_jobs.values():
+            status = str(job.get("status", "") or "")
+            if not status:
+                continue
+            counts[status] = counts.get(status, 0) + 1
+        return counts
+
+    def _photo_export_job_snapshot_locked(self, job: dict[str, Any], *, include_result: bool = True) -> dict[str, Any]:
+        snapshot = {
+            key: self._photo_export_job_jsonable(value)
+            for key, value in job.items()
+            if key != "future" and (include_result or key not in {"result", "traceback"})
+        }
+        snapshot.setdefault("progress", {})
+        snapshot["done"] = str(snapshot.get("status", "") or "") in {"completed", "failed", "cancelled"}
+        return snapshot
+
+    def _photo_export_jobs_payload_locked(
+        self,
+        *,
+        status: str = "",
+        limit: int = 25,
+        include_result: bool = True,
+    ) -> dict[str, Any]:
+        clean_status = str(status or "").strip().lower()
+        rows = [
+            job
+            for job in self._photo_export_jobs.values()
+            if not clean_status or str(job.get("status", "") or "") == clean_status
+        ]
+        rows.sort(key=lambda item: str(item.get("updatedAt", item.get("createdAt", "")) or ""), reverse=True)
+        return {
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "jobs": [
+                self._photo_export_job_snapshot_locked(job, include_result=include_result)
+                for job in rows[:max(1, limit)]
+            ],
+            "counts": self._photo_export_job_counts_locked(),
+        }
+
+    def _photo_export_job_prune_locked(self, *, keep: int = 50) -> None:
+        done_statuses = {"completed", "failed", "cancelled"}
+        done = [
+            job
+            for job in self._photo_export_jobs.values()
+            if str(job.get("status", "") or "") in done_statuses
+        ]
+        if len(self._photo_export_jobs) <= keep or not done:
+            return
+        done.sort(key=lambda item: str(item.get("finishedAt", item.get("updatedAt", item.get("createdAt", ""))) or ""))
+        for job in done[:max(0, len(self._photo_export_jobs) - keep)]:
+            job_id = str(job.get("jobId", "") or "")
+            if job_id:
+                self._photo_export_jobs.pop(job_id, None)
+
+    def _photo_export_job_cancel_requested(self, job_id: str) -> bool:
+        with self._photo_export_jobs_lock:
+            job = self._photo_export_jobs.get(job_id)
+            return bool(job and job.get("cancelRequested"))
+
+    def _update_photo_export_job_progress(self, job_id: str, payload: dict[str, Any]) -> None:
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        with self._photo_export_jobs_lock:
+            job = self._photo_export_jobs.get(job_id)
+            if not job:
+                return
+            progress = job.get("progress", {}) if isinstance(job.get("progress"), dict) else {}
+            progress.update(self._photo_export_job_jsonable(payload))
+            progress["updatedAt"] = now
+            job["progress"] = progress
+            job["updatedAt"] = now
+
+    def _dispatch_photo_export_job(self, job_id: str, command: str, params: dict[str, Any]) -> dict[str, Any]:
+        if self._photo_export_job_cancel_requested(job_id):
+            raise PhotoExportJobCancelled("Photo export job was cancelled before it started.")
+        handler_name = self._PHOTO_EXPORT_JOB_COMMANDS[command]
+
+        def progress(payload: dict[str, Any], phase: str | None = None) -> None:
+            if self._photo_export_job_cancel_requested(job_id):
+                raise PhotoExportJobCancelled("Photo export job was cancelled.")
+            update = dict(payload or {})
+            if phase:
+                update.setdefault("stage", phase)
+            self._update_photo_export_job_progress(job_id, update)
+
+        result = getattr(self, handler_name)(dict(params), progress)
+        if self._photo_export_job_cancel_requested(job_id):
+            raise PhotoExportJobCancelled("Photo export job was cancelled after the current export step.")
+        return result if isinstance(result, dict) else {"value": result}
+
+    def _run_photo_export_job(self, job_id: str) -> None:
+        started_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        with self._photo_export_jobs_lock:
+            job = self._photo_export_jobs.get(job_id)
+            if not job:
+                return
+            if job.get("cancelRequested") or str(job.get("status", "") or "") == "cancelled":
+                job["status"] = "cancelled"
+                job["finishedAt"] = started_at
+                job["updatedAt"] = started_at
+                job["message"] = str(job.get("message", "") or "Photo export job was cancelled before it started.")
+                return
+            job["status"] = "running"
+            job["startedAt"] = started_at
+            job["updatedAt"] = started_at
+            progress = job.get("progress", {}) if isinstance(job.get("progress"), dict) else {}
+            progress.update({"stage": "running", "message": "Photo export job is running."})
+            job["progress"] = progress
+            command = str(job.get("command", "") or "")
+            params = dict(job.get("params", {}) if isinstance(job.get("params"), dict) else {})
+
+        try:
+            result = self._dispatch_photo_export_job(job_id, command, params)
+            finished_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            with self._photo_export_jobs_lock:
+                job = self._photo_export_jobs.get(job_id)
+                if not job:
+                    return
+                status = "cancelled" if job.get("cancelRequested") else "completed"
+                progress = job.get("progress", {}) if isinstance(job.get("progress"), dict) else {}
+                total = int(progress.get("total", 0) or 0)
+                progress.update({
+                    "stage": status,
+                    "processed": total,
+                    "updated": total if status == "completed" else int(progress.get("updated", 0) or 0),
+                    "message": "Photo export job completed." if status == "completed" else "Photo export job was cancelled.",
+                    "updatedAt": finished_at,
+                })
+                job.update({
+                    "status": status,
+                    "result": self._photo_export_job_jsonable(result),
+                    "error": "",
+                    "finishedAt": finished_at,
+                    "updatedAt": finished_at,
+                    "progress": progress,
+                    "message": progress["message"],
+                })
+        except PhotoExportJobCancelled as exc:
+            finished_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            with self._photo_export_jobs_lock:
+                job = self._photo_export_jobs.get(job_id)
+                if not job:
+                    return
+                progress = job.get("progress", {}) if isinstance(job.get("progress"), dict) else {}
+                progress.update({
+                    "stage": "cancelled",
+                    "message": str(exc) or "Photo export job was cancelled.",
+                    "updatedAt": finished_at,
+                })
+                job.update({
+                    "status": "cancelled",
+                    "error": str(exc) or "Photo export job was cancelled.",
+                    "finishedAt": finished_at,
+                    "updatedAt": finished_at,
+                    "progress": progress,
+                    "message": progress["message"],
+                })
+        except Exception as exc:
+            finished_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            with self._photo_export_jobs_lock:
+                job = self._photo_export_jobs.get(job_id)
+                if not job:
+                    return
+                progress = job.get("progress", {}) if isinstance(job.get("progress"), dict) else {}
+                progress.update({
+                    "stage": "failed",
+                    "failed": int(progress.get("failed", 0) or 0) + 1,
+                    "message": str(exc) or "Photo export job failed.",
+                    "updatedAt": finished_at,
+                })
+                job.update({
+                    "status": "failed",
+                    "error": str(exc),
+                    "traceback": traceback.format_exc()[-4000:],
+                    "finishedAt": finished_at,
+                    "updatedAt": finished_at,
+                    "progress": progress,
+                    "message": progress["message"],
+                })
+        finally:
+            try:
+                with self._photo_export_jobs_lock:
+                    job = self._photo_export_jobs.get(job_id, {})
+                    status = str(job.get("status", "") or "")
+                    command = str(job.get("command", "") or "")
+                self.project._append_audit(
+                    {
+                        "action": "photo_export_job_finished",
+                        "job_id": job_id,
+                        "export_command": command,
+                        "status": status,
+                    }
+                )
+            except Exception:
+                pass
+
+    def start_photo_export_job(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        command, command_from_action = self._photo_export_job_command(params)
+        export_params = self._photo_export_job_params(params, command_from_action=command_from_action)
+        job_id = new_id("photoExportJob")
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        job = {
+            "jobId": job_id,
+            "command": command,
+            "status": "queued",
+            "params": export_params,
+            "result": {},
+            "error": "",
+            "message": "Queued photo export job.",
+            "createdAt": now,
+            "updatedAt": now,
+            "startedAt": "",
+            "finishedAt": "",
+            "cancelRequested": False,
+            "progress": self._photo_export_job_progress_seed(command, export_params),
+            "future": None,
+        }
+        with self._photo_export_jobs_lock:
+            self._photo_export_job_prune_locked()
+            self._photo_export_jobs[job_id] = job
+        future = self._photo_export_executor().submit(self._run_photo_export_job, job_id)
+        with self._photo_export_jobs_lock:
+            current = self._photo_export_jobs.get(job_id)
+            if current is not None:
+                current["future"] = future
+                snapshot = self._photo_export_job_snapshot_locked(current)
+                payload = self._photo_export_jobs_payload_locked(limit=10)
+            else:
+                snapshot = self._photo_export_job_jsonable(job)
+                payload = {"generatedAt": now, "jobs": [], "counts": {}}
+        self.project._append_audit(
+            {
+                "action": "start_photo_export_job",
+                "job_id": job_id,
+                "export_command": command,
+            }
+        )
+        payload.update({"job": snapshot, "jobStarted": True})
+        return payload
+
+    def photo_export_job_status(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        job_id = str(params.get("jobId", params.get("id", "")) or "").strip()
+        if not job_id:
+            raise ValueError("Photo export job id is required.")
+        include_result = bool(params.get("includeResult", True))
+        with self._photo_export_jobs_lock:
+            job = self._photo_export_jobs.get(job_id)
+            if not job:
+                payload = self._photo_export_jobs_payload_locked(limit=10, include_result=include_result)
+                payload.update({"jobFound": False, "job": {}, "message": "Photo export job was not found."})
+                return payload
+            snapshot = self._photo_export_job_snapshot_locked(job, include_result=include_result)
+            payload = self._photo_export_jobs_payload_locked(limit=10, include_result=include_result)
+        payload.update({"jobFound": True, "job": snapshot})
+        return payload
+
+    def photo_export_jobs(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        try:
+            limit = max(1, min(200, int(params.get("limit", 25) or 25)))
+        except (TypeError, ValueError):
+            limit = 25
+        status = str(params.get("status", "") or "").strip().lower()
+        include_result = bool(params.get("includeResult", False))
+        with self._photo_export_jobs_lock:
+            return self._photo_export_jobs_payload_locked(status=status, limit=limit, include_result=include_result)
+
+    def cancel_photo_export_job(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        job_id = str(params.get("jobId", params.get("id", "")) or "").strip()
+        if not job_id:
+            raise ValueError("Photo export job id is required.")
+        reason = str(params.get("reason", "") or "Cancelled by user.")[:300]
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        with self._photo_export_jobs_lock:
+            job = self._photo_export_jobs.get(job_id)
+            if not job:
+                payload = self._photo_export_jobs_payload_locked(limit=10)
+                payload.update({"jobCancelled": False, "job": {}, "message": "Photo export job was not found."})
+                return payload
+            status = str(job.get("status", "") or "")
+            if status in {"completed", "failed", "cancelled"}:
+                payload = self._photo_export_jobs_payload_locked(limit=10)
+                payload.update({
+                    "jobCancelled": status == "cancelled",
+                    "job": self._photo_export_job_snapshot_locked(job),
+                    "message": "Photo export job is already finished.",
+                })
+                return payload
+            job["cancelRequested"] = True
+            job["message"] = reason
+            job["updatedAt"] = now
+            future = job.get("future")
+            cancelled_before_start = bool(status == "queued" and isinstance(future, Future) and future.cancel())
+            if status == "queued" and (cancelled_before_start or future is None):
+                job["status"] = "cancelled"
+                job["finishedAt"] = now
+                job["error"] = reason
+                progress = job.get("progress", {}) if isinstance(job.get("progress"), dict) else {}
+                progress.update({"stage": "cancelled", "message": reason, "updatedAt": now})
+                job["progress"] = progress
+            else:
+                job["status"] = "cancelling"
+                progress = job.get("progress", {}) if isinstance(job.get("progress"), dict) else {}
+                progress.update({"stage": "cancelling", "message": reason, "updatedAt": now})
+                job["progress"] = progress
+            snapshot = self._photo_export_job_snapshot_locked(job)
+            payload = self._photo_export_jobs_payload_locked(limit=10)
+        self.project._append_audit(
+            {
+                "action": "cancel_photo_export_job",
+                "job_id": job_id,
+                "previous_status": status,
+                "cancelled_before_start": cancelled_before_start,
+            }
+        )
+        payload.update({"jobCancelled": True, "job": snapshot})
+        return payload
 
     def _cmd_export_photo_selection(self, params, progress=None):
         source_paths = params.get("sourcePaths", [])
@@ -1785,15 +3550,26 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         result = self.project.delete_person(str(params["personName"]))
         return {"deleted": result, "state": self.state()}
 
+    def _cmd_delete_subject_data(self, params, progress=None):
+        result = self.project.delete_subject_data(
+            str(params["personName"]),
+            confirm=bool(params.get("confirm", False)),
+            reason=str(params.get("reason", "subject-request")),
+            source=str(params.get("source", self.actor)),
+        )
+        return {"deleted": result, "state": self.state()}
+
     def _cmd_rename_person(self, params, progress=None):
         result = self.project.rename_person(str(params["oldName"]), str(params["newName"]))
         return {
             "renamed": {
                 "references": int(result.get("references", 0) or 0),
                 "candidates": int(result.get("candidates", 0) or 0),
+                "identityMerged": bool(result.get("identityMerged", False)),
             },
             "photoProfile": {
                 "peopleRows": int(result.get("peopleRows", 0) or 0),
+                "groupRows": int(result.get("groupRows", 0) or 0),
                 "profileMoved": bool(result.get("profileMoved", False)),
                 "profileMerged": bool(result.get("profileMerged", False)),
             },
@@ -1818,6 +3594,18 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def _cmd_database_integrity(self, params, progress=None):
         return self.project.database_integrity()
+
+    def _cmd_workspace_encryption_status(self, params, progress=None):
+        return self.project.workspace_encryption_status()
+
+    def _cmd_rotate_workspace_database_key(self, params, progress=None):
+        key = parse_workspace_key(params.get("newKey"))
+        if key is None:
+            raise ValueError("A new workspace database key is required.")
+        return self.project.rotate_workspace_database_key(
+            key,
+            source=str(params.get("source", "desktop-internal") or "desktop-internal"),
+        )
 
     def _cmd_repair_database_integrity(self, params, progress=None):
         result = self.project.repair_database_integrity(confirm=bool(params.get("confirm", False)))
@@ -2057,6 +3845,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         result = self.public_dataset_benchmark(params)
         return {"value": result, "state": self.state(preview_create_budget=0)}
 
+    def _cmd_run_cross_age_trajectory_benchmark(self, params, progress=None):
+        result = self.cross_age_trajectory_benchmark(params)
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
     def _cmd_compare_public_dataset_models(self, params, progress=None):
         result = self.public_dataset_model_comparison(params)
         return {"value": result, "state": self.state(preview_create_budget=0)}
@@ -2187,11 +3979,20 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     def _cmd_reference_suggestion_status(self, params, progress=None):
         return self.project.reference_suggestion_status(limit=int(params.get("limit", 20) or 20))
 
-    def _cmd_stage_reference_suggestions(self, params, progress=None):
+    def _stage_reference_suggestions_inline(self, params: dict[str, Any], progress=None) -> dict[str, Any]:
         limit = max(1, min(50, int(params.get("limit", 20) or 20)))
         candidates = self.project.reference_suggestion_candidates(limit=limit * 4)
+        progress_counts = {
+            "total": len(candidates),
+            "processed": 0,
+            "updated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "deferred": 0,
+        }
 
         def emit(phase: str, processed: int, **extra: Any) -> None:
+            progress_counts["processed"] = max(progress_counts["processed"], int(processed or 0))
             if progress:
                 progress({
                     "phase": phase,
@@ -2204,8 +4005,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         emit("started", 0, embedded=0, failed=0)
         if not candidates:
             result = self.project.stage_reference_suggestions({}, limit=limit)
+            result["progress"] = progress_counts
+            result["message"] = "No eligible accepted matches need reference suggestion staging."
             emit("complete", 0, staged=int(result.get("staged", 0) or 0), embedded=0, failed=0)
-            return {"value": result, "state": self.state(preview_create_budget=0)}
+            return result
         engine = self._engine_instance()
         embeddings: dict[str, EmbeddingResult] = {}
         embedding_errors: list[dict[str, str]] = []
@@ -2219,15 +4022,52 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         result = self.project.stage_reference_suggestions(embeddings, limit=limit)
         if embedding_errors:
             result["embeddingErrors"] = embedding_errors[:20]
+        staged = int(result.get("staged", 0) or 0)
+        progress_counts.update({
+            "processed": len(candidates),
+            "updated": staged,
+            "skipped": max(0, len(candidates) - len(embeddings)),
+            "failed": len(embedding_errors),
+            "deferred": 0,
+        })
+        result["progress"] = progress_counts
+        result["message"] = (
+            f"Staged {staged} suggested reference(s)."
+            if staged
+            else "No reference suggestions passed suitability checks."
+        )
         emit("complete", len(candidates), staged=int(result.get("staged", 0) or 0), embedded=len(embeddings), failed=len(embedding_errors))
-        return {"value": result, "state": self.state(preview_create_budget=0)}
+        return result
+
+    def _cmd_stage_reference_suggestions(self, params, progress=None):
+        params = params if isinstance(params, dict) else {}
+        if bool(params.get("runInline", params.get("inline", False))):
+            result = self._stage_reference_suggestions_inline(params, progress=progress)
+            return {"value": result, "state": self.state(preview_create_budget=0)}
+        limit = max(1, min(50, int(params.get("limit", 20) or 20)))
+        try:
+            queue_limit = max(10, min(200, int(params.get("queueLimit", 10) or 10)))
+        except (TypeError, ValueError):
+            queue_limit = 10
+        payload = self._enqueue_photo_indexing_job_once(
+            "reference_suggestions",
+            {"limit": limit},
+            limit=queue_limit,
+        )
+        job = payload.get("job", {}) if isinstance(payload.get("job"), dict) else {}
+        payload.update({
+            "queuedJob": job,
+            "staged": 0,
+            "message": "Reference suggestion staging queued.",
+        })
+        return {"value": payload, "state": self.state(preview_create_budget=0)}
 
     def _cmd_approve_reference_suggestion(self, params, progress=None):
         artifact_id = str(params.get("artifactId", "") or "")
         artifact = self.project.db.learned_artifact_by_id(artifact_id)
         payload = artifact.get("payload") if artifact and isinstance(artifact.get("payload"), dict) else {}
         candidate_id = str(payload.get("candidateId", payload.get("candidate_id", "")) or "")
-        candidate = self.project.candidates.get(candidate_id)
+        candidate = self.project.candidate_by_id(candidate_id)
         if candidate is None:
             raise ValueError("The source candidate for this reference suggestion is no longer available.")
         embedding = self._reference_suggestion_embedding(candidate, self._engine_instance())
@@ -2342,7 +4182,48 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return {"jurisdictions": list_jurisdictions(), "disclaimer": JURISDICTION_DISCLAIMER}
 
     def _cmd_set_jurisdiction_preset(self, params, progress=None):
+        if not bool(params.get("confirm", False)):
+            raise ValueError("Changing the jurisdiction preset requires confirm=true.")
         result = self.project.set_jurisdiction_preset(str(params.get("preset", "")))
+        self.consent_on_file = self.project.consent_on_file()
+        return {"value": result, "state": self.state()}
+
+    def _cmd_compliance_status(self, params, progress=None):
+        return self.project.compliance_status()
+
+    def _cmd_biometric_retention_policy(self, params, progress=None):
+        return self.project.biometric_retention_policy()
+
+    def _cmd_acknowledge_ai_disclosure(self, params, progress=None):
+        if not bool(params.get("confirm", False)):
+            raise ValueError("AI disclosure acknowledgement requires confirm=true.")
+        status = self.project.acknowledge_ai_disclosure(
+            operator=str(params.get("operator", "")),
+            source=str(params.get("source", self.actor)),
+        )
+        self.consent_on_file = self.project.consent_on_file()
+        return {"value": status, "state": self.state()}
+
+    def _cmd_enforce_retention_policy(self, params, progress=None):
+        if not bool(params.get("confirm", False)):
+            raise ValueError("Retention enforcement requires confirm=true.")
+        result = self.project.enforce_retention_policy(source=str(params.get("source", self.actor)))
+        return {"value": result, "state": self.state()}
+
+    def _cmd_export_biometric_retention_policy(self, params, progress=None):
+        folder = str(params.get("folder", "")).strip()
+        result = self.project.export_biometric_retention_policy(Path(folder).expanduser() if folder else None)
+        return {"value": result, "state": self.state(preview_create_budget=0)}
+
+    def _cmd_record_biometric_policy_publication(self, params, progress=None):
+        if not bool(params.get("confirm", False)):
+            raise ValueError("Recording policy publication requires confirm=true.")
+        result = self.project.record_policy_publication(
+            public_url=str(params.get("publicUrl", "")),
+            approved_by=str(params.get("approvedBy", "")),
+            published_at=str(params.get("publishedAt", "")),
+            source=str(params.get("source", self.actor)),
+        )
         return {"value": result, "state": self.state()}
 
     def _cmd_export_compliance_pack(self, params, progress=None):
@@ -2376,6 +4257,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return {"ok": True}
 
     def _cmd_save_settings(self, params, progress=None):
+        previous_model_pack = self.project.config.model_pack
         thresholds = self.project.config.thresholds
         incoming = params.get("thresholds", {})
         if not isinstance(incoming, dict):
@@ -2464,6 +4346,15 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         )
         if safe_mode_profile != "custom":
             safe_mode_threshold = safe_mode_threshold_for_profile(safe_mode_profile)
+        safe_mode_multimodal = bool(
+            params.get("safeModeMultimodal", self.project.config.safe_mode_multimodal)
+        )
+        model_configuration_changed = (
+            model_pack != previous_model_pack
+            or safe_mode_multimodal != bool(self.project.config.safe_mode_multimodal)
+        )
+        if model_configuration_changed:
+            self._record_model_lifecycle_configuration("before model settings change")
         thresholds.confident = confident
         thresholds.likely = likely
         thresholds.relaxed_child = relaxed_child
@@ -2475,6 +4366,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         self.project.config.performance_mode = performance_mode
         self.project.config.learning_mode = learning_mode
         self.project.config.model_pack = model_pack
+        invalidated_synthetic = (
+            len(self.project._remove_age_trajectory_references())
+            if model_pack != previous_model_pack
+            else 0
+        )
         self.project.config.storage_budget_bytes = storage_budget_bytes
         self.project.config.max_media_file_bytes = max_media_file_bytes
         self.project.config.auto_reject_below = auto_reject_below
@@ -2490,6 +4386,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             params.get("perSubjectConsent", self.project.config.per_subject_consent)
         )
         self.project.config.safe_mode = bool(params.get("safeMode", self.project.config.safe_mode))
+        self.project.config.safe_mode_multimodal = safe_mode_multimodal
         self.project.config.safe_mode_zero_admittance = bool(
             params.get("safeModeZeroAdmittance", self.project.config.safe_mode_zero_admittance)
         )
@@ -2512,6 +4409,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "performance_mode": performance_mode,
                 "learning_mode": learning_mode,
                 "model_pack": model_pack,
+                "invalidated_synthetic_age_references": invalidated_synthetic,
                 "storage_budget_bytes": storage_budget_bytes,
                 "max_media_file_bytes": max_media_file_bytes,
                 "review_rules": {
@@ -2530,6 +4428,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     "ffprobe_path_set": bool(ffprobe_path),
                 },
                 "safe_mode": self.project.config.safe_mode,
+                "safe_mode_multimodal": self.project.config.safe_mode_multimodal,
                 "safe_mode_zero_admittance": self.project.config.safe_mode_zero_admittance,
                 "safe_mode_threshold": safe_mode_threshold,
                 "safe_mode_profile": safe_mode_profile,
@@ -2539,20 +4438,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         )
         self.project.save()
         self._reset_engine()
+        if model_configuration_changed:
+            self._record_model_lifecycle_configuration("after model settings change")
         return self.state()
 
-    def _cmd_calibrate_safe_mode(self, params, progress=None):
-        """Fit the Safe Mode temperature from user-labeled local images (Stage 1b).
-
-        params: {examples: [{path, sensitive|label}], reset?: bool}. With reset,
-        clears calibration back to T=1.0 (the raw model)."""
-        from crossage_fr.ingest.safety import calibrate_safety_temperature
-
-        if bool(params.get("reset")):
-            self.project.config.safe_mode_temperature = 1.0
-            self.project.save()
-            self.project._append_audit({"action": "calibrate_safe_mode", "reset": True, "temperature": 1.0})
-            return {"ok": True, "reset": True, "temperature": 1.0}
+    def _safe_mode_calibration_examples_from_params(self, params: dict[str, Any]) -> list[tuple[str, bool]]:
         example_buckets: dict[bool, list[tuple[str, bool]]] = {}
         label_order: list[bool] = []
         cap = SAFE_MODE_CALIBRATION_EXAMPLE_CAP
@@ -2597,13 +4487,37 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                         break
             except Exception:
                 continue
-        labeled = _balanced_safe_mode_calibration_examples(example_buckets, label_order, cap)
+        return _balanced_safe_mode_calibration_examples(example_buckets, label_order, cap)
+
+    def _calibrate_safe_mode_inline(self, params: dict[str, Any], progress=None) -> dict[str, Any]:
+        from crossage_fr.ingest.safety import calibrate_safety_temperature
+
+        labeled = self._safe_mode_calibration_examples_from_params(params)
         calibration_progress = (
             (lambda payload: progress({**payload, "source": "safe_mode_calibration"}))
             if progress
             else None
         )
         result = calibrate_safety_temperature(labeled, progress=calibration_progress)
+        result.setdefault(
+            "progress",
+            {
+                "total": len(labeled),
+                "processed": len(labeled),
+                "updated": 1 if result.get("ok") else 0,
+                "skipped": 0,
+                "failed": 0 if result.get("ok") else 1,
+                "deferred": 0,
+            },
+        )
+        result.setdefault(
+            "message",
+            (
+                f"Safe Mode calibration updated from {len(labeled)} labeled image(s)."
+                if result.get("ok")
+                else str(result.get("reason", "") or "Safe Mode calibration needs more labeled examples.")
+            ),
+        )
         if result.get("ok"):
             self.project.config.safe_mode_temperature = float(result["temperature"])
             self.project.save()
@@ -2617,6 +4531,42 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "nll_after": result.get("nllAfter"),
             })
         return result
+
+    def _cmd_calibrate_safe_mode(self, params, progress=None):
+        """Fit the Safe Mode temperature from user-labeled local images (Stage 1b).
+
+        params: {examples: [{path, sensitive|label}], reset?: bool}. With reset,
+        clears calibration back to T=1.0 (the raw model)."""
+        params = params if isinstance(params, dict) else {}
+        if bool(params.get("reset")):
+            self.project.config.safe_mode_temperature = 1.0
+            self.project.save()
+            self.project._append_audit({"action": "calibrate_safe_mode", "reset": True, "temperature": 1.0})
+            return {"ok": True, "reset": True, "temperature": 1.0}
+        if bool(params.get("runInline", params.get("inline", False))):
+            return self._calibrate_safe_mode_inline(params, progress=progress)
+        scope = {
+            "examples": params.get("examples", []),
+            "folders": params.get("folders", []),
+        }
+        try:
+            queue_limit = max(10, min(200, int(params.get("queueLimit", 10) or 10)))
+        except (TypeError, ValueError):
+            queue_limit = 10
+        payload = self.enqueue_photo_indexing_job({
+            "jobKind": "safe_mode_calibration",
+            "scope": scope,
+            "limit": queue_limit,
+        })
+        job = payload.get("job", {}) if isinstance(payload.get("job"), dict) else {}
+        return {
+            "ok": True,
+            "queued": True,
+            "jobId": str(job.get("jobId", "") or ""),
+            "job": job,
+            "queue": payload,
+            "message": "Safe Mode calibration queued.",
+        }
 
     def _cmd_explain_safety(self, params, progress=None):
         """Localize sensitive regions in a flagged image (Stage 2, optional model).
@@ -2851,8 +4801,26 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return str(real)
 
     def set_workspace(self, path: Path) -> dict[str, Any]:
+        try:
+            self._local_sync.stop_server()
+        except Exception:
+            pass
+        if self._photo_source_service_instance is not None:
+            try:
+                for job in self._photo_source_service_instance.catalog.list_jobs(status="running", limit=200):
+                    self._photo_source_service_instance.catalog.request_cancel(str(job.get("jobId", "")))
+                for job in self._photo_source_service_instance.catalog.list_jobs(status="queued", limit=200):
+                    self._photo_source_service_instance.catalog.request_cancel(str(job.get("jobId", "")))
+            except Exception:
+                pass
         self.project = ProjectState(path.expanduser().resolve(), actor=self.actor)
         self.consent_on_file = self.project.consent_on_file()
+        self._local_sync = LocalSyncManager(
+            self.project.root,
+            self.project.db,
+            self.project.workspace_encryption,
+        )
+        self._photo_source_service_instance = None
         self._reset_engine()
         return self.state()
 
@@ -3166,7 +5134,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         sampled_video_frames = video_count * 9
         video_seconds = sampled_video_frames / 2.8
         two_pass_seconds = image_count * 0.04 if config.two_pass_scan and config.verification_detector_size > detector_size else 0.0
-        total_seconds = image_seconds + video_seconds + two_pass_seconds
+        multimodal_seconds = image_count * 5.0 if config.safe_mode and config.safe_mode_multimodal else 0.0
+        total_seconds = image_seconds + video_seconds + two_pass_seconds + multimodal_seconds
         return {
             "detectorSize": detector_size,
             "performanceMode": self.project.config.performance_mode,
@@ -3175,12 +5144,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "imageSeconds": int(image_seconds),
             "videoSeconds": int(video_seconds),
             "twoPassSeconds": int(two_pass_seconds),
+            "multimodalSafetySeconds": int(multimodal_seconds),
             "totalSeconds": int(total_seconds),
             "label": self._duration_label(total_seconds),
             "assumptions": [
                 "Estimate uses recent local benchmarks and media counts.",
                 "Large HEIC files and long videos can vary substantially.",
                 "Resume skips and embedding cache can reduce repeated scan time.",
+                "Category-aware Safe Mode adds about five seconds per uncached image on the validated quality tier."
+                if multimodal_seconds
+                else "The fast compatibility Safe Mode detector is active.",
             ],
         }
 
@@ -3224,6 +5197,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             warnings.append("Add at least one person before starting the scan.")
         if self.project.config.require_consent and not self.consent_on_file:
             warnings.append("Confirm permission before scanning.")
+        if self.project.config.safe_mode and self.project.config.safe_mode_multimodal:
+            warnings.append("Category-aware Safe Mode is enabled; uncached images take substantially longer to scan.")
         estimated_db_bytes = media_count * 620
         estimated_preview_bytes = max(1, min(media_count, 50_000)) * 36_000 if media_count else 0
         return {
@@ -3242,6 +5217,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             },
             "resumable": True,
             "safeMode": bool(self.project.config.safe_mode),
+            "safeModeMultimodal": bool(self.project.config.safe_mode_multimodal),
             "safeModeZeroAdmittance": bool(self.project.config.safe_mode_zero_admittance),
             "performanceMode": self.project.config.performance_mode,
             "effectivePerformanceMode": effective_mode,
@@ -3277,7 +5253,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         plan = analysis.get("plan", {}) if isinstance(analysis.get("plan"), dict) else {}
         video_decoder = analysis.get("videoDecoder", {}) if isinstance(analysis.get("videoDecoder"), dict) else video_decoder_report()
         face_model = self._model_status()
-        safe_model = safety_model_report()
+        safe_model = safety_model_report(multimodal_enabled=self.project.config.safe_mode_multimodal)
         estimated_workspace_bytes = int(plan.get("estimatedWorkspaceBytes", 0) or 0)
         free_bytes = int(storage.get("freeBytes", 0) or 0)
         workspace_writable = self._workspace_writable()
@@ -3397,6 +5373,60 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             return f"About {hours}h {minutes}m"
         return f"About {max(1, minutes)}m" if minutes else "Under 1m"
 
+    def _fixed_cohort_integrity_report(self, face_model: dict[str, Any] | None = None) -> dict[str, Any]:
+        status = face_model if isinstance(face_model, dict) else self._model_status()
+        model_name = str(
+            status.get("currentPack")
+            or self.project.config.model_pack
+            or self.engine_name
+            or ""
+        )
+        report = dict(fixed_cohort_report(model_name))
+        for key in ("path", "manifestPath"):
+            if report.get(key):
+                report[key] = _mask_absolute_paths(str(report[key]))
+        return report
+
+    def _photo_vlm_model_report(self) -> dict[str, Any]:
+        local_settings = self._photo_local_settings()
+        try:
+            report = portable_photo_vlm_status(
+                preference=str(local_settings.get("visionModelTier", "auto") or "auto"),
+                power_mode=str(local_settings.get("indexingPowerMode", "balanced") or "balanced"),
+            )
+        except (PhotoVlmIntegrityError, PhotoVlmUnavailableError) as exc:
+            return {
+                "available": False,
+                "catalogReady": False,
+                "verified": False,
+                "reason": str(exc),
+                "packs": [],
+                "route": {"available": False},
+            }
+        packs = report.get("packs") if isinstance(report.get("packs"), list) else []
+        installed = [item for item in packs if isinstance(item, dict) and bool(item.get("installed"))]
+        route = report.get("route") if isinstance(report.get("route"), dict) else {}
+        catalog_ready = (
+            report.get("catalogSha256") == "63a31351f11b68fdeb9f739061df5e1fc85fae6dd25914bb589eabe8af19cc75"
+            and report.get("offlineInference") is True
+            and len(packs) == 2
+        )
+        installed_verified = not installed or all(bool(item.get("available")) for item in installed)
+        if bool(route.get("available")):
+            reason = str(route.get("reason", "") or "Portable photo caption model is ready.")
+        elif not installed:
+            reason = "Verified Qwen3-VL/SmolVLM2 catalog is ready; model weights install only when requested."
+        else:
+            reason = str(route.get("reason", "") or "The installed portable photo caption model needs repair.")
+        return {
+            **report,
+            "available": bool(route.get("available")),
+            "catalogReady": catalog_ready,
+            "verified": bool(catalog_ready and installed_verified),
+            "installedPackCount": len(installed),
+            "reason": reason,
+        }
+
     def runtime_self_test(self) -> dict[str, Any]:
         checks: list[dict[str, Any]] = []
 
@@ -3407,7 +5437,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             checks.append(row)
 
         platform = asdict(self.platform_report)
-        safe_model = safety_model_report()
+        onnx_runtime = onnxruntime_runtime_report()
+        safe_model = safety_model_report(multimodal_enabled=self.project.config.safe_mode_multimodal)
         image_decoder = image_decoder_report()
         video_decoder = video_decoder_report()
         workspace_ok = False
@@ -3425,9 +5456,54 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             except OSError:
                 pass
         add("Workspace write", workspace_ok, workspace_detail)
+        add(
+            "ONNX Runtime 1.27.0",
+            bool(onnx_runtime.get("ok")),
+            "Pinned native runtime and CPU inference passed."
+            if onnx_runtime.get("ok")
+            else str(onnx_runtime.get("error") or "ONNX Runtime dependency contract failed."),
+            onnx_runtime,
+        )
         add("Recognition engine", bool(self.engine_name), self.engine_name)
         face_model = self._model_status()
         add("Face model", bool(face_model.get("ready")), str(face_model.get("recommendation") or face_model.get("engine")), face_model)
+        cohort = self._fixed_cohort_integrity_report(face_model)
+        add(
+            "AS-Norm cohort",
+            bool(cohort.get("verified")),
+            "Bundled fixed cohort passed provenance and checksum verification."
+            if cohort.get("verified")
+            else str(cohort.get("error") or "No fixed cohort supports the active recognizer."),
+            cohort,
+        )
+        fiqa_model = fiqa_model_report(validate_runtime=True)
+        add(
+            "Face quality model",
+            bool(fiqa_model.get("available")),
+            str(fiqa_model.get("modelName") or fiqa_model.get("reason") or fiqa_model.get("engine")),
+            fiqa_model,
+        )
+        photo_ocr_model = ppocrv6_model_report(validate_runtime=True)
+        add(
+            "Photo OCR model",
+            bool(photo_ocr_model.get("available") and photo_ocr_model.get("verified")),
+            str(photo_ocr_model.get("modelId") or photo_ocr_model.get("reason") or photo_ocr_model.get("engine")),
+            photo_ocr_model,
+        )
+        photo_vlm_model = self._photo_vlm_model_report()
+        add(
+            "Photo caption model",
+            bool(photo_vlm_model.get("catalogReady") and photo_vlm_model.get("verified")),
+            str((photo_vlm_model.get("route") or {}).get("modelId", "") or photo_vlm_model.get("reason") or "Portable photo VLM catalog checked."),
+            photo_vlm_model,
+        )
+        synthetic_screen = synthetic_enrollment_screen_report(validate_runtime=True)
+        add(
+            "Synthetic enrollment screen",
+            bool(synthetic_screen.get("available") and synthetic_screen.get("verified")),
+            str(synthetic_screen.get("modelId") or synthetic_screen.get("reason") or synthetic_screen.get("engine")),
+            synthetic_screen,
+        )
         add("Safe Mode model", bool(safe_model.get("available")), str(safe_model.get("modelName") or safe_model.get("reason") or safe_model.get("engine")), safe_model)
         add("Image decoder", bool(image_decoder.get("extensions")), f"{len(image_decoder.get('extensions', []))} supported extension(s).", image_decoder)
         add(
@@ -3442,6 +5518,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         recommendations = []
         if not safe_model.get("available"):
             recommendations.append("Install or bundle an ONNX Safe Mode model before production use.")
+        if not synthetic_screen.get("available"):
+            recommendations.append("Restore the verified synthetic-enrollment screen; enrollment will remain held for human review until then.")
+        if not photo_ocr_model.get("available"):
+            recommendations.append("Restore the verified PP-OCRv6 model pack; portable photo text indexing will use Tesseract fallback until then.")
+        if not photo_vlm_model.get("catalogReady") or not photo_vlm_model.get("verified"):
+            recommendations.append("Restore the verified Qwen3-VL/SmolVLM2 catalog or repair the installed photo caption model pack.")
         if not face_model.get("ready"):
             recommendations.append("Download a face model before sharing production installers.")
         if not (video_decoder.get("opencvAvailable") or video_decoder.get("ffmpegAvailable")):
@@ -3645,7 +5727,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def model_distribution_audit(self) -> dict[str, Any]:
         face_model = self._model_status()
-        safe_model = safety_model_report()
+        safe_model = safety_model_report(multimodal_enabled=self.project.config.safe_mode_multimodal)
+        synthetic_screen = synthetic_enrollment_screen_report()
+        photo_ocr_model = ppocrv6_model_report()
+        photo_vlm_model = self._photo_vlm_model_report()
         items: list[dict[str, Any]] = []
 
         def license_state(text: str) -> str:
@@ -3706,6 +5791,93 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "redistributionReady": bool(safe_model.get("available")) and (not safe_license or license_state(safe_license) == "declared"),
             }
         )
+        synthetic_license = str(synthetic_screen.get("license") or "")
+        items.append(
+            {
+                "kind": "synthetic-enrollment-screen",
+                "id": str(synthetic_screen.get("modelId") or "vintrace-siglip2-linear-synthetic-screen"),
+                "name": "Synthetic enrollment screen",
+                "source": "Pinned SigLIP 2 encoder with provenance-controlled local linear classifier",
+                "url": "https://huggingface.co/onnx-community/siglip2-base-patch16-256-ONNX",
+                "filename": "classifier.npz + vision_model_uint8.onnx",
+                "sha256": "32c8bb112b662e4b46f8d89aa908a9d217699e1b65091cd74009a9e49812e189",
+                "sizeBytes": 94746802,
+                "license": synthetic_license,
+                "licenseState": license_state(synthetic_license),
+                "installed": bool(synthetic_screen.get("available")),
+                "archivePath": "",
+                "installedPath": "bundled-backend:model-pack",
+                "accuracyTier": "review-only-authenticity-triage",
+                "humanReviewRequired": True,
+                "redistributionRisk": "declared" if synthetic_screen.get("verified") else "integrity-failed",
+                "limitations": list(synthetic_screen.get("limitations", [])),
+                "validation": ["See benchmarks/results/synthetic-enrollment-screen-benchmark-20260712.json."],
+                "redistributionReady": bool(synthetic_screen.get("available") and synthetic_screen.get("verified") and synthetic_license),
+            }
+        )
+        photo_ocr_license = str(photo_ocr_model.get("license") or "")
+        photo_ocr_artifacts = photo_ocr_model.get("artifacts") if isinstance(photo_ocr_model.get("artifacts"), dict) else {}
+        items.append(
+            {
+                "kind": "photo-ocr",
+                "id": str(photo_ocr_model.get("modelId") or "vintrace-ppocrv6-small-rapidocr"),
+                "name": "PaddleOCR PP-OCRv6 small multilingual",
+                "source": "RapidOCR 3.9.1 pinned ONNX conversions from PaddleOCR PP-OCRv6",
+                "url": "https://github.com/RapidAI/RapidOCR/releases/tag/v3.9.1",
+                "filename": "PP-OCRv6_det_small.onnx + PP-OCRv6_rec_small.onnx + orientation classifier",
+                "sha256": str(photo_ocr_model.get("manifestSha256") or ""),
+                "sizeBytes": sum(
+                    int(item.get("sizeBytes", 0) or 0)
+                    for item in photo_ocr_artifacts.values()
+                    if isinstance(item, dict)
+                ),
+                "license": photo_ocr_license,
+                "licenseState": license_state(photo_ocr_license),
+                "installed": bool(photo_ocr_model.get("available")),
+                "archivePath": "",
+                "installedPath": "bundled-backend:models/ocr",
+                "accuracyTier": "portable-multilingual-photo-text",
+                "humanReviewRequired": False,
+                "redistributionRisk": "declared" if photo_ocr_model.get("verified") else "integrity-failed",
+                "limitations": ["Arabic, Devanagari, and Korean are not claimed by this bundled model pack."],
+                "validation": ["See tests/photo_rapidocr_units.py and the PHOTO-01 implementation ledger evidence."],
+                "redistributionReady": bool(photo_ocr_model.get("available") and photo_ocr_model.get("verified") and photo_ocr_license),
+            }
+        )
+        for pack in photo_vlm_model.get("packs", []) if isinstance(photo_vlm_model.get("packs"), list) else []:
+            if not isinstance(pack, dict):
+                continue
+            tier = str(pack.get("tier", "") or "")
+            artifacts = pack.get("artifacts") if isinstance(pack.get("artifacts"), list) else []
+            license_text = str(pack.get("license", "") or "")
+            installed = bool(pack.get("installed"))
+            available = bool(pack.get("available"))
+            items.append(
+                {
+                    "kind": "photo-vlm",
+                    "id": str(pack.get("modelId", "") or tier),
+                    "name": str(pack.get("label", "") or tier),
+                    "source": str(pack.get("source", "") or "Pinned Hugging Face model revision"),
+                    "url": str(pack.get("source", "") or ""),
+                    "filename": " + ".join(str(item.get("filename", "") or "") for item in artifacts if isinstance(item, dict)),
+                    "sha256": str(photo_vlm_model.get("catalogSha256", "") or ""),
+                    "sizeBytes": sum(int(item.get("sizeBytes", 0) or 0) for item in artifacts if isinstance(item, dict)),
+                    "license": license_text,
+                    "licenseState": license_state(license_text),
+                    "installed": installed,
+                    "archivePath": "explicit in-app model setup",
+                    "installedPath": f"{photo_vlm_model.get('modelRoot', '')}/models/{tier}",
+                    "accuracyTier": "portable-photo-caption-quality" if tier == "quality" else "portable-photo-caption-low-memory",
+                    "humanReviewRequired": True,
+                    "redistributionRisk": "declared" if (not installed or available) else "integrity-failed",
+                    "limitations": [
+                        "Generated captions and tags can be incomplete or inaccurate and remain reviewable suggestions.",
+                        "The worker must not be used to identify people or infer sensitive traits.",
+                    ],
+                    "validation": ["See tests/photo_vlm_units.py and the PHOTO-02 implementation ledger evidence."],
+                    "redistributionReady": bool(photo_vlm_model.get("catalogReady") and photo_vlm_model.get("verified") and license_text),
+                }
+            )
         blockers = [item for item in items if item["licenseState"] in {"missing", "needs-review"}]
         governance_blockers = [item for item in items if item.get("redistributionRisk") == "needs-license-review"]
         recommendations = []
@@ -3715,63 +5887,108 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             recommendations.append("Install at least one face model or rely on the in-app first-run downloader.")
         if not safe_model.get("available"):
             recommendations.append("Bundle or configure a Safe Mode ONNX model before broad distribution.")
+        if not synthetic_screen.get("available"):
+            recommendations.append("Bundle the verified synthetic-enrollment screen before broad distribution.")
+        if not photo_ocr_model.get("available"):
+            recommendations.append("Bundle the verified PP-OCRv6 model pack before broad distribution.")
+        if not photo_vlm_model.get("catalogReady") or not photo_vlm_model.get("verified"):
+            recommendations.append("Restore the verified portable photo VLM catalog or repair the installed optional model pack.")
         if not recommendations:
             recommendations.append("Model manifest is complete for the installed local models.")
         return {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            "ok": not blockers and not governance_blockers and bool(safe_model.get("available")),
+            "ok": not blockers and not governance_blockers and bool(safe_model.get("available")) and bool(synthetic_screen.get("available") and synthetic_screen.get("verified")) and bool(photo_ocr_model.get("available") and photo_ocr_model.get("verified")) and bool(photo_vlm_model.get("catalogReady") and photo_vlm_model.get("verified")),
             "items": items,
             "blockers": [*blockers, *governance_blockers],
             "recommendations": recommendations,
         }
 
     def _dataset_regression_gate_summary(self) -> dict[str, Any]:
-        rows = [
-            {
-                "pack": "antelopev2",
-                "label": "Current frontal baseline",
-                "metrics": {"precision": 0.995, "recall": 0.62, "wrongIdentity": 0, "falsePositives": 0},
-                "metricsByThreshold": {"likely": {"precision": 0.995, "recall": 0.60}},
-                "validationMatrix": {"pose:profile": {"recall": 0.34}},
-                "pipeline": {"scanMetrics": {"poseRelaxedReviews": 6}},
-            },
-            {
-                "pack": "buffalo_l",
-                "label": "Pose-aware candidate",
-                "metrics": {"precision": 0.992, "recall": 0.82, "wrongIdentity": 0, "falsePositives": 0},
-                "metricsByThreshold": {"likely": {"precision": 0.992, "recall": 0.80}},
-                "validationMatrix": {"pose:profile": {"recall": 0.76}},
-                "pipeline": {"scanMetrics": {"poseRelaxedReviews": 2}},
-            },
-            {
-                "pack": "buffalo_s",
-                "label": "Noisy candidate",
-                "metrics": {"precision": 0.99, "recall": 0.84, "wrongIdentity": 2, "falsePositives": 1},
-                "metricsByThreshold": {"likely": {"precision": 0.96, "recall": 0.82}},
-                "validationMatrix": {"pose:profile": {"recall": 0.78}},
-                "pipeline": {"scanMetrics": {"poseRelaxedReviews": 1}},
-            },
-        ]
-        scored_rows: list[dict[str, Any]] = []
-        for row in rows:
-            score = self._model_pack_recommendation_score(row)
-            scored_rows.append({**row, "recommendationScore": score["score"], "recommendationReasons": score["reasons"]})
-        recommendation = self._model_comparison_recommendation(scored_rows, current_pack="antelopev2")
-        pose_candidate = next((row for row in scored_rows if row.get("pack") == "buffalo_l"), {})
-        noisy_candidate = next((row for row in scored_rows if row.get("pack") == "buffalo_s"), {})
-        ok = (
-            recommendation.get("status") == "switch"
-            and recommendation.get("recommendedPack") == "buffalo_l"
-            and float(recommendation.get("profileRecall", 0) or 0) >= 0.70
-            and float(pose_candidate.get("recommendationScore", 0) or 0) > float(noisy_candidate.get("recommendationScore", 0) or 0)
+        report_env = os.environ.get("VINTRACE_PUBLIC_BENCHMARK_REPORT", "").strip()
+        repo_root = Path(__file__).resolve().parents[1]
+        report_path = Path(report_env).expanduser() if report_env else repo_root / "benchmarks" / "results" / "public-dataset-benchmark-latest.json"
+
+        def fail(status: str, summary: str, **extra: Any) -> dict[str, Any]:
+            return {
+                "ok": False,
+                "status": status,
+                "source": "public-dataset-benchmark-report",
+                "reportPath": str(report_path),
+                "summary": summary,
+                "recommendations": [
+                    "Run benchmarks/run_public_dataset_benchmarks.py with prepared public datasets, or set VINTRACE_PUBLIC_BENCHMARK_REPORT to a fresh report."
+                ],
+                **extra,
+            }
+
+        if not report_path.exists():
+            return fail("missing", "No real public dataset benchmark report was found.")
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return fail("unreadable", "Public dataset benchmark report could not be read.", error=str(exc))
+        rows = [row for row in payload.get("rows", []) if isinstance(row, dict)] if isinstance(payload, dict) else []
+        if not rows:
+            return fail("empty", "Public dataset benchmark report contains no benchmark rows.")
+        gates = payload.get("regressionGates") if isinstance(payload.get("regressionGates"), dict) else evaluate_dataset_gates(rows)
+        matrix = payload.get("modelPackMatrix") if isinstance(payload.get("modelPackMatrix"), dict) else model_pack_quality_matrix(
+            rows,
+            current_pack=str(payload.get("baselinePack") or "antelopev2"),
         )
+        required_datasets = {
+            value.strip()
+            for value in os.environ.get("VINTRACE_PUBLIC_BENCHMARK_REQUIRED_DATASETS", "calfw,cplfw,agedb,fiw,cfp").split(",")
+            if value.strip()
+        }
+        completed_datasets = sorted({
+            str(row.get("datasetId"))
+            for row in rows
+            if row.get("status") == "complete" and row.get("datasetId")
+        })
+        missing_required = sorted(required_datasets - set(completed_datasets))
+        max_age_days = max(1, int(os.environ.get("VINTRACE_PUBLIC_BENCHMARK_MAX_AGE_DAYS", "30") or 30))
+        age_days: int | None = None
+        try:
+            generated_at = str(payload.get("generatedAt") or "")
+            parsed = datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+            age_days = max(0, (datetime.utcnow() - parsed.replace(tzinfo=None)).days)
+        except (TypeError, ValueError):
+            age_days = None
+        stale = age_days is None or age_days > max_age_days
+        ok = bool(gates.get("ok")) and not missing_required and not stale
+        dataset_summaries = [
+            {
+                "datasetId": row.get("datasetId"),
+                "pack": row.get("pack"),
+                "status": row.get("status"),
+                "evaluated": row.get("evaluated"),
+                "precision": row.get("precision"),
+                "recall": row.get("recall"),
+                "accuracy": row.get("accuracy"),
+            }
+            for row in rows[:40]
+        ]
         return {
             "ok": bool(ok),
-            "recommendedPack": recommendation.get("recommendedPack"),
-            "profileRecall": recommendation.get("profileRecall"),
-            "confidence": recommendation.get("confidence"),
-            "summary": recommendation.get("summary"),
-            "rows": scored_rows,
+            "status": "pass" if ok else "fail",
+            "source": "public-dataset-benchmark-report",
+            "reportPath": str(report_path),
+            "generatedAt": payload.get("generatedAt"),
+            "ageDays": age_days,
+            "maxAgeDays": max_age_days,
+            "requiredDatasets": sorted(required_datasets),
+            "completedDatasets": completed_datasets,
+            "missingRequiredDatasets": missing_required,
+            "rowCount": len(rows),
+            "datasets": dataset_summaries,
+            "regressionGates": gates,
+            "modelPackMatrix": matrix,
+            "summary": "Real public dataset benchmark gates passed." if ok else "Real public dataset benchmark evidence is missing, stale, or failing.",
+            "recommendations": [
+                *([f"Run or provide benchmark data for: {', '.join(missing_required)}."] if missing_required else []),
+                *(["Refresh the public dataset benchmark report."] if stale else []),
+                *([*gates.get("recommendations", [])[:3]] if isinstance(gates.get("recommendations"), list) else []),
+            ] or ["Keep public dataset benchmark evidence fresh before release."],
         }
 
     def _self_learning_rd_release_posture(self) -> dict[str, Any]:
@@ -3816,9 +6033,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def release_readiness(self) -> dict[str, Any]:
         face_model = self._model_status()
-        safe_model = safety_model_report()
+        safe_model = safety_model_report(multimodal_enabled=self.project.config.safe_mode_multimodal)
+        synthetic_screen = synthetic_enrollment_screen_report(validate_runtime=True)
+        photo_ocr_model = ppocrv6_model_report(validate_runtime=True)
+        photo_vlm_model = self._photo_vlm_model_report()
         distribution = self.model_distribution_audit()
         db_integrity = self.project.database_integrity()
+        workspace_encryption = self.project.workspace_encryption_status()
         video_decoder = video_decoder_report()
         dataset_gate = self._dataset_regression_gate_summary()
         self_learning_rd = self._self_learning_rd_release_posture()
@@ -3841,6 +6062,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             or os.environ.get("GH_TOKEN")
             or os.environ.get("GITHUB_TOKEN")
         )
+        signing_environment = release_signing_environment_readiness()
+        mac_signing = signing_environment["macos"]
+        windows_signing = signing_environment["windows"]
+        windows_signing_details = [str(item) for item in windows_signing.get("errors", [])]
+        if windows_signing["missing"]:
+            windows_signing_details.append("Missing production Windows release settings: " + ", ".join(windows_signing["missing"]))
         checks = [
             {
                 "name": "Face model",
@@ -3851,6 +6078,24 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "name": "Safe Mode model",
                 "ok": bool(safe_model.get("available")),
                 "detail": str(safe_model.get("modelName") or safe_model.get("reason") or "Safe Mode model unavailable."),
+            },
+            {
+                "name": "Synthetic enrollment screen",
+                "ok": bool(synthetic_screen.get("available") and synthetic_screen.get("verified")),
+                "detail": str(synthetic_screen.get("modelId") or synthetic_screen.get("reason") or "Synthetic enrollment screen unavailable."),
+                "value": synthetic_screen,
+            },
+            {
+                "name": "Photo OCR model",
+                "ok": bool(photo_ocr_model.get("available") and photo_ocr_model.get("verified")),
+                "detail": str(photo_ocr_model.get("modelId") or photo_ocr_model.get("reason") or "PP-OCRv6 unavailable."),
+                "value": photo_ocr_model,
+            },
+            {
+                "name": "Photo caption model",
+                "ok": bool(photo_vlm_model.get("catalogReady") and photo_vlm_model.get("verified")),
+                "detail": str((photo_vlm_model.get("route") or {}).get("modelId", "") or photo_vlm_model.get("reason") or "Portable photo VLM catalog checked."),
+                "value": photo_vlm_model,
             },
             {
                 "name": "Model license manifest",
@@ -3871,6 +6116,22 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "value": db_integrity,
             },
             {
+                "name": "Workspace encryption",
+                "ok": bool(
+                    workspace_encryption.get("enabled")
+                    and workspace_encryption.get("migrationComplete")
+                    and workspace_encryption.get("database", {}).get("encryptedHeader")
+                    and str(workspace_encryption.get("database", {}).get("cipherVersion", "")).startswith("4.")
+                    and not workspace_encryption.get("plaintextVectorSidecars")
+                ),
+                "detail": (
+                    "SQLCipher and authenticated sensitive-file encryption are active."
+                    if workspace_encryption.get("enabled") and workspace_encryption.get("migrationComplete")
+                    else "Production workspace encryption is unavailable or migration is incomplete."
+                ),
+                "value": workspace_encryption,
+            },
+            {
                 "name": "Video decoder",
                 "ok": bool(video_decoder.get("opencvAvailable") or video_decoder.get("ffmpegAvailable")),
                 "detail": str(video_decoder.get("backend") or "Video decoder unavailable."),
@@ -3885,7 +6146,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             {
                 "name": "Dataset regression gates",
                 "ok": bool(dataset_gate.get("ok")),
-                "detail": "Pose-aware model recommendation gate passed." if dataset_gate.get("ok") else "Dataset recommendation gate failed; inspect model scoring before release.",
+                "detail": "Real public dataset regression gates passed." if dataset_gate.get("ok") else "Real public dataset benchmark evidence is missing, stale, or failing.",
                 "value": dataset_gate,
             },
             {
@@ -3907,13 +6168,23 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             },
             {
                 "name": "macOS signing",
-                "ok": bool(os.environ.get("CSC_LINK") or os.environ.get("APPLE_ID")),
-                "detail": "Signing environment detected." if os.environ.get("CSC_LINK") or os.environ.get("APPLE_ID") else "Configure Apple Developer signing and notarization before public DMGs.",
+                "ok": bool(mac_signing["ready"]),
+                "detail": (
+                    "Exact Developer ID and App Store Connect notarization environment detected."
+                    if mac_signing["ready"]
+                    else "Missing production macOS release settings: " + ", ".join(mac_signing["missing"])
+                ),
+                "value": mac_signing,
             },
             {
                 "name": "Windows signing",
-                "ok": bool(os.environ.get("WIN_CSC_LINK") or os.environ.get("CSC_LINK")),
-                "detail": "Windows signing environment detected." if os.environ.get("WIN_CSC_LINK") or os.environ.get("CSC_LINK") else "Configure a Windows code-signing certificate to reduce SmartScreen friction.",
+                "ok": bool(windows_signing["ready"]),
+                "detail": (
+                    "Exact Azure Artifact Signing OIDC environment detected."
+                    if windows_signing["ready"]
+                    else "; ".join(windows_signing_details)
+                ),
+                "value": windows_signing,
             },
             {
                 "name": "Auto-update",
@@ -3935,7 +6206,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def model_integrity(self) -> dict[str, Any]:
         face_model = self._model_status()
-        safe_model = safety_model_report()
+        cohort = self._fixed_cohort_integrity_report(face_model)
+        safe_model = safety_model_report(multimodal_enabled=self.project.config.safe_mode_multimodal)
+        synthetic_screen = synthetic_enrollment_screen_report(validate_runtime=True)
+        photo_ocr_model = ppocrv6_model_report(validate_runtime=True)
+        photo_vlm_model = self._photo_vlm_model_report()
         image_decoder = image_decoder_report()
         video_decoder = video_decoder_report()
         distribution = self.model_distribution_audit()
@@ -3961,6 +6236,14 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             root_writable = False
 
         add("Face model", bool(face_model.get("ready")), str(face_model.get("recommendation") or face_model.get("engine") or "Face model checked."), face_model)
+        add(
+            "AS-Norm cohort",
+            bool(cohort.get("verified")),
+            "Bundled fixed cohort passed provenance and checksum verification."
+            if cohort.get("verified")
+            else str(cohort.get("error") or "No fixed cohort supports the active recognizer."),
+            cohort,
+        )
         add("Model folder writable", root_writable, str(model_root) if root_writable else "Choose a writable model download folder.")
         installed_checks = []
         current_pack = str(face_model.get("currentPack", ""))
@@ -3996,9 +6279,27 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         archive_ok = all(bool(item.get("ok")) for item in archive_checks if item.get("status") != "missing")
         add("Downloaded archives", archive_ok, "Downloaded model archives pass checksum checks." if archive_ok else "One or more downloaded model archives failed checksum verification.", archive_checks)
         add("Safe Mode model", bool(safe_model.get("available")), str(safe_model.get("modelName") or safe_model.get("reason") or "Safe Mode model checked."), safe_model)
+        add(
+            "Synthetic enrollment screen",
+            bool(synthetic_screen.get("available") and synthetic_screen.get("verified")),
+            str(synthetic_screen.get("modelId") or synthetic_screen.get("reason") or "Synthetic enrollment screen checked."),
+            synthetic_screen,
+        )
+        add(
+            "Photo OCR model",
+            bool(photo_ocr_model.get("available") and photo_ocr_model.get("verified")),
+            str(photo_ocr_model.get("modelId") or photo_ocr_model.get("reason") or "PP-OCRv6 checked."),
+            photo_ocr_model,
+        )
+        add(
+            "Photo caption model",
+            bool(photo_vlm_model.get("catalogReady") and photo_vlm_model.get("verified")),
+            str((photo_vlm_model.get("route") or {}).get("modelId", "") or photo_vlm_model.get("reason") or "Portable photo VLM catalog checked."),
+            photo_vlm_model,
+        )
         add("Model license manifest", bool(distribution.get("ok")), "Model manifest is ready for redistribution review." if distribution.get("ok") else "; ".join(distribution.get("recommendations", [])[:2]), distribution)
         add("Workspace database", bool(db_integrity.get("ok")), "SQLite workspace index passed integrity checks." if db_integrity.get("ok") else str(db_integrity.get("error") or "SQLite workspace index needs repair."), db_integrity)
-        add("Dataset regression gates", bool(dataset_gate.get("ok")), "Pose-aware recommendation gate passed." if dataset_gate.get("ok") else "Dataset recommendation gate failed.", dataset_gate)
+        add("Dataset regression gates", bool(dataset_gate.get("ok")), "Real public dataset regression gates passed." if dataset_gate.get("ok") else "Real public dataset benchmark evidence is missing, stale, or failing.", dataset_gate)
         add("Image decoder", bool(image_decoder.get("extensions")), f"{len(image_decoder.get('extensions', []))} image extension(s) supported.", image_decoder)
         add("Video decoder", bool(video_decoder.get("opencvAvailable") or video_decoder.get("ffmpegAvailable")), str(video_decoder.get("backend") or "Video decoder unavailable."), video_decoder)
         recommendations = [check["detail"] for check in checks if not check["ok"]]
@@ -4094,7 +6395,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "model-integrity.json": self.model_integrity(),
             "release-readiness.json": self.release_readiness(),
             "model-status.json": self._model_status(),
-            "safe-mode-model.json": safety_model_report(),
+            "safe-mode-model.json": safety_model_report(multimodal_enabled=self.project.config.safe_mode_multimodal),
             "image-decoder.json": image_decoder_report(),
             "video-decoder.json": video_decoder_report(),
             "scale-summary.json": self.project.scale_summary(),
@@ -4138,6 +6439,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
         build = self._build_info()
         consent = self.project.consent_summary()
+        compliance = self.project.compliance_status()
         chain = self.project.verify_audit_chain()
         retention = self.project.retention_policy_report()
         model_audit = self.model_distribution_audit()
@@ -4152,10 +6454,46 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "perSubjectConsent": bool(config.per_subject_consent),
             "reviewOnly": bool(config.review_only),
             "safeMode": bool(config.safe_mode),
+            "safeModeMultimodal": bool(config.safe_mode_multimodal),
             "safeModeZeroAdmittance": bool(config.safe_mode_zero_admittance),
             "retentionReviewedDays": int(config.retention_reviewed_days),
+            "retentionPendingDays": int(config.retention_pending_days),
+            "retentionAuditDays": int(config.retention_audit_days),
+            "retentionEnforcementEnabled": bool(config.retention_enforcement_enabled),
             "jurisdictionPreset": str(config.jurisdiction_preset),
         }
+        subject_release_evidence = []
+        for record in compliance.get("subjects", {}).get("records", []):
+            if not isinstance(record, dict):
+                continue
+            subject_release_evidence.append(
+                {
+                    "subjectRef": self.project._audit_person_ref(str(record.get("personName", ""))),
+                    "signerRef": self.project._audit_person_ref(str(record.get("signerName", ""))),
+                    "releaseId": record.get("releaseId", ""),
+                    "recordHash": record.get("recordHash", ""),
+                    "active": bool(record.get("active")),
+                    "complete": bool(record.get("complete")),
+                    "expired": bool(record.get("expired")),
+                    "signerRole": record.get("signerRole", ""),
+                    "specificPurposeRecorded": bool(record.get("specificPurpose")),
+                    "specificPurposeHash": hashlib.sha256(
+                        str(record.get("specificPurpose", "")).encode("utf-8")
+                    ).hexdigest() if record.get("specificPurpose") else "",
+                    "collectionTermDays": record.get("collectionTermDays", 0),
+                    "lawfulBasis": record.get("lawfulBasis", ""),
+                    "confirmedAt": record.get("confirmedAt"),
+                    "expiresAt": record.get("expiresAt"),
+                }
+            )
+        biometric_policy = deepcopy(compliance.get("retentionPolicy", {}))
+        publication = biometric_policy.get("publication") if isinstance(biometric_policy, dict) else None
+        if isinstance(publication, dict) and publication.get("approvedBy"):
+            publication["approvedByRef"] = self.project._audit_person_ref(str(publication.get("approvedBy", "")))
+            publication.pop("approvedBy", None)
+        destruction_receipts = self.project.consent.get("destructionReceipts")
+        if not isinstance(destruction_receipts, list):
+            destruction_receipts = []
         generated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
         context = {
             "generatedAt": generated_at,
@@ -4167,16 +6505,25 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "accuracy": accuracy,
             "preset": preset,
             "policy": policy,
+            "compliance": compliance,
         }
         json_payloads = {
-            "00-manifest.json": {
-                "generatedAt": generated_at,
-                "appVersion": __version__,
-                "workspaceId": self.project.workspace_metadata.get("workspaceId"),
-                "disclaimer": COMPLIANCE_DRAFT_DISCLAIMER,
-                "note": "Governance evidence pack. Does not include photos, videos, thumbnails, face vectors, or model files.",
+            "consent-summary.json": consent,
+            "subject-release-evidence.json": {
+                "schemaVersion": 1,
+                "records": subject_release_evidence,
             },
-            "consent-summary.json": {**consent, "subjects": self.project.subject_consents()},
+            "ai-disclosure-notice.json": {
+                "notice": compliance.get("aiDisclosure", {}).get("notice", {}),
+                "version": compliance.get("aiDisclosure", {}).get("version", ""),
+                "acknowledged": bool(compliance.get("aiDisclosure", {}).get("acknowledged")),
+                "acknowledgedAt": compliance.get("aiDisclosure", {}).get("acknowledgedAt"),
+            },
+            "biometric-retention-policy.json": biometric_policy,
+            "destruction-receipts.json": {
+                "schemaVersion": 1,
+                "receipts": destruction_receipts,
+            },
             "audit-chain-status.json": chain,
             "audit-events.json": self.project.audit_events(limit=200, offset=0),
             "retention-policy.json": retention,
@@ -4193,19 +6540,41 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "annex-iv-technical-documentation-DRAFT.md": self._render_annex_iv_draft(context),
         }
         serializable = self._redact_paths(json_payloads, include_paths=False)
+        member_bytes: dict[str, bytes] = {
+            name: json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8")
+            for name, payload in serializable.items()
+        }
+        member_bytes.update({name: text.encode("utf-8") for name, text in markdown_docs.items()})
+        manifest = {
+            "schemaVersion": 2,
+            "generatedAt": generated_at,
+            "appVersion": __version__,
+            "workspaceId": self.project.workspace_metadata.get("workspaceId"),
+            "disclaimer": COMPLIANCE_DRAFT_DISCLAIMER,
+            "note": "Governance evidence pack. Does not include photos, videos, thumbnails, face vectors, or model files.",
+            "members": [
+                {
+                    "name": name,
+                    "bytes": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+                for name, content in sorted(member_bytes.items())
+            ],
+        }
         with zipfile.ZipFile(pack_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for name, payload in serializable.items():
-                archive.writestr(name, json.dumps(payload, indent=2))
-            for name, text in markdown_docs.items():
-                archive.writestr(name, text)
+            archive.writestr("00-manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
+            for name, content in member_bytes.items():
+                archive.writestr(name, content)
         size = pack_path.stat().st_size
+        pack_sha256 = hashlib.sha256(pack_path.read_bytes()).hexdigest()
         self.project._append_audit(
-            {"action": "export_compliance_pack", "zip_path": str(pack_path), "bytes": size}
+            {"action": "export_compliance_pack", "packSha256": pack_sha256, "bytes": size}
         )
         return {
             "zipPath": str(pack_path),
+            "sha256": pack_sha256,
             "bytes": size,
-            "members": list(serializable) + list(markdown_docs),
+            "members": ["00-manifest.json", *member_bytes],
             "disclaimer": COMPLIANCE_DRAFT_DISCLAIMER,
         }
 
@@ -4250,6 +6619,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "note": candidate.note,
                 "modelName": candidate.model_name,
                 "mediaKind": candidate.media_kind,
+                "videoTrackId": candidate.video_track_id,
+                "videoTrackVersion": candidate.video_track_version,
+                "videoTrackStartMs": candidate.video_track_start_ms,
+                "videoTrackEndMs": candidate.video_track_end_ms,
+                "videoTrackFrameCount": candidate.video_track_frame_count,
+                "videoTrackKeyframeTimestampsMs": candidate.video_track_keyframe_timestamps_ms,
+                "videoTrackKeyframeIndices": candidate.video_track_keyframe_indices,
             }
             for candidate in candidates
         ]
@@ -4290,6 +6666,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "policy": {
                 "reviewOnly": bool(config.review_only),
                 "safeMode": bool(config.safe_mode),
+                "safeModeMultimodal": bool(config.safe_mode_multimodal),
                 "safeModeZeroAdmittance": bool(config.safe_mode_zero_admittance),
                 "jurisdictionPreset": str(config.jurisdiction_preset),
             },
@@ -4342,7 +6719,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "## Governance basis",
             f"- Consent on file: {payload['consent'].get('active')} (operator: {payload['consent'].get('operator')})",
             f"- Review-only: {payload['policy']['reviewOnly']}  ·  Safe Mode: {payload['policy']['safeMode']} "
-            f"(zero-admittance: {payload['policy']['safeModeZeroAdmittance']})",
+            f"(category-aware: {payload['policy']['safeModeMultimodal']}; "
+            f"zero-admittance: {payload['policy']['safeModeZeroAdmittance']})",
             f"- Jurisdiction preset: {payload['policy']['jurisdictionPreset']}",
             f"- Tamper-evident audit: verified={payload['auditChain']['verified']}, "
             f"length={payload['auditChain']['length']}, tail-hash={str(payload['auditChain']['tail'])[:16]}…",
@@ -4407,7 +6785,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "Art 9(2) basis) MUST be confirmed per subject. Children's biometrics are heightened risk.\n\n"
             "## 4. Risks & mitigations\n"
             "- Wrongful identification → recall-first + mandatory human review; cross-age confidence is banded (NIST IFPC 2025).\n"
-            f"- Sensitive-content exposure → Safe Mode **{policy['safeMode']}**, zero-admittance **{policy['safeModeZeroAdmittance']}**.\n"
+            f"- Sensitive-content exposure → Safe Mode **{policy['safeMode']}**, category-aware local policy "
+            f"**{policy['safeModeMultimodal']}**, zero-admittance **{policy['safeModeZeroAdmittance']}**.\n"
             "- Tampering/repudiation → tamper-evident hash-chained audit "
             f"(verified: **{ctx['chain'].get('verified')}**, chained entries: **{ctx['chain'].get('chained')}**).\n"
             "- Data sprawl → local-only processing, retention policy, and delete_face_data.\n\n"
@@ -4579,7 +6958,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     def installer_self_diagnostics(self) -> dict[str, Any]:
         runtime = self.runtime_self_test()
         face_model = self._model_status()
-        safe_model = safety_model_report()
+        cohort = self._fixed_cohort_integrity_report(face_model)
+        safe_model = safety_model_report(multimodal_enabled=self.project.config.safe_mode_multimodal)
         image_decoder = image_decoder_report()
         video_decoder = video_decoder_report()
         workspace_health = self.project.workspace_health()
@@ -4602,6 +6982,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "detail": str(face_model.get("recommendation") or face_model.get("engine") or "Face model status checked."),
             },
             {
+                "name": "AS-Norm cohort",
+                "ok": bool(cohort.get("verified")),
+                "detail": "Bundled fixed cohort passed provenance and checksum verification."
+                if cohort.get("verified")
+                else str(cohort.get("error") or "No fixed cohort supports the active recognizer."),
+            },
+            {
                 "name": "Model downloader",
                 "ok": downloadable or bool(face_model.get("ready")),
                 "detail": "Download URL and checksum are configured." if downloadable else "Face model is already ready or no downloadable pack is configured.",
@@ -4609,7 +6996,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             {
                 "name": "Dataset regression gates",
                 "ok": bool(dataset_gate.get("ok")),
-                "detail": "Pose-aware recommendation gate passed." if dataset_gate.get("ok") else "Dataset recommendation gate failed; run tests/dataset_regression_gates.py.",
+                "detail": "Real public dataset regression gates passed." if dataset_gate.get("ok") else "Real public dataset benchmark evidence is missing, stale, or failing.",
             },
             {
                 "name": "Model manifest",
@@ -4811,6 +7198,31 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "index": "memory",
         }
 
+    def ordered_review_candidates(self, params: dict[str, Any]) -> dict[str, Any]:
+        status = str(params.get("status", "pending")).strip().lower()
+        if status not in {"pending", "accepted", "rejected", "uncertain"}:
+            raise ValueError("Ordered review candidate status must be pending, accepted, rejected, or uncertain.")
+        limit = max(1, min(1000, int(params.get("limit", 100) or 100)))
+        preview_budget = max(0, min(64, int(params.get("previewBudget", 0) or 0)))
+        ordered = self.project.ordered_review_candidates(status=status)
+        candidates = ordered[:limit]
+        items: list[dict[str, Any]] = []
+        remaining_preview_budget = preview_budget
+        for candidate in candidates:
+            before_preview = self.project.preview_path_for(candidate.source_path, create=False)
+            row = self._candidate_state_row(candidate, remaining_preview_budget)
+            if remaining_preview_budget > 0 and not before_preview and row.get("previewPath"):
+                remaining_preview_budget -= 1
+            items.append(row)
+        return {
+            "total": len(ordered),
+            "status": status,
+            "limit": limit,
+            "returned": len(items),
+            "items": items,
+            "index": "active-learning",
+        }
+
     def suggest_photo_review_more_candidates(self, params: dict[str, Any]) -> dict[str, Any]:
         person_names = self._clean_album_people(params.get("personNames", params.get("people", [])))
         exclude_people = self._clean_album_people(params.get("excludePeople", []))
@@ -4879,11 +7291,20 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "status": candidate.status,
             "note": candidate.note,
             "riskFlags": self._candidate_risk_flags(candidate),
+            "reviewPriority": float(getattr(candidate, "review_priority", 0.0) or 0.0),
+            "reviewLane": str(getattr(candidate, "review_lane", "") or ""),
             "mediaKind": candidate.media_kind,
             "mediaSourcePath": candidate.media_source_path,
             "videoTimestampMs": candidate.video_timestamp_ms,
             "videoFrameIndex": candidate.video_frame_index,
             "videoDurationMs": candidate.video_duration_ms,
+            "videoTrackId": candidate.video_track_id,
+            "videoTrackVersion": candidate.video_track_version,
+            "videoTrackStartMs": candidate.video_track_start_ms,
+            "videoTrackEndMs": candidate.video_track_end_ms,
+            "videoTrackFrameCount": candidate.video_track_frame_count,
+            "videoTrackKeyframeTimestampsMs": list(candidate.video_track_keyframe_timestamps_ms),
+            "videoTrackKeyframeIndices": list(candidate.video_track_keyframe_indices),
             "sourceHash": candidate.source_hash,
             "createdAt": candidate.created_at,
             "captureDate": candidate.capture_date,
@@ -4941,13 +7362,19 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         asset_id: str,
         source_path: str,
         smart_album_source_cache: dict[str, set[str]] | None = None,
+        manual_memberships_by_asset_id: dict[str, list[dict[str, Any]]] | None = None,
+        album_rows: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        memberships = self.project.db.list_photo_asset_album_memberships(asset_id) if asset_id else []
+        memberships = (
+            list(manual_memberships_by_asset_id.get(asset_id, []))
+            if manual_memberships_by_asset_id is not None and asset_id
+            else self.project.db.list_photo_asset_album_memberships(asset_id) if asset_id else []
+        )
         seen_ids = {str(item.get("albumId", "") or "") for item in memberships}
         source = str(source_path or "")
         if not source:
             return memberships
-        for album in self.project.db.list_photo_albums():
+        for album in album_rows if album_rows is not None else self.project.db.list_photo_albums():
             album_id = str(album.get("albumId", "") or "")
             if not album_id or album_id in seen_ids:
                 continue
@@ -4981,6 +7408,94 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             )
             seen_ids.add(album_id)
         return memberships
+
+    def _photo_album_memberships_for_assets(
+        self,
+        assets_by_source_path: dict[str, dict[str, Any]],
+        manual_memberships_by_asset_id: dict[str, list[dict[str, Any]]],
+        album_rows: list[dict[str, Any]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        source_by_asset_id = {
+            str(asset.get("assetId", "") or ""): str(source_path or "")
+            for source_path, asset in assets_by_source_path.items()
+            if str(asset.get("assetId", "") or "")
+        }
+        requested_asset_ids = tuple(source_by_asset_id)
+        memberships_by_asset_id = {
+            asset_id: list(manual_memberships_by_asset_id.get(asset_id, []))
+            for asset_id in requested_asset_ids
+        }
+        if not requested_asset_ids:
+            return memberships_by_asset_id
+        seen_album_ids_by_asset = {
+            asset_id: {str(item.get("albumId", "") or "") for item in memberships}
+            for asset_id, memberships in memberships_by_asset_id.items()
+        }
+        for album in album_rows:
+            album_id = str(album.get("albumId", "") or "")
+            if not album_id or str(album.get("albumKind", "smart") or "smart") == "manual":
+                continue
+            matched_asset_ids: set[str] = set()
+            criteria = self._photo_smart_album_sql_criteria(album)
+            if criteria is not None:
+                existing_required_ids = {
+                    str(value or "").strip()
+                    for value in criteria.get("requiredAssetIds", ())
+                    if str(value or "").strip()
+                }
+                scoped_ids = (
+                    tuple(asset_id for asset_id in requested_asset_ids if asset_id in existing_required_ids)
+                    if existing_required_ids
+                    else requested_asset_ids
+                )
+                excluded_ids = {
+                    str(value or "").strip()
+                    for value in criteria.get("excludedAssetIds", ())
+                    if str(value or "").strip()
+                }
+                scoped_ids = tuple(asset_id for asset_id in scoped_ids if asset_id not in excluded_ids)
+                if scoped_ids:
+                    try:
+                        page = self._photo_smart_album_sql_page_for_criteria(
+                            {**criteria, "requiredAssetIds": scoped_ids},
+                            offset=0,
+                            limit=len(scoped_ids),
+                            sort="newest",
+                        )
+                        matched_asset_ids.update(
+                            str(asset.get("assetId", "") or "")
+                            for asset in page.get("assets", [])
+                            if isinstance(asset, dict) and str(asset.get("assetId", "") or "")
+                        )
+                    except Exception:
+                        matched_asset_ids.clear()
+            else:
+                try:
+                    matched_sources = {
+                        str(item.get("sourcePath", "") or "")
+                        for item in self._photo_album_items(album)
+                        if str(item.get("sourcePath", "") or "")
+                    }
+                    matched_asset_ids.update(
+                        asset_id
+                        for asset_id, source_path in source_by_asset_id.items()
+                        if source_path in matched_sources
+                    )
+                except Exception:
+                    matched_asset_ids.clear()
+            for asset_id in matched_asset_ids:
+                if album_id in seen_album_ids_by_asset.get(asset_id, set()):
+                    continue
+                memberships_by_asset_id.setdefault(asset_id, []).append({
+                    "albumId": album_id,
+                    "name": str(album.get("name", "") or "Untitled album"),
+                    "albumKind": "smart",
+                    "position": -1,
+                    "addedAt": "",
+                    "derived": True,
+                })
+                seen_album_ids_by_asset.setdefault(asset_id, set()).add(album_id)
+        return memberships_by_asset_id
 
     def _photo_smart_album_contains_asset(self, album: dict[str, Any], asset_id: str) -> bool | None:
         clean_asset_id = str(asset_id or "").strip()
@@ -5112,17 +7627,27 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         album_membership_cache: dict[str, set[str]] | None = None,
         media_pair_cache: dict[str, list[dict[str, Any]]] | None = None,
         edit_stack_version_count_cache: dict[str, int] | None = None,
+        asset_cache: dict[str, dict[str, Any]] | None = None,
+        metadata_cache: dict[str, dict[str, Any]] | None = None,
+        edit_stack_cache: dict[str, dict[str, Any]] | None = None,
+        asset_people_cache: dict[str, list[dict[str, Any]]] | None = None,
+        duplicate_group_cache: dict[str, dict[str, Any]] | None = None,
+        album_memberships_cache: dict[str, list[dict[str, Any]]] | None = None,
     ) -> dict[str, Any]:
         match_rows = self._dedupe_photo_matches(matches or ([candidate] if candidate is not None else []))
         primary = candidate or (match_rows[0] if match_rows else None)
-        asset = self.project.db.photo_asset_by_path(source_path)
+        asset = asset_cache.get(source_path) if asset_cache is not None else self.project.db.photo_asset_by_path(source_path)
         asset_metadata = asset.get("metadata", {}) if asset and isinstance(asset.get("metadata"), dict) else {}
         video_poster = asset_metadata.get("videoPoster") if isinstance(asset_metadata.get("videoPoster"), dict) else {}
         poster_preview_path = str(video_poster.get("previewPath", "") or "") if isinstance(video_poster, dict) else ""
         live_photo_metadata = asset_metadata.get("livePhoto") if isinstance(asset_metadata.get("livePhoto"), dict) else {}
         live_key_preview_path = str(live_photo_metadata.get("keyPhotoPreviewPath", "") or "") if isinstance(live_photo_metadata, dict) else ""
         asset_id = str(asset["assetId"]) if asset else ""
-        edit_stack = self.project.db.photo_edit_stack_by_asset(asset_id=asset_id) if asset_id else None
+        edit_stack = (
+            edit_stack_cache.get(asset_id)
+            if edit_stack_cache is not None and asset_id
+            else self.project.db.photo_edit_stack_by_asset(asset_id=asset_id) if asset_id else None
+        )
         edit_stack_version_count = 0
         if asset_id:
             if edit_stack_version_count_cache is not None:
@@ -5176,11 +7701,19 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     preview_path = str(rendered_edit_preview)
             except OSError:
                 pass
-        metadata = self.project.db.photo_asset_metadata_by_id(str(asset["assetId"])) if asset else {}
+        metadata = (
+            metadata_cache.get(asset_id, {})
+            if metadata_cache is not None and asset_id
+            else self.project.db.photo_asset_metadata_by_id(str(asset["assetId"])) if asset else {}
+        )
         date_override = str(metadata.get("dateOverride", "") or "") if metadata else ""
         asset_capture_date = str(asset.get("captureDate", "") or "") if asset else ""
         capture_date = date_override or (primary.capture_date if primary is not None else asset_capture_date or None)
-        asset_people_rows = self.project.db.list_photo_asset_people(asset_id) if asset_id else []
+        asset_people_rows = (
+            asset_people_cache.get(asset_id, [])
+            if asset_people_cache is not None and asset_id
+            else self.project.db.list_photo_asset_people(asset_id) if asset_id else []
+        )
         match_candidate_ids = {match.candidate_id for match in match_rows}
         people_rows = [
             {
@@ -5240,6 +7773,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "caption": str(metadata.get("caption", "") or "") if metadata else "",
             "keywords": metadata.get("keywords", []) if metadata else [],
             "favorite": bool(metadata.get("favorite", False)) if metadata else False,
+            "rating": max(0, min(5, int(metadata.get("rating", 0) or 0))) if metadata else 0,
+            "colorLabel": str(metadata.get("colorLabel", "") or "") if metadata else "",
+            "pickStatus": str(metadata.get("pickStatus", "") or "") if metadata else "",
             "hidden": bool(metadata.get("hidden", False)) if metadata else False,
             "deletedAt": str(metadata.get("deletedAt", "") or "") if metadata else "",
             "dateOverride": date_override,
@@ -5259,8 +7795,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "importSourceLabel": str(asset_metadata.get("importSourceLabel", "") or ""),
             "importSourceDetail": str(asset_metadata.get("importSourceDetail", "") or ""),
             "importedAt": str(asset_metadata.get("importedAt", "") or ""),
-            "albumMemberships": self._photo_album_memberships_for_asset(asset_id, source_path, album_membership_cache) if source_path else [],
-            "duplicateGroup": self.project.db.photo_duplicate_group_for_asset(asset_id) if asset_id else None,
+            "albumMemberships": (
+                album_memberships_cache.get(asset_id, [])
+                if album_memberships_cache is not None and asset_id
+                else self._photo_album_memberships_for_asset(asset_id, source_path, album_membership_cache) if source_path else []
+            ),
+            "duplicateGroup": (
+                duplicate_group_cache.get(asset_id)
+                if duplicate_group_cache is not None and asset_id
+                else self.project.db.photo_duplicate_group_for_asset(asset_id) if asset_id else None
+            ),
             "mediaPairs": media_pairs,
             "createdAt": primary.created_at if primary is not None else ((scan_date or str(asset.get("addedAt", "") or "")) if asset else scan_date),
             "status": primary.status if primary is not None else None,
@@ -5320,6 +7864,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             except (TypeError, ValueError):
                 return None
 
+        def int_list(value: Any, limit: int = 8) -> list[int]:
+            if not isinstance(value, list):
+                return []
+            result: list[int] = []
+            for item in value[:limit]:
+                parsed = optional_int(item)
+                if parsed is not None and parsed >= 0:
+                    result.append(parsed)
+            return result
+
         return ReviewCandidate(
             candidate_id=candidate_id,
             source_path=source_path,
@@ -5338,6 +7892,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             video_timestamp_ms=optional_int(payload.get("video_timestamp_ms", payload.get("videoTimestampMs"))),
             video_frame_index=optional_int(payload.get("video_frame_index", payload.get("videoFrameIndex"))),
             video_duration_ms=optional_int(payload.get("video_duration_ms", payload.get("videoDurationMs"))),
+            video_track_id=str(payload.get("video_track_id", payload.get("videoTrackId", "")) or ""),
+            video_track_version=str(payload.get("video_track_version", payload.get("videoTrackVersion", "")) or ""),
+            video_track_start_ms=optional_int(payload.get("video_track_start_ms", payload.get("videoTrackStartMs"))),
+            video_track_end_ms=optional_int(payload.get("video_track_end_ms", payload.get("videoTrackEndMs"))),
+            video_track_frame_count=max(0, int(number(payload.get("video_track_frame_count", payload.get("videoTrackFrameCount", 0)), 0.0))),
+            video_track_keyframe_timestamps_ms=int_list(payload.get("video_track_keyframe_timestamps_ms", payload.get("videoTrackKeyframeTimestampsMs", []))),
+            video_track_keyframe_indices=int_list(payload.get("video_track_keyframe_indices", payload.get("videoTrackKeyframeIndices", []))),
             source_hash=str(payload.get("source_hash", payload.get("sourceHash", "")) or ""),
             pose_bucket=str(payload.get("pose_bucket", payload.get("poseBucket", "unknown")) or "unknown"),
             created_at=str(payload.get("created_at", payload.get("createdAt", "")) or ""),
@@ -5354,7 +7915,32 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             review_lane=str(payload.get("review_lane", payload.get("reviewLane", "")) or ""),
         )
 
-    def _refresh_project_candidates_from_db(self) -> int:
+    def _refresh_project_candidates_from_db(self, candidate_ids: Iterable[str] | None = None) -> int:
+        clean_ids = [
+            value
+            for value in dict.fromkeys(str(candidate_id or "").strip() for candidate_id in (candidate_ids or []))
+            if value
+        ]
+        if clean_ids and getattr(self.project, "_candidate_index_backed", False):
+            try:
+                payloads = self.project.db.candidate_payloads_by_ids(clean_ids)
+            except Exception:
+                payloads = {}
+            loaded_count = 0
+            for candidate_id in clean_ids:
+                payload = payloads.get(candidate_id)
+                candidate = self._review_candidate_from_payload(payload) if isinstance(payload, dict) else None
+                if candidate is None:
+                    self.project.candidates.pop(candidate_id, None)
+                    self.project._loaded_candidate_ids.discard(candidate_id)
+                    self.project._loaded_candidate_payloads.pop(candidate_id, None)
+                    continue
+                self.project.candidates[candidate.candidate_id] = candidate
+                self.project._loaded_candidate_ids.add(candidate.candidate_id)
+                self.project._loaded_candidate_payloads[candidate.candidate_id] = asdict(candidate)
+                loaded_count += 1
+            self._invalidate_photo_matches_cache()
+            return loaded_count
         loaded: dict[str, ReviewCandidate] = {}
         for payload in self.project.db.iter_candidate_payloads():
             candidate = self._review_candidate_from_payload(payload)
@@ -5613,6 +8199,83 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             stack["items"] = items
         return stack
 
+    def _photo_culling_manifest_for_stack(
+        self,
+        stack: dict[str, Any],
+        *,
+        verify_files: bool,
+        changed_message: str = "A burst frame changed since it was indexed. Refresh or reimport the library before analyzing.",
+    ) -> tuple[list[dict[str, str]], dict[str, dict[str, Any]]]:
+        items = stack.get("items") if isinstance(stack.get("items"), list) else []
+        asset_ids = [str(item.get("assetId", "") or "") for item in items if isinstance(item, dict)]
+        assets = self.project.db.photo_assets_by_ids(asset_ids)
+        by_id = {
+            str(asset.get("assetId", "") or ""): asset
+            for asset in assets
+            if str(asset.get("assetId", "") or "")
+        }
+        manifest: list[dict[str, str]] = []
+        ordered_assets: dict[str, dict[str, Any]] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            asset_id = str(item.get("assetId", "") or "")
+            asset = by_id.get(asset_id)
+            source_path_text = str(asset.get("sourcePath", "") or "").strip() if asset else ""
+            if not asset or not asset_id or not source_path_text:
+                raise ValueError("One or more burst frames are missing or unavailable.")
+            source_path = Path(source_path_text).expanduser()
+            if not source_path.is_file():
+                raise ValueError("One or more burst frames are missing or unavailable.")
+            if verify_files and not self._photo_culling_file_signature_matches(asset):
+                raise ValueError(changed_message)
+            indexed_hash = str(asset.get("contentHash", "") or "").lower()
+            content_hash = indexed_hash
+            if verify_files or not re.fullmatch(r"[a-f0-9]{64}", indexed_hash):
+                content_hash = sha256_file(source_path)
+            if verify_files and re.fullmatch(r"[a-f0-9]{64}", indexed_hash) and content_hash != indexed_hash:
+                raise ValueError(changed_message)
+            if not re.fullmatch(r"[a-f0-9]{64}", content_hash):
+                raise ValueError("A burst frame has no valid content hash.")
+            manifest.append({"assetId": asset_id, "contentHash": content_hash})
+            ordered_assets[asset_id] = asset
+        if len(manifest) < 2 or len(manifest) != len(items):
+            raise ValueError("Assisted culling requires at least two valid burst frames.")
+        return manifest, ordered_assets
+
+    @staticmethod
+    def _photo_culling_file_signature_matches(asset: dict[str, Any] | None) -> bool:
+        if not isinstance(asset, dict):
+            return False
+        source_path = str(asset.get("sourcePath", "") or "").strip()
+        signature = asset.get("fileSignature") if isinstance(asset.get("fileSignature"), dict) else {}
+        try:
+            expected_size = int(signature.get("size"))
+            expected_mtime_ns = int(signature.get("mtimeNs"))
+            stat = Path(source_path).expanduser().stat()
+        except (OSError, TypeError, ValueError, OverflowError):
+            return False
+        return bool(
+            source_path
+            and stat.st_size == expected_size
+            and stat.st_mtime_ns == expected_mtime_ns
+        )
+
+    @staticmethod
+    def _photo_culling_cache_matches(
+        result: dict[str, Any] | None,
+        manifest: list[dict[str, str]],
+        *,
+        face_signals_allowed: bool,
+    ) -> bool:
+        if not isinstance(result, dict):
+            return False
+        return (
+            str(result.get("version", "") or "") == PHOTO_CULLING_VERSION
+            and result.get("sourceManifest") == manifest
+            and bool(result.get("faceSignalsAllowed", False)) == bool(face_signals_allowed)
+        )
+
     def list_photo_burst_stacks(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         body = params if isinstance(params, dict) else {}
         include_items = bool(body.get("includeItems", body.get("items", False)))
@@ -5639,6 +8302,40 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             if include_singles or len(infos) > 1
         ]
         stacks.sort(key=lambda stack: (-int(stack.get("count", 0) or 0), str(stack.get("name", "") or "").casefold()))
+        cached_by_stack = {
+            str(result.get("stackId", "") or ""): result
+            for result in self.project.db.photo_culling_results()
+            if isinstance(result, dict)
+        }
+        assets_by_source = {
+            str(asset.get("sourcePath", "") or ""): asset
+            for asset in burst_assets
+            if isinstance(asset, dict) and str(asset.get("sourcePath", "") or "")
+        }
+        face_signals_allowed = bool(self.consent_on_file)
+        for stack in stacks:
+            cached = cached_by_stack.get(str(stack.get("stackId", "") or ""))
+            if not cached:
+                continue
+            manifest = []
+            for source_path in stack.get("sourcePaths", []):
+                asset = assets_by_source.get(str(source_path or ""))
+                asset_id = str(asset.get("assetId", "") or "") if asset else ""
+                content_hash = str(asset.get("contentHash", "") or "").lower() if asset else ""
+                if (
+                    not asset_id
+                    or not re.fullmatch(r"[a-f0-9]{64}", content_hash)
+                    or not self._photo_culling_file_signature_matches(asset)
+                ):
+                    manifest = []
+                    break
+                manifest.append({"assetId": asset_id, "contentHash": content_hash})
+            if manifest and self._photo_culling_cache_matches(
+                cached,
+                manifest,
+                face_signals_allowed=face_signals_allowed,
+            ):
+                stack["culling"] = cached
         return {"total": len(stacks), "stacks": stacks}
 
     def set_photo_burst_selection(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -5727,6 +8424,268 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "stack": updated_stack,
         }
 
+    def photo_culling_status(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        del params
+        runtime = photo_culling_runtime_status()
+        fiqa = fiqa_model_report(validate_runtime=False)
+        runtime["faceSignalsAllowed"] = bool(self.consent_on_file)
+        runtime["faceSignalsReason"] = (
+            "Face quality and eye-state signals are enabled."
+            if self.consent_on_file
+            else "Face quality and eye-state signals require face-processing consent."
+        )
+        runtime["fiqa"] = {
+            key: fiqa.get(key)
+            for key in ("available", "runtimeReady", "engine", "modelId", "modelName", "license", "sha256", "sourceCommit", "reason")
+            if key in fiqa
+        }
+        runtime["privacyDefault"] = "local-review-only"
+        return runtime
+
+    def _photo_culling_face_analyzer(self) -> tuple[Any | None, str]:
+        if not self.consent_on_file:
+            return None, "consent-required"
+        try:
+            engine = self._engine_instance()
+        except Exception:
+            return None, "unavailable"
+        engine_name = str(getattr(engine, "model_name", "") or "")
+        if not engine_name.startswith("insightface-"):
+            return None, engine_name or "unavailable"
+
+        def analyze(image: Any, source_path: Path) -> list[dict[str, Any]]:
+            rows: list[dict[str, Any]] = []
+            for embedding in engine.embed_loaded_image(image, source_path)[:8]:
+                if embedding.bbox is None:
+                    continue
+                rows.append({
+                    "bbox": list(embedding.bbox),
+                    "quality": float(embedding.quality or 0.0),
+                    "fiqaScore": float(embedding.fiqa_score or 0.0) if float(embedding.fiqa_score or 0.0) > 0 else None,
+                })
+            return rows
+
+        return analyze, engine_name
+
+    def analyze_photo_burst_culling(
+        self,
+        params: dict[str, Any],
+        *,
+        progress: Any | None = None,
+        frame_runner: Any | None = None,
+    ) -> dict[str, Any]:
+        stack_id = str(params.get("stackId", "") or "").strip()
+        visibility = self._normalize_photo_visibility_filter(
+            params.get("visibility", params.get("visibilityState", "")),
+            hidden_only=bool(params.get("hiddenOnly", False)),
+            deleted_only=bool(params.get("deletedOnly", False)),
+        ) or "visible"
+        stacks = self.list_photo_burst_stacks({
+            "includeItems": True,
+            "includeSingles": False,
+            "visibility": visibility,
+        }).get("stacks", [])
+        stack = next((row for row in stacks if str(row.get("stackId", "") or "") == stack_id), None)
+        if stack is None:
+            raise ValueError("The selected visible burst stack was not found.")
+        items = stack.get("items") if isinstance(stack.get("items"), list) else []
+        if len(items) > MAX_CULLING_FRAMES:
+            raise ValueError(f"Assisted culling supports at most {MAX_CULLING_FRAMES} frames per burst.")
+        manifest, assets_by_id = self._photo_culling_manifest_for_stack(stack, verify_files=True)
+        face_signals_allowed = bool(self.consent_on_file)
+        with self._photo_culling_lock:
+            cached = self.project.db.photo_culling_result_by_stack(stack_id)
+            if not bool(params.get("force", False)) and self._photo_culling_cache_matches(
+                cached,
+                manifest,
+                face_signals_allowed=face_signals_allowed,
+            ):
+                return {
+                    "result": cached,
+                    "cached": True,
+                    "offline": True,
+                    "recommendationOnly": True,
+                    "automaticDeletion": False,
+                }
+
+        face_analyzer, face_engine = self._photo_culling_face_analyzer()
+        people_by_id = self.project.db.photo_asset_people_by_ids(assets_by_id.keys()) if face_signals_allowed else {}
+        fiqa = fiqa_model_report(validate_runtime=False)
+        analyzed_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        frames: list[dict[str, Any]] = []
+        total = len(items)
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            asset_id = str(item.get("assetId", "") or "")
+            asset = assets_by_id.get(asset_id)
+            if asset is None:
+                raise ValueError("A burst frame disappeared while assisted culling was running.")
+            if progress:
+                progress({
+                    "phase": "scoring",
+                    "processed": index,
+                    "total": total,
+                    "message": f"Scoring burst frame {index + 1} of {total}",
+                }, "photo_culling")
+            if frame_runner is not None:
+                metrics = frame_runner(
+                    asset,
+                    face_signals_allowed=face_signals_allowed,
+                    face_analyzer=face_analyzer,
+                )
+            else:
+                metrics = analyze_culling_frame(
+                    str(asset.get("sourcePath", "") or ""),
+                    face_signals_allowed=face_signals_allowed,
+                    face_analyzer=face_analyzer,
+                )
+            if not isinstance(metrics, dict):
+                raise ValueError("The local culling scorer returned an invalid frame result.")
+            indexed_qualities: list[float] = []
+            for row in people_by_id.get(asset_id, []):
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    quality = float(row.get("quality", 0.0) or 0.0)
+                except (TypeError, ValueError, OverflowError):
+                    quality = 0.0
+                if math.isfinite(quality) and quality > 0:
+                    indexed_qualities.append(max(0.0, min(1.0, quality)))
+            if metrics.get("faceQuality") is None and indexed_qualities:
+                metrics["faceQuality"] = round(
+                    0.65 * (sum(indexed_qualities) / len(indexed_qualities)) + 0.35 * min(indexed_qualities),
+                    6,
+                )
+                metrics["faceQualitySource"] = "indexed-production-face-quality"
+                metrics["facesDetected"] = max(int(metrics.get("facesDetected", 0) or 0), len(indexed_qualities))
+            frames.append({
+                "assetId": asset_id,
+                "sequence": int(item.get("sequence", index + 1) or index + 1),
+                **metrics,
+            })
+        if progress:
+            progress({"phase": "ranking", "processed": total, "total": total, "message": "Ranking burst frames"}, "photo_culling")
+        face_quality_sources = sorted({
+            str(frame.get("faceQualitySource", "") or "")
+            for frame in frames
+            if frame.get("faceQuality") is not None and str(frame.get("faceQualitySource", "") or "")
+        })
+        uses_live_fiqa = "ediffiqa-t" in face_quality_sources
+        uses_live_face_engine = any(source in {"ediffiqa-t", "embedding-quality-fallback"} for source in face_quality_sources)
+        result = build_photo_culling_result(
+            frames,
+            stack_id=stack_id,
+            source_manifest=manifest,
+            analyzed_at=analyzed_at,
+            face_signals_allowed=face_signals_allowed,
+            provenance={
+                "faceQualitySource": ",".join(face_quality_sources),
+                "faceQualityModelId": fiqa.get("modelId", "") if uses_live_fiqa else "",
+                "faceQualityModelVersion": fiqa.get("sourceCommit", fiqa.get("sha256", "")) if uses_live_fiqa else "",
+                "faceQualityLicense": fiqa.get("license", "") if uses_live_fiqa else "",
+                "faceEngine": face_engine if uses_live_face_engine else "",
+            },
+        )
+        with self._photo_culling_lock:
+            saved = self.project.db.save_photo_culling_result(result)
+        self.project._append_audit({
+            "action": "analyze_photo_burst_culling",
+            "stack_id": stack_id,
+            "analysis_id": saved.get("analysisId", ""),
+            "result_sha256": saved.get("resultSha256", ""),
+            "frame_count": len(saved.get("frames", [])),
+            "recommended_asset_id": saved.get("recommendedAssetId", ""),
+            "recommendation_only": True,
+            "automatic_deletion": False,
+            "face_signals_allowed": face_signals_allowed,
+            "offline": True,
+        })
+        if progress:
+            progress({"phase": "complete", "processed": total, "total": total, "message": "Burst recommendation ready"}, "photo_culling")
+        return {
+            "result": saved,
+            "cached": False,
+            "offline": True,
+            "recommendationOnly": True,
+            "automaticDeletion": False,
+        }
+
+    def apply_photo_culling_recommendation(self, params: dict[str, Any]) -> dict[str, Any]:
+        if params.get("confirm") is not True:
+            raise ValueError("Using an assisted-culling recommendation requires explicit confirmation.")
+        stack_id = str(params.get("stackId", "") or "").strip()
+        analysis_id = str(params.get("analysisId", "") or "").strip()
+        idempotency_key = str(params.get("idempotencyKey", "") or "").strip()
+        if not idempotency_key or len(idempotency_key) > 160:
+            raise ValueError("A non-empty idempotencyKey of at most 160 characters is required.")
+        idempotency_sha256 = hashlib.sha256(f"photo-culling:{idempotency_key}".encode("utf-8")).hexdigest()
+        with self._photo_culling_lock:
+            result = self.project.db.photo_culling_result_by_stack(stack_id)
+            if result is None or str(result.get("analysisId", "") or "") != analysis_id:
+                raise ValueError("The assisted-culling recommendation is missing or stale. Analyze the burst again.")
+            application = result.get("application") if isinstance(result.get("application"), dict) else {}
+            if str(application.get("idempotencyKeySha256", "") or "") == idempotency_sha256:
+                return {
+                    "result": result,
+                    "selection": {},
+                    "idempotentReplay": True,
+                    "recommendationOnly": True,
+                    "automaticDeletion": False,
+                }
+            expected_result_hash = str(params.get("resultSha256", "") or "").strip().lower()
+            if expected_result_hash and expected_result_hash != str(result.get("resultSha256", "") or ""):
+                raise ValueError("The assisted-culling result changed after it was opened. Analyze the burst again.")
+            stacks = self.list_photo_burst_stacks({"includeItems": True, "includeSingles": False, "visibility": "all"}).get("stacks", [])
+            stack = next((row for row in stacks if str(row.get("stackId", "") or "") == stack_id), None)
+            if stack is None:
+                raise ValueError("The burst stack is no longer available.")
+            manifest, _assets = self._photo_culling_manifest_for_stack(
+                stack,
+                verify_files=True,
+                changed_message="A burst frame changed after analysis. Analyze the burst again.",
+            )
+            if not self._photo_culling_cache_matches(
+                result,
+                manifest,
+                face_signals_allowed=bool(self.consent_on_file),
+            ):
+                raise ValueError("A burst frame or consent setting changed after analysis. Analyze the burst again.")
+            recommended_asset_id = str(result.get("recommendedAssetId", "") or "")
+            recommended_item = next(
+                (item for item in stack.get("items", []) if str(item.get("assetId", "") or "") == recommended_asset_id),
+                None,
+            )
+            if not isinstance(recommended_item, dict):
+                raise ValueError("The recommended burst frame is no longer available.")
+            selection = self.set_photo_burst_selection({
+                "stackId": stack_id,
+                "keepSourcePaths": [str(recommended_item.get("sourcePath", "") or "")],
+            })
+            applied_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            result["application"] = {
+                "idempotencyKeySha256": idempotency_sha256,
+                "assetId": recommended_asset_id,
+                "appliedAt": applied_at,
+            }
+            saved = self.project.db.save_photo_culling_result(result)
+        self.project._append_audit({
+            "action": "apply_photo_culling_recommendation",
+            "stack_id": stack_id,
+            "analysis_id": analysis_id,
+            "recommended_asset_id": recommended_asset_id,
+            "selected_count": 1,
+            "deleted_count": 0,
+            "automatic_deletion": False,
+        })
+        return {
+            "result": saved,
+            "selection": selection,
+            "idempotentReplay": False,
+            "recommendationOnly": True,
+            "automaticDeletion": False,
+        }
+
     def _photo_source_entry(
         self,
         *,
@@ -5797,11 +8756,20 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         asset_rows = [asset for asset in assets if isinstance(asset, dict)]
         if not asset_rows:
             return []
-        matches = matches_by_source if matches_by_source is not None else self._photo_matches_by_source()
+        matches = (
+            matches_by_source
+            if matches_by_source is not None
+            else self._photo_matches_by_source_for_source_paths(
+                str(asset.get("sourcePath", "") or "") for asset in asset_rows
+            )
+        )
         metadata_by_asset_id = self.project.db.photo_asset_metadata_by_ids(
             str(asset.get("assetId", "") or "") for asset in asset_rows
         )
         edit_stack_asset_ids = self.project.db.photo_edit_stack_asset_ids_for_assets(
+            str(asset.get("assetId", "") or "") for asset in asset_rows
+        )
+        people_by_asset_id = self.project.db.photo_asset_people_by_ids(
             str(asset.get("assetId", "") or "") for asset in asset_rows
         )
         entries: list[dict[str, Any]] = []
@@ -5820,6 +8788,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             entry["_assetId"] = asset_id
             entry["_asset"] = asset
             entry["_hasEditStack"] = asset_id in edit_stack_asset_ids
+            entry["_peopleRows"] = people_by_asset_id.get(asset_id, [])
             entry["edited"] = asset_id in edit_stack_asset_ids or bool(entry["_metadata"].get("edited", False))
             entries.append(entry)
         return entries
@@ -5954,6 +8923,32 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         clean_term = re.sub(r"[^a-z0-9]+", " ", str(term or "").casefold()).strip()
         return self._photo_utility_classifier_term_matches_normalized(normalized, clean_term)
 
+    def _photo_utility_classifier_match_context(
+        self,
+        *,
+        source_path: str,
+        metadata: dict[str, Any],
+        asset_metadata: dict[str, Any],
+    ) -> PhotoUtilityClassifierMatchContext:
+        fields = self._photo_utility_classifier_field_values(
+            source_path=source_path,
+            metadata=metadata,
+            asset_metadata=asset_metadata,
+        )
+        normalized_fields: list[PhotoUtilityClassifierFieldContext] = []
+        for field, label, value in fields:
+            normalized = self._photo_utility_classifier_normalized_text(value)
+            normalized_fields.append((field, label, value, normalized, f" {normalized} ", normalized.replace(" ", "")))
+        joined_text = " ".join(value for _field, _label, value in fields if str(value or "").strip())
+        joined_normalized = self._photo_utility_classifier_normalized_text(joined_text)
+        return (
+            normalized_fields,
+            joined_text,
+            joined_normalized,
+            f" {joined_normalized} ",
+            joined_normalized.replace(" ", ""),
+        )
+
     def _clean_photo_utility_classifier_review(self, value: Any) -> dict[str, Any]:
         review = value if isinstance(value, dict) else {}
         raw_entries = review.get("entries", []) if isinstance(review.get("entries", []), list) else []
@@ -6032,33 +9027,33 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         source_path: str,
         metadata: dict[str, Any],
         asset_metadata: dict[str, Any],
+        match_context: PhotoUtilityClassifierMatchContext | None = None,
     ) -> dict[str, str] | None:
         classifier = PHOTO_UTILITY_CLASSIFIERS.get(str(classifier_id or ""))
         if not classifier:
             return None
-        fields = self._photo_utility_classifier_field_values(
+        normalized_fields, joined_text, joined_normalized, joined_padded, joined_compact = match_context or self._photo_utility_classifier_match_context(
             source_path=source_path,
             metadata=metadata,
             asset_metadata=asset_metadata,
         )
-        normalized_fields = [
-            (field, label, value, self._photo_utility_classifier_normalized_text(value))
-            for field, label, value in fields
-        ]
-        joined_text = " ".join(value for _field, _label, value in fields if str(value or "").strip())
-        joined_normalized = self._photo_utility_classifier_normalized_text(joined_text)
+
+        def prepared_term_matches(normalized: str, padded: str, compact: str, clean_term: str) -> bool:
+            if not normalized or not clean_term:
+                return False
+            if " " in clean_term:
+                return f" {clean_term} " in padded
+            return f" {clean_term} " in padded or clean_term in {compact, compact[:len(clean_term)]}
 
         def clip(value: Any) -> str:
             text = re.sub(r"\s+", " ", str(value or "")).strip()
             return text if len(text) <= 180 else text[:177].rstrip() + "..."
 
-        for term in classifier.get("terms", ()):
-            clean_term = re.sub(r"\s+", " ", str(term or "").strip())
-            normalized_term = self._photo_utility_classifier_normalized_text(clean_term)
+        for clean_term, normalized_term in PHOTO_UTILITY_CLASSIFIER_TERMS.get(str(classifier_id or ""), ()):
             if not normalized_term:
                 continue
-            for field, label, value, normalized_value in normalized_fields:
-                if self._photo_utility_classifier_term_matches_normalized(normalized_value, normalized_term):
+            for field, label, value, normalized_value, padded_value, compact_value in normalized_fields:
+                if prepared_term_matches(normalized_value, padded_value, compact_value, normalized_term):
                     review_action = self._photo_utility_classifier_review_action(
                         classifier_id=str(classifier_id or ""),
                         field=field,
@@ -6080,7 +9075,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     if review_action == "confirmed":
                         evidence["reviewAction"] = "confirmed"
                     return evidence
-            if self._photo_utility_classifier_term_matches_normalized(joined_normalized, normalized_term):
+            if prepared_term_matches(joined_normalized, joined_padded, joined_compact, normalized_term):
                 review_action = self._photo_utility_classifier_review_action(
                     classifier_id=str(classifier_id or ""),
                     field="metadata",
@@ -6195,7 +9190,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     if isinstance(item, (str, int, float)) and not isinstance(item, bool):
                         direct_name = self._clean_photo_pet_label(item)
             if direct_name:
-                records.append({"name": direct_name, "kind": direct_kind})
+                # A structured pet record is one entity. Do not recursively
+                # reinterpret provenance values such as `source: manual` as
+                # additional pet names after its explicit name is known.
+                return [{"name": direct_name, "kind": direct_kind}]
             for key, item in value.items():
                 normalized_key = re.sub(r"[^a-z0-9]+", "", str(key or "").casefold())
                 if normalized_key in {"confidence", "score", "probability", "bbox", "bounds", "x", "y", "width", "height"}:
@@ -6550,9 +9548,15 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 sorted(str(path or "") for path in generated_source_paths if str(path or "")),
                 matches_by_source=matches_by_source,
             )
-        matches = matches_by_source or self._photo_matches_by_source()
         total = self.project.db.count_photo_assets()
         assets = self.project.db.list_photo_assets(offset=0, limit=max(1, total)) if total else []
+        matches = (
+            matches_by_source
+            if matches_by_source is not None
+            else self._photo_matches_by_source_for_source_paths(
+                str(asset.get("sourcePath", "") or "") for asset in assets
+            )
+        )
         metadata_by_asset_id = self.project.db.photo_asset_metadata_by_ids(
             str(asset.get("assetId", "") or "") for asset in assets
         )
@@ -6699,6 +9703,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "album": "album",
             "albums": "album",
             "caption": "caption",
+            "color": "colorLabel",
+            "colorlabel": "colorLabel",
             "capturedate": "date",
             "camera": "camera",
             "cameramake": "camera",
@@ -6805,6 +9811,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "ocrtext": "ocrText",
             "ocrtextconfidence": "ocrConfidence",
             "path": "path",
+            "pick": "pickStatus",
+            "picked": "pickStatus",
+            "pickstatus": "pickStatus",
             "place": "location",
             "people": "person",
             "peoplecount": "personCount",
@@ -6818,8 +9827,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "pixelwidth": "width",
             "quality": "quality",
             "query": "query",
+            "rating": "rating",
+            "stars": "rating",
+            "starrating": "rating",
             "recent": "recentDays",
             "recentdays": "recentDays",
+            "reject": "pickStatus",
+            "rejected": "pickStatus",
             "resolution": "dimensions",
             "reviewstatus": "status",
             "scan": "addedDate",
@@ -7275,40 +10289,74 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         key = str(token or "").strip().casefold()
         if not key:
             return False
+        return key in self._photo_sql_known_person_tokens([token])
+
+    def _photo_sql_known_person_tokens(self, tokens: Iterable[Any]) -> set[str]:
+        keys = {str(token or "").strip().casefold() for token in tokens if str(token or "").strip()}
+        if not keys:
+            return set()
         try:
             with self.project.db.connect() as conn:
-                row = conn.execute(
-                    """
-                    SELECT 1
+                placeholders = ",".join("?" for _ in keys)
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT LOWER(TRIM(COALESCE(person_name, ''))) AS person_key
                     FROM photo_asset_people
-                    WHERE LOWER(TRIM(COALESCE(person_name, ''))) = ?
+                    WHERE LOWER(TRIM(COALESCE(person_name, ''))) IN ({placeholders})
                         AND TRIM(COALESCE(person_name, '')) != ''
-                    LIMIT 1
                     """,
-                    (key,),
-                ).fetchone()
-                return bool(row)
+                    tuple(keys),
+                ).fetchall()
+                return {str(row["person_key"] or "") for row in rows if str(row["person_key"] or "")}
         except Exception:
-            return False
+            return set()
 
-    def _photo_sql_token_is_known_pet(self, token: str) -> bool:
-        pet = self._clean_photo_pet_label(token)
-        key = pet.casefold()
-        if not key:
-            return False
+    def _photo_pet_marker_values_by_key(self, keys: Iterable[str]) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for key in keys:
+            clean_key = str(key or "").strip().casefold()
+            if not clean_key:
+                continue
+            for prefix in ("pet", *PHOTO_PET_KIND_TERMS.keys()):
+                for value in (
+                    f"{prefix}:{clean_key}",
+                    f"{prefix}: {clean_key}",
+                    f"{prefix}={clean_key}",
+                    f"{prefix}= {clean_key}",
+                    f"{prefix} = {clean_key}",
+                    f"{prefix}-{clean_key}",
+                    f"{prefix}- {clean_key}",
+                    f"{prefix} - {clean_key}",
+                ):
+                    mapping[value] = clean_key
+        return mapping
+
+    def _photo_sql_known_pet_tokens(self, tokens: Iterable[Any]) -> set[str]:
+        keys = {
+            self._clean_photo_pet_label(token).casefold()
+            for token in tokens
+            if self._clean_photo_pet_label(token)
+        }
+        if not keys:
+            return set()
+        known: set[str] = set()
         try:
             for profile in self.project.db.list_photo_pet_profiles().values():
-                if self._clean_photo_pet_label(profile.get("petName", "")).casefold() == key:
-                    return True
+                key = self._clean_photo_pet_label(profile.get("petName", "")).casefold()
+                if key in keys:
+                    known.add(key)
         except Exception:
-            return False
+            pass
         try:
             for group in self.project.db.list_photo_people_groups():
                 for group_pet in (*group.get("memberPets", []), *group.get("excludePets", [])):
-                    if self._clean_photo_pet_label(group_pet).casefold() == key:
-                        return True
+                    key = self._clean_photo_pet_label(group_pet).casefold()
+                    if key in keys:
+                        known.add(key)
         except Exception:
-            return False
+            pass
+        if known == keys:
+            return known
         scalar_paths = ("$.petName", "$.animalName")
         array_paths = ("$.petNames", "$.animalNames")
         record_paths = ("$.pets", "$.animals")
@@ -7319,94 +10367,108 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "value",
             *PHOTO_PET_NAME_KEYS,
         }))
-        marker_values = tuple(
-            value
-            for prefix in ("pet", *PHOTO_PET_KIND_TERMS.keys())
-            for value in (
-                f"{prefix}:{key}",
-                f"{prefix}: {key}",
-                f"{prefix}={key}",
-                f"{prefix}= {key}",
-                f"{prefix} = {key}",
-                f"{prefix}-{key}",
-                f"{prefix}- {key}",
-                f"{prefix} - {key}",
-            )
-        )
         try:
             with self.project.db.connect() as conn:
+                key_values = tuple(sorted(keys))
+                key_sql = ",".join("?" for _ in key_values)
                 for path in scalar_paths:
-                    if conn.execute(
+                    expr = f"LOWER(COALESCE(CAST(json_extract(COALESCE(metadata_json, '{{}}'), '{path}') AS TEXT), ''))"
+                    rows = conn.execute(
                         f"""
-                        SELECT 1
+                        SELECT DISTINCT {expr} AS value
                         FROM photo_assets
-                        WHERE LOWER(COALESCE(CAST(json_extract(COALESCE(metadata_json, '{{}}'), '{path}') AS TEXT), '')) = ?
-                        LIMIT 1
+                        WHERE {expr} IN ({key_sql})
                         """,
-                        (key,),
-                    ).fetchone():
-                        return True
+                        key_values,
+                    ).fetchall()
+                    known.update(str(row["value"] or "") for row in rows if str(row["value"] or "") in keys)
+                    if known == keys:
+                        return known
                 for path in array_paths:
                     array_expr = (
                         f"CASE WHEN json_type(COALESCE(metadata_json, '{{}}'), '{path}') = 'array' "
                         f"THEN json_extract(COALESCE(metadata_json, '{{}}'), '{path}') ELSE '[]' END"
                     )
-                    if conn.execute(
+                    rows = conn.execute(
                         f"""
-                        SELECT 1
-                        FROM photo_assets
-                        WHERE EXISTS (
-                            SELECT 1
-                            FROM json_each({array_expr}) AS jp
-                            WHERE jp.type IN ('text', 'integer', 'real')
-                                AND LOWER(CAST(jp.value AS TEXT)) = ?
-                        )
-                        LIMIT 1
+                        SELECT DISTINCT LOWER(CAST(jp.value AS TEXT)) AS value
+                        FROM photo_assets AS a, json_each({array_expr}) AS jp
+                        WHERE jp.type IN ('text', 'integer', 'real')
+                            AND LOWER(CAST(jp.value AS TEXT)) IN ({key_sql})
                         """,
-                        (key,),
-                    ).fetchone():
-                        return True
+                        key_values,
+                    ).fetchall()
+                    known.update(str(row["value"] or "") for row in rows if str(row["value"] or "") in keys)
+                    if known == keys:
+                        return known
                 name_key_sql = ",".join("?" for _ in name_keys)
                 for path in record_paths:
                     record_expr = (
                         f"CASE WHEN json_type(COALESCE(metadata_json, '{{}}'), '{path}') IN ('array', 'object') "
                         f"THEN json_extract(COALESCE(metadata_json, '{{}}'), '{path}') ELSE '[]' END"
                     )
-                    if conn.execute(
+                    rows = conn.execute(
                         f"""
-                        SELECT 1
-                        FROM photo_assets
-                        WHERE EXISTS (
-                            SELECT 1
-                            FROM json_tree({record_expr}) AS jpt
-                            WHERE jpt.type IN ('text', 'integer', 'real')
-                                AND LOWER(COALESCE(CAST(jpt.key AS TEXT), '')) IN ({name_key_sql})
-                                AND LOWER(CAST(jpt.value AS TEXT)) = ?
-                        )
-                        LIMIT 1
+                        SELECT DISTINCT LOWER(CAST(jpt.value AS TEXT)) AS value
+                        FROM photo_assets AS a, json_tree({record_expr}) AS jpt
+                        WHERE jpt.type IN ('text', 'integer', 'real')
+                            AND LOWER(COALESCE(CAST(jpt.key AS TEXT), '')) IN ({name_key_sql})
+                            AND LOWER(CAST(jpt.value AS TEXT)) IN ({key_sql})
                         """,
-                        (*name_keys, key),
-                    ).fetchone():
-                        return True
-                marker_sql = ",".join("?" for _ in marker_values)
-                if conn.execute(
-                    f"""
-                    SELECT 1
-                    FROM photo_assets
-                    WHERE EXISTS (
-                        SELECT 1
-                        FROM json_tree(COALESCE(metadata_json, '{{}}')) AS jpm
+                        (*name_keys, *key_values),
+                    ).fetchall()
+                    known.update(str(row["value"] or "") for row in rows if str(row["value"] or "") in keys)
+                    if known == keys:
+                        return known
+                marker_by_value = self._photo_pet_marker_values_by_key(keys)
+                if marker_by_value:
+                    marker_values = tuple(sorted(marker_by_value))
+                    marker_sql = ",".join("?" for _ in marker_values)
+                    rows = conn.execute(
+                        f"""
+                        SELECT DISTINCT LOWER(TRIM(CAST(jpm.value AS TEXT))) AS value
+                        FROM photo_assets AS a, json_tree(COALESCE(metadata_json, '{{}}')) AS jpm
                         WHERE jpm.type IN ('text', 'integer', 'real')
                             AND LOWER(TRIM(CAST(jpm.value AS TEXT))) IN ({marker_sql})
-                    )
-                    LIMIT 1
-                    """,
-                    marker_values,
-                ).fetchone():
-                    return True
+                        """,
+                        marker_values,
+                    ).fetchall()
+                    for row in rows:
+                        value = str(row["value"] or "")
+                        key = marker_by_value.get(value, "")
+                        if key:
+                            known.add(key)
         except Exception:
+            return known
+        return known
+
+    def _photo_sql_tokens_may_be_pet(self, tokens: Iterable[Any]) -> bool:
+        keys = {
+            self._clean_photo_pet_label(token).casefold()
+            for token in tokens
+            if self._clean_photo_pet_label(token)
+        }
+        if not keys:
             return False
-        return False
+        if self._photo_sql_known_pet_tokens(keys):
+            return True
+        try:
+            with self.project.db.connect() as conn:
+                clauses = " OR ".join("LOWER(COALESCE(metadata_json, '')) LIKE ?" for _ in keys)
+                row = conn.execute(
+                    f"SELECT 1 FROM photo_assets WHERE {clauses} LIMIT 1",
+                    tuple(f"%{key}%" for key in sorted(keys)),
+                ).fetchone()
+                return bool(row)
+        except Exception:
+            return True
+
+    def _photo_sql_token_is_known_pet(self, token: str) -> bool:
+        pet = self._clean_photo_pet_label(token)
+        key = pet.casefold()
+        if not key:
+            return False
+        return key in self._photo_sql_known_pet_tokens([pet])
 
     def _photo_smart_album_sql_people_group_spec(
         self,
@@ -7444,6 +10506,45 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             if len(member_people) + len(member_pets) < 2:
                 return None
             return member_people, excluded_people, member_pets, excluded_pets
+
+        known_pet_cache: dict[tuple[str, ...], set[str]] = {}
+        known_person_cache: dict[tuple[str, ...], set[str]] = {}
+        may_be_pet_cache: dict[tuple[str, ...], bool] = {}
+
+        def pet_key(raw: Any) -> str:
+            return self._clean_photo_pet_label(raw).casefold()
+
+        def person_key(raw: Any) -> str:
+            return str(raw or "").strip().casefold()
+
+        def token_cache_key(values: Iterable[Any], *, pet_labels: bool = False) -> tuple[str, ...]:
+            if pet_labels:
+                return tuple(sorted({pet_key(value) for value in values if pet_key(value)}))
+            return tuple(sorted({person_key(value) for value in values if person_key(value)}))
+
+        def known_pet_keys(values: Iterable[Any]) -> set[str]:
+            cache_key = token_cache_key(values, pet_labels=True)
+            if not cache_key:
+                return set()
+            if cache_key not in known_pet_cache:
+                known_pet_cache[cache_key] = self._photo_sql_known_pet_tokens(cache_key)
+            return known_pet_cache[cache_key]
+
+        def known_person_keys(values: Iterable[Any]) -> set[str]:
+            cache_key = token_cache_key(values)
+            if not cache_key:
+                return set()
+            if cache_key not in known_person_cache:
+                known_person_cache[cache_key] = self._photo_sql_known_person_tokens(cache_key)
+            return known_person_cache[cache_key]
+
+        def tokens_may_be_pet(values: Iterable[Any]) -> bool:
+            cache_key = token_cache_key(values, pet_labels=True)
+            if not cache_key:
+                return False
+            if cache_key not in may_be_pet_cache:
+                may_be_pet_cache[cache_key] = self._photo_sql_tokens_may_be_pet(cache_key)
+            return may_be_pet_cache[cache_key]
 
         if text.startswith("group:saved:"):
             group_id = text[len("group:saved:"):].strip()
@@ -7486,12 +10587,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]] | None:
             people: list[str] = []
             pets: list[str] = []
+            parts = [str(raw or "").strip() for raw in parts if str(raw or "").strip()]
+            pet_keys = known_pet_keys(parts)
+            person_keys = known_person_keys(parts)
             for raw in parts:
                 token = str(raw or "").strip()
-                if not token:
-                    continue
-                is_pet = self._photo_sql_token_is_known_pet(token)
-                is_person = self._photo_sql_token_is_known_person(token)
+                is_pet = pet_key(token) in pet_keys
+                is_person = person_key(token) in person_keys
                 if is_pet and is_person:
                     return None
                 if is_pet:
@@ -7505,32 +10607,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             return (clean_people_values, (), clean_pet_values, ()) if len(clean_people_values) + len(clean_pet_values) >= 2 else None
 
         def token_may_be_pet(tokens: Iterable[str]) -> bool:
-            token_keys = {str(token or "").strip().casefold() for token in tokens if str(token or "").strip()}
-            if not token_keys:
-                return False
-            try:
-                for profile in self.project.db.list_photo_pet_profiles().values():
-                    if self._clean_photo_pet_label(profile.get("petName", "")).casefold() in token_keys:
-                        return True
-            except Exception:
-                pass
-            for group in self.project.db.list_photo_people_groups():
-                for pet in (*group.get("memberPets", []), *group.get("excludePets", [])):
-                    if self._clean_photo_pet_label(pet).casefold() in token_keys:
-                        return True
-            try:
-                with self.project.db.connect() as conn:
-                    for token in token_keys:
-                        if not token:
-                            continue
-                        if conn.execute(
-                            "SELECT 1 FROM photo_assets WHERE LOWER(COALESCE(metadata_json, '')) LIKE ? LIMIT 1",
-                            (f"%{token}%",),
-                        ).fetchone():
-                            return True
-            except Exception:
-                return True
-            return False
+            return tokens_may_be_pet(tokens)
 
         parsed_people: tuple[str, ...] = ()
         if "&" in text:
@@ -7729,20 +10806,33 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         matched = math.isclose(actual_number, target)
         return not matched if operator == "isNot" else matched
 
+    def _photo_query_recent_cutoff_date(self, expected: Any) -> str:
+        try:
+            days = max(1, min(3650, int(float(self._photo_query_values(expected)[0]))))
+        except (TypeError, ValueError, IndexError):
+            return ""
+        return (datetime.utcnow().date() - timedelta(days=days)).isoformat()
+
     def _photo_query_date_matches(self, actual: str, operator: str, expected: Any) -> bool:
+        actual_date = str(actual or "")[:10]
+        if operator == "withinLast":
+            target = self._photo_query_recent_cutoff_date(expected)
+            if not re.match(r"^\d{4}-\d{2}-\d{2}$", actual_date) or not target:
+                return False
+            return actual_date >= target
         values = self._photo_query_values(expected)
         target = str(values[0] if values else "")[:10]
-        if not re.match(r"^\d{4}-\d{2}-\d{2}$", actual or "") or not re.match(r"^\d{4}-\d{2}-\d{2}$", target):
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", actual_date) or not re.match(r"^\d{4}-\d{2}-\d{2}$", target):
             return False
         if operator in {"greaterThan"}:
-            return actual > target
+            return actual_date > target
         if operator in {"atLeast", "onOrAfter"}:
-            return actual >= target
+            return actual_date >= target
         if operator in {"lessThan"}:
-            return actual < target
+            return actual_date < target
         if operator in {"atMost", "onOrBefore"}:
-            return actual <= target
-        matched = actual == target
+            return actual_date <= target
+        matched = actual_date == target
         return not matched if operator == "isNot" else matched
 
     def _photo_album_entry_matches_query_condition(
@@ -7806,6 +10896,22 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 return False
             matched = bool(metadata.get("favorite", False)) == target
             return not matched if operator == "isNot" else matched
+        if field == "rating":
+            return self._photo_query_number_matches(metadata.get("rating", 0), operator, expected)
+        if field == "colorLabel":
+            try:
+                expected = self.project.db._normalize_photo_color_label(expected)  # noqa: SLF001
+            except ValueError:
+                return False
+            matched = str(metadata.get("colorLabel", "") or "") == expected
+            return not matched if operator in {"isNot", "notContains"} else matched
+        if field == "pickStatus":
+            try:
+                expected = self.project.db._normalize_photo_pick_status(expected)  # noqa: SLF001
+            except ValueError:
+                return False
+            matched = str(metadata.get("pickStatus", "") or "") == expected
+            return not matched if operator in {"isNot", "notContains"} else matched
         if field == "edited":
             target = self._photo_query_bool(expected)
             if target is None:
@@ -8360,17 +11466,31 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             assets = page.get("assets", []) if isinstance(page.get("assets", []), list) else []
             return int(page.get("total", 0) or 0), self._photo_entries_for_assets(assets[:clean_limit])
 
-        source_paths = self._photo_smart_album_materialized_source_paths(album)
-        if source_paths is not None:
+        cache = self._photo_smart_album_materialized_cache(album)
+        if cache is not None:
+            album_id = str(album.get("albumId", "") or "")
+            cache_library_root = str(cache.get("libraryRoot", "") or "")
+            summary = self.project.db.photo_smart_album_materialization_summary(
+                album_id,
+                cache_library_root,
+                cover_source_path=str(album.get("coverSourcePath", "") or ""),
+            )
+            sample_paths = self.project.db.photo_smart_album_materialization_source_paths(
+                album_id,
+                cache_library_root,
+                limit=clean_limit,
+            )
             return (
-                len(source_paths),
-                self._photo_entries_for_materialized_source_paths(source_paths[:clean_limit]),
+                int(summary.get("count", summary.get("assetCount", 0)) or 0),
+                self._photo_entries_for_materialized_source_paths(sample_paths),
             )
 
-        entries = self._photo_smart_album_entries_sql_union(album, sort=sort)
-        if entries is None:
+        summary = self._photo_smart_album_summary_sql_union(album)
+        if summary is None:
             return None
-        return len(entries), entries[:clean_limit]
+        sample_assets = self._photo_smart_album_sql_union_sample_assets(album, sort=sort, limit=clean_limit)
+        sample_entries = self._photo_entries_for_assets(sample_assets or [])
+        return int(summary.get("count", 0) or 0), self._sort_photo_entries(sample_entries, sort)[:clean_limit]
 
     def _photo_saved_filter_preview(self, saved_filter: dict[str, Any]) -> dict[str, Any]:
         rules = self._clean_album_rules(saved_filter.get("rules", {}))
@@ -8384,14 +11504,14 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "rules": rules,
             "coverSourcePath": "",
         }
-        count = 0
+        count: int | None = 0
         items: list[dict[str, Any]] = []
+        preview_pending = False
         if rules:
             preview = self._photo_smart_album_count_and_sample(album, sample_limit=3, sort="newest")
             if preview is None:
-                items = self._photo_album_items(album)
-                self._photo_save_smart_album_materialization(album, items)
-                count = len(items)
+                preview_pending = True
+                count = None
             else:
                 count, items = preview
         sample_titles: list[str] = []
@@ -8403,7 +11523,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 sample_titles.append(title)
         return {
             **saved_filter,
-            "count": count,
+            **({"count": count} if count is not None else {}),
+            "previewPending": preview_pending,
             "ruleSummary": self._photo_album_rule_summary(rules),
             "previewSamples": sample_titles,
         }
@@ -9609,11 +12730,22 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "metadataRows": 0,
             "keywordAssignments": 0,
             "peopleLinks": 0,
+            "peopleProfiles": 0,
+            "relationshipNameReviews": 0,
             "albums": 0,
             "albumItems": 0,
             "albumFolders": 0,
             "savedFilters": 0,
             "editStacks": 0,
+            "editVersions": 0,
+            "mediaPairRows": 0,
+            "curationPreferences": 0,
+            "externalSources": 0,
+            "externalAssetLinks": 0,
+            "externalAlbumLinks": 0,
+            "externalAlbumItems": 0,
+            "tetherSessions": 0,
+            "tetherCaptures": 0,
         }
         warnings: list[str] = []
         if not database_path.exists():
@@ -9624,11 +12756,21 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "metadataRows": "photo_asset_metadata",
             "keywordAssignments": "photo_asset_keywords",
             "peopleLinks": "photo_asset_people",
+            "peopleProfiles": "photo_people_profiles",
+            "relationshipNameReviews": "photo_relationship_name_reviews",
             "albums": "photo_albums",
             "albumItems": "photo_album_items",
             "albumFolders": "photo_album_folders",
             "savedFilters": "photo_saved_filters",
             "editStacks": "photo_edit_stacks",
+            "editVersions": "photo_edit_stack_versions",
+            "mediaPairRows": "photo_media_pairs",
+            "externalSources": "photo_external_sources",
+            "externalAssetLinks": "photo_asset_external_ids",
+            "externalAlbumLinks": "photo_external_album_links",
+            "externalAlbumItems": "photo_external_album_items",
+            "tetherSessions": "photo_tether_sessions",
+            "tetherCaptures": "photo_tether_captures",
         }
         try:
             with sqlite3.connect(f"file:{database_path}?mode=ro", uri=True) as connection:
@@ -9638,6 +12780,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                         counts[key] = int(row[0] if row else 0)
                     except sqlite3.DatabaseError as exc:
                         warnings.append(f"Could not read {table} from the restored database: {exc}")
+                try:
+                    row = connection.execute(
+                        "SELECT COUNT(*) FROM meta WHERE key = 'photo_curation_preferences'"
+                    ).fetchone()
+                    counts["curationPreferences"] = int(row[0] if row else 0)
+                except sqlite3.DatabaseError as exc:
+                    warnings.append(f"Could not read photo curation preferences from the restored database: {exc}")
         except sqlite3.DatabaseError as exc:
             warnings.append(f"Could not open restored workspace.sqlite3: {exc}")
         return counts, warnings
@@ -9653,11 +12802,22 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             ("metadataRows", "Metadata rows"),
             ("keywordAssignments", "Keyword assignments"),
             ("peopleLinks", "People links"),
+            ("peopleProfiles", "People authority profiles"),
+            ("relationshipNameReviews", "Relationship-name reviews"),
             ("albums", "Albums"),
             ("albumItems", "Album items"),
             ("albumFolders", "Album folders"),
             ("savedFilters", "Saved filters"),
             ("editStacks", "Edit stacks"),
+            ("editVersions", "Edit versions"),
+            ("mediaPairRows", "Media and sidecar relationships"),
+            ("curationPreferences", "Curation preferences"),
+            ("externalSources", "External catalog sources"),
+            ("externalAssetLinks", "External asset mappings"),
+            ("externalAlbumLinks", "External album mappings"),
+            ("externalAlbumItems", "External album item mappings"),
+            ("tetherSessions", "Tether sessions"),
+            ("tetherCaptures", "Tether captures"),
         ):
             live = int(live_counts.get(key, 0) or 0)
             restored = int(restored_counts.get(key, 0) or 0)
@@ -10127,6 +13287,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "metadataRows": 0,
             "keywordAssignments": 0,
             "peopleLinks": 0,
+            "peopleProfiles": 0,
+            "relationshipNameReviews": 0,
             "albums": 0,
             "manualAlbums": 0,
             "smartAlbums": 0,
@@ -10135,6 +13297,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "albumFolders": 0,
             "savedFilters": 0,
             "editStacks": 0,
+            "editVersions": 0,
             "editStackSidecars": 0,
             "missingEditStackSidecars": 0,
             "invalidEditStackSidecars": 0,
@@ -10142,6 +13305,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "pairedMotionFiles": 0,
             "missingPairedMotionFiles": 0,
             "mediaPairRows": 0,
+            "curationPreferences": 0,
+            "externalSources": 0,
+            "externalAssetLinks": 0,
+            "externalAlbumLinks": 0,
+            "externalAlbumItems": 0,
+            "tetherSessions": 0,
+            "tetherCaptures": 0,
             "nonLiveMediaPairRows": 0,
             "mediaPairRelatedFiles": 0,
             "missingMediaPairFiles": 0,
@@ -10274,9 +13444,19 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "metadataRows": "SELECT COUNT(*) AS n FROM photo_asset_metadata",
                 "keywordAssignments": "SELECT COUNT(*) AS n FROM photo_asset_keywords",
                 "peopleLinks": "SELECT COUNT(*) AS n FROM photo_asset_people",
+                "peopleProfiles": "SELECT COUNT(*) AS n FROM photo_people_profiles",
+                "relationshipNameReviews": "SELECT COUNT(*) AS n FROM photo_relationship_name_reviews",
                 "albumItems": "SELECT COUNT(*) AS n FROM photo_album_items",
                 "savedFilters": "SELECT COUNT(*) AS n FROM photo_saved_filters",
                 "editStacks": "SELECT COUNT(*) AS n FROM photo_edit_stacks",
+                "editVersions": "SELECT COUNT(*) AS n FROM photo_edit_stack_versions",
+                "curationPreferences": "SELECT COUNT(*) AS n FROM meta WHERE key = 'photo_curation_preferences'",
+                "externalSources": "SELECT COUNT(*) AS n FROM photo_external_sources",
+                "externalAssetLinks": "SELECT COUNT(*) AS n FROM photo_asset_external_ids",
+                "externalAlbumLinks": "SELECT COUNT(*) AS n FROM photo_external_album_links",
+                "externalAlbumItems": "SELECT COUNT(*) AS n FROM photo_external_album_items",
+                "tetherSessions": "SELECT COUNT(*) AS n FROM photo_tether_sessions",
+                "tetherCaptures": "SELECT COUNT(*) AS n FROM photo_tether_captures",
             }.items():
                 row = conn.execute(sql).fetchone()
                 counts[key] = int(row["n"] if row else 0)
@@ -10658,24 +13838,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     LEFT JOIN photo_assets AS a ON a.source_path = album.cover_source_path
                     WHERE TRIM(album.cover_source_path) != '' AND a.asset_id IS NULL
                     ORDER BY album.updated_at DESC, album.album_id ASC
-                    LIMIT ?
-                    """,
-                ),
-                (
-                    "photo_album_folders",
-                    "Album folder cover points at a source path that is no longer cataloged.",
-                    """
-                    SELECT COUNT(*) AS n
-                    FROM photo_album_folders AS folder
-                    LEFT JOIN photo_assets AS a ON a.source_path = folder.cover_source_path
-                    WHERE TRIM(folder.cover_source_path) != '' AND a.asset_id IS NULL
-                    """,
-                    """
-                    SELECT folder.folder_id AS folderId, folder.name AS folderName, folder.cover_source_path AS sourcePath
-                    FROM photo_album_folders AS folder
-                    LEFT JOIN photo_assets AS a ON a.source_path = folder.cover_source_path
-                    WHERE TRIM(folder.cover_source_path) != '' AND a.asset_id IS NULL
-                    ORDER BY folder.updated_at DESC, folder.folder_id ASC
                     LIMIT ?
                     """,
                 ),
@@ -11759,37 +14921,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 ],
             },
             {
-                "id": "broken-album-folder-covers",
-                "label": "Broken album folder covers",
-                "category": "catalogIntegrityIssues",
-                "reason": "Album folder cover points at a source path that is no longer cataloged.",
-                "count": """
-                    SELECT COUNT(*) AS n
-                    FROM photo_album_folders AS folder
-                    LEFT JOIN photo_assets AS a ON a.source_path = folder.cover_source_path
-                    WHERE TRIM(folder.cover_source_path) != '' AND a.asset_id IS NULL
-                """,
-                "sample": """
-                    SELECT folder.folder_id AS folderId, folder.name AS folderName, folder.cover_source_path AS sourcePath
-                    FROM photo_album_folders AS folder
-                    LEFT JOIN photo_assets AS a ON a.source_path = folder.cover_source_path
-                    WHERE TRIM(folder.cover_source_path) != '' AND a.asset_id IS NULL
-                    ORDER BY folder.updated_at DESC, folder.folder_id ASC
-                    LIMIT ?
-                """,
-                "repair": [
-                    (
-                        """
-                        UPDATE photo_album_folders
-                        SET cover_source_path = '', updated_at = ?
-                        WHERE TRIM(cover_source_path) != ''
-                            AND cover_source_path NOT IN (SELECT source_path FROM photo_assets)
-                        """,
-                        (now,),
-                    )
-                ],
-            },
-            {
                 "id": "orphan-search-index",
                 "label": "Orphan search index rows",
                 "category": "catalogIntegrityIssues",
@@ -12259,6 +15390,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             ],
         }
 
+    def _photo_local_settings(self) -> dict[str, Any]:
+        settings = self.project.db.photo_library_settings()
+        local_settings = settings.get("localSettings", {})
+        return local_settings if isinstance(local_settings, dict) else {}
+
     def photo_library_settings(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         settings = self.project.db.photo_library_settings()
         workspace_default = str(self._workspace_default_photo_managed_root())
@@ -12329,6 +15465,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return None
 
     def save_photo_library_settings(self, params: dict[str, Any]) -> dict[str, Any]:
+        incoming_local_settings = params.get("localSettings") if isinstance(params.get("localSettings"), dict) else None
+        previous_vlm_tier = str(self._photo_local_settings().get("visionModelTier", "auto") or "auto")
+        next_vlm_tier = str(
+            incoming_local_settings.get("visionModelTier", previous_vlm_tier)
+            if incoming_local_settings is not None
+            else previous_vlm_tier
+        )
+        vlm_tier_changed = next_vlm_tier != previous_vlm_tier
+        if vlm_tier_changed:
+            self._record_model_lifecycle_configuration("before photo VLM route change")
         managed_root_param = params.get("defaultManagedRoot", params.get("managedRoot", None))
         managed_root = Path(str(managed_root_param)).expanduser() if managed_root_param is not None and str(managed_root_param).strip() else None
         active_library_root = None
@@ -12361,7 +15507,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             active_library_root_profile_id=active_library_root_profile_id,
             library_root_profile=params.get("libraryRootProfile", params.get("viewRootProfile")) if isinstance(params.get("libraryRootProfile", params.get("viewRootProfile")), dict) else None,
             forget_library_root=str(params.get("forgetLibraryRoot", params.get("forgetLibraryRootProfileId", "")) or ""),
-            local_settings=params.get("localSettings") if isinstance(params.get("localSettings"), dict) else None,
+            local_settings=incoming_local_settings,
             backup_policy=params.get("backupPolicy") if isinstance(params.get("backupPolicy"), dict) else None,
             managed_root_policy=params.get("managedRootPolicy", params.get("rootPolicy")) if isinstance(params.get("managedRootPolicy", params.get("rootPolicy")), dict) else None,
         )
@@ -12383,6 +15529,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "backup_policy_interval_hours": int((value.get("backupPolicy") or {}).get("intervalHours", 0) or 0) if isinstance(value.get("backupPolicy"), dict) else 0,
             }
         )
+        if vlm_tier_changed:
+            self._record_model_lifecycle_configuration("after photo VLM route change")
         return value
 
     def _photo_indexing_job_kind(self, params: dict[str, Any]) -> str:
@@ -12397,8 +15545,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             kind = "generated_collections"
         if kind in {"smart", "smart-albums", "smart_albums", "smartalbums", "smart-album-materialization", "smart_album_materialization"}:
             kind = "smart_albums"
-        if kind not in {"ocr", "barcode", "objects", "search", "generated_collections", "smart_albums"}:
-            raise ValueError("Photo indexing job kind must be ocr, barcode, objects, search, generated_collections, or smart_albums.")
+        if kind in {"semantic", "semantic-search", "semantic_search", "semantic-embeddings", "semantic_embeddings", "siglip", "siglip2"}:
+            kind = "semantic"
+        if kind in {"reference-suggestions", "reference_suggestions", "reference-suggestion", "reference_suggestion", "suggested-references", "suggested_references"}:
+            kind = "reference_suggestions"
+        if kind in {"safe-mode-calibration", "safe_mode_calibration", "safe-calibration", "safe_calibration", "safety-calibration", "safety_calibration"}:
+            kind = "safe_mode_calibration"
+        if kind in {"audio", "audio-index", "audio_index", "transcript", "transcription", "sound-events", "sound_events"}:
+            kind = "audio"
+        if kind not in PHOTO_INDEXING_JOB_COSTS:
+            raise ValueError("Unsupported Photo indexing job kind.")
         return kind
 
     def _photo_indexing_job_scope(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -12409,7 +15565,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return {key: value for key, value in params.items() if key not in ignored}
 
     def _photo_indexing_jobs_payload(self, *, status: str = "", limit: int = 25) -> dict[str, Any]:
-        jobs = self.project.db.list_photo_indexing_jobs(status=status, limit=limit)
+        jobs = [
+            {
+                **job,
+                "costClass": PHOTO_INDEXING_JOB_COSTS.get(str(job.get("jobKind", "") or ""), "heavy"),
+            }
+            for job in self.project.db.list_photo_indexing_jobs(status=status, limit=limit)
+        ]
         counts = self.project.db.photo_indexing_job_counts()
         return {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
@@ -12444,6 +15606,38 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         payload = self._photo_indexing_jobs_payload(limit=limit)
         payload["job"] = job
         return payload
+
+    def _existing_photo_indexing_job_for_kind(
+        self,
+        kind: str,
+        *,
+        statuses: tuple[str, ...] = ("running", "queued", "paused"),
+    ) -> dict[str, Any]:
+        clean_kind = str(kind or "").strip().lower()
+        for status in statuses:
+            for job in self.project.db.list_photo_indexing_jobs(status=status, limit=50):
+                if str(job.get("jobKind", "") or "") == clean_kind:
+                    return job
+        return {}
+
+    def _enqueue_photo_indexing_job_once(
+        self,
+        kind: str,
+        scope: dict[str, Any],
+        *,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        clean_kind = self._photo_indexing_job_kind({"jobKind": kind})
+        existing = self._existing_photo_indexing_job_for_kind(clean_kind)
+        if existing:
+            payload = self._photo_indexing_jobs_payload(limit=limit)
+            payload.update({"job": existing, "deduplicated": True})
+            return payload
+        return self.enqueue_photo_indexing_job({
+            "jobKind": clean_kind,
+            "scope": scope,
+            "limit": limit,
+        })
 
     def index_photo_search_index(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params if isinstance(params, dict) else {}
@@ -12639,6 +15833,891 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         )
         return result
 
+    def _photo_audio_candidate_assets(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        raw_paths = params.get("sourcePaths")
+        source_paths: list[str] = []
+        if isinstance(raw_paths, list) and raw_paths:
+            for value in raw_paths:
+                text = str(value or "").strip()
+                if not text:
+                    continue
+                variants = [text]
+                try:
+                    resolved = str(Path(text).expanduser().resolve())
+                except OSError:
+                    resolved = str(Path(text).expanduser())
+                if resolved not in variants:
+                    variants.append(resolved)
+                for variant in variants:
+                    if variant not in source_paths:
+                        source_paths.append(variant)
+        return self.project.db.list_photo_audio_candidate_assets(source_paths=source_paths or None)
+
+    def photo_audio_status(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        report = audio_model_report()
+        summary = self.project.db.photo_audio_index_summary(index_version=AUDIO_INDEX_VERSION)
+        settings = self.photo_library_settings({})
+        local_settings = settings.get("localSettings", {}) if isinstance(settings.get("localSettings"), dict) else {}
+        return {
+            **report,
+            **summary,
+            "enabled": bool(local_settings.get("localIntelligenceEnabled", False)),
+            "paused": bool(local_settings.get("backgroundIndexingPaused", False)),
+            "powerMode": str(local_settings.get("indexingPowerMode", "balanced") or "balanced"),
+            "pendingCount": max(0, int(summary.get("candidateCount", 0)) - int(summary.get("indexedCount", 0))),
+        }
+
+    def photo_audio_segments(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        asset_id = str(params.get("assetId", "") or "").strip()
+        source_path = str(params.get("sourcePath", params.get("path", "")) or "").strip()
+        if not asset_id and source_path:
+            assets = self.project.db.photo_assets_by_paths([source_path])
+            if assets:
+                asset_id = str(assets[0].get("assetId", "") or "")
+        if not asset_id:
+            raise ValueError("assetId or sourcePath is required.")
+        segments = self.project.db.list_photo_audio_segments(asset_id=asset_id)
+        return {
+            "assetId": asset_id,
+            "sourcePath": source_path,
+            "indexVersion": AUDIO_INDEX_VERSION,
+            "segments": segments,
+            "transcriptSegments": [row for row in segments if row.get("segmentKind") == "speech"],
+            "soundEventSegments": [row for row in segments if row.get("segmentKind") == "sound"],
+            "total": len(segments),
+        }
+
+    @staticmethod
+    def _photo_audio_segment_record(
+        asset_id: str,
+        source_fingerprint: str,
+        segment: AudioSegment,
+    ) -> dict[str, Any]:
+        identity = {
+            "assetId": asset_id,
+            "endMs": int(segment.end_ms),
+            "indexVersion": AUDIO_INDEX_VERSION,
+            "kind": segment.kind,
+            "label": segment.label,
+            "sourceFingerprint": source_fingerprint,
+            "startMs": int(segment.start_ms),
+            "text": segment.text,
+        }
+        segment_id = "aseg_" + hashlib.sha256(
+            json.dumps(identity, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()[:32]
+        return {
+            "segmentId": segment_id,
+            "segmentKind": segment.kind,
+            "startMs": int(segment.start_ms),
+            "endMs": int(segment.end_ms),
+            "timestampMs": int(segment.timestamp_ms),
+            "text": segment.text,
+            "label": segment.label,
+            "confidence": segment.confidence,
+            "language": segment.language,
+            "modelName": segment.model,
+            "modelVersion": segment.model_version,
+        }
+
+    def index_photo_audio(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        settings = self.photo_library_settings({})
+        local_settings = settings.get("localSettings", {}) if isinstance(settings.get("localSettings"), dict) else {}
+        if not bool(local_settings.get("localIntelligenceEnabled", False)) and not bool(params.get("ignoreSettings", False)):
+            return {
+                "enabled": False,
+                "disabled": True,
+                "message": "Local intelligence is disabled in Photos settings.",
+                "progress": {"total": 0, "processed": 0, "updated": 0, "skipped": 0, "failed": 0, "deferred": 0},
+            }
+        if bool(local_settings.get("backgroundIndexingPaused", False)) and not bool(params.get("ignorePaused", False)):
+            return {
+                "enabled": True,
+                "disabled": False,
+                "paused": True,
+                "message": "Photo indexing is paused in Photos settings.",
+                "progress": {"total": 0, "processed": 0, "updated": 0, "skipped": 0, "failed": 0, "deferred": 0},
+            }
+        report = audio_model_report()
+        if not report.get("available"):
+            return {
+                "enabled": False,
+                "disabled": True,
+                "available": False,
+                "message": str(report.get("reason") or "Audio model pack is unavailable."),
+                "model": report,
+                "progress": {"total": 0, "processed": 0, "updated": 0, "skipped": 0, "failed": 0, "deferred": 0},
+            }
+        transcribe = bool(params.get("transcribe", True))
+        sound_events = bool(params.get("soundEvents", True))
+        if not transcribe and not sound_events:
+            raise ValueError("At least one audio analysis mode must be enabled.")
+        requested_language = re.sub(
+            r"[^A-Za-z0-9_-]",
+            "",
+            str(params.get("language", "auto") or "auto").strip().lower(),
+        )[:16] or "auto"
+        power_mode = str(local_settings.get("indexingPowerMode", "balanced") or "balanced")
+        default_budget = {"low": 1, "balanced": 2, "performance": 6}.get(power_mode, 2)
+        try:
+            budget_limit = max(1, min(100, int(params.get("audioBudgetLimit", params.get("budgetLimit", default_budget)) or default_budget)))
+        except (TypeError, ValueError):
+            budget_limit = default_budget
+        try:
+            max_duration_seconds = max(
+                1,
+                min(
+                    AUDIO_MAX_DURATION_SECONDS,
+                    int(params.get("audioMaxDurationSeconds", AUDIO_MAX_DURATION_SECONDS) or AUDIO_MAX_DURATION_SECONDS),
+                ),
+            )
+        except (TypeError, ValueError):
+            max_duration_seconds = AUDIO_MAX_DURATION_SECONDS
+        force = bool(params.get("force", params.get("reset", False)))
+        candidates = self._photo_audio_candidate_assets(params)
+        items: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        updated = skipped = failed = deferred = processed_budget = segments_updated = 0
+        no_audio_count = 0
+        for asset in candidates:
+            asset_id = str(asset.get("assetId", "") or "").strip()
+            source_path = str(asset.get("sourcePath", "") or "").strip()
+            if not asset_id or not source_path:
+                skipped += 1
+                continue
+            path = Path(source_path).expanduser()
+            if path.suffix.lower() not in VIDEO_EXTENSIONS or not path.exists() or not path.is_file() or path.is_symlink():
+                skipped += 1
+                failures.append({"assetId": asset_id, "status": "missing", "error": "source video is unavailable"})
+                continue
+            file_size, file_mtime_ns = self._photo_semantic_file_stat(path)
+            try:
+                source_fingerprint = video_source_fingerprint(path)
+            except OSError as exc:
+                failed += 1
+                failures.append({"assetId": asset_id, "status": "failed", "error": str(exc)[:300]})
+                continue
+            if not force and self.project.db.photo_audio_index_is_current(
+                asset_id=asset_id,
+                index_version=AUDIO_INDEX_VERSION,
+                source_fingerprint=source_fingerprint,
+                file_size=file_size,
+                file_mtime_ns=file_mtime_ns,
+                transcription_enabled=transcribe,
+                sound_events_enabled=sound_events,
+                language=requested_language,
+            ):
+                skipped += 1
+                items.append({"assetId": asset_id, "sourcePath": source_path, "status": "cached"})
+                continue
+            if processed_budget >= budget_limit:
+                deferred += 1
+                continue
+            processed_budget += 1
+            try:
+                analysis = analyze_media_audio(
+                    path,
+                    duration_ms=max(0, int(asset.get("durationMs", 0) or 0)),
+                    language=requested_language,
+                    transcribe=transcribe,
+                    sound_events=sound_events,
+                    max_duration_seconds=max_duration_seconds,
+                )
+                after_size, after_mtime_ns = self._photo_semantic_file_stat(path)
+                after_fingerprint = video_source_fingerprint(path)
+                if (after_size, after_mtime_ns, after_fingerprint) != (file_size, file_mtime_ns, source_fingerprint):
+                    raise RuntimeError("Video source changed while audio was being indexed.")
+                segment_rows = [
+                    self._photo_audio_segment_record(asset_id, source_fingerprint, segment)
+                    for segment in analysis.get("segments", [])
+                    if isinstance(segment, AudioSegment)
+                ]
+                inserted = self.project.db.replace_photo_audio_segments(
+                    asset_id=asset_id,
+                    index_version=AUDIO_INDEX_VERSION,
+                    source_path=str(path.expanduser().resolve()),
+                    source_fingerprint=source_fingerprint,
+                    file_size=file_size,
+                    file_mtime_ns=file_mtime_ns,
+                    transcription_enabled=transcribe,
+                    sound_events_enabled=sound_events,
+                    language=requested_language,
+                    segments=segment_rows,
+                )
+            except Exception as exc:
+                message = str(exc)[:300] or "Audio indexing failed."
+                no_audio = any(
+                    marker in message.casefold()
+                    for marker in ("no decodable audio stream", "does not contain any stream", "matches no streams")
+                )
+                if no_audio:
+                    self.project.db.replace_photo_audio_segments(
+                        asset_id=asset_id,
+                        index_version=AUDIO_INDEX_VERSION,
+                        source_path=str(path.expanduser().resolve()),
+                        source_fingerprint=source_fingerprint,
+                        file_size=file_size,
+                        file_mtime_ns=file_mtime_ns,
+                        transcription_enabled=transcribe,
+                        sound_events_enabled=sound_events,
+                        language=requested_language,
+                        segments=[],
+                    )
+                    updated += 1
+                    no_audio_count += 1
+                    items.append({"assetId": asset_id, "sourcePath": source_path, "status": "no-audio", "segmentCount": 0})
+                    continue
+                failed += 1
+                failure = {"assetId": asset_id, "sourcePath": source_path, "status": "failed", "error": message}
+                failures.append(failure)
+                items.append(failure)
+                continue
+            updated += 1
+            segments_updated += inserted
+            items.append(
+                {
+                    "assetId": asset_id,
+                    "sourcePath": source_path,
+                    "status": "indexed",
+                    "segmentCount": inserted,
+                    "transcriptCount": len(analysis.get("transcriptSegments", [])),
+                    "soundEventCount": len(analysis.get("soundEventSegments", [])),
+                    "language": str(analysis.get("language", "") or ""),
+                    "durationMs": int(analysis.get("durationMs", 0) or 0),
+                    "truncated": bool(analysis.get("truncated", False)),
+                }
+            )
+        progress = {
+            "total": len(candidates),
+            "processed": updated + skipped + failed,
+            "updated": updated,
+            "skipped": skipped,
+            "failed": failed,
+            "deferred": deferred,
+        }
+        result = {
+            "enabled": True,
+            "disabled": False,
+            "available": True,
+            "indexVersion": AUDIO_INDEX_VERSION,
+            "powerMode": power_mode,
+            "budgetLimit": budget_limit,
+            "maxDurationSeconds": max_duration_seconds,
+            "transcriptionEnabled": transcribe,
+            "soundEventsEnabled": sound_events,
+            "language": requested_language,
+            "pending": deferred > 0,
+            "progress": progress,
+            "segmentsUpdated": segments_updated,
+            "noAudioCount": no_audio_count,
+            "items": items[:100],
+            "failures": failures[:25],
+            "message": (
+                f"Audio indexing has {deferred} video(s) still queued."
+                if deferred
+                else "Video transcripts and sound events are up to date."
+            ),
+        }
+        self.project._append_audit(
+            {
+                "action": "index_photo_audio",
+                "total": len(candidates),
+                "updated": updated,
+                "segments_updated": segments_updated,
+                "no_audio": no_audio_count,
+                "skipped": skipped,
+                "failed": failed,
+                "deferred": deferred,
+                "index_version": AUDIO_INDEX_VERSION,
+            }
+        )
+        return result
+
+    def index_video_semantic_segments(
+        self,
+        params: dict[str, Any] | None = None,
+        *,
+        model_report: dict[str, Any] | None = None,
+        local_settings: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Sample, segment, and persist videos for timestamped semantic retrieval."""
+        params = params if isinstance(params, dict) else {}
+        import numpy as np
+
+        from crossage_fr.embed import siglip_engine
+
+        if local_settings is None:
+            settings = self.photo_library_settings({})
+            local_settings = settings.get("localSettings", {}) if isinstance(settings.get("localSettings"), dict) else {}
+        if not bool(local_settings.get("localIntelligenceEnabled", False)) and not bool(params.get("ignoreSettings", False)):
+            return {
+                "enabled": False,
+                "disabled": True,
+                "message": "Local intelligence is disabled in Photos settings.",
+                "progress": {"total": 0, "processed": 0, "updated": 0, "skipped": 0, "failed": 0, "deferred": 0},
+                "segmentsUpdated": 0,
+                "items": [],
+                "failures": [],
+            }
+        if bool(local_settings.get("backgroundIndexingPaused", False)) and not bool(params.get("ignorePaused", False)):
+            return {
+                "enabled": True,
+                "disabled": False,
+                "paused": True,
+                "message": "Photo indexing is paused in Photos settings.",
+                "progress": {"total": 0, "processed": 0, "updated": 0, "skipped": 0, "failed": 0, "deferred": 0},
+                "segmentsUpdated": 0,
+                "items": [],
+                "failures": [],
+            }
+        report = model_report if isinstance(model_report, dict) else siglip_engine.semantic_model_report()
+        if not report.get("available"):
+            return {
+                "enabled": False,
+                "disabled": True,
+                "available": False,
+                "message": str(report.get("reason") or "Semantic-search model pack is not installed."),
+                "progress": {"total": 0, "processed": 0, "updated": 0, "skipped": 0, "failed": 0, "deferred": 0},
+                "segmentsUpdated": 0,
+                "items": [],
+                "failures": [],
+            }
+        model_name = str(report.get("modelName", "SigLIP2") or "SigLIP2")
+        if bool(params.get("vectorIndexOnly", False)):
+            vector_index = self._build_video_semantic_vector_index(model_name)
+            ready = bool(vector_index.get("ready", False))
+            vector_count = int(vector_index.get("vectorCount", 0) or 0)
+            return {
+                "enabled": True,
+                "disabled": False,
+                "available": True,
+                "engine": model_name,
+                "indexVersion": VIDEO_SEMANTIC_INDEX_VERSION,
+                "vectorIndexOnly": True,
+                "pending": not ready,
+                "progress": {
+                    "total": vector_count,
+                    "processed": vector_count,
+                    "updated": vector_count if ready else 0,
+                    "skipped": 0,
+                    "failed": 0 if ready else 1,
+                    "deferred": 0,
+                },
+                "segmentsUpdated": 0,
+                "items": [],
+                "failures": [],
+                "vectorIndex": vector_index,
+                "message": (
+                    f"Video semantic vector index is ready for {vector_count} segment(s)."
+                    if ready
+                    else "Video semantic vector index build did not complete."
+                ),
+            }
+
+        power_mode = str(local_settings.get("indexingPowerMode", "balanced") or "balanced")
+        default_budget = {"low": 1, "balanced": 4, "performance": 12}.get(power_mode, 4)
+        try:
+            budget_limit = max(1, min(100, int(params.get("videoBudgetLimit", default_budget) or default_budget)))
+        except (TypeError, ValueError):
+            budget_limit = default_budget
+        try:
+            max_frames = max(1, min(VIDEO_SEMANTIC_MAX_FRAMES, int(params.get("videoMaxFrames", VIDEO_SEMANTIC_MAX_FRAMES) or VIDEO_SEMANTIC_MAX_FRAMES)))
+        except (TypeError, ValueError):
+            max_frames = VIDEO_SEMANTIC_MAX_FRAMES
+        try:
+            sample_interval_seconds = min(30.0, max(0.25, float(params.get("videoSampleIntervalSeconds", VIDEO_SEMANTIC_SAMPLE_INTERVAL_SECONDS) or VIDEO_SEMANTIC_SAMPLE_INTERVAL_SECONDS)))
+        except (TypeError, ValueError):
+            sample_interval_seconds = VIDEO_SEMANTIC_SAMPLE_INTERVAL_SECONDS
+        force = bool(params.get("force", params.get("reset", False)))
+        candidates = self._video_semantic_candidate_assets(params)
+        items: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        updated = 0
+        skipped = 0
+        failed = 0
+        deferred = 0
+        encoded_budget = 0
+        segments_updated = 0
+        for asset in candidates:
+            asset_id = str(asset.get("assetId", "") or "").strip()
+            source_path = str(asset.get("sourcePath", "") or "").strip()
+            if not asset_id or not source_path:
+                skipped += 1
+                continue
+            path = Path(source_path).expanduser()
+            if path.suffix.lower() not in VIDEO_EXTENSIONS or not path.exists() or not path.is_file():
+                skipped += 1
+                failures.append({
+                    "assetId": asset_id,
+                    "sourcePath": source_path,
+                    "status": "missing",
+                    "error": "source file is missing or not a supported video",
+                })
+                continue
+            file_size, file_mtime_ns = self._photo_semantic_file_stat(path)
+            try:
+                source_fingerprint = video_source_fingerprint(path)
+            except OSError as exc:
+                failed += 1
+                failures.append({
+                    "assetId": asset_id,
+                    "sourcePath": source_path,
+                    "status": "failed",
+                    "error": f"Could not fingerprint video source: {str(exc)[:220]}",
+                })
+                continue
+            if not force and self.project.db.video_semantic_segments_are_current(
+                asset_id=asset_id,
+                model_name=model_name,
+                index_version=VIDEO_SEMANTIC_INDEX_VERSION,
+                source_fingerprint=source_fingerprint,
+                file_size=file_size,
+                file_mtime_ns=file_mtime_ns,
+            ):
+                skipped += 1
+                items.append({"assetId": asset_id, "sourcePath": source_path, "status": "cached"})
+                continue
+            if encoded_budget >= budget_limit:
+                deferred += 1
+                continue
+            encoded_budget += 1
+            asset_cache_key = hashlib.sha256(asset_id.encode("utf-8")).hexdigest()[:20]
+            asset_cache_root = self.project.root / "video-semantic-frames" / asset_cache_key
+            source_cache_root = asset_cache_root / source_fingerprint[:20]
+            try:
+                samples = sample_video_frames(
+                    path,
+                    source_cache_root,
+                    max_frames=max_frames,
+                    interval_seconds=sample_interval_seconds,
+                    jpeg_quality=90,
+                )
+                vector_chunks: list[np.ndarray] = []
+                for offset in range(0, len(samples), 8):
+                    sample_chunk = samples[offset:offset + 8]
+                    images = [load_image(sample.path) for sample in sample_chunk]
+                    encoded_chunk = siglip_engine.encode_images(images)
+                    if encoded_chunk is None:
+                        raise RuntimeError("Semantic image encoder returned no vectors.")
+                    chunk = np.asarray(encoded_chunk, dtype=np.float32)
+                    if chunk.ndim != 2 or chunk.shape[0] != len(sample_chunk) or chunk.shape[1] <= 0 or not np.isfinite(chunk).all():
+                        raise RuntimeError("Semantic image encoder returned invalid video frame vectors.")
+                    vector_chunks.append(chunk)
+                frame_vectors = np.concatenate(vector_chunks, axis=0) if vector_chunks else np.empty((0, 0), dtype=np.float32)
+                after_size, after_mtime_ns = self._photo_semantic_file_stat(path)
+                after_fingerprint = video_source_fingerprint(path)
+                if (
+                    after_size != file_size
+                    or after_mtime_ns != file_mtime_ns
+                    or after_fingerprint != source_fingerprint
+                ):
+                    raise RuntimeError("Video source changed while visual segments were being indexed.")
+                segments = build_video_visual_segments(
+                    asset_id=asset_id,
+                    model_name=model_name,
+                    source_fingerprint=source_fingerprint,
+                    samples=samples,
+                    vectors=frame_vectors,
+                )
+                segment_rows = [
+                    {
+                        "segmentId": segment.segment_id,
+                        "startMs": segment.start_ms,
+                        "endMs": segment.end_ms,
+                        "timestampMs": segment.timestamp_ms,
+                        "frameIndex": segment.frame_index,
+                        "durationMs": segment.duration_ms,
+                        "previewPath": segment.preview_path,
+                        "sampleCount": segment.sample_count,
+                        "vector": list(segment.vector),
+                    }
+                    for segment in segments
+                ]
+                inserted = self.project.db.replace_video_semantic_segments(
+                    asset_id=asset_id,
+                    model_name=model_name,
+                    index_version=VIDEO_SEMANTIC_INDEX_VERSION,
+                    source_path=str(path.expanduser().resolve()),
+                    source_fingerprint=source_fingerprint,
+                    file_size=file_size,
+                    file_mtime_ns=file_mtime_ns,
+                    segments=segment_rows,
+                )
+            except Exception as exc:
+                failed += 1
+                failure = {
+                    "assetId": asset_id,
+                    "sourcePath": source_path,
+                    "status": "failed",
+                    "error": str(exc)[:300] or "Video segment indexing failed.",
+                }
+                failures.append(failure)
+                items.append(failure)
+                continue
+            updated += 1
+            segments_updated += inserted
+            items.append({
+                "assetId": asset_id,
+                "sourcePath": source_path,
+                "status": "indexed",
+                "segmentCount": inserted,
+            })
+            try:
+                for stale_cache in asset_cache_root.iterdir():
+                    if stale_cache.is_dir() and stale_cache.name != source_fingerprint[:20]:
+                        shutil.rmtree(stale_cache, ignore_errors=True)
+            except OSError:
+                pass
+
+        progress = {
+            "total": len(candidates),
+            "processed": updated + skipped + failed,
+            "updated": updated,
+            "skipped": skipped,
+            "failed": failed,
+            "deferred": deferred,
+        }
+        vector_index: dict[str, Any] = {}
+        if deferred == 0 and (updated > 0 or bool(params.get("rebuildVectorIndex", False))):
+            try:
+                vector_index = self._build_video_semantic_vector_index(model_name)
+            except Exception as exc:
+                vector_index = {"ready": False, "error": str(exc)[:300]}
+        vector_index_pending = bool(vector_index) and not bool(vector_index.get("ready", False))
+        result = {
+            "enabled": True,
+            "disabled": False,
+            "available": True,
+            "engine": model_name,
+            "indexVersion": VIDEO_SEMANTIC_INDEX_VERSION,
+            "powerMode": power_mode,
+            "budgetLimit": budget_limit,
+            "sampleIntervalSeconds": sample_interval_seconds,
+            "maxFramesPerVideo": max_frames,
+            "pending": deferred > 0 or vector_index_pending,
+            "progress": progress,
+            "segmentsUpdated": segments_updated,
+            "items": items[:100],
+            "failures": failures[:25],
+            "vectorIndex": vector_index,
+            "message": (
+                f"Video semantic indexing has {deferred} video(s) still queued."
+                if deferred
+                else "Video segments are ready, but the vector index build must be retried."
+                if vector_index_pending
+                else "Video semantic segments are up to date."
+            ),
+        }
+        self.project._append_audit(
+            {
+                "action": "index_video_semantic_segments",
+                "total": len(candidates),
+                "updated": updated,
+                "segments_updated": segments_updated,
+                "skipped": skipped,
+                "failed": failed,
+                "deferred": deferred,
+                "model_name": model_name,
+                "index_version": VIDEO_SEMANTIC_INDEX_VERSION,
+            }
+        )
+        return result
+
+    def index_photo_semantic_embeddings(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        import numpy as np
+
+        from crossage_fr.embed import siglip_engine
+
+        settings = self.photo_library_settings({})
+        local_settings = settings.get("localSettings", {}) if isinstance(settings.get("localSettings"), dict) else {}
+        if not bool(local_settings.get("localIntelligenceEnabled", False)) and not bool(params.get("ignoreSettings", False)):
+            return {
+                "enabled": False,
+                "disabled": True,
+                "message": "Local intelligence is disabled in Photos settings.",
+                "progress": {"total": 0, "processed": 0, "updated": 0, "skipped": 0, "failed": 0, "deferred": 0},
+                "items": [],
+                "failures": [],
+            }
+        if bool(local_settings.get("backgroundIndexingPaused", False)) and not bool(params.get("ignorePaused", False)):
+            return {
+                "enabled": True,
+                "disabled": False,
+                "paused": True,
+                "message": "Photo indexing is paused in Photos settings.",
+                "progress": {"total": 0, "processed": 0, "updated": 0, "skipped": 0, "failed": 0, "deferred": 0},
+                "items": [],
+                "failures": [],
+            }
+        report = siglip_engine.semantic_model_report()
+        if not report.get("available"):
+            return {
+                "enabled": False,
+                "disabled": True,
+                "available": False,
+                "message": str(report.get("reason") or "Semantic-search model pack is not installed."),
+                "progress": {"total": 0, "processed": 0, "updated": 0, "skipped": 0, "failed": 0, "deferred": 0},
+                "items": [],
+                "failures": [],
+            }
+        model_name = str(report.get("modelName", "SigLIP2") or "SigLIP2")
+        if bool(params.get("vectorIndexOnly", False)):
+            vector_index = self._build_photo_semantic_vector_index(model_name)
+            video_result = self.index_video_semantic_segments(
+                params,
+                model_report=report,
+                local_settings=local_settings,
+            )
+            video_vector_index = video_result.get("vectorIndex", {}) if isinstance(video_result.get("vectorIndex"), dict) else {}
+            ready = bool(vector_index.get("ready", False)) and bool(video_vector_index.get("ready", True))
+            vector_count = int(vector_index.get("vectorCount", 0) or 0)
+            video_vector_count = int(video_vector_index.get("vectorCount", 0) or 0)
+            result = {
+                "enabled": True,
+                "disabled": False,
+                "available": True,
+                "engine": model_name,
+                "vectorIndexOnly": True,
+                "pending": not ready,
+                "progress": {
+                    "total": vector_count + video_vector_count,
+                    "processed": vector_count + video_vector_count,
+                    "updated": vector_count + video_vector_count if ready else 0,
+                    "skipped": 0,
+                    "failed": 0 if ready else 1,
+                    "deferred": 0,
+                },
+                "items": [],
+                "failures": [],
+                "vectorIndex": vector_index,
+                "videoVectorIndex": video_vector_index,
+                "videoSegments": video_result,
+                "message": (
+                    f"Semantic vector indexes are ready for {vector_count} image(s) and {video_vector_count} video segment(s)."
+                    if ready
+                    else "Semantic vector index build did not complete."
+                ),
+            }
+            self.project._append_audit(
+                {
+                    "action": "build_photo_semantic_vector_index",
+                    "model_name": model_name,
+                    "vector_count": vector_count,
+                    "video_vector_count": video_vector_count,
+                    "backend": vector_index.get("backend", ""),
+                    "ready": ready,
+                }
+            )
+            return result
+        power_mode = str(local_settings.get("indexingPowerMode", "balanced") or "balanced")
+        default_budget = {"low": 25, "balanced": 100, "performance": 500}.get(power_mode, 100)
+        try:
+            budget_limit = max(1, min(5000, int(params.get("budgetLimit", params.get("limit", default_budget)) or default_budget)))
+        except (TypeError, ValueError):
+            budget_limit = default_budget
+        force = bool(params.get("force", params.get("reset", False)))
+        candidates = self._photo_semantic_candidate_assets(params)
+        scoped_total = len(candidates)
+        items: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        updated = 0
+        skipped = 0
+        failed = 0
+        deferred = 0
+        encoded_budget = 0
+        for asset in candidates:
+            asset_id = str(asset.get("assetId", "") or "")
+            source_path = str(asset.get("sourcePath", "") or "")
+            if not asset_id or not source_path:
+                skipped += 1
+                continue
+            path = Path(source_path).expanduser()
+            if path.suffix.lower() not in IMAGE_EXTENSIONS or not path.exists():
+                skipped += 1
+                failures.append({
+                    "assetId": asset_id,
+                    "sourcePath": source_path,
+                    "status": "missing",
+                    "error": "source file is missing or not a supported image",
+                })
+                continue
+            file_size, file_mtime_ns = self._photo_semantic_file_stat(path)
+            cached_vector = None if force else self.project.db.photo_semantic_embedding_for_asset(
+                asset_id=asset_id,
+                model_name=model_name,
+                file_size=file_size,
+                file_mtime_ns=file_mtime_ns,
+            )
+            if cached_vector is not None:
+                skipped += 1
+                items.append({"assetId": asset_id, "sourcePath": source_path, "status": "cached"})
+                continue
+            if encoded_budget >= budget_limit:
+                deferred += 1
+                continue
+            encoded_budget += 1
+            try:
+                encoded_vector = siglip_engine.encode_image_path_cached(path)
+            except Exception as exc:
+                encoded_vector = None
+                error = str(exc)[:300]
+            else:
+                error = ""
+            if encoded_vector is None:
+                failed += 1
+                failure = {
+                    "assetId": asset_id,
+                    "sourcePath": source_path,
+                    "status": "failed",
+                    "error": error or "Semantic image encoder returned no vector.",
+                }
+                failures.append(failure)
+                items.append(failure)
+                continue
+            vector = np.asarray(encoded_vector, dtype=np.float32).reshape(-1)
+            if vector.size == 0 or not np.isfinite(vector).all():
+                failed += 1
+                failure = {
+                    "assetId": asset_id,
+                    "sourcePath": source_path,
+                    "status": "failed",
+                    "error": "Semantic image encoder returned an invalid vector.",
+                }
+                failures.append(failure)
+                items.append(failure)
+                continue
+            self.project.db.upsert_photo_semantic_embedding(
+                asset_id=asset_id,
+                model_name=model_name,
+                source_path=source_path,
+                file_size=file_size,
+                file_mtime_ns=file_mtime_ns,
+                vector=vector.tolist(),
+            )
+            updated += 1
+            items.append({"assetId": asset_id, "sourcePath": source_path, "status": "indexed"})
+        progress = {
+            "total": scoped_total,
+            "processed": updated + skipped + failed,
+            "updated": updated,
+            "skipped": skipped,
+            "failed": failed,
+            "deferred": deferred,
+        }
+        vector_index: dict[str, Any] = {}
+        if deferred == 0 and (updated > 0 or bool(params.get("rebuildVectorIndex", False))):
+            try:
+                vector_index = self._build_photo_semantic_vector_index(model_name)
+            except Exception as exc:
+                vector_index = {
+                    "ready": False,
+                    "error": str(exc)[:300],
+                }
+        vector_index_pending = bool(vector_index) and not bool(vector_index.get("ready", False))
+        video_result = self.index_video_semantic_segments(
+            params,
+            model_report=report,
+            local_settings=local_settings,
+        )
+        video_progress = video_result.get("progress", {}) if isinstance(video_result.get("progress"), dict) else {}
+        combined_progress = {
+            key: int(progress.get(key, 0) or 0) + int(video_progress.get(key, 0) or 0)
+            for key in ("total", "processed", "updated", "skipped", "failed", "deferred")
+        }
+        video_pending = bool(video_result.get("pending", False))
+        video_vector_index = video_result.get("vectorIndex", {}) if isinstance(video_result.get("vectorIndex"), dict) else {}
+        combined_items = [*items, *(video_result.get("items", []) if isinstance(video_result.get("items"), list) else [])]
+        combined_failures = [*failures, *(video_result.get("failures", []) if isinstance(video_result.get("failures"), list) else [])]
+        result = {
+            "enabled": True,
+            "disabled": False,
+            "available": True,
+            "engine": model_name,
+            "powerMode": power_mode,
+            "budgetLimit": budget_limit,
+            "pending": deferred > 0 or vector_index_pending or video_pending,
+            "progress": combined_progress,
+            "items": combined_items[:100],
+            "failures": combined_failures[:25],
+            "vectorIndex": vector_index,
+            "videoVectorIndex": video_vector_index,
+            "videoSegments": video_result,
+            "message": (
+                f"Semantic embeddings have {deferred} image(s) still queued."
+                if deferred
+                else str(video_result.get("message", "") or "Video semantic indexing is still pending.")
+                if video_pending
+                else "Semantic embeddings are ready, but the vector index build must be retried."
+                if vector_index_pending
+                else "Semantic embeddings are up to date."
+            ),
+        }
+        self.project._append_audit(
+            {
+                "action": "index_photo_semantic_embeddings",
+                "total": scoped_total,
+                "updated": updated,
+                "video_updated": int(video_progress.get("updated", 0) or 0),
+                "video_segments_updated": int(video_result.get("segmentsUpdated", 0) or 0),
+                "skipped": skipped,
+                "failed": failed,
+                "deferred": deferred,
+                "model_name": model_name,
+            }
+        )
+        return result
+
+    def index_reference_suggestions(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        settings = self.photo_library_settings({})
+        local_settings = settings.get("localSettings", {}) if isinstance(settings.get("localSettings"), dict) else {}
+        if not bool(local_settings.get("localIntelligenceEnabled", False)) and not bool(params.get("ignoreSettings", False)):
+            return {
+                "enabled": False,
+                "disabled": True,
+                "message": "Local intelligence is disabled in Photos settings.",
+                "progress": {"total": 0, "processed": 0, "updated": 0, "skipped": 0, "failed": 0, "deferred": 0},
+            }
+        if bool(local_settings.get("backgroundIndexingPaused", False)) and not bool(params.get("ignorePaused", False)):
+            return {
+                "enabled": True,
+                "disabled": False,
+                "paused": True,
+                "message": "Photo indexing is paused in Photos settings.",
+                "progress": {"total": 0, "processed": 0, "updated": 0, "skipped": 0, "failed": 0, "deferred": 0},
+            }
+        result = self._stage_reference_suggestions_inline(params)
+        result.setdefault("enabled", True)
+        result.setdefault("disabled", False)
+        return result
+
+    def index_safe_mode_calibration(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params if isinstance(params, dict) else {}
+        settings = self.photo_library_settings({})
+        local_settings = settings.get("localSettings", {}) if isinstance(settings.get("localSettings"), dict) else {}
+        if not bool(local_settings.get("localIntelligenceEnabled", False)) and not bool(params.get("ignoreSettings", False)):
+            return {
+                "enabled": False,
+                "disabled": True,
+                "message": "Local intelligence is disabled in Photos settings.",
+                "progress": {"total": 0, "processed": 0, "updated": 0, "skipped": 0, "failed": 0, "deferred": 0},
+            }
+        if bool(local_settings.get("backgroundIndexingPaused", False)) and not bool(params.get("ignorePaused", False)):
+            return {
+                "enabled": True,
+                "disabled": False,
+                "paused": True,
+                "message": "Photo indexing is paused in Photos settings.",
+                "progress": {"total": 0, "processed": 0, "updated": 0, "skipped": 0, "failed": 0, "deferred": 0},
+            }
+        result = self._calibrate_safe_mode_inline(params)
+        result.setdefault("enabled", True)
+        result.setdefault("disabled", False)
+        return result
+
     def photo_indexing_jobs(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params if isinstance(params, dict) else {}
         try:
@@ -12654,21 +16733,55 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             limit = max(10, min(200, int(params.get("limit", 10) or 10)))
         except (TypeError, ValueError):
             limit = 10
+        max_cost_class = _normalize_photo_indexing_cost_class(params.get("maxCostClass"), "heavy")
+        max_cost_rank = PHOTO_INDEXING_COST_RANK[max_cost_class]
         job_id = str(params.get("jobId", "") or "").strip()
         job = self.project.db.photo_indexing_job(job_id) if job_id else {}
         if not job:
-            queued = self.project.db.list_photo_indexing_jobs(status="queued", limit=1)
+            queued = [
+                row
+                for row in self.project.db.list_photo_indexing_jobs(status="queued", limit=200)
+                if PHOTO_INDEXING_COST_RANK[PHOTO_INDEXING_JOB_COSTS.get(str(row.get("jobKind", "") or ""), "heavy")] <= max_cost_rank
+            ]
             if not queued:
-                queued = self.project.db.list_photo_indexing_jobs(status="paused", limit=1)
+                queued = [
+                    row
+                    for row in self.project.db.list_photo_indexing_jobs(status="paused", limit=200)
+                    if PHOTO_INDEXING_COST_RANK[PHOTO_INDEXING_JOB_COSTS.get(str(row.get("jobKind", "") or ""), "heavy")] <= max_cost_rank
+                ]
             if not queued:
                 payload = self._photo_indexing_jobs_payload(limit=limit)
-                payload.update({"ran": False, "message": "No queued Photo indexing jobs."})
+                has_deferred = any(
+                    self.project.db.list_photo_indexing_jobs(status=status_name, limit=1)
+                    for status_name in ("queued", "paused")
+                )
+                payload.update({
+                    "ran": False,
+                    "deferred": has_deferred,
+                    "maxCostClass": max_cost_class,
+                    "message": (
+                        f"Queued Photo indexing jobs exceed the {max_cost_class} runtime cost limit."
+                        if has_deferred
+                        else "No queued Photo indexing jobs."
+                    ),
+                })
                 return payload
             job = queued[0]
             job_id = str(job.get("jobId", "") or "")
         if not job_id:
             raise ValueError("Photo indexing job id is required.")
         status = str(job.get("status", "") or "")
+        job_cost_class = PHOTO_INDEXING_JOB_COSTS.get(str(job.get("jobKind", "") or ""), "heavy")
+        if PHOTO_INDEXING_COST_RANK[job_cost_class] > max_cost_rank:
+            payload = self._photo_indexing_jobs_payload(limit=limit)
+            payload.update({
+                "ran": False,
+                "deferred": True,
+                "job": {**job, "costClass": job_cost_class},
+                "maxCostClass": max_cost_class,
+                "message": f"This {job_cost_class} job exceeds the {max_cost_class} runtime cost limit.",
+            })
+            return payload
         rerun = bool(params.get("rerun", params.get("force", False)))
         if status not in {"queued", "failed", "paused"} and not rerun:
             payload = self._photo_indexing_jobs_payload(limit=limit)
@@ -12687,6 +16800,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         attempt_number = int(running_job.get("attempts", 0) or 0)
         kind = str(running_job.get("jobKind", "") or "")
         scope = running_job.get("scope", {}) if isinstance(running_job.get("scope"), dict) else {}
+        if bool(params.get("ignoreSettings", False)):
+            scope = {**scope, "ignoreSettings": True}
+        if bool(params.get("ignorePaused", False)):
+            scope = {**scope, "ignorePaused": True}
         try:
             delay_ms = max(0, min(5000, int(os.environ.get("CROSSAGE_PHOTO_INDEXING_JOB_DELAY_MS", "0") or 0)))
         except ValueError:
@@ -12706,10 +16823,27 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 result = self.index_photo_generated_collections(scope)
             elif kind == "smart_albums":
                 result = self.index_photo_smart_albums(scope)
+            elif kind == "semantic":
+                result = self.index_photo_semantic_embeddings(scope)
+            elif kind == "reference_suggestions":
+                result = self.index_reference_suggestions(scope)
+            elif kind == "safe_mode_calibration":
+                result = self.index_safe_mode_calibration(scope)
+            elif kind == "audio":
+                result = self.index_photo_audio(scope)
             else:
-                raise ValueError("Photo indexing job kind must be ocr, barcode, objects, search, generated_collections, or smart_albums.")
+                raise ValueError("Unsupported Photo indexing job kind.")
             message = str(result.get("message", "") or "")
-            if result.get("paused"):
+            current_job = self.project.db.photo_indexing_job(job_id)
+            if str(current_job.get("status", "") or "") == "cancelled":
+                final_status = "cancelled"
+                error = str(current_job.get("error", "") or "Cancelled by user.")
+                result = {
+                    **result,
+                    "cancelled": True,
+                    "message": error,
+                }
+            elif result.get("paused"):
                 final_status = "paused"
                 error = message or "Photo indexing is paused."
             elif result.get("disabled"):
@@ -12739,22 +16873,25 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 },
             )
         except Exception as exc:
-            result = {"error": str(exc)}
+            current_job = self.project.db.photo_indexing_job(job_id)
+            was_cancelled = str(current_job.get("status", "") or "") == "cancelled"
+            error = str(current_job.get("error", "") or "Cancelled by user.") if was_cancelled else str(exc)
+            result = {"error": str(exc), "cancelled": True} if was_cancelled else {"error": str(exc)}
             completed_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
             updated_job = self.project.db.update_photo_indexing_job(
                 job_id,
-                status="failed",
+                status="cancelled" if was_cancelled else "failed",
                 result=result,
-                error=str(exc),
+                error=error,
                 completed_at=completed_at,
                 history_entry={
                     "event": "attempt",
                     "attempt": attempt_number,
-                    "status": "failed",
+                    "status": "cancelled" if was_cancelled else "failed",
                     "startedAt": started_at,
                     "completedAt": completed_at,
                     "progress": {},
-                    "error": str(exc),
+                    "error": error,
                 },
             )
         progress = updated_job.get("result", {}).get("progress", {}) if isinstance(updated_job.get("result"), dict) else {}
@@ -12770,7 +16907,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             }
         )
         payload = self._photo_indexing_jobs_payload(limit=limit)
-        payload.update({"ran": True, "job": updated_job})
+        payload.update({
+            "ran": True,
+            "job": {**updated_job, "costClass": job_cost_class},
+            "maxCostClass": max_cost_class,
+        })
         return payload
 
     def run_photo_indexing_queue(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -12785,16 +16926,53 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             max_jobs = 3
         automatic = bool(params.get("automatic", params.get("scheduled", False)))
         include_failed = bool(params.get("includeFailed", params.get("retryFailed", False)))
+        max_cost_class = _normalize_photo_indexing_cost_class(params.get("maxCostClass"), "heavy")
+        max_cost_rank = PHOTO_INDEXING_COST_RANK[max_cost_class]
+        raw_runtime_state = params.get("runtimeState", {})
+        runtime_state = raw_runtime_state if isinstance(raw_runtime_state, dict) else {}
+        clean_runtime_state = {
+            key: runtime_state.get(key)
+            for key in (
+                "reason",
+                "powerMode",
+                "onBattery",
+                "idleState",
+                "foregroundActive",
+                "thermalState",
+                "speedLimit",
+                "memoryPressure",
+                "freeMemoryBytes",
+                "totalMemoryBytes",
+                "memoryAvailableFraction",
+                "maxCostClass",
+                "constraints",
+            )
+            if key in runtime_state
+        }
         settings = self.photo_library_settings({})
         local_settings = settings.get("localSettings", {}) if isinstance(settings.get("localSettings"), dict) else {}
         local_intelligence_enabled = bool(local_settings.get("localIntelligenceEnabled", False)) or bool(params.get("ignoreSettings", False))
         catalog_job_kinds = {"search", "generated_collections", "smart_albums"}
 
         def next_queue_candidates(status: str) -> list[dict[str, Any]]:
-            rows = self.project.db.list_photo_indexing_jobs(status=status, limit=25)
-            if local_intelligence_enabled:
-                return rows
-            return [row for row in rows if str(row.get("jobKind", "") or "") in catalog_job_kinds]
+            rows = self.project.db.list_photo_indexing_jobs(status=status, limit=200)
+            if not local_intelligence_enabled:
+                rows = [row for row in rows if str(row.get("jobKind", "") or "") in catalog_job_kinds]
+            return [
+                row
+                for row in rows
+                if PHOTO_INDEXING_COST_RANK[PHOTO_INDEXING_JOB_COSTS.get(str(row.get("jobKind", "") or ""), "heavy")] <= max_cost_rank
+            ]
+
+        def cost_deferred_candidates(status: str) -> list[dict[str, Any]]:
+            rows = self.project.db.list_photo_indexing_jobs(status=status, limit=200)
+            if not local_intelligence_enabled:
+                rows = [row for row in rows if str(row.get("jobKind", "") or "") in catalog_job_kinds]
+            return [
+                row
+                for row in rows
+                if PHOTO_INDEXING_COST_RANK[PHOTO_INDEXING_JOB_COSTS.get(str(row.get("jobKind", "") or ""), "heavy")] > max_cost_rank
+            ]
 
         has_catalog_job = any(
             next_queue_candidates(status)
@@ -12834,13 +17012,22 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             if not queued and include_failed:
                 queued = next_queue_candidates("failed")
             if not queued:
-                stopped_reason = "empty"
+                stopped_reason = "cost-limit" if any(
+                    cost_deferred_candidates(status_name)
+                    for status_name in (("queued", "paused", "failed") if include_failed else ("queued", "paused"))
+                ) else "empty"
                 break
             job_id = str(queued[0].get("jobId", "") or "")
             if not job_id:
                 stopped_reason = "invalid-job"
                 break
-            result = self.run_photo_indexing_job({"jobId": job_id, "limit": limit})
+            result = self.run_photo_indexing_job({
+                "jobId": job_id,
+                "limit": limit,
+                "ignoreSettings": bool(params.get("ignoreSettings", False)),
+                "ignorePaused": bool(params.get("ignorePaused", False)),
+                "maxCostClass": max_cost_class,
+            })
             job = result.get("job", {}) if isinstance(result.get("job"), dict) else {}
             if job:
                 jobs_run.append(job)
@@ -12859,6 +17046,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             progress = result.get("progress", {}) if isinstance(result.get("progress"), dict) else {}
             for key in progress_totals:
                 progress_totals[key] += int(progress.get(key, 0) or 0)
+        cost_deferred_count = sum(
+            len(cost_deferred_candidates(status_name))
+            for status_name in (("queued", "paused", "failed") if include_failed else ("queued", "paused"))
+        )
+        if stopped_reason == "cost-limit":
+            progress_totals["deferred"] += cost_deferred_count
         self.project._append_audit(
             {
                 "action": "run_photo_indexing_queue",
@@ -12871,6 +17064,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "updated": progress_totals["updated"],
                 "failed": progress_totals["failed"],
                 "deferred": progress_totals["deferred"],
+                "max_cost_class": max_cost_class,
+                "runtime_state": clean_runtime_state,
             }
         )
         payload = self._photo_indexing_jobs_payload(limit=limit)
@@ -12882,6 +17077,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "includeFailed": include_failed,
             "stoppedReason": stopped_reason,
             "progress": progress_totals,
+            "maxCostClass": max_cost_class,
+            "costDeferredCount": cost_deferred_count,
+            "runtimeState": clean_runtime_state,
         })
         return payload
 
@@ -12900,9 +17098,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             payload.update({"jobCancelled": False, "message": "Photo indexing job was not found."})
             return payload
         status = str(job.get("status", "") or "")
-        if status == "running":
+        if status == "completed":
             payload = self._photo_indexing_jobs_payload(limit=limit)
-            payload.update({"jobCancelled": False, "job": job, "message": "Running Photo indexing jobs cannot be cancelled."})
+            payload.update({"jobCancelled": False, "job": job, "message": "Completed Photo indexing jobs cannot be cancelled."})
+            return payload
+        if status == "cancelled":
+            payload = self._photo_indexing_jobs_payload(limit=limit)
+            payload.update({"jobCancelled": True, "job": job, "message": "Photo indexing job is already cancelled."})
             return payload
         now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
         updated_job = self.project.db.update_photo_indexing_job(
@@ -12980,7 +17182,38 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             offset += page_size
         return assets
 
-    def _photo_ocr_scope_assets(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+    def _photo_index_scope_total_limit(self, params: dict[str, Any]) -> int:
+        try:
+            return max(1, min(100_000, int(params.get("limit", 100_000) or 100_000)))
+        except (TypeError, ValueError):
+            return 100_000
+
+    def _photo_sql_local_index_scope(
+        self,
+        kind: str,
+        params: dict[str, Any],
+        *,
+        failed_only: bool,
+        pending_only: bool,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        total_limit = self._photo_index_scope_total_limit(params)
+        fetch_limit = max(1, min(total_limit, int(limit or total_limit)))
+        result = self.project.db.photo_local_index_scope_assets(
+            kind,
+            failed_only=failed_only,
+            pending_only=pending_only,
+            limit=fetch_limit,
+            total_limit=total_limit,
+        )
+        assets = [asset for asset in result.get("assets", []) if isinstance(asset, dict)]
+        try:
+            total = int(result.get("total", len(assets)) or 0)
+        except (TypeError, ValueError):
+            total = len(assets)
+        return assets, max(total, len(assets))
+
+    def _photo_ocr_scope_assets(self, params: dict[str, Any], *, limit: int | None = None) -> tuple[list[dict[str, Any]], int]:
         source_values = params.get("sourcePaths", params.get("sources", []))
         if isinstance(params.get("sourcePath", ""), str) and str(params.get("sourcePath", "")).strip():
             source_values = [*source_values, params.get("sourcePath")] if isinstance(source_values, list) else [params.get("sourcePath")]
@@ -12993,7 +17226,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         pending_only = bool(params.get("pendingOnly", params.get("unindexedOnly", False)))
         has_explicit_scope = bool(asset_values if isinstance(asset_values, list) else []) or bool(source_values if isinstance(source_values, list) else [])
         if params.get("all", False) or params.get("allPhotos", False) or ((failed_only or pending_only) and not has_explicit_scope):
-            assets = self._photo_ocr_all_assets(limit=max(1, min(100_000, int(params.get("limit", 100_000) or 100_000))))
+            return self._photo_sql_local_index_scope(
+                "ocr",
+                params,
+                failed_only=failed_only,
+                pending_only=pending_only,
+                limit=limit or self._photo_index_scope_total_limit(params),
+            )
         else:
             for asset_id in asset_values if isinstance(asset_values, list) else []:
                 asset = self.project.db.photo_asset_by_id(str(asset_id or ""))
@@ -13034,7 +17273,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 if has_ocr or status in {"indexed", "failed", "no_text"}:
                     continue
             scoped.append(asset)
-        return scoped
+        return scoped, len(scoped)
 
     def _photo_ocr_sidecar_candidates(self, source: Path) -> list[Path]:
         candidates = [
@@ -13356,37 +17595,33 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         language: str,
         image_size: tuple[int, int] | None = None,
     ) -> tuple[str, str, list[dict[str, Any]]]:
-        """On-device OCR via RapidOCR (PP-OCRv5 ONNX over onnxruntime), fully offline.
-
-        Returns (text, error, percent-bounded regions). Higher quality than the
-        Tesseract path on handwritten/multilingual/noisy real-world photos.
-        """
+        """Run the integrity-checked PP-OCRv6 worker and normalize its regions."""
+        if getattr(self, "_rapidocr_engine", None) is False:
+            return "", str(getattr(self, "_rapidocr_init_error", "rapidocr-init-failed") or "rapidocr-init-failed"), []
         try:
-            from rapidocr_onnxruntime import RapidOCR
-        except Exception:
-            return "", "rapidocr-not-installed", []
-        engine = getattr(self, "_rapidocr_engine", None)
-        if engine is None:
-            try:
-                engine = RapidOCR()
-            except Exception as exc:
-                return "", f"rapidocr-init-failed: {str(exc)[:160]}", []
-            self._rapidocr_engine = engine
-        try:
-            result, _elapsed = engine(str(source))
-        except Exception as exc:
+            output = run_ppocrv6(source)
+        except (PpOcrV6IntegrityError, PpOcrV6UnavailableError) as exc:
+            error = f"rapidocr-init-failed: {str(exc)[:200]}"
+            self._rapidocr_engine = False
+            self._rapidocr_init_error = error
+            return "", error, []
+        except PpOcrV6InferenceError as exc:
             return "", f"rapidocr-failed: {str(exc)[:200]}", []
-        if not result:
-            return "", "", []
+        self._rapidocr_engine = True
+        self._rapidocr_init_error = ""
+        provenance = output.get("provenance") if isinstance(output.get("provenance"), dict) else {}
+        self._rapidocr_last_provenance = provenance
         width = float(image_size[0]) if image_size and image_size[0] else 0.0
         height = float(image_size[1]) if image_size and image_size[1] else 0.0
         lines: list[str] = []
         regions: list[dict[str, Any]] = []
-        for entry in result:
-            try:
-                box, raw_text, conf = entry[0], str(entry[1] or "").strip(), entry[2]
-            except (IndexError, TypeError):
+        output_lines = output.get("lines") if isinstance(output.get("lines"), list) else []
+        for entry in output_lines:
+            if not isinstance(entry, dict):
                 continue
+            box = entry.get("box")
+            raw_text = str(entry.get("text", "") or "").strip()
+            conf = entry.get("confidence", 0.0)
             if not raw_text:
                 continue
             lines.append(raw_text)
@@ -13398,7 +17633,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "text": raw_text[:500],
                 "language": language,
                 "confidence": round(confidence, 3),
-                "source": "rapidocr",
+                "source": "ppocrv6-rapidocr",
+                "model": provenance,
             }
             if width > 0 and height > 0 and isinstance(box, (list, tuple)) and len(box) >= 4:
                 xs = [float(p[0]) for p in box if isinstance(p, (list, tuple)) and len(p) >= 2]
@@ -13410,11 +17646,24 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     region["y"] = round(y0 / height * 100.0, 2)
                     region["width"] = round(max(0.0, x1 - x0) / width * 100.0, 2)
                     region["height"] = round(max(0.0, y1 - y0) / height * 100.0, 2)
+                    region["bounds"] = {
+                        "unit": "percent",
+                        "x": region["x"],
+                        "y": region["y"],
+                        "width": region["width"],
+                        "height": region["height"],
+                        "pixelX": round(x0, 3),
+                        "pixelY": round(y0, 3),
+                        "pixelWidth": round(max(0.0, x1 - x0), 3),
+                        "pixelHeight": round(max(0.0, y1 - y0), 3),
+                        "imageWidth": int(width),
+                        "imageHeight": int(height),
+                    }
             script = str(self._photo_ocr_detect_script(raw_text).get("script", "") or "")
             if script:
                 region["script"] = script
             regions.append(region)
-        text = re.sub(r"\s+", " ", " ".join(lines)).strip()
+        text = re.sub(r"\s+", " ", str(output.get("text", "") or " ".join(lines))).strip()
         if not text:
             return "", "", []
         return text[:50_000], "", regions
@@ -13467,11 +17716,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             }
         if allow_engine:
             image_size = self._photo_ocr_asset_image_size(asset, source)
-            # Prefer on-device RapidOCR (PP-OCRv5 ONNX); fall back to Tesseract when absent.
-            engine_source = "rapidocr"
+            # PP-OCRv6 is the portable default; Tesseract remains an availability fallback.
+            engine_source = "ppocrv6-rapidocr"
             engine_text, error, engine_regions = self._photo_ocr_text_from_rapidocr(source, language, image_size)
-            if not engine_text and error in ("", "rapidocr-not-installed"):
+            engine_model = dict(getattr(self, "_rapidocr_last_provenance", {}) or {})
+            if not engine_text and (error == "" or str(error).startswith("rapidocr-init-failed")):
                 engine_source = "tesseract"
+                engine_model = {}
                 engine_text, error, engine_regions = self._photo_ocr_text_from_tesseract(source, language, image_size)
             if engine_text:
                 engine_confidence = 0.65
@@ -13491,9 +17742,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     "sourcePath": "",
                     "confidence": engine_confidence,
                     "regions": engine_regions,
-                    "regionSource": (engine_source if engine_source == "rapidocr" else "tesseract-tsv") if engine_regions else "",
+                    "regionSource": (engine_source if engine_source == "ppocrv6-rapidocr" else "tesseract-tsv") if engine_regions else "",
+                    "model": engine_model,
                 }
-            if error and error not in ("tesseract-not-installed", "rapidocr-not-installed"):
+            if error and error != "tesseract-not-installed":
                 return {"ok": False, "status": "failed", "error": error, "source": engine_source}
         return {"ok": False, "status": "no_text", "error": "No OCR text was produced.", "source": "sidecar"}
 
@@ -13519,7 +17771,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "items": [],
                 "failures": [],
             }
-        assets = self._photo_ocr_scope_assets(params)
         force = bool(params.get("force", False))
         failed_only = bool(params.get("failedOnly", params.get("retryFailures", False)))
         pending_only = bool(params.get("pendingOnly", params.get("unindexedOnly", False)))
@@ -13532,8 +17783,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             budget_limit = max(1, min(5000, int(params.get("budgetLimit", default_budget) or default_budget)))
         except (TypeError, ValueError):
             budget_limit = default_budget
-        scoped_total = len(assets)
+        assets, scoped_total = self._photo_ocr_scope_assets(params, limit=budget_limit)
         deferred = max(0, len(assets) - budget_limit)
+        if scoped_total > len(assets):
+            deferred = max(deferred, scoped_total - budget_limit)
         if deferred:
             assets = assets[:budget_limit]
         generated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -13570,15 +17823,26 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 continue
             extracted = self._photo_ocr_extract_asset(asset, language=language, allow_engine=allow_engine)
             status = str(extracted.get("status", "failed") or "failed")
+            extracted_model = extracted.get("model") if isinstance(extracted.get("model"), dict) else {}
             local_ocr = {
                 "status": status,
                 "indexedAt": generated_at,
                 "language": language,
                 "source": str(extracted.get("source", "") or ""),
-                "engine": "sidecar" if extracted.get("source") == "sidecar" else ("tesseract" if extracted.get("source") == "tesseract" else "none"),
+                "engine": (
+                    "sidecar"
+                    if extracted.get("source") == "sidecar"
+                    else "tesseract"
+                    if extracted.get("source") == "tesseract"
+                    else "ppocrv6-rapidocr"
+                    if extracted.get("source") == "ppocrv6-rapidocr"
+                    else "none"
+                ),
                 "confidence": round(float(extracted.get("confidence", 0) or 0), 3),
                 "error": str(extracted.get("error", "") or "")[:300],
             }
+            if extracted_model:
+                local_ocr["model"] = extracted_model
             if extracted.get("ok"):
                 text = str(extracted.get("text", "") or "").strip()
                 confidence = float(extracted.get("confidence", 0.65) or 0.65)
@@ -13635,6 +17899,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                         conn,
                         default_language=language,
                         default_confidence=confidence,
+                        default_source=str(extracted.get("source", "") or ""),
+                        default_metadata={"model": extracted_model} if extracted_model else {},
                         refresh_index=True,
                     )
                 updated += 1
@@ -13713,8 +17979,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "ocr",
             limit=max(1, min(100_000, int(params.get("limit", 100_000) or 100_000))),
         )
-        settings = self.photo_library_settings({})
-        local_settings = settings.get("localSettings", {}) if isinstance(settings.get("localSettings"), dict) else {}
+        local_settings = self._photo_local_settings()
         return {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "enabled": bool(local_settings.get("localIntelligenceEnabled", False)),
@@ -13728,7 +17993,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "failures": status.get("failures", []),
         }
 
-    def _photo_barcode_scope_assets(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+    def _photo_barcode_scope_assets(self, params: dict[str, Any], *, limit: int | None = None) -> tuple[list[dict[str, Any]], int]:
         source_values = params.get("sourcePaths", params.get("sources", []))
         if isinstance(params.get("sourcePath", ""), str) and str(params.get("sourcePath", "")).strip():
             source_values = [*source_values, params.get("sourcePath")] if isinstance(source_values, list) else [params.get("sourcePath")]
@@ -13740,7 +18005,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         has_explicit_scope = bool(asset_values if isinstance(asset_values, list) else []) or bool(source_values if isinstance(source_values, list) else [])
         assets: list[dict[str, Any]] = []
         if params.get("all", False) or params.get("allPhotos", False) or ((failed_only or pending_only) and not has_explicit_scope):
-            assets = self._photo_ocr_all_assets(limit=max(1, min(100_000, int(params.get("limit", 100_000) or 100_000))))
+            return self._photo_sql_local_index_scope(
+                "barcode",
+                params,
+                failed_only=failed_only,
+                pending_only=pending_only,
+                limit=limit or self._photo_index_scope_total_limit(params),
+            )
         else:
             for asset_id in asset_values if isinstance(asset_values, list) else []:
                 asset = self.project.db.photo_asset_by_id(str(asset_id or ""))
@@ -13775,7 +18046,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             if pending_only and (has_barcode or status in {"indexed", "failed", "no_code", "unavailable"}):
                 continue
             scoped.append(asset)
-        return scoped
+        return scoped, len(scoped)
 
     def index_photo_barcodes(self, params: dict[str, Any]) -> dict[str, Any]:
         settings = self.photo_library_settings({})
@@ -13799,7 +18070,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "items": [],
                 "failures": [],
             }
-        assets = self._photo_barcode_scope_assets(params)
         force = bool(params.get("force", False))
         failed_only = bool(params.get("failedOnly", params.get("retryFailures", False)))
         pending_only = bool(params.get("pendingOnly", params.get("unindexedOnly", False)))
@@ -13809,8 +18079,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             budget_limit = max(1, min(5000, int(params.get("budgetLimit", default_budget) or default_budget)))
         except (TypeError, ValueError):
             budget_limit = default_budget
-        scoped_total = len(assets)
+        assets, scoped_total = self._photo_barcode_scope_assets(params, limit=budget_limit)
         deferred = max(0, len(assets) - budget_limit)
+        if scoped_total > len(assets):
+            deferred = max(deferred, scoped_total - budget_limit)
         if deferred:
             assets = assets[:budget_limit]
         generated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -13865,8 +18137,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     error = "source file is missing"
                 if not error:
                     try:
-                        file_info = self.project.db._photo_asset_file_metadata(str(source))
-                        extracted_meta = file_info.get("metadata", {}) if isinstance(file_info.get("metadata"), dict) else {}
+                        extracted_meta = self.project.db._photo_asset_qr_metadata(source)
+                        if not isinstance(extracted_meta, dict):
+                            extracted_meta = {}
                         patch = {key: extracted_meta[key] for key in barcode_keys if key in extracted_meta}
                         barcode_rows = patch.get("barcodes", [])
                         barcode_count = len(barcode_rows) if isinstance(barcode_rows, list) else (1 if str(patch.get("barcodeText", "") or "").strip() else 0)
@@ -13956,8 +18229,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "barcode",
             limit=max(1, min(100_000, int(params.get("limit", 100_000) or 100_000))),
         )
-        settings = self.photo_library_settings({})
-        local_settings = settings.get("localSettings", {}) if isinstance(settings.get("localSettings"), dict) else {}
+        local_settings = self._photo_local_settings()
         return {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "enabled": bool(local_settings.get("localIntelligenceEnabled", False)),
@@ -13972,7 +18244,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "failures": status.get("failures", []),
         }
 
-    def _photo_object_scope_assets(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+    def _photo_object_scope_assets(self, params: dict[str, Any], *, limit: int | None = None) -> tuple[list[dict[str, Any]], int]:
         source_values = params.get("sourcePaths", params.get("sources", []))
         if isinstance(params.get("sourcePath", ""), str) and str(params.get("sourcePath", "")).strip():
             source_values = [*source_values, params.get("sourcePath")] if isinstance(source_values, list) else [params.get("sourcePath")]
@@ -13984,7 +18256,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         has_explicit_scope = bool(asset_values if isinstance(asset_values, list) else []) or bool(source_values if isinstance(source_values, list) else [])
         assets: list[dict[str, Any]] = []
         if params.get("all", False) or params.get("allPhotos", False) or ((failed_only or pending_only) and not has_explicit_scope):
-            assets = self._photo_ocr_all_assets(limit=max(1, min(100_000, int(params.get("limit", 100_000) or 100_000))))
+            return self._photo_sql_local_index_scope(
+                "objects",
+                params,
+                failed_only=failed_only,
+                pending_only=pending_only,
+                limit=limit or self._photo_index_scope_total_limit(params),
+            )
         else:
             for asset_id in asset_values if isinstance(asset_values, list) else []:
                 asset = self.project.db.photo_asset_by_id(str(asset_id or ""))
@@ -14010,14 +18288,22 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 continue
             metadata = asset.get("metadata", {}) if isinstance(asset.get("metadata"), dict) else {}
             local_objects = metadata.get("localObjectTags", {}) if isinstance(metadata.get("localObjectTags"), dict) else {}
-            status = str(local_objects.get("status", "") or "").strip().lower()
+            local_vision = metadata.get("localVision", {}) if isinstance(metadata.get("localVision"), dict) else {}
+            model_requested = bool(params.get("useModel", params.get("useExternalEngine", True))) and not bool(params.get("metadataOnly", False))
+            status = str(
+                (local_vision.get("status", "") if model_requested else "")
+                or local_objects.get("status", "")
+                or ""
+            ).strip().lower()
             has_objects = bool(object_tag_counts.get(asset_id, 0))
             if failed_only and status not in {"failed", "no_objects", "unavailable"}:
                 continue
-            if pending_only and (has_objects or status in {"indexed", "failed", "no_objects", "unavailable"}):
-                continue
+            if pending_only:
+                terminal = status in {"indexed", "failed", "no_objects", "unavailable"}
+                if terminal or (has_objects and not model_requested):
+                    continue
             scoped.append(asset)
-        return scoped
+        return scoped, len(scoped)
 
     def index_photo_objects(self, params: dict[str, Any]) -> dict[str, Any]:
         settings = self.photo_library_settings({})
@@ -14043,36 +18329,69 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "items": [],
                 "failures": [],
             }
-        assets = self._photo_object_scope_assets(params)
         force = bool(params.get("force", False))
         failed_only = bool(params.get("failedOnly", params.get("retryFailures", False)))
         pending_only = bool(params.get("pendingOnly", params.get("unindexedOnly", False)))
+        use_model = bool(params.get("useModel", params.get("useExternalEngine", True))) and not bool(params.get("metadataOnly", False))
+        model_preference = str(
+            params.get(
+                "modelTier",
+                params.get("tier", params.get("preference", local_settings.get("visionModelTier", "auto"))),
+            )
+            or "auto"
+        ).strip().lower()
+        vlm_root = str(params.get("modelRoot", params.get("vlmRoot", "")) or "").strip() or None
         power_mode = str(local_settings.get("indexingPowerMode", "balanced") or "balanced")
-        default_budget = {"low": 50, "balanced": 250, "performance": 1000}.get(power_mode, 250)
+        default_budget = (
+            {"low": 4, "balanced": 12, "performance": 30}.get(power_mode, 12)
+            if use_model
+            else {"low": 50, "balanced": 250, "performance": 1000}.get(power_mode, 250)
+        )
         try:
             budget_limit = max(1, min(5000, int(params.get("budgetLimit", default_budget) or default_budget)))
         except (TypeError, ValueError):
             budget_limit = default_budget
-        scoped_total = len(assets)
+        assets, scoped_total = self._photo_object_scope_assets(params, limit=budget_limit)
         deferred = max(0, len(assets) - budget_limit)
+        if scoped_total > len(assets):
+            deferred = max(deferred, scoped_total - budget_limit)
         if deferred:
             assets = assets[:budget_limit]
         generated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
         object_tag_counts = self.project.db.photo_object_tag_counts(
             str(asset.get("assetId", "") or "") for asset in assets if str(asset.get("assetId", "") or "")
         )
+        vlm_status: dict[str, Any] = {}
+        vlm_status_error = ""
+        if use_model:
+            try:
+                vlm_status = portable_photo_vlm_status(
+                    root=vlm_root,
+                    preference=model_preference,
+                    power_mode=power_mode,
+                )
+            except (PhotoVlmIntegrityError, PhotoVlmUnavailableError) as exc:
+                vlm_status_error = str(exc)
+        vlm_route = vlm_status.get("route") if isinstance(vlm_status.get("route"), dict) else {}
+        vlm_available = bool(vlm_route.get("available", False))
+        if use_model and not vlm_available and not vlm_status_error:
+            vlm_status_error = str(vlm_route.get("reason", "") or "Install a verified local photo VLM model pack.")
         items: list[dict[str, Any]] = []
         failures: list[dict[str, Any]] = []
         updated = 0
         skipped = 0
         failed = 0
+        model_updated = 0
+        caption_updated = 0
         for asset in assets:
             asset_id = str(asset.get("assetId", "") or "")
             source_path = str(asset.get("sourcePath", "") or "")
             metadata = asset.get("metadata", {}) if isinstance(asset.get("metadata"), dict) else {}
             records = self.project.db.photo_object_tags_from_metadata(metadata)
             existing_count = int(object_tag_counts.get(asset_id, 0) or 0)
-            if not force and existing_count:
+            existing_vision = metadata.get("localVision") if isinstance(metadata.get("localVision"), dict) else {}
+            existing_vision_indexed = str(existing_vision.get("status", "") or "").strip().lower() == "indexed"
+            if not force and existing_count and (not use_model or not vlm_available or existing_vision_indexed):
                 skipped += 1
                 items.append({
                     "assetId": asset_id,
@@ -14082,31 +18401,113 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     "objectTagCount": existing_count,
                 })
                 continue
-            status = "indexed" if records else "no_objects"
-            error = "" if records else "No object, scene, event, or model labels were found in local metadata."
-            confidence_values = [float(record["confidence"]) for record in records if isinstance(record.get("confidence"), (int, float))]
+            generated: dict[str, Any] = {}
+            generation_error = ""
+            generation_status = ""
+            if use_model and vlm_available:
+                try:
+                    generated = run_photo_vlm(
+                        source_path,
+                        preference=model_preference,
+                        power_mode=power_mode,
+                        root=vlm_root,
+                    )
+                    generation_status = "indexed"
+                except (PhotoVlmUnavailableError, PhotoVlmIntegrityError) as exc:
+                    generation_status = "unavailable"
+                    generation_error = str(exc)
+                except PhotoVlmError as exc:
+                    generation_status = "failed"
+                    generation_error = str(exc)
+            elif use_model:
+                generation_status = "unavailable"
+                generation_error = vlm_status_error
+
+            generated_tags = [
+                re.sub(r"\s+", " ", str(value or "")).strip()[:80]
+                for value in (generated.get("tags", []) if isinstance(generated.get("tags"), list) else [])
+                if re.sub(r"\s+", " ", str(value or "")).strip()
+            ][:16]
+            generated_caption = re.sub(r"\s+", " ", str(generated.get("caption", "") or "")).strip()[:600]
+            next_local_vision: dict[str, Any] = dict(existing_vision)
+            if generated:
+                next_local_vision = {
+                    "status": "indexed",
+                    "indexedAt": generated_at,
+                    "source": str(generated.get("source", "") or "vlm"),
+                    "caption": generated_caption,
+                    "tags": generated_tags,
+                    "tagCount": len(generated_tags),
+                    "imageWidth": int(generated.get("imageWidth", 0) or 0),
+                    "imageHeight": int(generated.get("imageHeight", 0) or 0),
+                    "elapsedMs": float(generated.get("elapsedMs", 0) or 0),
+                    "route": generated.get("route", {}) if isinstance(generated.get("route"), dict) else {},
+                    "model": generated.get("model", {}) if isinstance(generated.get("model"), dict) else {},
+                    "error": "",
+                    "humanReviewRequired": True,
+                }
+                model_updated += 1
+                if generated_caption:
+                    caption_updated += 1
+            elif use_model:
+                next_local_vision = {
+                    **next_local_vision,
+                    "status": generation_status or "unavailable",
+                    "lastAttemptAt": generated_at,
+                    "error": generation_error[:300],
+                    "humanReviewRequired": True,
+                }
+
+            candidate_metadata = {**metadata, "localVision": next_local_vision} if use_model else metadata
+            next_records = self.project.db.photo_object_tags_from_metadata(candidate_metadata)
+            has_caption = bool(generated_caption or str(existing_vision.get("caption", "") or "").strip())
+            succeeded = bool(next_records or has_caption)
+            if succeeded:
+                status = "indexed"
+                error = ""
+            elif generation_status in {"failed", "unavailable"}:
+                status = generation_status
+                error = generation_error[:300]
+            else:
+                status = "no_objects"
+                error = "No object, scene, event, or model labels were found in local metadata."
+            confidence_values = [
+                float(record["confidence"])
+                for record in next_records
+                if isinstance(record.get("confidence"), (int, float))
+            ]
+            source_name = str(generated.get("source", "") or ("metadata" if next_records else ""))
             local_patch = {
                 "status": status,
                 "indexedAt": generated_at,
-                "source": "metadata",
-                "metadataOnly": True,
-                "tagCount": len(records),
+                "source": source_name,
+                "metadataOnly": not bool(generated),
+                "tagCount": len(next_records),
+                "captionGenerated": bool(generated_caption),
                 "confidence": round(max(confidence_values), 3) if confidence_values else None,
                 "error": error,
             }
             updated_asset = self.project.db.update_photo_asset_metadata_json(
                 asset_id=asset_id,
-                patch={"localObjectTags": local_patch},
+                patch={
+                    "localObjectTags": local_patch,
+                    **({"localVision": next_local_vision} if use_model else {}),
+                },
             )
-            if records:
+            persisted_metadata = updated_asset.get("metadata", {}) if isinstance(updated_asset.get("metadata"), dict) else {}
+            persisted_records = self.project.db.photo_object_tags_from_metadata(persisted_metadata)
+            persisted_count = len(persisted_records)
+            if succeeded:
                 updated += 1
                 items.append({
                     "assetId": asset_id,
                     "sourcePath": source_path,
                     "status": status,
-                    "objectTagCount": len(records),
-                    "source": "metadata",
-                    "assetMetadata": updated_asset.get("metadata", {}),
+                    "objectTagCount": persisted_count,
+                    "captionGenerated": bool(generated_caption),
+                    "source": source_name,
+                    "modelTier": str((generated.get("route") or {}).get("tier", "")) if isinstance(generated.get("route"), dict) else "",
+                    "assetMetadata": persisted_metadata,
                 })
             else:
                 failed += 1
@@ -14116,7 +18517,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     "status": status,
                     "error": error,
                     "objectTagCount": 0,
-                    "assetMetadata": updated_asset.get("metadata", {}),
+                    "assetMetadata": persisted_metadata,
                 }
                 failures.append(failure)
                 items.append(failure)
@@ -14126,7 +18527,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "generatedAt": generated_at,
             "failedOnly": failed_only,
             "pendingOnly": pending_only,
-            "metadataOnly": True,
+            "metadataOnly": model_updated == 0,
+            "modelRequested": use_model,
+            "modelAvailable": vlm_available,
+            "modelPreference": model_preference,
+            "modelRoute": vlm_route,
+            "modelStatusError": vlm_status_error,
             "powerMode": power_mode,
             "pending": bool(pending_only and deferred > 0),
             "progress": {
@@ -14136,6 +18542,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "skipped": skipped,
                 "failed": failed,
                 "deferred": deferred,
+                "modelUpdated": model_updated,
+                "captionUpdated": caption_updated,
             },
             "items": items,
             "failures": failures[:25],
@@ -14149,7 +18557,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "failed": failed,
                 "failed_only": failed_only,
                 "pending_only": pending_only,
-                "metadata_only": True,
+                "metadata_only": model_updated == 0,
+                "model_requested": use_model,
+                "model_available": vlm_available,
+                "model_preference": model_preference,
+                "model_updated": model_updated,
+                "caption_updated": caption_updated,
                 "power_mode": power_mode,
                 "deferred": deferred,
             }
@@ -14162,15 +18575,28 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "objects",
             limit=max(1, min(100_000, int(params.get("limit", 100_000) or 100_000))),
         )
-        settings = self.photo_library_settings({})
-        local_settings = settings.get("localSettings", {}) if isinstance(settings.get("localSettings"), dict) else {}
+        local_settings = self._photo_local_settings()
+        preference = str(params.get("modelTier", params.get("tier", local_settings.get("visionModelTier", "auto"))) or "auto")
+        model_status: dict[str, Any] = {}
+        model_error = ""
+        try:
+            model_status = portable_photo_vlm_status(
+                root=str(params.get("modelRoot", params.get("vlmRoot", "")) or "") or None,
+                preference=preference,
+                power_mode=str(local_settings.get("indexingPowerMode", "balanced") or "balanced"),
+            )
+        except (PhotoVlmIntegrityError, PhotoVlmUnavailableError) as exc:
+            model_error = str(exc)
         return {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "enabled": bool(local_settings.get("localIntelligenceEnabled", False)),
             "noNetwork": bool(local_settings.get("noNetworkIntelligence", True)),
             "paused": bool(local_settings.get("backgroundIndexingPaused", False)),
             "powerMode": str(local_settings.get("indexingPowerMode", "balanced") or "balanced"),
-            "metadataOnly": True,
+            "metadataOnly": not bool((model_status.get("route") or {}).get("available", False)),
+            "modelPreference": preference,
+            "modelStatus": model_status,
+            "modelStatusError": model_error,
             "total": int(status.get("total", 0) or 0),
             "indexed": int(status.get("indexed", 0) or 0),
             "pending": int(status.get("pending", 0) or 0),
@@ -14259,6 +18685,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 remove_value(row.get("kind", row.get("type", "")), row.get("value", ""))
 
         result = self.project.db.save_photo_curation_preferences(body)
+        library_root = self._photo_library_root_filter_from_params(params)
+        base_entries = self._visible_photo_entries(self._all_photo_entries())
+        if library_root:
+            base_entries = self._filter_photo_entries_by_library_root(base_entries, library_root)
+        self._photo_generated_collection_summaries(base_entries, library_root=library_root)
+        with self._photo_folder_rail_cache_lock:
+            self._photo_folder_rail_cache.clear()
         self.project._append_audit(
             {
                 "action": "save_photo_curation_preferences",
@@ -14275,6 +18708,121 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def photo_user_memories(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return {"memories": self.project.db.photo_user_memories()}
+
+    def _visible_source_paths_in_order(
+        self,
+        source_paths: Iterable[Any],
+        *,
+        include_hidden: bool = False,
+        include_deleted: bool = False,
+    ) -> list[str]:
+        ordered_paths = [str(path or "").strip() for path in source_paths if str(path or "").strip()]
+        if not ordered_paths:
+            return []
+        assets = self.project.db.photo_assets_by_paths(ordered_paths)
+        asset_by_source = {
+            str(asset.get("sourcePath", "") or ""): asset
+            for asset in assets
+            if str(asset.get("sourcePath", "") or "") and str(asset.get("assetId", "") or "")
+        }
+        metadata_by_asset_id = self.project.db.photo_asset_metadata_by_ids(
+            str(asset.get("assetId", "") or "") for asset in assets
+        )
+        visible_sources: set[str] = set()
+        for source, asset in asset_by_source.items():
+            asset_id = str(asset.get("assetId", "") or "")
+            metadata = metadata_by_asset_id.get(asset_id, {})
+            if not include_hidden and bool(metadata.get("hidden", False)):
+                continue
+            if not include_deleted and str(metadata.get("deletedAt", "") or ""):
+                continue
+            visible_sources.add(source)
+        return [path for path in ordered_paths if path in visible_sources]
+
+    def photo_user_memory_source_order(self, params: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(params, dict):
+            raise ValueError("Photo user memory source order params must be an object.")
+        memory_id = str(params.get("memoryId", params.get("id", "")) or "").strip()
+        if not memory_id:
+            raise ValueError("memoryId is required.")
+        memory = next(
+            (
+                item
+                for item in self.project.db.photo_user_memories()
+                if str(item.get("memoryId", "") or "") == memory_id
+            ),
+            None,
+        )
+        if memory is None:
+            raise ValueError("Unknown photo memory id.")
+        source_paths = self._visible_source_paths_in_order(
+            memory.get("sourcePaths", []) if isinstance(memory.get("sourcePaths", []), list) else [],
+            include_hidden=bool(params.get("includeHidden", False)),
+            include_deleted=bool(params.get("includeDeleted", False)),
+        )
+        return {"memoryId": memory_id, "sourcePaths": source_paths, "total": len(source_paths)}
+
+    def _patch_photo_user_memory_generated_cache(
+        self,
+        memory: dict[str, Any] | None,
+        *,
+        memory_id: str = "",
+        library_root: str = "",
+    ) -> None:
+        """Keep explicit Memory writes immediately readable without a catalog rebuild."""
+        clean_root = str(library_root or "").strip()
+        clean_id = str(memory_id or (memory or {}).get("memoryId", "") or "").strip()
+        if not clean_id:
+            return
+        cache = self.project.db.photo_generated_collection_cache(clean_root)
+        cached_memories = cache.get("memories", []) if isinstance(cache.get("memories", []), list) else []
+        next_memories = [
+            item for item in cached_memories
+            if isinstance(item, dict) and str(item.get("memoryId", "") or "") != clean_id
+        ]
+        if isinstance(memory, dict):
+            source_paths = [
+                str(path or "").strip()
+                for path in memory.get("sourcePaths", [])
+                if str(path or "").strip()
+            ]
+            entries = self._visible_photo_entries(self._photo_entries_for_source_paths(source_paths))
+            if clean_root:
+                entries = self._filter_photo_entries_by_library_root(entries, clean_root)
+            summary = self._photo_memory_summary(
+                category="user",
+                name=str(memory.get("name", "") or "Memory"),
+                entries=entries,
+                subtitle=str(memory.get("subtitle", "") or ""),
+                memory_id=clean_id,
+                cover_source_path=str(memory.get("coverSourcePath", "") or ""),
+                created_at=str(memory.get("createdAt", "") or ""),
+                updated_at=str(memory.get("updatedAt", "") or ""),
+                movie_settings=memory.get("movieSettings") if isinstance(memory.get("movieSettings"), dict) else None,
+            )
+            if summary:
+                next_memories.append(summary)
+        next_memories.sort(
+            key=lambda item: (
+                int(bool(item.get("favorite", False))),
+                str(item.get("sortHint", "") or ""),
+                int(item.get("count", 0) or 0),
+                str(item.get("name", "") or ""),
+            ),
+            reverse=True,
+        )
+        self.project.db.save_photo_generated_collection_cache(
+            clean_root,
+            {
+                **cache,
+                # The next full/background enrichment will replace this bounded
+                # write-through snapshot with a newly signed catalog summary.
+                "signature": "",
+                "memories": next_memories[:32],
+            },
+        )
+        with self._photo_folder_rail_cache_lock:
+            self._photo_folder_rail_cache.clear()
 
     def save_photo_user_memory(self, params: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(params, dict):
@@ -14337,6 +18885,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if bool(params.get("clearMovieSettings")):
             memory_payload["clearMovieSettings"] = True
         result = self.project.db.save_photo_user_memory(memory_payload)
+        self._patch_photo_user_memory_generated_cache(
+            result,
+            library_root=self._photo_library_root_filter_from_params(params),
+        )
         self.project._append_audit(
             {
                 "action": "save_photo_user_memory",
@@ -14355,6 +18907,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if not memory_id.startswith("user:"):
             raise ValueError("Only user-created Memories can be deleted.")
         deleted = self.project.db.delete_photo_user_memory(memory_id)
+        if deleted:
+            self._patch_photo_user_memory_generated_cache(
+                None,
+                memory_id=memory_id,
+                library_root=self._photo_library_root_filter_from_params(params),
+            )
         self.project._append_audit(
             {
                 "action": "delete_photo_user_memory",
@@ -14823,6 +19381,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "name": name,
             "title": str(params.get("title", name) or name).strip() or name,
             "sourceLabel": str(params.get("sourceLabel", "") or "").strip(),
+            "storyId": params.get("storyId", ""),
+            "storyContentSha256": params.get("storyContentSha256", ""),
+            "storyGenerationSha256": params.get("storyGenerationSha256", ""),
             "sourcePaths": source_paths,
             "theme": str(params.get("theme", "") or ""),
             "themeTimelinePreset": params.get("themeTimelinePreset", params.get("themePreset", params.get("timelinePreset", "auto"))),
@@ -14925,6 +19486,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             raise ValueError("Slideshow export requires at least one visible photo or video.")
 
         project_id = str(params.get("projectId", params.get("id", "")) or "").strip()
+        story_id = re.sub(r"[^A-Za-z0-9:_-]+", "-", str(params.get("storyId", "") or "")).strip("-")[:128]
+        story_content_sha256 = str(params.get("storyContentSha256", "") or "").strip().lower()
+        story_generation_sha256 = str(params.get("storyGenerationSha256", "") or "").strip().lower()
+        if not re.fullmatch(r"[a-f0-9]{64}", story_content_sha256):
+            story_content_sha256 = ""
+        if not re.fullmatch(r"[a-f0-9]{64}", story_generation_sha256):
+            story_generation_sha256 = ""
         memory_id = str(params.get("memoryId", params.get("memory_id", "")) or "").strip()
         memory_name = self._photo_export_clean_text(params.get("memoryName", params.get("memory_name", "")), limit=120)
         export_action = str(params.get("exportAction", params.get("action", "export_photo_slideshow")) or "export_photo_slideshow").strip()
@@ -15561,6 +20129,15 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     "motion": clean_timeline_motion(raw_item.get("motion", raw_item.get("motionPreset", raw_item.get("keyframeMotion", "auto")))),
                     "keyframes": keyframes,
                 }
+                chapter_id = re.sub(r"[^A-Za-z0-9:_-]+", "-", str(raw_item.get("chapterId", "") or "")).strip("-")[:128]
+                chapter_title = self._photo_export_clean_text(raw_item.get("chapterTitle", ""), limit=100)
+                chapter_narrative = self._photo_export_clean_text(raw_item.get("chapterNarrative", ""), limit=700)
+                if chapter_id:
+                    timeline_item["chapterId"] = chapter_id
+                if chapter_title:
+                    timeline_item["chapterTitle"] = chapter_title
+                if chapter_narrative:
+                    timeline_item["chapterNarrative"] = chapter_narrative
                 if has_focal_x:
                     timeline_item["focalX"] = clean_percent(first_value(raw_item, "focalX", "cropFocusX", "focusX"), 50)
                 if has_focal_y:
@@ -15638,6 +20215,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 timeline_item["captionWrap"] = raw_timeline_item["captionWrap"]
             if isinstance(raw_timeline_item.get("captions"), list) and raw_timeline_item["captions"]:
                 timeline_item["captions"] = raw_timeline_item["captions"]
+            for key in ("chapterId", "chapterTitle", "chapterNarrative"):
+                if isinstance(raw_timeline_item.get(key), str) and raw_timeline_item[key]:
+                    timeline_item[key] = raw_timeline_item[key]
             transition_item_effect = raw_timeline_item.get("transitionEffect")
             if transition_item_effect in {"auto", "cut", "fade", "dissolve", "zoom"}:
                 timeline_item["transitionEffect"] = transition_item_effect
@@ -15770,6 +20350,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 row["captionWrap"] = raw_timeline_item["captionWrap"]
             if isinstance(raw_timeline_item.get("captions"), list) and raw_timeline_item["captions"]:
                 row["captions"] = raw_timeline_item["captions"]
+            for key in ("chapterId", "chapterTitle", "chapterNarrative"):
+                if isinstance(raw_timeline_item.get(key), str) and raw_timeline_item[key]:
+                    row[key] = raw_timeline_item[key]
             transition_item_effect = raw_timeline_item.get("transitionEffect")
             if transition_item_effect in {"auto", "cut", "fade", "dissolve", "zoom"}:
                 row["transitionEffect"] = transition_item_effect
@@ -16032,6 +20615,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 slide["captionWrap"] = row["captionWrap"]
             if isinstance(row.get("captions"), list) and row["captions"]:
                 slide["captions"] = row["captions"]
+            for key in ("chapterId", "chapterTitle", "chapterNarrative"):
+                if isinstance(row.get(key), str) and row[key]:
+                    slide[key] = row[key]
         chapters: list[dict[str, Any]] = []
         for slide_index, row in enumerate(playable_rows):
             try:
@@ -16042,21 +20628,34 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 chapter_duration_ms = max(500, int(row.get("durationMs", interval_ms) or interval_ms))
             except (TypeError, ValueError):
                 chapter_duration_ms = interval_ms
+            story_chapter_id = str(row.get("chapterId", "") or "")
+            if story_chapter_id and chapters and str(chapters[-1].get("id", "") or "") == story_chapter_id:
+                end_ms = chapter_start_ms + chapter_duration_ms
+                chapters[-1]["endMs"] = max(int(chapters[-1].get("endMs", 0) or 0), end_ms)
+                chapters[-1]["durationMs"] = max(500, int(chapters[-1]["endMs"]) - int(chapters[-1].get("startMs", 0) or 0))
+                chapters[-1]["slideCount"] = int(chapters[-1].get("slideCount", 1) or 1) + 1
+                continue
             chapter = {
-                "id": f"chapter-{slide_index + 1}",
-                "index": slide_index + 1,
+                "id": story_chapter_id or f"chapter-{slide_index + 1}",
+                "index": len(chapters) + 1,
                 "slideIndex": slide_index,
                 "sourceIndex": int(row.get("index", slide_index + 1) or slide_index + 1),
                 "sourcePath": str(row.get("sourcePath", "") or ""),
                 "relativePath": str(row.get("relativePath", "") or ""),
-                "label": self._photo_export_clean_text(row.get("captionText", row.get("label", "")), limit=120) or f"Chapter {slide_index + 1}",
+                "label": self._photo_export_clean_text(
+                    row.get("chapterTitle", row.get("captionText", row.get("label", ""))),
+                    limit=120,
+                ) or f"Chapter {len(chapters) + 1}",
                 "kind": "titleCard" if row.get("result") == "title_card" else str(row.get("mediaKind", "") or "image"),
                 "motion": str(row.get("motion", "auto") or "auto"),
                 "resolvedMotion": str(row.get("resolvedMotion", row.get("motion", "auto")) or "auto"),
                 "startMs": chapter_start_ms,
                 "durationMs": chapter_duration_ms,
                 "endMs": chapter_start_ms + chapter_duration_ms,
+                "slideCount": 1,
             }
+            if isinstance(row.get("chapterNarrative"), str) and row["chapterNarrative"]:
+                chapter["narrative"] = row["chapterNarrative"]
             if isinstance(row.get("keyframes"), dict):
                 chapter["keyframes"] = row["keyframes"]
             if isinstance(row.get("focalX"), (int, float)):
@@ -16155,6 +20754,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "action": export_action,
             "exportKind": export_kind,
             "projectId": project_id,
+            "storyId": story_id,
+            "storyContentSha256": story_content_sha256,
+            "storyGenerationSha256": story_generation_sha256,
             "memoryId": memory_id,
             "memoryName": memory_name,
             "bundlePath": str(bundle_root),
@@ -16734,6 +21336,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "exportKind": export_kind,
                 "bundlePath": str(bundle_root),
                 "projectId": project_id,
+                "storyId": story_id,
+                "storyContentSha256": story_content_sha256,
+                "storyGenerationSha256": story_generation_sha256,
                 "memoryId": memory_id,
                 "memoryName": memory_name,
                 "title": title,
@@ -16778,6 +21383,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "action": export_action,
                 "export_kind": export_kind,
                 "project_id": project_id,
+                "story_id": story_id,
+                "story_content_sha256": story_content_sha256,
+                "story_generation_sha256": story_generation_sha256,
                 "memory_id": memory_id,
                 "memory_name": memory_name,
                 "bundle_path": str(bundle_root),
@@ -16826,6 +21434,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "outputMode": "video" if render_video else "html",
             "exportKind": export_kind,
             "projectId": project_id,
+            "storyId": story_id,
+            "storyContentSha256": story_content_sha256,
+            "storyGenerationSha256": story_generation_sha256,
             "memoryId": memory_id,
             "memoryName": memory_name,
             "title": title,
@@ -17142,8 +21753,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 sample_page = self._photo_smart_album_sql_page_for_criteria(criteria, offset=0, limit=3, sort="newest")
                 items = self._photo_entries_for_assets(sample_page.get("assets", []))
             else:
-                union_entries = self._photo_smart_album_entries_sql_union(album, sort="newest")
-                items = union_entries[:3] if union_entries is not None else []
+                union_assets = self._photo_smart_album_sql_union_sample_assets(album, sort="newest", limit=3)
+                items = self._sort_photo_entries(self._photo_entries_for_assets(union_assets or []), "newest")[:3] if union_assets is not None else []
         elif album_kind == "smart":
             items = self._photo_album_items(album)
         sample_titles: list[str] = []
@@ -17696,6 +22307,19 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 }
             )
         return result
+
+    def photo_album_source_order(self, params: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(params, dict):
+            raise ValueError("Photo album source order params must be an object.")
+        album_id = str(params.get("albumId", "") or "").strip()
+        if not album_id:
+            raise ValueError("albumId is required.")
+        source_paths = self.project.db.list_photo_album_source_paths(
+            album_id,
+            include_hidden=bool(params.get("includeHidden", False)),
+            include_deleted=bool(params.get("includeDeleted", False)),
+        )
+        return {"albumId": album_id, "sourcePaths": source_paths, "total": len(source_paths)}
 
     def _photo_album_source_paths_param(self, params: dict[str, Any]) -> list[str]:
         values = params.get("sourcePaths", [])
@@ -19004,7 +23628,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if self._photo_smart_album_sql_criteria_branches(album) is not None:
             return None
         signature = self._photo_smart_album_materialization_signature(album, library_root=library_root)
-        cache = self.project.db.photo_smart_album_materialization_cache(album_id, library_root)
+        cache = self.project.db.photo_smart_album_materialization_cache_header(album_id, library_root)
         if str(cache.get("signature", "") or "") != signature:
             return None
         return {**cache, "cacheHit": True}
@@ -19038,23 +23662,43 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             cache = self._photo_smart_album_materialized_cache(album)
         if cache is None:
             return None
-        source_paths = cache.get("sourcePaths", [])
-        paths = [str(path or "").strip() for path in source_paths if str(path or "").strip()] if isinstance(source_paths, list) else []
+        cache_library_root = str(cache.get("libraryRoot", "") or "")
+        paths = self.project.db.photo_smart_album_materialization_source_paths(
+            str(album.get("albumId", "") or ""),
+            cache_library_root,
+        )
         if str(library_root or "").strip():
             paths = [path for path in paths if self._photo_source_inside_library_root(path, library_root)]
         return paths
 
     def _photo_smart_album_materialized_summary(self, album: dict[str, Any], *, library_root: str = "") -> dict[str, Any] | None:
-        source_paths = self._photo_smart_album_materialized_source_paths(album, library_root=library_root)
-        if source_paths is None:
+        cache = self._photo_smart_album_materialized_cache(album, library_root=library_root)
+        if cache is None and str(library_root or "").strip():
+            cache = self._photo_smart_album_materialized_cache(album)
+        if cache is None:
             return None
+        cache_library_root = str(cache.get("libraryRoot", "") or "")
         selected_cover = str(album.get("coverSourcePath", "") or "")
-        source_set = set(source_paths)
-        cover_matches = bool(selected_cover and selected_cover in source_set)
+        if str(library_root or "").strip() and not cache_library_root:
+            source_paths = self.project.db.photo_smart_album_materialization_source_paths(str(album.get("albumId", "") or ""), cache_library_root)
+            source_paths = [path for path in source_paths if self._photo_source_inside_library_root(path, library_root)]
+            source_set = set(source_paths)
+            cover_matches = bool(selected_cover and selected_cover in source_set)
+            return {
+                "count": len(source_paths),
+                "coverSourcePath": selected_cover if cover_matches else source_paths[0] if source_paths else "",
+                "coverMatches": cover_matches,
+                "materialized": True,
+            }
+        summary = self.project.db.photo_smart_album_materialization_summary(
+            str(album.get("albumId", "") or ""),
+            cache_library_root,
+            cover_source_path=selected_cover,
+        )
         return {
-            "count": len(source_paths),
-            "coverSourcePath": selected_cover if cover_matches else source_paths[0] if source_paths else "",
-            "coverMatches": cover_matches,
+            "count": int(summary.get("count", summary.get("assetCount", 0)) or 0),
+            "coverSourcePath": str(summary.get("coverSourcePath", "") or ""),
+            "coverMatches": bool(summary.get("coverMatches", False)),
             "materialized": True,
         }
 
@@ -19154,17 +23798,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     def _photo_smart_album_summary_sql(self, album: dict[str, Any]) -> dict[str, Any] | None:
         criteria = self._photo_smart_album_sql_criteria(album)
         if criteria is None:
-            entries = self._photo_smart_album_entries_sql_union(album, sort="newest")
-            if entries is None:
+            summary = self._photo_smart_album_summary_sql_union(album)
+            if summary is None:
                 return self._photo_smart_album_materialized_summary(album)
-            sources = [str(entry.get("sourcePath", "") or "") for entry in entries if str(entry.get("sourcePath", "") or "")]
-            selected_cover = str(album.get("coverSourcePath", "") or "")
-            cover_matches = bool(selected_cover and selected_cover in set(sources))
-            return {
-                "count": len(sources),
-                "coverSourcePath": selected_cover if cover_matches else sources[0] if sources else "",
-                "coverMatches": cover_matches,
-            }
+            return summary
         page = self._photo_smart_album_sql_page_for_criteria(criteria, offset=0, limit=1, sort="newest")
         assets = page.get("assets", []) if isinstance(page.get("assets", []), list) else []
         fallback_cover = str(assets[0].get("sourcePath", "") or "") if assets else ""
@@ -19197,21 +23834,20 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if not branches:
             return self._photo_smart_album_materialized_source_paths(album, library_root=clean_library_root)
         if len(branches) > 1:
-            entries = self._photo_smart_album_entries_sql_union(album, sort="newest")
-            if entries is None:
-                return None
+            sources_by_asset_id: dict[str, str] = {}
+            for criteria in branches:
+                for asset_id, source_path in self._photo_smart_album_sql_asset_sources_for_criteria(criteria, sort="newest"):
+                    if asset_id and source_path and asset_id not in sources_by_asset_id:
+                        sources_by_asset_id[asset_id] = source_path
             return [
                 source_path
-                for entry in entries
-                for source_path in [str(entry.get("sourcePath", "") or "")]
+                for source_path in sources_by_asset_id.values()
                 if source_path and self._photo_source_inside_library_root(source_path, clean_library_root)
             ]
         criteria = branches[0]
-        assets = self._photo_smart_album_sql_assets_for_criteria(criteria, sort="newest")
         return [
             source_path
-            for asset in assets
-            for source_path in [str(asset.get("sourcePath", "") or "")]
+            for _asset_id, source_path in self._photo_smart_album_sql_asset_sources_for_criteria(criteria, sort="newest")
             if source_path and self._photo_source_inside_library_root(source_path, clean_library_root)
         ]
 
@@ -19761,6 +24397,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return [date_text, date_text[:7], date_text[:4]]
 
     def _photo_entry_curation_content(self, entry: dict[str, Any]) -> list[str]:
+        cached = entry.get("_curationContent")
+        if isinstance(cached, list):
+            return cached
         metadata = self._photo_entry_metadata(entry)
         source = str(entry.get("sourcePath", "") or "")
         values = [
@@ -19787,6 +24426,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 continue
             seen.add(key)
             cleaned.append(clean)
+        entry["_curationContent"] = cleaned
         return cleaned
 
     def _photo_curation_values_match(self, values: list[str], preference_keys: set[str], *, contains: bool = False) -> bool:
@@ -19811,6 +24451,14 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             preferences = self.project.db.photo_curation_preferences()
         if place_labels_by_asset_id is None:
             place_labels_by_asset_id = self._photo_place_labels_by_asset_id()
+        cached = entry.get("_curationPenaltyCache")
+        if (
+            isinstance(cached, tuple)
+            and len(cached) == 3
+            and cached[0] is preferences
+            and cached[1] is place_labels_by_asset_id
+        ):
+            return int(cached[2])
         penalty = 0
         if self._photo_curation_values_match(
             self._photo_entry_curation_people(entry),
@@ -19834,6 +24482,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             contains=True,
         ):
             penalty += 2
+        entry["_curationPenaltyCache"] = (preferences, place_labels_by_asset_id, penalty)
         return penalty
 
     def _photo_date_bucket_cover_rank(
@@ -19842,7 +24491,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         curation_preferences: dict[str, Any] | None = None,
         place_labels_by_asset_id: dict[str, list[str]] | None = None,
     ) -> tuple[int, int, float, int, int, int, str, str]:
-        return (
+        cached = entry.get("_curationCoverRankCache")
+        if (
+            isinstance(cached, tuple)
+            and len(cached) == 3
+            and cached[0] is curation_preferences
+            and cached[1] is place_labels_by_asset_id
+            and isinstance(cached[2], tuple)
+        ):
+            return cached[2]
+        rank = (
             -self._photo_entry_curation_penalty(entry, curation_preferences, place_labels_by_asset_id),
             int(self._photo_entry_direct_bool(entry, "favorite")),
             max(0.0, min(1.0, self._photo_entry_direct_number(entry, "bestQuality", "quality"))),
@@ -19852,6 +24510,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             self._entry_date_text(entry),
             str(entry.get("sourcePath", "") or "").casefold(),
         )
+        entry["_curationCoverRankCache"] = (curation_preferences, place_labels_by_asset_id, rank)
+        return rank
 
     def _photo_date_bucket_cover_reason(self, entry: dict[str, Any]) -> str:
         if self._photo_entry_direct_bool(entry, "favorite"):
@@ -20492,6 +25152,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         day = ((h + l - 7 * m + 114) % 31) + 1
         return datetime(year, month, day)
 
+    @functools.lru_cache(maxsize=4096)
     def _photo_memory_fixed_holiday_label(self, date_text: str) -> str:
         if not re.match(r"^\d{4}-\d{2}-\d{2}$", str(date_text or "")):
             return ""
@@ -20569,8 +25230,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return " ".join(str(value or "") for value in values if str(value or "").strip())
 
     def _photo_memory_event_labels(self, entry: dict[str, Any]) -> list[tuple[str, str]]:
+        cached = entry.get("_memoryEventLabels")
+        if isinstance(cached, list):
+            return cached
         text = self._photo_memory_event_text(entry).casefold()
         if not text:
+            entry["_memoryEventLabels"] = []
             return []
         normalized = re.sub(r"[^a-z0-9]+", " ", text)
         labels: list[tuple[str, str]] = []
@@ -20610,7 +25275,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 continue
             seen.add(item)
             unique.append(item)
-        return unique[:3]
+        result = unique[:3]
+        entry["_memoryEventLabels"] = result
+        return result
 
     def _photo_memory_summary(
         self,
@@ -20940,59 +25607,30 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         curation_preferences: dict[str, Any] | None = None,
         user_memories: list[dict[str, Any]] | None = None,
     ) -> str:
-        signature_entries: list[dict[str, Any]] = []
+        entry_digest = hashlib.sha256()
+        entry_count = 0
         for entry in sorted(entries, key=lambda item: str(item.get("sourcePath", "") or "").casefold()):
             source_path = str(entry.get("sourcePath", "") or "")
             if not source_path:
                 continue
             asset = self._photo_entry_asset(entry) or {}
-            asset_metadata = asset.get("metadata", {}) if isinstance(asset.get("metadata"), dict) else {}
-            metadata = self._photo_entry_metadata(entry)
-            people_rows = [
-                {
-                    "candidateId": str(row.get("candidateId", "") or ""),
-                    "personName": str(row.get("personName", "") or ""),
-                    "status": str(row.get("status", "") or ""),
-                    "score": float(row.get("score", 0.0) or 0.0),
-                    "quality": float(row.get("quality", 0.0) or 0.0),
-                    "band": str(row.get("band", "") or ""),
-                    "updatedAt": str(row.get("updatedAt", "") or ""),
-                }
-                for row in self._photo_entry_people_rows(entry)
-                if isinstance(row, dict)
-            ]
-            matches = [
-                {
-                    "candidateId": str(match.candidate_id or ""),
-                    "sourcePath": str(match.source_path or ""),
-                    "mediaSourcePath": str(match.media_source_path or ""),
-                    "personName": str(match.person_name or ""),
-                    "status": str(match.status or ""),
-                    "score": float(match.score or 0.0),
-                    "quality": float(match.quality or 0.0),
-                    "band": str(match.band or ""),
-                    "captureDate": str(match.capture_date or ""),
-                    "createdAt": str(match.created_at or ""),
-                }
-                for match in entry.get("matches", []) or []
-                if isinstance(match, ReviewCandidate)
-            ]
-            signature_entries.append({
+            signature_entry = {
                 "sourcePath": source_path,
                 "assetId": str(asset.get("assetId", entry.get("_assetId", "")) or ""),
                 "mediaKind": str(asset.get("mediaKind", entry.get("mediaKind", "")) or ""),
                 "captureDate": str(asset.get("captureDate", "") or ""),
                 "addedAt": str(asset.get("addedAt", entry.get("scanDate", "")) or ""),
                 "updatedAt": str(asset.get("updatedAt", "") or ""),
-                "metadata": metadata,
-                "assetMetadata": asset_metadata,
-                "people": sorted(people_rows, key=lambda row: (row["personName"].casefold(), row["candidateId"])),
-                "matches": sorted(matches, key=lambda row: (row["personName"].casefold(), row["candidateId"])),
-            })
+            }
+            entry_digest.update(json.dumps(signature_entry, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+            entry_digest.update(b"\0")
+            entry_count += 1
         body = {
-            "schemaVersion": "1",
+            "schemaVersion": "2",
             "libraryRoot": str(library_root or ""),
-            "entries": signature_entries,
+            "entryCount": entry_count,
+            "entryDigest": entry_digest.hexdigest(),
+            "catalogRevision": self.project.db.photo_smart_album_materialization_revision(),
             "curationPreferences": curation_preferences if isinstance(curation_preferences, dict) else {},
             "userMemories": user_memories if isinstance(user_memories, list) else [],
         }
@@ -21763,6 +26401,22 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 return False
             desired = not target if operator == "isNot" else target
             return self._photo_smart_album_sql_set(criteria, "favoriteState", desired)
+        if field in {"colorLabel", "pickStatus"}:
+            if operator not in {"is", "isNot"}:
+                return False
+            try:
+                normalized = (
+                    self.project.db._normalize_photo_color_label(value)  # noqa: SLF001
+                    if field == "colorLabel"
+                    else self.project.db._normalize_photo_pick_status(value)  # noqa: SLF001
+                )
+            except ValueError:
+                return False
+            return self._photo_smart_album_sql_add_filter(
+                criteria,
+                "curationTextFilters",
+                (field, operator, normalized),
+            )
         if field == "edited":
             if operator not in {"is", "isNot"}:
                 return False
@@ -21783,6 +26437,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             state_key = "hiddenState" if field == "hidden" else "deletedState"
             return self._photo_smart_album_sql_set(criteria, state_key, desired)
         if field == "date":
+            if operator == "withinLast":
+                cutoff_date = self._photo_query_recent_cutoff_date(value)
+                return bool(cutoff_date) and self._photo_smart_album_sql_set(criteria, "dateFrom", cutoff_date)
             date_value = self._normalize_photo_date_filter(value)
             if not date_value:
                 return False
@@ -21799,7 +26456,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 return self._photo_smart_album_sql_add_filter(criteria, "effectiveDateFilters", (operator, date_value))
             return False
         if field == "addedDate":
-            date_value = self._normalize_photo_date_filter(value)
+            if operator == "withinLast":
+                date_value = self._photo_query_recent_cutoff_date(value)
+                operator = "onOrAfter"
+            else:
+                date_value = self._normalize_photo_date_filter(value)
             if not date_value or operator not in {"is", "isNot", "greaterThan", "atLeast", "onOrAfter", "lessThan", "atMost", "onOrBefore"}:
                 return False
             return self._photo_smart_album_sql_add_filter(criteria, "addedDateFilters", (operator, date_value))
@@ -21878,6 +26539,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             key = "excludedGroupPeopleFilters" if operator in {"isNot", "notContains"} else "groupPeopleFilters"
             return self._photo_smart_album_sql_add_filter(criteria, key, group_spec)
         numeric_filter_keys = {
+            "rating": "ratingFilters",
             "width": "widthFilters",
             "height": "heightFilters",
             "duration": "durationFilters",
@@ -22053,6 +26715,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "ftsColumnTextFilters",
                 "metadataExactTextFilters",
                 "groupTextFilters",
+                "curationTextFilters",
             }:
                 current = merged.get(key, ())
                 if current in ("", None, []):
@@ -22142,6 +26805,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 continue
             if key in {
                 "widthFilters",
+                "ratingFilters",
                 "heightFilters",
                 "durationFilters",
                 "durationMsFilters",
@@ -22384,6 +27048,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             favorite_state=criteria.get("favoriteState") if isinstance(criteria.get("favoriteState"), bool) else None,
             edited_only=bool(criteria.get("editedOnly", False)),
             edited_state=criteria.get("editedState") if isinstance(criteria.get("editedState"), bool) else None,
+            rating_filters=criteria.get("ratingFilters", ()),
+            curation_text_filters=criteria.get("curationTextFilters", ()),
             keyword=str(criteria.get("keyword", "") or ""),
             excluded_keywords=criteria.get("excludedKeywords", ()),
             keyword_text_filters=criteria.get("keywordTextFilters", ()),
@@ -22451,16 +27117,114 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         *,
         sort: str,
     ) -> list[dict[str, Any]]:
-        first_page = self._photo_smart_album_sql_page_for_criteria(criteria, offset=0, limit=1, sort=sort)
-        total = int(first_page.get("total", 0) or 0)
-        if total <= 0:
+        assets: list[dict[str, Any]] = []
+        for page_assets in self._photo_smart_album_sql_asset_pages_for_criteria(criteria, sort=sort):
+            assets.extend(page_assets)
+        return assets
+
+    def _photo_smart_album_sql_asset_pages_for_criteria(
+        self,
+        criteria: dict[str, Any],
+        *,
+        sort: str,
+        page_limit: int | None = None,
+    ) -> Iterable[list[dict[str, Any]]]:
+        limit = max(1, int(page_limit or PHOTO_SMART_ALBUM_SQL_ASSET_PAGE_LIMIT))
+        offset = 0
+        total: int | None = None
+        while True:
+            page = self._photo_smart_album_sql_page_for_criteria(criteria, offset=offset, limit=limit, sort=sort)
+            if total is None:
+                total = max(0, int(page.get("total", 0) or 0))
+            page_assets = page.get("assets", []) if isinstance(page.get("assets", []), list) else []
+            if not page_assets:
+                break
+            yield page_assets
+            offset += len(page_assets)
+            if offset >= total:
+                break
+
+    def _photo_smart_album_sql_asset_sources_for_criteria(
+        self,
+        criteria: dict[str, Any],
+        *,
+        sort: str,
+    ) -> Iterable[tuple[str, str]]:
+        for page_assets in self._photo_smart_album_sql_asset_pages_for_criteria(criteria, sort=sort):
+            for asset in page_assets:
+                asset_id = str(asset.get("assetId", "") or "")
+                source_path = str(asset.get("sourcePath", "") or "")
+                if asset_id and source_path:
+                    yield asset_id, source_path
+
+    def _photo_smart_album_sql_asset_ids_for_criteria(
+        self,
+        criteria: dict[str, Any],
+        *,
+        sort: str,
+    ) -> tuple[str, ...]:
+        seen: set[str] = set()
+        asset_ids: list[str] = []
+        for asset_id, _source_path in self._photo_smart_album_sql_asset_sources_for_criteria(criteria, sort=sort):
+            if asset_id and asset_id not in seen:
+                seen.add(asset_id)
+                asset_ids.append(asset_id)
+        return tuple(asset_ids)
+
+    def _photo_smart_album_summary_sql_union(self, album: dict[str, Any]) -> dict[str, Any] | None:
+        branches = self._photo_smart_album_sql_criteria_branches(album)
+        if not branches or len(branches) <= 1:
+            return None
+        selected_cover = str(album.get("coverSourcePath", "") or "")
+        seen_asset_ids: set[str] = set()
+        fallback_cover = ""
+        cover_matches = False
+        for criteria in branches:
+            for page_assets in self._photo_smart_album_sql_asset_pages_for_criteria(criteria, sort="newest"):
+                for asset in page_assets:
+                    asset_id = str(asset.get("assetId", "") or "")
+                    source_path = str(asset.get("sourcePath", "") or "")
+                    if not asset_id or asset_id in seen_asset_ids:
+                        continue
+                    seen_asset_ids.add(asset_id)
+                    if not fallback_cover and source_path:
+                        fallback_cover = source_path
+                    if selected_cover and source_path == selected_cover:
+                        cover_matches = True
+        return {
+            "count": len(seen_asset_ids),
+            "coverSourcePath": selected_cover if cover_matches else fallback_cover,
+            "coverMatches": cover_matches,
+        }
+
+    def _photo_smart_album_sql_union_sample_assets(
+        self,
+        album: dict[str, Any],
+        *,
+        sort: str,
+        limit: int,
+    ) -> list[dict[str, Any]] | None:
+        branches = self._photo_smart_album_sql_criteria_branches(album)
+        if not branches or len(branches) <= 1:
+            return None
+        clean_limit = max(0, int(limit or 0))
+        if clean_limit <= 0:
             return []
-        if total <= 1:
-            assets = first_page.get("assets", [])
-            return assets if isinstance(assets, list) else []
-        page = self._photo_smart_album_sql_page_for_criteria(criteria, offset=0, limit=total, sort=sort)
-        assets = page.get("assets", [])
-        return assets if isinstance(assets, list) else []
+        assets_by_id: dict[str, dict[str, Any]] = {}
+        for criteria in branches:
+            for page_assets in self._photo_smart_album_sql_asset_pages_for_criteria(
+                criteria,
+                sort=sort,
+                page_limit=max(clean_limit, 1),
+            ):
+                for asset in page_assets:
+                    asset_id = str(asset.get("assetId", "") or "")
+                    if asset_id and asset_id not in assets_by_id:
+                        assets_by_id[asset_id] = asset
+                    if len(assets_by_id) >= clean_limit:
+                        return list(assets_by_id.values())
+                break
+        return list(assets_by_id.values())
 
     def _photo_smart_album_entries_sql_union(self, album: dict[str, Any], *, sort: str) -> list[dict[str, Any]] | None:
         branches = self._photo_smart_album_sql_criteria_branches(album)
@@ -22501,8 +27265,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             return None
         assets_by_id: dict[str, None] = {}
         for criteria in branches:
-            for asset in self._photo_smart_album_sql_assets_for_criteria(criteria, sort="newest"):
-                asset_id = str(asset.get("assetId", "") or "").strip()
+            for asset_id in self._photo_smart_album_sql_asset_ids_for_criteria(criteria, sort="newest"):
+                asset_id = str(asset_id or "").strip()
                 if asset_id:
                     assets_by_id.setdefault(asset_id, None)
         return tuple(assets_by_id.keys())
@@ -22938,6 +27702,45 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             return [entry for _index, entry in collapsed_units], burst_stack_by_source
 
         def photo_items_for_rows(rows: list[dict[str, Any]], burst_stack_by_source: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+            source_paths = [str(row.get("sourcePath", "") or "") for row in rows if str(row.get("sourcePath", "") or "")]
+            asset_cache = {
+                str(row.get("sourcePath", "") or ""): row.get("_asset")
+                for row in rows
+                if str(row.get("sourcePath", "") or "") and isinstance(row.get("_asset"), dict)
+            }
+            missing_asset_paths = [source for source in source_paths if source not in asset_cache]
+            if missing_asset_paths:
+                asset_cache.update({
+                    str(asset.get("sourcePath", "") or ""): asset
+                    for asset in self.project.db.photo_assets_by_paths(missing_asset_paths)
+                    if str(asset.get("sourcePath", "") or "")
+                })
+            asset_ids = [
+                str(asset.get("assetId", "") or "")
+                for asset in asset_cache.values()
+                if str(asset.get("assetId", "") or "")
+            ]
+            metadata_cache = {
+                str(row.get("_assetId", "") or ""): row.get("_metadata")
+                for row in rows
+                if str(row.get("_assetId", "") or "") and isinstance(row.get("_metadata"), dict)
+            }
+            missing_metadata_ids = [asset_id for asset_id in asset_ids if asset_id not in metadata_cache]
+            if missing_metadata_ids:
+                metadata_cache.update(self.project.db.photo_asset_metadata_by_ids(missing_metadata_ids))
+            edit_stack_cache = self.project.db.photo_edit_stacks_for_assets(asset_ids)
+            asset_people_cache = self.project.db.photo_asset_people_by_ids(asset_ids)
+            duplicate_group_cache = self.project.db.photo_duplicate_groups_for_assets(
+                asset_ids,
+                ensure_current=folder_id == "duplicates" or duplicate_only,
+            )
+            manual_memberships = self.project.db.photo_asset_album_memberships_by_ids(asset_ids)
+            album_rows = self.project.db.list_photo_albums()
+            album_memberships_cache = self._photo_album_memberships_for_assets(
+                asset_cache,
+                manual_memberships,
+                album_rows,
+            )
             prefetch_media_pairs(rows)
             prefetch_edit_stack_version_counts(rows)
             items: list[dict[str, Any]] = []
@@ -22956,6 +27759,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     album_membership_cache=album_membership_cache,
                     media_pair_cache=media_pair_cache,
                     edit_stack_version_count_cache=edit_stack_version_count_cache,
+                    asset_cache=asset_cache,
+                    metadata_cache=metadata_cache,
+                    edit_stack_cache=edit_stack_cache,
+                    asset_people_cache=asset_people_cache,
+                    duplicate_group_cache=duplicate_group_cache,
+                    album_memberships_cache=album_memberships_cache,
                 )
                 if row.get("eventAt"):
                     item["eventAt"] = str(row.get("eventAt", "") or "")
@@ -23282,10 +28091,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 apply_filters(self._photo_album_folder_collection_items(album_folder_id)),
                 sort,
             )
+            matched, burst_stack_by_source = collapse_burst_entries(matched)
             total = len(matched)
             page = matched[offset:offset + limit]
-            items = photo_items_for_rows(page)
-            return page_payload(total, offset, limit, len(page), items, validation=page_validation)
+            items = photo_items_for_rows(page, burst_stack_by_source)
+            return page_payload(total, offset, limit, len(items), items, validation=page_validation)
 
         if folder_id.startswith("album:"):
             album_id = folder_id[len("album:"):]
@@ -23294,7 +28104,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 raise ValueError("Unknown photo album id.")
             scale_warning = self._photo_smart_album_scale_warning(album)
             page_validation = [scale_warning] if scale_warning else []
-            sql_page = self._photo_smart_album_items_sql_page(
+            sql_page = None if collapse_bursts else self._photo_smart_album_items_sql_page(
                 album,
                 offset=offset,
                 limit=limit,
@@ -23326,58 +28136,19 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             )
             if sql_page is not None:
                 page = sql_page["entries"]
-                prefetch_media_pairs(page)
-                prefetch_edit_stack_version_counts(page)
-                items: list[dict[str, Any]] = []
-                remaining = preview_budget
-                for row in page:
-                    source_path = str(row.get("sourcePath", "") or "")
-                    before = self.project.preview_path_for(source_path, create=False)
-                    item = self._photo_item_row(
-                        source_path=source_path,
-                        media_kind=str(row.get("mediaKind", "image") or "image"),
-                        preview_create=remaining > 0,
-                        candidate=row.get("candidate"),
-                        matches=row.get("matches", []),
-                        scan_date=str(row.get("scanDate", "") or ""),
-                        album_membership_cache=album_membership_cache,
-                        media_pair_cache=media_pair_cache,
-                        edit_stack_version_count_cache=edit_stack_version_count_cache,
-                    )
-                    if remaining > 0 and not before and item.get("previewPath"):
-                        remaining -= 1
-                    items.append(finalize_photo_item(item))
-                return page_payload(int(sql_page["total"]), offset, limit, len(page), items, validation=page_validation)
+                items = photo_items_for_rows(page)
+                return page_payload(int(sql_page["total"]), offset, limit, len(items), items, validation=page_validation)
             album_entries = self._photo_album_items(album)
             self._photo_save_smart_album_materialization(album, album_entries)
             matched = self._sort_photo_entries(
                 apply_filters(album_entries),
                 sort,
             )
+            matched, burst_stack_by_source = collapse_burst_entries(matched)
             total = len(matched)
             page = matched[offset:offset + limit]
-            prefetch_media_pairs(page)
-            prefetch_edit_stack_version_counts(page)
-            items: list[dict[str, Any]] = []
-            remaining = preview_budget
-            for row in page:
-                source_path = str(row.get("sourcePath", "") or "")
-                before = self.project.preview_path_for(source_path, create=False)
-                item = self._photo_item_row(
-                    source_path=source_path,
-                    media_kind=str(row.get("mediaKind", "image") or "image"),
-                    preview_create=remaining > 0,
-                    candidate=row.get("candidate"),
-                    matches=row.get("matches", []),
-                    scan_date=str(row.get("scanDate", "") or ""),
-                    album_membership_cache=album_membership_cache,
-                    media_pair_cache=media_pair_cache,
-                    edit_stack_version_count_cache=edit_stack_version_count_cache,
-                )
-                if remaining > 0 and not before and item.get("previewPath"):
-                    remaining -= 1
-                items.append(finalize_photo_item(item))
-            return page_payload(total, offset, limit, len(page), items, validation=page_validation)
+            items = photo_items_for_rows(page, burst_stack_by_source)
+            return page_payload(total, offset, limit, len(items), items, validation=page_validation)
 
         if folder_id.startswith("person:"):
             name = folder_id[len("person:"):]
@@ -23392,35 +28163,22 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if folder_id.startswith("group:") and group_mode == "best":
             group_entries = self._photo_best_group_entries(group_entries)
         matched = self._sort_photo_entries(group_entries, sort)
+        matched, burst_stack_by_source = collapse_burst_entries(matched)
         total = len(matched)
         page = matched[offset:offset + limit]
-        prefetch_media_pairs(page)
-        prefetch_edit_stack_version_counts(page)
-        items = []
-        remaining = preview_budget
-        for row in page:
-            source_path = str(row.get("sourcePath", "") or "")
-            before = self.project.preview_path_for(source_path, create=False)
-            item = self._photo_item_row(
-                source_path=source_path,
-                media_kind=str(row.get("mediaKind", "image") or "image"),
-                preview_create=remaining > 0,
-                candidate=row.get("candidate"),
-                matches=row.get("matches", []),
-                scan_date=str(row.get("scanDate", "") or ""),
-                album_membership_cache=album_membership_cache,
-                media_pair_cache=media_pair_cache,
-                edit_stack_version_count_cache=edit_stack_version_count_cache,
-            )
-            if remaining > 0 and not before and item.get("previewPath"):
-                remaining -= 1
-            items.append(finalize_photo_item(item))
+        items = photo_items_for_rows(page, burst_stack_by_source)
         return page_payload(total, offset, limit, len(page), items)
 
     def suggest_photo_albums(self, params: dict[str, Any]) -> dict[str, Any]:
         limit = max(1, min(24, int(params.get("limit", 12) or 12)))
         suggestions: list[dict[str, Any]] = []
-        seen_names: set[str] = set()
+        # Suggestions are actionable proposals, not a second listing of albums
+        # the user already created (including a previously accepted proposal).
+        seen_names: set[str] = {
+            str(album.get("name", "") or "").strip().casefold()
+            for album in self.project.db.list_photo_albums()
+            if str(album.get("name", "") or "").strip()
+        }
         curation_preferences = self.project.db.photo_curation_preferences()
         feature_less_people = self._photo_curation_preference_keys(curation_preferences, "featureLessPeople")
         feature_less_content = self._photo_curation_preference_keys(curation_preferences, "featureLessContent")
@@ -23712,6 +28470,64 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         )):
             return
         shutil.rmtree(resolved_bundle, ignore_errors=True)
+
+    def _write_photo_selection_manifest_files(
+        self,
+        *,
+        bundle_root: Path,
+        export_root: Path,
+        manifest: dict[str, Any],
+        rows: list[dict[str, Any]],
+    ) -> tuple[Path, Path]:
+        manifest_path = bundle_root / "manifest.json"
+        csv_path = bundle_root / "manifest.csv"
+        fieldnames = [
+            "sourcePath",
+            "targetPath",
+            "result",
+            "metadataPath",
+            "xmpPath",
+            "existingSidecarPaths",
+            "exportVariant",
+            "renderFormat",
+            "videoRenderFormat",
+            "videoRenderQuality",
+            "targetColorProfile",
+            "targetColorProfilePath",
+            "editStackId",
+            "rawRenderProxyPath",
+            "videoTrimStartMs",
+            "videoTrimEndMs",
+            "videoTrimDurationMs",
+            "videoSourceDurationMs",
+            "videoRotateDegrees",
+            "videoCropAspect",
+            "videoTransformApplied",
+            "videoEditTimeline",
+            "videoEditTransform",
+            "videoEditRender",
+            "videoEditSummary",
+            "contentCredentialStatus",
+            "contentCredentialFailure",
+            "contentCredentials",
+            "spatialPortability",
+        ]
+        try:
+            manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+            with csv_path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({
+                        **row,
+                        "existingSidecarPaths": json.dumps(row.get("existingSidecarPaths", [])),
+                        "contentCredentials": json.dumps(row.get("contentCredentials", {}), sort_keys=True),
+                        "spatialPortability": json.dumps(row.get("spatialPortability", {}), sort_keys=True),
+                    })
+        except Exception:
+            self._cleanup_failed_photo_export_bundle(bundle_root, export_root)
+            raise
+        return manifest_path, csv_path
 
     def _photo_export_strip_known_suffix(self, value: str) -> str:
         text = self._safe_photo_export_name(value)
@@ -24046,9 +28862,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def _photo_export_ffmpeg_path(self) -> str:
         candidates = [
-            str(getattr(self.project.config, "ffmpeg_path", "") or ""),
             os.environ.get("VINTRACE_FFMPEG_PATH", ""),
             os.environ.get("CROSSAGE_FFMPEG_PATH", ""),
+            str(getattr(self.project.config, "ffmpeg_path", "") or ""),
             shutil.which("ffmpeg") or "",
         ]
         for candidate in candidates:
@@ -24094,6 +28910,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             raise VideoLoadError("Video crop aspect must be none, square, landscape, or portrait.")
         command = [
             ffmpeg,
+            "-nostdin",
             "-hide_banner",
             "-loglevel",
             "error",
@@ -24595,7 +29412,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             row_cue = self._photo_export_clean_text(row.get("themeCue", ""), limit=80)
             caption_placement = row_caption_placement(row)
             caption_text = "" if caption_placement == "hidden" else row_caption_text(row)
-            chapter_label = caption_text or (row_label if row_label and row_label != render_title else row_cue or row_label or f"Chapter {index + 1}")
+            story_chapter_title = self._photo_export_clean_text(row.get("chapterTitle", ""), limit=120)
+            chapter_label = story_chapter_title or caption_text or (row_label if row_label and row_label != render_title else row_cue or row_label or f"Chapter {index + 1}")
             overlay_row = {
                 "index": index,
                 "title": render_title or "Vintrace slideshow",
@@ -24964,6 +29782,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
         command = [
             ffmpeg,
+            "-nostdin",
             "-hide_banner",
             "-loglevel",
             "error",
@@ -26114,6 +30933,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             seconds = max(0.0, float(timestamp_ms) / 1000.0)
             command = [
                 ffmpeg,
+                "-nostdin",
                 "-hide_banner",
                 "-loglevel",
                 "error",
@@ -26156,6 +30976,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 values.append(resolved.with_suffix(f"{suffix}{sidecar_suffix}"))
             for candidate in values:
                 candidates[str(candidate)] = candidate
+        for _pair_kind, candidate, _role in self.project.db._adjacent_spatial_companions(resolved):  # noqa: SLF001
+            candidates[str(candidate)] = candidate
         results: list[Path] = []
         for candidate in candidates.values():
             try:
@@ -26190,6 +31012,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def _photo_export_sidecar_payload(self, source_path: str, *, strip_location: bool = False) -> dict[str, Any]:
         asset = self.project.db.photo_asset_by_path(str(source_path or ""))
+        if not asset and str(source_path or "").strip():
+            try:
+                canonical_source = str(safe_resolve(Path(str(source_path)).expanduser()))
+            except OSError:
+                canonical_source = ""
+            if canonical_source:
+                asset = self.project.db.photo_asset_by_path(canonical_source)
         if not asset:
             return {"sourcePath": str(source_path or ""), "assetId": "", "metadata": {}, "people": [], "albums": []}
         asset_id = str(asset.get("assetId", "") or "")
@@ -26224,6 +31053,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "metadata": metadata,
             "people": self.project.db.list_photo_asset_people(asset_id),
             "albums": self.project.db.list_photo_asset_album_memberships(asset_id),
+            "mediaPairs": self.project.db.photo_media_pairs_for_asset(asset_id),
         }
 
     def _photo_export_clean_text(self, value: Any, *, limit: int = 0) -> str:
@@ -26383,16 +31213,48 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             fields["longitude"] = longitude
         return fields
 
-    def _photo_export_xmp_extended_lines(self, payload: dict[str, Any]) -> list[str]:
+    def _photo_export_xmp_extended_lines(
+        self,
+        payload: dict[str, Any],
+        *,
+        spatial_original_preserved: bool = True,
+    ) -> list[str]:
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         asset_metadata = payload.get("assetMetadata") if isinstance(payload.get("assetMetadata"), dict) else {}
         exif = asset_metadata.get("exif") if isinstance(asset_metadata.get("exif"), dict) else {}
         xmp_metadata = asset_metadata.get("xmp") if isinstance(asset_metadata.get("xmp"), dict) else {}
         iptc_metadata = xmp_metadata.get("iptc") if isinstance(xmp_metadata.get("iptc"), dict) else {}
         lines: list[str] = []
-        rating = self._photo_export_metadata_first_text(metadata.get("rating"), asset_metadata.get("rating"), xmp_metadata.get("rating"))
-        if rating:
-            lines.append(f"      <xmp:Rating>{html.escape(rating)}</xmp:Rating>")
+        try:
+            catalog_rating = max(0, min(5, int(round(float(metadata.get("rating", 0) or 0)))))
+        except (TypeError, ValueError):
+            catalog_rating = 0
+        raw_xmp_rating = xmp_metadata.get("rating", "")
+        try:
+            source_rating = max(0, min(5, int(round(float(raw_xmp_rating)))))
+        except (TypeError, ValueError):
+            source_rating = 0
+        rating = (
+            catalog_rating
+            if bool(metadata.get("ratingExplicit")) or catalog_rating or raw_xmp_rating in (None, "")
+            else source_rating
+        )
+        try:
+            pick_status = self.project.db._normalize_photo_pick_status(metadata.get("pickStatus", xmp_metadata.get("pickStatus", "")))  # noqa: SLF001
+        except ValueError:
+            pick_status = ""
+        try:
+            color_label = self.project.db._normalize_photo_color_label(metadata.get("colorLabel", xmp_metadata.get("colorLabel", "")))  # noqa: SLF001
+        except ValueError:
+            color_label = ""
+        xmp_rating = -1 if pick_status == "reject" else rating
+        lines.append(f"      <xmp:Rating>{xmp_rating}</xmp:Rating>")
+        lines.append(f"      <vintraceCatalog:CatalogRating>{rating}</vintraceCatalog:CatalogRating>")
+        if color_label:
+            lines.append(f"      <xmp:Label>{html.escape(color_label.title())}</xmp:Label>")
+        pick_value = -1 if pick_status == "reject" else 1 if pick_status == "pick" else 0
+        lines.append(f"      <crs:Pick>{pick_value}</crs:Pick>")
+        lines.append(f"      <vintraceCatalog:PickStatus>{html.escape(pick_status or 'unflagged')}</vintraceCatalog:PickStatus>")
         lines.extend(self._photo_export_xmp_seq("dc:creator", self.project.db._photo_asset_metadata_text_values(iptc_metadata.get("creator"))))  # noqa: SLF001
         lines.extend(self._photo_export_xmp_alt("dc:rights", iptc_metadata.get("copyright")))
         lines.extend(self._photo_export_xmp_alt("xmpRights:UsageTerms", iptc_metadata.get("usageTerms")))
@@ -26466,9 +31328,109 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             lines.append(f"      <tiff:Software>{html.escape(software)}</tiff:Software>")
         lines.extend(self._photo_export_xmp_bag("Iptc4xmpExt:PersonInImage", self._photo_export_people_names(payload)))
         lines.extend(self._photo_export_xmp_bag("photoshop:SupplementalCategories", [f"Album: {name}" for name in self._photo_export_album_names(payload)]))
+        spatial = self._photo_export_spatial_fields(
+            payload,
+            original_preserved=spatial_original_preserved,
+        )
+        if spatial.get("kind"):
+            lines.append(f"      <vintrace:SpatialMediaKind>{html.escape(str(spatial['kind']))}</vintrace:SpatialMediaKind>")
+            preserved = "true" if spatial.get("originalPreserved") else "false"
+            lines.append(f"      <vintrace:OriginalPreserved>{preserved}</vintrace:OriginalPreserved>")
+        if spatial.get("depthSidecar"):
+            lines.append(f"      <GDepth:Mime>{html.escape(str(spatial.get('depthMime') or 'image/png'))}</GDepth:Mime>")
+            lines.append(f"      <GDepth:Format>{html.escape(str(spatial.get('depthFormat') or 'RangeInverse'))}</GDepth:Format>")
+            lines.append(f"      <vintrace:DepthSidecar>{html.escape(str(spatial['depthSidecar']))}</vintrace:DepthSidecar>")
+        if spatial.get("stereoSidecar"):
+            lines.append(f"      <vintrace:StereoRightEye>{html.escape(str(spatial['stereoSidecar']))}</vintrace:StereoRightEye>")
+        if spatial.get("aperture"):
+            lines.append(f"      <GFocus:Aperture>{html.escape(str(spatial['aperture']))}</GFocus:Aperture>")
+        if spatial.get("focusDistance"):
+            lines.append(f"      <GFocus:FocalDistance>{html.escape(str(spatial['focusDistance']))}</GFocus:FocalDistance>")
         return lines
 
-    def _photo_export_xmp(self, payload: dict[str, Any]) -> str:
+    def _photo_export_spatial_fields(
+        self,
+        payload: dict[str, Any],
+        *,
+        original_preserved: bool = True,
+        export_disposition: str = "",
+    ) -> dict[str, Any]:
+        asset_metadata = payload.get("assetMetadata") if isinstance(payload.get("assetMetadata"), dict) else {}
+        media_pairs = payload.get("mediaPairs") if isinstance(payload.get("mediaPairs"), list) else []
+        depth_pair = next(
+            (pair for pair in media_pairs if isinstance(pair, dict) and str(pair.get("pairKind", "")) == "depth_sidecar"),
+            {},
+        )
+        stereo_pair = next(
+            (pair for pair in media_pairs if isinstance(pair, dict) and str(pair.get("pairKind", "")) == "stereo_pair"),
+            {},
+        )
+        local_depth = asset_metadata.get("localDepthControls") if isinstance(asset_metadata.get("localDepthControls"), dict) else {}
+
+        def metadata_signals(value: Any, depth: int = 0) -> tuple[bool, bool]:
+            if depth > 6 or not isinstance(value, (dict, list)):
+                return False, False
+            entries = list(value.items())[:100] if isinstance(value, dict) else list(enumerate(value))[:24]
+            depth_detected = False
+            stereo_detected = False
+            for raw_key, item in entries:
+                key = re.sub(r"[^a-z0-9]+", "", str(raw_key).casefold())
+                if re.match(r"^(ocr|caption|semantic|object|scene|localdepth|generated|generation|edit)", key):
+                    continue
+                present = item is not None and item is not False and str(item).strip() != ""
+                if re.match(r"^(depth(?:map|data|image)?|disparity(?:map|image)?|portraitmatte|auxiliary(?:image|imagetype)?)$", key):
+                    depth_detected = depth_detected or present
+                if re.match(r"^(spatial(?:photo|video|media|type)?|stereo(?:pair|image)?|lefteye|righteye)$", key):
+                    stereo_detected = stereo_detected or present
+                if key in {"auxiliaryimagetype", "spatialmediatype", "mediatype"} and isinstance(item, str):
+                    signal = item.casefold()[:500]
+                    depth_detected = depth_detected or bool(re.search(r"\b(depth|disparity|portrait[ _-]?matte)\b", signal))
+                    stereo_detected = stereo_detected or bool(re.search(r"\b(spatial[ _-]?(photo|video)|stereo|left[ _-]?eye|right[ _-]?eye)\b", signal))
+                nested_depth, nested_stereo = metadata_signals(item, depth + 1)
+                depth_detected = depth_detected or nested_depth
+                stereo_detected = stereo_detected or nested_stereo
+                if depth_detected and stereo_detected:
+                    break
+            return depth_detected, stereo_detected
+
+        has_depth_metadata, has_spatial_metadata = metadata_signals(asset_metadata)
+        kind = (
+            "stereo"
+            if stereo_pair or has_spatial_metadata
+            else "portrait-depth"
+            if depth_pair or has_depth_metadata
+            else ""
+        )
+
+        def pair_name(pair: dict[str, Any]) -> str:
+            value = str(pair.get("relatedSourcePath", "") or "").strip()
+            return Path(value).name[:240] if value else ""
+
+        depth_name = pair_name(depth_pair)
+        depth_suffix = Path(depth_name).suffix.lower()
+        return {
+            "kind": kind,
+            "metadataDetected": bool(has_depth_metadata or has_spatial_metadata),
+            "depthSidecar": depth_name,
+            "stereoSidecar": pair_name(stereo_pair),
+            "depthMime": (mimetypes.guess_type(depth_name)[0] or "image/png") if depth_name else "",
+            "depthFormat": "RangeInverse" if depth_pair else "",
+            "depthExtension": depth_suffix,
+            "aperture": self._photo_export_metadata_first_text(local_depth.get("aperture")),
+            "focusDistance": self._photo_export_metadata_first_text(local_depth.get("focusDistance")),
+            "companionCount": int(bool(depth_pair)) + int(bool(stereo_pair)),
+            "originalPreserved": bool(original_preserved),
+            "exportDisposition": export_disposition or (
+                "original-byte-preserved" if original_preserved else "flattened-2d"
+            ),
+        }
+
+    def _photo_export_xmp(
+        self,
+        payload: dict[str, Any],
+        *,
+        spatial_original_preserved: bool = True,
+    ) -> str:
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         asset_metadata = payload.get("assetMetadata") if isinstance(payload.get("assetMetadata"), dict) else {}
         xmp_metadata = asset_metadata.get("xmp") if isinstance(asset_metadata.get("xmp"), dict) else {}
@@ -26491,12 +31453,15 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             accessibility_lines.append(
                 f"      <Iptc4xmpCore:ExtDescrAccessibility><rdf:Alt><rdf:li xml:lang=\"x-default\">{extended_description}</rdf:li></rdf:Alt></Iptc4xmpCore:ExtDescrAccessibility>"
             )
-        extended_lines = self._photo_export_xmp_extended_lines(payload)
+        extended_lines = self._photo_export_xmp_extended_lines(
+            payload,
+            spatial_original_preserved=spatial_original_preserved,
+        )
         return "\n".join([
             '<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>',
             '<x:xmpmeta xmlns:x="adobe:ns:meta/">',
             '  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">',
-            '    <rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/" xmlns:Iptc4xmpCore="http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/" xmlns:Iptc4xmpExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:xmpRights="http://ns.adobe.com/xap/1.0/rights/" xmlns:exif="http://ns.adobe.com/exif/1.0/" xmlns:tiff="http://ns.adobe.com/tiff/1.0/" xmlns:aux="http://ns.adobe.com/exif/1.0/aux/">',
+            '    <rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/" xmlns:Iptc4xmpCore="http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/" xmlns:Iptc4xmpExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:xmpRights="http://ns.adobe.com/xap/1.0/rights/" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" xmlns:exif="http://ns.adobe.com/exif/1.0/" xmlns:tiff="http://ns.adobe.com/tiff/1.0/" xmlns:aux="http://ns.adobe.com/exif/1.0/aux/" xmlns:GDepth="http://ns.google.com/photos/1.0/depthmap/" xmlns:GFocus="http://ns.google.com/photos/1.0/focus/" xmlns:vintrace="https://vintrace.local/ns/spatial/1.0/" xmlns:vintraceCatalog="https://vintrace.local/ns/catalog/1.0/">',
             f"      <dc:title><rdf:Alt><rdf:li xml:lang=\"x-default\">{title}</rdf:li></rdf:Alt></dc:title>",
             f"      <dc:description><rdf:Alt><rdf:li xml:lang=\"x-default\">{caption}</rdf:li></rdf:Alt></dc:description>",
             "      <dc:subject><rdf:Bag>",
@@ -26512,6 +31477,736 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "<?xpacket end=\"w\"?>",
             "",
         ])
+
+    def _photo_source_service(self) -> PhotoSourceService:
+        if self._photo_source_service_instance is None:
+            service = PhotoSourceService(
+                self.project.db,
+                self.project.root,
+                platform_name=sys.platform,
+            )
+            self._photo_source_service_instance = service
+            for job in service.catalog.recover_interrupted_jobs():
+                job_id = str(job.get("jobId", "") or "")
+                provider = str(job.get("provider", "") or "")
+                if job_id and provider not in REMOTE_PHOTO_SOURCE_PROVIDERS:
+                    self._submit_photo_source_job(job_id)
+                elif job_id:
+                    params = job.get("params") if isinstance(job.get("params"), dict) else {}
+                    try:
+                        service.adapter(provider).describe_library(str(params.get("libraryPath", "") or ""))
+                    except Exception:
+                        service.catalog.update_job(
+                            job_id,
+                            status="queued",
+                            error="Reconnect this inbound source to resume the queued job.",
+                            progress={"phase": "credentials_required", "message": "Reconnect this inbound source to resume."},
+                        )
+                    else:
+                        self._submit_photo_source_job(job_id)
+        return self._photo_source_service_instance
+
+    def _photo_source_executor(self) -> ThreadPoolExecutor:
+        with self._photo_source_jobs_lock:
+            if self._photo_source_job_executor is None:
+                self._photo_source_job_executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="photo-source",
+                )
+            return self._photo_source_job_executor
+
+    def _photo_source_library_path_hash(self, value: Any) -> str:
+        path = str(value or "").strip()
+        return hashlib.sha256(path.encode("utf-8")).hexdigest()[:16] if path else ""
+
+    def _photo_source_job_finished(self, job_id: str, future: Future[dict[str, Any]]) -> None:
+        with self._photo_source_jobs_lock:
+            self._photo_source_job_futures.pop(job_id, None)
+        job: dict[str, Any] = {}
+        try:
+            job = future.result()
+            status = str(job.get("status", "") or "") if isinstance(job, dict) else ""
+        except Exception as exc:
+            status = "failed"
+            try:
+                self._photo_source_service().catalog.update_job(
+                    job_id,
+                    status="failed",
+                    error=str(exc),
+                    completed=True,
+                )
+            except Exception:
+                pass
+        self._audit_photo_source_job_finished(job_id, job, status=status)
+
+    def _audit_photo_source_job_finished(
+        self,
+        job_id: str,
+        job: dict[str, Any],
+        *,
+        status: str = "",
+    ) -> None:
+        try:
+            result = job.get("result", {}) if isinstance(job, dict) and isinstance(job.get("result"), dict) else {}
+            counts = result.get("counts", {}) if isinstance(result.get("counts"), dict) else {}
+            warnings = result.get("warnings", []) if isinstance(result.get("warnings"), list) else []
+            self.project._append_audit({
+                "action": "photo_source_job_finished",
+                "job_id": job_id,
+                "status": status or str(job.get("status", "") or ""),
+                "provider": str(job.get("provider", "") or "") if isinstance(job, dict) else "",
+                "job_kind": str(job.get("jobKind", "") or "") if isinstance(job, dict) else "",
+                "source_id": str(job.get("sourceId", "") or "") if isinstance(job, dict) else "",
+                "counts": counts,
+                "warning_count": len(warnings),
+            })
+        except Exception:
+            pass
+
+    def _submit_photo_source_job(self, job_id: str) -> Future[dict[str, Any]]:
+        with self._photo_source_jobs_lock:
+            existing = self._photo_source_job_futures.get(job_id)
+            if existing is not None and not existing.done():
+                return existing
+        executor = self._photo_source_executor()
+        future = executor.submit(self._photo_source_service().run_job, job_id)
+        with self._photo_source_jobs_lock:
+            self._photo_source_job_futures[job_id] = future
+        future.add_done_callback(lambda completed: self._photo_source_job_finished(job_id, completed))
+        return future
+
+    def photo_source_status(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = self._photo_source_service().status()
+        provider = str((params or {}).get("provider", "") or "").strip()
+        if provider:
+            clean_provider = normalize_provider(provider)
+            payload["provider"] = payload.get("providers", {}).get(clean_provider, {})
+        return payload
+
+    def photo_source_provider_status(self, provider: str) -> dict[str, Any]:
+        clean_provider = normalize_provider(provider)
+        payload = self._photo_source_service().status()
+        return {
+            **payload.get("providers", {}).get(clean_provider, {}),
+            "sources": [source for source in payload.get("sources", []) if source.get("provider") == clean_provider],
+            "jobs": [job for job in payload.get("jobs", []) if job.get("provider") == clean_provider],
+        }
+
+    @staticmethod
+    def _dam_catalog_provider(params: dict[str, Any] | None) -> str:
+        provider = normalize_provider((params or {}).get("provider"))
+        if provider not in DAM_CATALOG_PROVIDERS:
+            supported = ", ".join(sorted(DAM_CATALOG_PROVIDERS))
+            raise ValueError(f"A supported DAM catalog provider is required ({supported}).")
+        return provider
+
+    def dam_catalog_status(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        provider = self._dam_catalog_provider(params)
+        return {
+            **self.photo_source_provider_status(provider),
+            "provider": provider,
+            "supportedProviders": [LIGHTROOM_CATALOG_PROVIDER, CAPTURE_ONE_CATALOG_PROVIDER],
+        }
+
+    def list_dam_catalogs(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.list_photo_source_libraries(self._dam_catalog_provider(params))
+
+    def preview_dam_catalog(self, params: dict[str, Any]) -> dict[str, Any]:
+        provider = self._dam_catalog_provider(params)
+        return self.preview_photo_source(provider, {**params, "provider": provider})
+
+    def start_dam_catalog_job(
+        self,
+        job_kind: str,
+        params: dict[str, Any],
+        *,
+        progress: Any | None = None,
+    ) -> dict[str, Any]:
+        if job_kind not in {"preview", "import", "sync"}:
+            raise ValueError("DAM catalog jobs support preview, import, or sync only.")
+        provider = self._dam_catalog_provider(params)
+        return self.start_photo_source_job(
+            provider,
+            job_kind,
+            {**params, "provider": provider},
+            progress=progress,
+        )
+
+    def list_photo_source_people_hints(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = self._photo_source_service().list_people_hints(params)
+        self.project._append_audit({
+            "action": "list_photo_source_people_hints",
+            "source_id": str((params or {}).get("sourceId", "") or ""),
+            "status": str((params or {}).get("status", "pending") or "pending"),
+            "count": len(payload.get("hints", [])),
+            "total": int(payload.get("total", 0) or 0),
+        })
+        return payload
+
+    def review_photo_source_people_hint(self, params: dict[str, Any]) -> dict[str, Any]:
+        payload = self._photo_source_service().review_people_hint(params)
+        self.project._append_audit({
+            "action": "review_photo_source_people_hint",
+            "hint_id": payload.get("hintId", ""),
+            "asset_id": payload.get("assetId", ""),
+            "source_id": payload.get("sourceId", ""),
+            "decision": payload.get("status", ""),
+        })
+        return payload
+
+    def revoke_photo_source_consent(
+        self,
+        params: dict[str, Any],
+        *,
+        progress: Any | None = None,
+    ) -> dict[str, Any]:
+        source_id = str(params.get("sourceId", "") or "").strip()
+        source = self._photo_source_service().catalog.get_source(source_id)
+        if not source:
+            raise ValueError("Unknown photo source id.")
+        run_inline = bool(params.get("runInline", params.get("inline", False)))
+        job = self._photo_source_service().enqueue_job(
+            str(source.get("provider", "") or ""),
+            "revoke_consent",
+            params,
+        )
+        job_id = str(job.get("jobId", "") or "")
+        self.project._append_audit({
+            "action": "revoke_photo_source_consent",
+            "job_id": job_id,
+            "source_id": source_id,
+            "provider": source.get("provider", ""),
+            "scopes": sorted(str(value) for value in params.get("scopes", []) if str(value or "").strip())
+            if isinstance(params.get("scopes"), list) else sorted(
+                str(key) for key, selected in params.get("scopes", {}).items() if bool(selected)
+            ) if isinstance(params.get("scopes"), dict) else [],
+            "local_catalog_only": True,
+        })
+        if run_inline:
+            callback = (lambda update: progress(update, "photo_source")) if progress else None
+            job = self._photo_source_service().run_job(job_id, progress_callback=callback)
+            self._audit_photo_source_job_finished(job_id, job)
+        else:
+            self._submit_photo_source_job(job_id)
+        return {
+            "job": job,
+            "jobId": job_id,
+            "jobStarted": True,
+            "jobs": self._photo_source_service().catalog.list_jobs(limit=20),
+        }
+
+    def inbound_connector_catalog(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        del params
+        service = self._photo_source_service()
+        status = service.status()
+        providers = []
+        for provider in sorted(REMOTE_PHOTO_SOURCE_PROVIDERS):
+            row = dict(status.get("providers", {}).get(provider, {}))
+            row["sources"] = [source for source in status.get("sources", []) if source.get("provider") == provider]
+            row["jobs"] = [job for job in status.get("jobs", []) if job.get("provider") == provider]
+            providers.append(row)
+        return {
+            "providers": providers,
+            "sources": [source for source in status.get("sources", []) if source.get("provider") in REMOTE_PHOTO_SOURCE_PROVIDERS],
+            "jobs": [job for job in status.get("jobs", []) if job.get("provider") in REMOTE_PHOTO_SOURCE_PROVIDERS],
+            "policy": {
+                "discovery": "metadata-only",
+                "download": "explicit-consent-managed-copy",
+                "credentials": "os-vault-shared-with-authorized-agent-processes"
+                if service.credential_vault.available
+                else "desktop-session-only",
+                "network": "public-http-https-only",
+                "stableIds": True,
+                "sourceMutation": False,
+            },
+        }
+
+    def configure_inbound_connector(self, params: dict[str, Any]) -> dict[str, Any]:
+        provider = normalize_provider(params.get("provider"))
+        if provider not in REMOTE_PHOTO_SOURCE_PROVIDERS:
+            raise ValueError("A remote inbound connector provider is required.")
+        payload = self._photo_source_service().configure_connector(provider, params)
+        self.project._append_audit({
+            "action": "configure_inbound_connector",
+            "provider": provider,
+            "connection_id_hash": hashlib.sha256(str(payload.get("connectionId", "")).encode("utf-8")).hexdigest()[:16],
+            "source_id": payload.get("source", {}).get("sourceId", "") if isinstance(payload.get("source"), dict) else "",
+            "credential_configured": bool(payload.get("credentialConfigured")),
+        })
+        return payload
+
+    def forget_inbound_connector(self, params: dict[str, Any]) -> dict[str, Any]:
+        provider = normalize_provider(params.get("provider"))
+        connection_id = str(params.get("connectionId", "") or "").strip()
+        if provider not in REMOTE_PHOTO_SOURCE_PROVIDERS or not connection_id:
+            raise ValueError("A remote provider and connectionId are required.")
+        payload = self._photo_source_service().forget_connector(provider, connection_id)
+        self.project._append_audit({
+            "action": "forget_inbound_connector",
+            "provider": provider,
+            "connection_id_hash": hashlib.sha256(connection_id.encode("utf-8")).hexdigest()[:16],
+            "forgotten": bool(payload.get("forgotten")),
+        })
+        return payload
+
+    def list_inbound_connector_sources(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = params if isinstance(params, dict) else {}
+        provider = str(body.get("provider", "") or "").strip()
+        if provider:
+            clean_provider = normalize_provider(provider)
+            if clean_provider not in REMOTE_PHOTO_SOURCE_PROVIDERS:
+                raise ValueError("A remote inbound connector provider is required.")
+            return self.list_photo_source_libraries(clean_provider)
+        return self.inbound_connector_catalog({})
+
+    def preview_inbound_connector(self, params: dict[str, Any]) -> dict[str, Any]:
+        provider = normalize_provider(params.get("provider"))
+        if provider not in REMOTE_PHOTO_SOURCE_PROVIDERS:
+            raise ValueError("A remote inbound connector provider is required.")
+        payload = dict(params)
+        if not str(payload.get("libraryPath", "") or "").strip():
+            payload["libraryPath"] = connector_uri(provider, str(payload.get("connectionId", "") or ""))
+        return self.preview_photo_source(provider, payload)
+
+    def start_inbound_connector_job(
+        self,
+        job_kind: str,
+        params: dict[str, Any],
+        *,
+        progress: Any | None = None,
+    ) -> dict[str, Any]:
+        provider = normalize_provider(params.get("provider"))
+        if provider not in REMOTE_PHOTO_SOURCE_PROVIDERS:
+            raise ValueError("A remote inbound connector provider is required.")
+        payload = dict(params)
+        if not str(payload.get("libraryPath", "") or "").strip():
+            payload["libraryPath"] = connector_uri(provider, str(payload.get("connectionId", "") or ""))
+        payload["storageMode"] = "managed"
+        return self.start_photo_source_job(provider, job_kind, payload, progress=progress)
+
+    def list_photo_source_libraries(self, provider: str) -> dict[str, Any]:
+        payload = self._photo_source_service().discover_libraries(provider)
+        self.project._append_audit({
+            "action": "list_photo_source_libraries",
+            "provider": normalize_provider(provider),
+            "count": len(payload.get("libraries", [])),
+        })
+        return payload
+
+    def preview_photo_source(self, provider: str, params: dict[str, Any]) -> dict[str, Any]:
+        payload = self._photo_source_service().preview(provider, params)
+        scopes = payload.get("scopes", {}) if isinstance(payload.get("scopes"), dict) else {}
+        provider_status = self.photo_source_provider_status(provider)
+        self.project._append_audit({
+            "action": "preview_photo_source",
+            "provider": normalize_provider(provider),
+            "source_id": payload.get("sourceId", ""),
+            "library_path_hash": self._photo_source_library_path_hash(params.get("libraryPath", params.get("rootPath", ""))),
+            "scopes": scopes,
+            "sensitive_scopes": [key for key in ("peopleFaces", "preciseLocation", "hidden", "deleted", "shared", "commentsLikes") if scopes.get(key)],
+            "scanned": int(payload.get("scanned_count", payload.get("scannedCount", 0)) or 0),
+            "complete": bool(payload.get("complete", False)),
+            "warning_count": len(payload.get("warnings", [])) if isinstance(payload.get("warnings"), list) else 0,
+            "dependency_version": str(provider_status.get("dependencyVersion", "") or ""),
+        })
+        return payload
+
+    def start_photo_source_job(
+        self,
+        provider: str,
+        job_kind: str,
+        params: dict[str, Any],
+        *,
+        progress: Any | None = None,
+    ) -> dict[str, Any]:
+        payload = dict(params if isinstance(params, dict) else {})
+        storage_mode = str(payload.get("storageMode", "referenced") or "referenced").strip().lower()
+        clean_provider = normalize_provider(provider)
+        if (storage_mode == "managed" or bool(payload.get("allowPhotosExport", False)) or clean_provider in REMOTE_PHOTO_SOURCE_PROVIDERS) and not str(payload.get("managedRoot", "") or "").strip():
+            payload["managedRoot"] = str(self._photo_managed_root_from_settings())
+        run_inline = bool(payload.pop("runInline", payload.pop("inline", False)))
+        service = self._photo_source_service()
+        job = service.enqueue_job(provider, job_kind, payload)
+        job_id = str(job.get("jobId", "") or "")
+        provider_status = service.adapter(provider).status()
+        self.project._append_audit({
+            "action": "start_photo_source_job",
+            "job_id": job_id,
+            "job_kind": str(job_kind or ""),
+            "provider": clean_provider,
+            "source_id": job.get("sourceId", ""),
+            "library_path_hash": self._photo_source_library_path_hash(payload.get("libraryPath", payload.get("rootPath", ""))),
+            "storage_mode": storage_mode,
+            "sensitive_scopes": [
+                key
+                for key in ("peopleFaces", "preciseLocation", "hidden", "deleted", "shared", "commentsLikes")
+                if isinstance(payload.get("scopes"), dict) and payload["scopes"].get(key)
+            ],
+            "cloud_export": bool(payload.get("allowPhotosExport", False)),
+            "remote_download": bool(payload.get("explicitExternalDownloadConsent", False)),
+            "dependency_version": str(provider_status.get("dependencyVersion", "") or ""),
+        })
+        if run_inline:
+            callback = (lambda update: progress(update, "photo_source")) if progress else None
+            job = service.run_job(job_id, progress_callback=callback)
+            self._audit_photo_source_job_finished(job_id, job)
+        else:
+            self._submit_photo_source_job(job_id)
+        jobs = service.catalog.list_jobs(source_id=str(job.get("sourceId", "") or ""), limit=20)
+        return {"job": job, "jobId": job_id, "jobStarted": True, "jobs": jobs}
+
+    def photo_source_job_status(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = params if isinstance(params, dict) else {}
+        job_id = str(body.get("jobId", body.get("id", "")) or "").strip()
+        if not job_id:
+            raise ValueError("Photo source job id is required.")
+        service = self._photo_source_service()
+        job = service.catalog.get_job(job_id)
+        return {
+            "jobFound": bool(job),
+            "job": job,
+            "jobs": service.catalog.list_jobs(source_id=str(job.get("sourceId", "") or ""), limit=20) if job else [],
+        }
+
+    def photo_source_jobs(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = params if isinstance(params, dict) else {}
+        jobs = self._photo_source_service().catalog.list_jobs(
+            source_id=str(body.get("sourceId", "") or ""),
+            status=str(body.get("status", "") or ""),
+            limit=int(body.get("limit", 50) or 50),
+        )
+        counts: dict[str, int] = {}
+        for job in jobs:
+            status = str(job.get("status", "") or "")
+            counts[status] = counts.get(status, 0) + 1
+        return {"jobs": jobs, "counts": counts}
+
+    def run_photo_source_job(self, params: dict[str, Any], *, progress: Any | None = None) -> dict[str, Any]:
+        job_id = str(params.get("jobId", params.get("id", "")) or "").strip()
+        if not job_id:
+            raise ValueError("Photo source job id is required.")
+        job = self._photo_source_service().catalog.get_job(job_id)
+        if not job:
+            raise ValueError("Unknown photo source job id.")
+        if job.get("status") == "running":
+            return job
+        callback = (lambda update: progress(update, "photo_source")) if progress else None
+        return self._photo_source_service().run_job(job_id, progress_callback=callback)
+
+    def cancel_photo_source_job(self, params: dict[str, Any]) -> dict[str, Any]:
+        job_id = str(params.get("jobId", params.get("id", "")) or "").strip()
+        if not job_id:
+            raise ValueError("Photo source job id is required.")
+        job = self._photo_source_service().catalog.request_cancel(job_id)
+        with self._photo_source_jobs_lock:
+            future = self._photo_source_job_futures.get(job_id)
+            if future is not None and future.cancel():
+                self._photo_source_job_futures.pop(job_id, None)
+        self.project._append_audit({"action": "cancel_photo_source_job", "job_id": job_id, "status": job.get("status", "")})
+        return job
+
+    def retry_photo_source_job(self, params: dict[str, Any], *, progress: Any | None = None) -> dict[str, Any]:
+        job_id = str(params.get("jobId", params.get("id", "")) or "").strip()
+        previous = self._photo_source_service().catalog.get_job(job_id)
+        if not previous:
+            raise ValueError("Unknown photo source job id.")
+        if previous.get("status") in {"queued", "running"}:
+            raise ValueError("This photo source job is still active.")
+        next_params = dict(previous.get("params", {}))
+        overrides = params.get("params") if isinstance(params.get("params"), dict) else {}
+        next_params.update(overrides)
+        next_params["force"] = bool(next_params.get("force", True))
+        if bool(params.get("runInline", False)):
+            next_params["runInline"] = True
+        return self.start_photo_source_job(
+            str(previous.get("provider", "")),
+            str(previous.get("jobKind", "")),
+            next_params,
+            progress=progress,
+        )
+
+    def dismiss_photo_source_job(self, params: dict[str, Any]) -> dict[str, Any]:
+        job_id = str(params.get("jobId", params.get("id", "")) or "").strip()
+        if not job_id:
+            raise ValueError("Photo source job id is required.")
+        deleted = self._photo_source_service().catalog.delete_job(job_id)
+        self.project._append_audit({"action": "dismiss_photo_source_job", "job_id": job_id, "deleted": deleted})
+        return {"jobId": job_id, "deleted": deleted}
+
+    def _photo_catalog_portability(self) -> OpenPhotoCatalogService:
+        return OpenPhotoCatalogService(self.project.db, self.project.root)
+
+    def _photo_catalog_cancellation(
+        self,
+        params: dict[str, Any],
+    ) -> tuple[Path, Callable[[], bool], Callable[[], None]]:
+        marker = Path(self.project.root) / ".photo-catalog-cancel"
+        token = str(params.get("cancelToken", "") or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{32,64}", token):
+            token = ""
+            try:
+                marker.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        def cancelled() -> bool:
+            if not token:
+                return marker.exists()
+            try:
+                return marker.read_text(encoding="ascii").strip() == token
+            except (OSError, UnicodeError):
+                return False
+
+        def finish() -> None:
+            try:
+                if not token or cancelled():
+                    marker.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        return marker, cancelled, finish
+
+    def photo_catalog_status(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        service = self._photo_catalog_portability()
+        return {
+            **service.format_status(),
+            "counts": service.catalog_counts(),
+        }
+
+    def inspect_open_photo_catalog(
+        self,
+        params: dict[str, Any],
+        *,
+        progress: Any | None = None,
+    ) -> dict[str, Any]:
+        callback = (lambda payload: progress(payload, "photo_catalog")) if progress else None
+        _marker, cancelled, finish = self._photo_catalog_cancellation(params)
+        try:
+            result = self._photo_catalog_portability().inspect_catalog(
+                str(params.get("catalogPath", params.get("path", "")) or ""),
+                verify_media=bool(params.get("verifyMedia", False)),
+                progress=callback,
+                cancel_check=cancelled,
+            )
+        finally:
+            finish()
+        self.project._append_audit(
+            {
+                "action": "inspect_open_photo_catalog",
+                "catalog_id": result.get("catalogId", ""),
+                "format_version": result.get("formatVersion", 0),
+                "members": result.get("members", 0),
+                "fully_verified": bool(result.get("fullyVerified", False)),
+            }
+        )
+        return result
+
+    def export_open_photo_catalog(
+        self,
+        params: dict[str, Any],
+        *,
+        progress: Any | None = None,
+    ) -> dict[str, Any]:
+        callback = (lambda payload: progress(payload, "photo_catalog")) if progress else None
+        _marker, cancelled, finish = self._photo_catalog_cancellation(params)
+        try:
+            result = self._photo_catalog_portability().export_catalog(
+                str(params.get("destination", params.get("folder", "")) or ""),
+                include_originals=bool(params.get("includeOriginals", True)),
+                include_sidecars=bool(params.get("includeSidecars", True)),
+                package_name=str(params.get("packageName", params.get("name", "")) or ""),
+                progress=callback,
+                cancel_check=cancelled,
+            )
+        finally:
+            finish()
+        counts = result.get("counts", {}) if isinstance(result.get("counts"), dict) else {}
+        self.project._append_audit(
+            {
+                "action": "export_open_photo_catalog",
+                "catalog_id": result.get("catalogId", ""),
+                "format_version": result.get("formatVersion", 0),
+                "media_policy": result.get("mediaPolicy", ""),
+                "assets": int(counts.get("assets", 0) or 0),
+                "sidecars": int(counts.get("sidecars", 0) or 0),
+                "path_free": bool(result.get("pathFree", False)),
+            }
+        )
+        return result
+
+    def import_open_photo_catalog(
+        self,
+        params: dict[str, Any],
+        *,
+        progress: Any | None = None,
+    ) -> dict[str, Any]:
+        callback = (lambda payload: progress(payload, "photo_catalog")) if progress else None
+        _marker, cancelled, finish = self._photo_catalog_cancellation(params)
+        try:
+            result = self._photo_catalog_portability().import_catalog(
+                str(params.get("catalogPath", params.get("path", "")) or ""),
+                managed_root=str(params.get("managedRoot", params.get("managedFolder", "")) or ""),
+                merge_by_hash=bool(params.get("mergeByHash", True)),
+                progress=callback,
+                cancel_check=cancelled,
+            )
+        finally:
+            finish()
+        counts = result.get("counts", {}) if isinstance(result.get("counts"), dict) else {}
+        self.project._append_audit(
+            {
+                "action": "import_open_photo_catalog",
+                "catalog_id": result.get("catalogId", ""),
+                "format_version": result.get("formatVersion", 0),
+                "assets": int(counts.get("assets", 0) or 0),
+                "created": int(counts.get("created", 0) or 0),
+                "merged": int(counts.get("merged", 0) or 0),
+                "verified": bool(result.get("verified", False)),
+            }
+        )
+        return result
+
+    def create_photo_tether_session(self, params: dict[str, Any]) -> dict[str, Any]:
+        camera = params.get("camera") if isinstance(params.get("camera"), dict) else {}
+        capabilities = params.get("capabilities") if isinstance(params.get("capabilities"), dict) else {}
+        settings = params.get("settings") if isinstance(params.get("settings"), dict) else {}
+        result = self.project.db.create_photo_tether_session(
+            mode=str(params.get("mode", "watch") or "watch"),
+            source_path=str(params.get("sourcePath", params.get("source_path", "")) or ""),
+            destination_path=str(params.get("destinationPath", params.get("destination_path", "")) or ""),
+            storage_mode=str(params.get("storageMode", params.get("storage_mode", "referenced")) or "referenced"),
+            managed_root=str(params.get("managedRoot", params.get("managed_root", "")) or ""),
+            naming_template=str(params.get("namingTemplate", params.get("naming_template", "capture_{sequence:04}")) or "capture_{sequence:04}"),
+            next_sequence=max(1, int(params.get("nextSequence", params.get("next_sequence", 1)) or 1)),
+            source_label=str(params.get("sourceLabel", params.get("source_label", "")) or ""),
+            camera=camera,
+            capabilities=capabilities,
+            settings=settings,
+            session_id=str(params.get("sessionId", params.get("session_id", "")) or ""),
+        )
+        self.project._append_audit(
+            {
+                "action": "create_photo_tether_session",
+                "session_id": result.get("sessionId", ""),
+                "mode": result.get("mode", ""),
+                "storage_mode": result.get("storageMode", ""),
+                "auto_resume": bool(result.get("settings", {}).get("autoResume", False)),
+            }
+        )
+        return result
+
+    def photo_tether_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = str(params.get("sessionId", params.get("session_id", "")) or "").strip()
+        capture_limit = max(1, min(500, int(params.get("captureLimit", params.get("capture_limit", 40)) or 40)))
+        if session_id:
+            session = self.project.db.photo_tether_session_by_id(session_id, capture_limit=capture_limit)
+            if not session:
+                raise ValueError("Photo tether session was not found.")
+            return {"session": session, "active": session if session.get("status") == "active" else None}
+        sessions = self.project.db.list_photo_tether_sessions(limit=max(1, min(100, int(params.get("limit", 20) or 20))))
+        active = next((session for session in sessions if session.get("status") == "active"), None)
+        recoverable = [session for session in sessions if session.get("status") == "recoverable"]
+        if active:
+            active = self.project.db.photo_tether_session_by_id(str(active.get("sessionId", "")), capture_limit=capture_limit)
+        elif recoverable:
+            recoverable[0] = self.project.db.photo_tether_session_by_id(
+                str(recoverable[0].get("sessionId", "")), capture_limit=capture_limit
+            ) or recoverable[0]
+        elif sessions:
+            sessions[0] = self.project.db.photo_tether_session_by_id(
+                str(sessions[0].get("sessionId", "")), capture_limit=capture_limit
+            ) or sessions[0]
+        return {
+            "active": active,
+            "recoverable": recoverable,
+            "recent": sessions,
+        }
+
+    def update_photo_tether_session_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        session_id = str(params.get("sessionId", params.get("session_id", "")) or "").strip()
+        status = str(params.get("status", "") or "").strip().lower()
+        result = self.project.db.update_photo_tether_session_status(
+            session_id,
+            status,
+            error=str(params.get("error", "") or ""),
+        )
+        self.project._append_audit(
+            {
+                "action": "update_photo_tether_session_status",
+                "session_id": session_id,
+                "status": status,
+                "has_error": bool(result.get("lastError")),
+            }
+        )
+        return result
+
+    def reserve_photo_tether_sequence(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.project.db.reserve_photo_tether_sequence(
+            str(params.get("sessionId", params.get("session_id", "")) or "")
+        )
+
+    def claim_photo_tether_capture(self, params: dict[str, Any]) -> dict[str, Any]:
+        raw_sequence = params.get("sequence")
+        return self.project.db.claim_photo_tether_capture(
+            session_id=str(params.get("sessionId", params.get("session_id", "")) or ""),
+            source_path=str(params.get("sourcePath", params.get("source_path", "")) or ""),
+            source_signature=str(params.get("sourceSignature", params.get("source_signature", "")) or ""),
+            size_bytes=max(0, int(params.get("sizeBytes", params.get("size_bytes", 0)) or 0)),
+            sequence=int(raw_sequence) if raw_sequence is not None else None,
+            captured_at=str(params.get("capturedAt", params.get("captured_at", "")) or ""),
+            metadata=params.get("metadata") if isinstance(params.get("metadata"), dict) else {},
+            retry=bool(params.get("retry", True)),
+        )
+
+    def complete_photo_tether_capture(self, params: dict[str, Any]) -> dict[str, Any]:
+        result = self.project.db.complete_photo_tether_capture(
+            str(params.get("captureId", params.get("capture_id", "")) or ""),
+            target_path=str(params.get("targetPath", params.get("target_path", "")) or ""),
+            asset_id=str(params.get("assetId", params.get("asset_id", "")) or ""),
+            import_id=str(params.get("importId", params.get("import_id", "")) or ""),
+            metadata=params.get("metadata") if isinstance(params.get("metadata"), dict) else None,
+        )
+        capture = result.get("capture", {}) if isinstance(result.get("capture"), dict) else {}
+        if not result.get("idempotent"):
+            self.project._append_audit(
+                {
+                    "action": "complete_photo_tether_capture",
+                    "session_id": capture.get("sessionId", ""),
+                    "capture_id": capture.get("captureId", ""),
+                    "sequence": capture.get("sequence", 0),
+                    "asset_id": capture.get("assetId", ""),
+                    "import_id": capture.get("importId", ""),
+                }
+            )
+        return result
+
+    def fail_photo_tether_capture(self, params: dict[str, Any]) -> dict[str, Any]:
+        result = self.project.db.fail_photo_tether_capture(
+            str(params.get("captureId", params.get("capture_id", "")) or ""),
+            str(params.get("error", "") or ""),
+        )
+        capture = result.get("capture", {}) if isinstance(result.get("capture"), dict) else {}
+        self.project._append_audit(
+            {
+                "action": "fail_photo_tether_capture",
+                "session_id": capture.get("sessionId", ""),
+                "capture_id": capture.get("captureId", ""),
+                "sequence": capture.get("sequence", 0),
+            }
+        )
+        return result
+
+    def recover_photo_tether_sessions(self, params: dict[str, Any]) -> dict[str, Any]:
+        result = self.project.db.recover_interrupted_photo_tether_sessions()
+        if result.get("recoveredSessions") or result.get("interruptedCaptures"):
+            self.project._append_audit(
+                {
+                    "action": "recover_photo_tether_sessions",
+                    "sessions": int(result.get("recoveredSessions", 0) or 0),
+                    "captures": int(result.get("interruptedCaptures", 0) or 0),
+                }
+            )
+        return result
 
     def import_photos(self, params: dict[str, Any]) -> dict[str, Any]:
         source_paths = params.get("sourcePaths", [])
@@ -26579,6 +32274,58 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             result["warnings"] = warnings
             result["deleteFromSourceAfterImport"] = False
             result["deleteFromSourceSupported"] = False
+        try:
+            credential_scan_limit = max(
+                0,
+                min(1000, int(params.get("contentCredentialsScanLimit", 256) or 0)),
+            )
+        except (TypeError, ValueError):
+            credential_scan_limit = 256
+        imported_assets = result.get("assets") if isinstance(result.get("assets"), list) else []
+        credential_candidates = 0
+        credential_preserved = 0
+        credential_valid = 0
+        credential_invalid = 0
+        credential_metadata_failures = 0
+        for asset in imported_assets[:credential_scan_limit]:
+            if not isinstance(asset, dict):
+                continue
+            source_path = Path(str(asset.get("sourcePath", "") or "")).expanduser()
+            if not self._content_credentials.is_candidate(source_path, scan_bytes=256 * 1024):
+                continue
+            credential_candidates += 1
+            summary = self._content_credentials.inspect(
+                source_path,
+                asset_sha256=str(asset.get("contentHash", "") or ""),
+            )
+            if summary.get("present") is True:
+                credential_preserved += 1
+                if summary.get("cryptographicallyValid") is True:
+                    credential_valid += 1
+                else:
+                    credential_invalid += 1
+            else:
+                credential_invalid += 1
+            try:
+                self.project.db.update_photo_asset_metadata_json(
+                    asset_id=str(asset.get("assetId", "") or ""),
+                    patch={"contentCredentials": deepcopy(summary)},
+                    refresh_index=False,
+                )
+            except Exception:
+                credential_metadata_failures += 1
+        credential_deferred = max(0, len(imported_assets) - credential_scan_limit)
+        result["contentCredentials"] = {
+            "policyVersion": self._content_credentials.status().get("policyVersion", ""),
+            "originalBytesPreserved": True,
+            "scannedCount": min(len(imported_assets), credential_scan_limit),
+            "candidateCount": credential_candidates,
+            "preservedCount": credential_preserved,
+            "cryptographicallyValidCount": credential_valid,
+            "invalidCount": credential_invalid,
+            "metadataWriteFailureCount": credential_metadata_failures,
+            "deferredCount": credential_deferred,
+        }
         self.project._append_audit(
             {
                 "action": "import_photos",
@@ -26591,6 +32338,12 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "keep_folder_organization": bool(result.get("keepFolderOrganization", False)),
                 "delete_from_source_requested": delete_from_source_requested,
                 "delete_from_source_supported": False,
+                "c2pa_candidates": credential_candidates,
+                "c2pa_preserved": credential_preserved,
+                "c2pa_valid": credential_valid,
+                "c2pa_invalid": credential_invalid,
+                "c2pa_deferred": credential_deferred,
+                "c2pa_metadata_write_failures": credential_metadata_failures,
             }
         )
         return result
@@ -26766,17 +32519,29 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         metadata_written = 0
         xmp_written = 0
         existing_sidecars_written = 0
+        spatial_assets = 0
+        spatial_companions_written = 0
         rendered = 0
         video_rendered = 0
         edit_stack_rendered = 0
         raw_proxy_rendered = 0
         render_fallback = 0
         skipped = 0
+        content_credentials_signed = 0
+        content_credentials_preserved = 0
+        content_credentials_failed = 0
+        content_credentials_none = 0
         rows: list[dict[str, Any]] = []
         copied_sources: set[str] = set()
         moved_items: list[dict[str, Any]] = []
 
-        def append_render_skip(source_value: str, reason: str, result_code: str = "render_skipped_strip_location") -> None:
+        def append_render_skip(
+            source_value: str,
+            reason: str,
+            result_code: str = "render_skipped_strip_location",
+            *,
+            credential_failure: str = "",
+        ) -> None:
             rows.append({
                 "sourcePath": source_value,
                 "targetPath": "",
@@ -26803,7 +32568,46 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "videoEditTransform": "",
                 "videoEditRender": "",
                 "videoEditSummary": "",
+                "contentCredentialStatus": "failed" if credential_failure else "none",
+                "contentCredentialFailure": credential_failure,
+                "contentCredentials": {},
+                "spatialPortability": {},
             })
+
+        def sign_rendered_export(
+            rendered_path: Path,
+            original_path: Path,
+            operations: list[dict[str, Any]],
+        ) -> dict[str, Any]:
+            parent_path = original_path
+            ordinary_operations: list[dict[str, Any]] = []
+            for operation in operations:
+                generated = self._photo_generated_artifact_operation(operation)
+                if generated is not None:
+                    parent_path = Path(str(generated["artifactPath"])).expanduser().resolve()
+                else:
+                    ordinary_operations.append(operation)
+            operations_sha256 = hashlib.sha256(
+                json.dumps(operations, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+            ).hexdigest()
+            try:
+                return self._content_credentials.sign_edited_asset(
+                    unsigned_path=rendered_path,
+                    destination_path=rendered_path,
+                    parent_path=parent_path,
+                    operation_kind="ordinary-edit" if ordinary_operations else "rendered-export",
+                    provenance={
+                        "edit": {
+                            "mode": "ordinary" if ordinary_operations else "conversion",
+                            "operation": "rendered-export",
+                            "baseEditStackHash": operations_sha256,
+                        }
+                    },
+                )
+            except ContentCredentialError:
+                raise
+            except Exception as exc:
+                raise ContentCredentialError(f"Content Credential signing failed: {str(exc)[:240]}") from exc
 
         for index, source_value in enumerate(unique_paths, start=1):
             source = Path(source_value).expanduser()
@@ -26831,6 +32635,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             edit_stack = self.project.db.photo_edit_stack_by_asset(asset_id=str(asset.get("assetId", ""))) if asset else None
             target_suffix = render_suffix if should_render_image else video_render_suffix if should_render_video else source_suffix
             payload = self._photo_export_sidecar_payload(source_value, strip_location=strip_location)
+            spatial_portability = self._photo_export_spatial_fields(payload)
+            if spatial_portability.get("kind"):
+                spatial_assets += 1
             rendered_metadata_payload = payload if include_xmp else None
             template_context = self._photo_export_template_context(resolved, index, payload)
             target_root = self._photo_export_template_folder(media_root, subfolder_template, template_context)
@@ -26862,10 +32669,15 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 row_video_edit_transform = ""
                 row_video_edit_render = ""
                 row_video_edit_summary = ""
+                row_content_credential_status = ""
+                row_content_credential_failure = ""
+                row_content_credentials: dict[str, Any] = {}
                 if should_render_image:
                     try:
                         edit_operations = edit_stack.get("operations", []) if isinstance(edit_stack, dict) else []
                         rendered_edit = None
+                        rendered_edit_applied = False
+                        rendered_raw_proxy = False
                         render_source = resolved
                         raw_render_proxy_path = ""
                         is_raw_source = source_suffix in RAW_IMAGE_EXTENSIONS
@@ -26905,7 +32717,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                                     metadata_payload=rendered_metadata_payload,
                                 )
                         if rendered_edit is not None:
-                            edit_stack_rendered += 1
+                            rendered_edit_applied = True
                             row_edit_stack_id = str(edit_stack.get("editId", "") or "") if isinstance(edit_stack, dict) else ""
                             result = "rendered_raw_proxy_edit" if render_source != resolved else "rendered_edit"
                         else:
@@ -26940,14 +32752,40 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                                 result = "rendered_raw_proxy"
                         if render_source != resolved:
                             row_raw_render_proxy_path = str(render_source)
+                            rendered_raw_proxy = True
+                        credential_result = sign_rendered_export(
+                            target,
+                            resolved,
+                            [operation for operation in edit_operations if isinstance(operation, dict)]
+                            if isinstance(edit_operations, list)
+                            else [],
+                        )
+                        row_content_credentials = deepcopy(credential_result["contentCredentials"])
+                        row_content_credential_status = "signed"
+                        content_credentials_signed += 1
+                        if rendered_edit_applied:
+                            edit_stack_rendered += 1
+                        if rendered_raw_proxy:
                             raw_proxy_rendered += 1
                         copied += 1
                         rendered += 1
                         row_render_format = render_format
                     except Exception as exc:
-                        if not allow_render_fallback:
+                        try:
+                            target.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                        if isinstance(exc, ContentCredentialError):
+                            row_content_credential_failure = str(exc)[:320]
+                            content_credentials_failed += 1
+                        if not allow_render_fallback or strip_location:
                             skipped += 1
-                            append_render_skip(source_value, str(exc)[:240] or "render failed", result_code="render_skipped_strip_location" if strip_location else "render_error")
+                            append_render_skip(
+                                source_value,
+                                str(exc)[:240] or "render failed",
+                                result_code="render_skipped_strip_location" if strip_location else "render_error",
+                                credential_failure=row_content_credential_failure,
+                            )
                             continue
                         target = self._photo_export_allocate_target(
                             target_root,
@@ -26980,6 +32818,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                             video_crop_aspect=str(video_edit.get("cropAspect", "none") or "none"),
                             strip_metadata=bool(strip_location),
                         )
+                        credential_result = sign_rendered_export(
+                            target,
+                            resolved,
+                            [operation for operation in edit_operations if isinstance(operation, dict)]
+                            if isinstance(edit_operations, list)
+                            else [],
+                        )
+                        row_content_credentials = deepcopy(credential_result["contentCredentials"])
+                        row_content_credential_status = "signed"
+                        content_credentials_signed += 1
                         copied += 1
                         rendered += 1
                         video_rendered += 1
@@ -27015,9 +32863,21 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                         row_render_format = video_render_format
                         row_video_render_quality = video_render_quality
                     except Exception as exc:
-                        if not allow_render_fallback:
+                        try:
+                            target.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                        if isinstance(exc, ContentCredentialError):
+                            row_content_credential_failure = str(exc)[:320]
+                            content_credentials_failed += 1
+                        if not allow_render_fallback or strip_location:
                             skipped += 1
-                            append_render_skip(source_value, str(exc)[:240] or "render failed", result_code="render_skipped_strip_location" if strip_location else "render_error")
+                            append_render_skip(
+                                source_value,
+                                str(exc)[:240] or "render failed",
+                                result_code="render_skipped_strip_location" if strip_location else "render_error",
+                                credential_failure=row_content_credential_failure,
+                            )
                             continue
                         target = self._photo_export_allocate_target(
                             target_root,
@@ -27031,7 +32891,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                         render_fallback += 1
                         result = f"copied_original_render_fallback: {exc}"
                 elif rendered_requested:
-                    if not allow_render_fallback:
+                    if not allow_render_fallback or strip_location:
                         skipped += 1
                         append_render_skip(source_value, "unsupported media", result_code="render_skipped_strip_location" if strip_location else "render_error")
                         continue
@@ -27054,6 +32914,34 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     shutil.copy2(resolved, target)
                     copied += 1
                     result = "copied"
+                if not row_content_credential_status:
+                    if self._content_credentials.is_candidate(target, scan_bytes=256 * 1024):
+                        row_content_credentials = self._content_credentials.inspect(target)
+                        content_credentials_preserved += 1
+                        if (
+                            row_content_credentials.get("present") is True
+                            and row_content_credentials.get("cryptographicallyValid") is True
+                        ):
+                            row_content_credential_status = (
+                                "preserved-original-fallback"
+                                if row_content_credential_failure
+                                else "preserved-original"
+                            )
+                        else:
+                            row_content_credential_status = (
+                                "preserved-invalid-fallback"
+                                if row_content_credential_failure
+                                else "preserved-invalid"
+                            )
+                            if not row_content_credential_failure:
+                                content_credentials_failed += 1
+                    else:
+                        content_credentials_none += 1
+                        row_content_credential_status = (
+                            "original-fallback-no-credential"
+                            if row_content_credential_failure
+                            else "no-credential"
+                        )
                 copied_sources.add(source_key)
                 metadata_path = ""
                 xmp_path = ""
@@ -27071,12 +32959,27 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                         metadata_written += 1
                     if include_xmp:
                         xmp_path_obj = metadata_root / f"{sidecar_base}.xmp"
-                        xmp_path_obj.write_text(self._photo_export_xmp(payload), encoding="utf-8")
+                        xmp_path_obj.write_text(
+                            self._photo_export_xmp(
+                                payload,
+                                spatial_original_preserved=not bool(row_render_format),
+                            ),
+                            encoding="utf-8",
+                        )
                         xmp_path = str(xmp_path_obj)
                         xmp_written += 1
                 if include_existing_sidecars:
                     existing_sidecar_paths = self._copy_photo_existing_sidecars(resolved, existing_sidecar_root, sidecar_base)
                     existing_sidecars_written += len(existing_sidecar_paths)
+                    spatial_companion_names = {
+                        candidate.name
+                        for _pair_kind, candidate, _role in self.project.db._adjacent_spatial_companions(resolved)  # noqa: SLF001
+                    }
+                    spatial_companions_written += sum(
+                        1
+                        for copied_path in existing_sidecar_paths
+                        if any(name in Path(copied_path).name for name in spatial_companion_names)
+                    )
                 rows.append({
                     "sourcePath": source_value,
                     "targetPath": str(target),
@@ -27103,6 +33006,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     "videoEditTransform": row_video_edit_transform,
                     "videoEditRender": row_video_edit_render,
                     "videoEditSummary": row_video_edit_summary,
+                    "contentCredentialStatus": row_content_credential_status,
+                    "contentCredentialFailure": row_content_credential_failure,
+                    "contentCredentials": row_content_credentials,
+                    "spatialPortability": self._photo_export_spatial_fields(
+                        payload,
+                        original_preserved=not bool(row_render_format),
+                        export_disposition=(
+                            "flattened-2d" if row_render_format else "original-byte-preserved"
+                        ),
+                    ),
                 })
             except OSError as exc:
                 missing += 1
@@ -27141,24 +33054,33 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "metadata": metadata_written,
                 "xmp": xmp_written,
                 "existingSidecars": existing_sidecars_written,
+                "spatialAssets": spatial_assets,
+                "spatialCompanions": spatial_companions_written,
                 "rendered": rendered,
                 "videoRendered": video_rendered,
                 "editStackRendered": edit_stack_rendered,
                 "rawProxyRendered": raw_proxy_rendered,
                 "renderFallback": render_fallback,
                 "skipped": skipped,
+                "contentCredentialsSigned": content_credentials_signed,
+                "contentCredentialsPreserved": content_credentials_preserved,
+                "contentCredentialsFailed": content_credentials_failed,
+                "contentCredentialsAbsent": content_credentials_none,
             },
             "items": rows,
-            "note": "Original export preserves source media bytes. Rendered export writes new local image files for supported image originals, can render RAW originals from same-stem image proxies when native RAW decoding is unavailable, and can render MP4, MOV, M4V, WebM, HEVC, or ProRes files for supported video originals. Saved video trim, rotate, and crop edits are applied to rendered video exports when present. Metadata sidecars are optional and generated from local library metadata.",
+            "contentCredentials": {
+                **self._content_credentials.status(),
+                "renderedExportsRequireSigning": True,
+                "originalExportsPreserveBytes": True,
+            },
+            "note": "Original export preserves source media bytes, embedded spatial/depth payloads, and any embedded Content Credentials. Existing depth/disparity, stereo, metadata, and edit sidecars are copied only when requested. Rendered RAW originals from same-stem image proxies are identified per item. Supported rendered exports flatten spatial media to the rendered 2D output and are signed locally with an embedded C2PA manifest; a signing failure never leaves an unsigned render in the export bundle. Saved video trim, rotate, and crop edits are applied to rendered video exports when present. Metadata sidecars are optional and generated from local library metadata.",
         }
-        manifest_path = bundle_root / "manifest.json"
-        csv_path = bundle_root / "manifest.csv"
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        with csv_path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["sourcePath", "targetPath", "result", "metadataPath", "xmpPath", "existingSidecarPaths", "exportVariant", "renderFormat", "videoRenderFormat", "videoRenderQuality", "targetColorProfile", "targetColorProfilePath", "editStackId", "rawRenderProxyPath", "videoTrimStartMs", "videoTrimEndMs", "videoTrimDurationMs", "videoSourceDurationMs", "videoRotateDegrees", "videoCropAspect", "videoTransformApplied", "videoEditTimeline", "videoEditTransform", "videoEditRender", "videoEditSummary"])
-            writer.writeheader()
-            for row in rows:
-                writer.writerow({**row, "existingSidecarPaths": json.dumps(row.get("existingSidecarPaths", []))})
+        manifest_path, csv_path = self._write_photo_selection_manifest_files(
+            bundle_root=bundle_root,
+            export_root=export_root,
+            manifest=manifest,
+            rows=rows,
+        )
         shared_sources = [
             str(row.get("sourcePath", "") or "")
             for row in rows
@@ -27220,6 +33142,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "raw_proxy_rendered": raw_proxy_rendered,
                 "render_fallback": render_fallback,
                 "skipped": skipped,
+                "c2pa_signed": content_credentials_signed,
+                "c2pa_preserved": content_credentials_preserved,
+                "c2pa_failed": content_credentials_failed,
+                "c2pa_absent": content_credentials_none,
                 "operation_id": operation.get("operationId", "") if isinstance(operation, dict) else "",
                 "strip_location": bool(strip_location),
                 "allow_render_fallback": bool(allow_render_fallback),
@@ -27381,7 +33307,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
         font = ImageFont.load_default()
         title_font = ImageFont.load_default()
-        thumbs: list[dict[str, Any]] = []
         rows: list[dict[str, Any]] = []
         counts = {
             "selected": len(unique_paths),
@@ -27432,55 +33357,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 return load_image(resolved).convert("RGB"), "original", preview_path, preview_error
             return self._photo_video_frame_image(resolved, 0).convert("RGB"), "video-frame", preview_path, preview_error
 
-        for index, source_value in enumerate(unique_paths, start=1):
-            source = Path(source_value).expanduser()
-            row = {
-                "index": index,
-                "sourcePath": source_value,
-                "result": "missing",
-                "label": source.name or "Photo",
-                "mediaKind": "",
-                "thumbnailSource": "",
-                "previewPath": "",
-                "previewError": "",
-                "error": "",
-            }
-            try:
-                resolved = safe_resolve(source)
-            except OSError as exc:
-                row["error"] = str(exc)
-                rows.append(row)
-                thumbs.append({"row": row, "image": None})
-                counts["missing"] += 1
-                continue
-            row["sourcePath"] = str(resolved)
-            if not resolved.exists() or not resolved.is_file():
-                row["error"] = "Source file is missing."
-                rows.append(row)
-                thumbs.append({"row": row, "image": None})
-                counts["missing"] += 1
-                continue
-            suffix = resolved.suffix.lower()
-            payload = self._photo_export_sidecar_payload(str(resolved))
-            row["label"] = contact_label(payload, resolved)
-            try:
-                row["mediaKind"] = "image" if suffix in IMAGE_EXTENSIONS else ("video" if suffix in VIDEO_EXTENSIONS else "")
-                thumb, thumbnail_source, preview_path, preview_error = load_contact_thumbnail(resolved, suffix)
-                row["thumbnailSource"] = thumbnail_source
-                row["previewPath"] = preview_path
-                row["previewError"] = preview_error
-                resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", getattr(Image, "LANCZOS", 1))
-                thumb.thumbnail((tile_size, tile_size), resampling)
-                row["result"] = "included"
-                counts["included"] += 1
-                thumbs.append({"row": row, "image": thumb})
-            except Exception as exc:
-                row["result"] = "unsupported"
-                row["error"] = str(exc)[:240]
-                counts["unsupported"] += 1
-                thumbs.append({"row": row, "image": None})
-            rows.append(row)
-
         def text_width(draw: Any, text: str) -> int:
             if hasattr(draw, "textlength"):
                 return int(draw.textlength(text, font=font))
@@ -27517,17 +33393,15 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 output[-1] = f"{line}..." if line else "..."
             return output[:max_lines]
 
-        pages = max(1, math.ceil(len(thumbs) / per_page))
-        page_images: list[Any] = []
+        pages = max(1, math.ceil(len(unique_paths) / per_page))
         generated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-        for page_number in range(pages):
+
+        def render_contact_page(page_number: int, page_items: list[dict[str, Any]]) -> Any:
             page = Image.new("RGB", (page_width, page_height), "white")
             draw = ImageDraw.Draw(page)
-            header = f"{title} · {len(unique_paths)} selected · page {page_number + 1}/{pages}"
+            header = f"{title} · {len(unique_paths)} selected · page {page_number}/{pages}"
             draw.text((margin, margin - 16), header, fill=(24, 24, 27), font=title_font)
             draw.text((margin, margin + 4), generated_at, fill=(100, 100, 108), font=font)
-            start = page_number * per_page
-            page_items = thumbs[start:start + per_page]
             for local_index, item in enumerate(page_items):
                 row = item["row"]
                 image = item["image"]
@@ -27551,21 +33425,30 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     lines = wrap_lines(draw, str(row.get("label", "") or Path(str(row.get("sourcePath", ""))).name), cell_width, caption_line_limit)
                     for line_index, line in enumerate(lines):
                         draw.text((x, y + tile_size + 9 + line_index * 14), line, fill=(36, 36, 41), font=font)
-            page_images.append(page)
-        counts["pages"] = len(page_images)
+            return page
 
         target_paths: list[str] = []
-        if output_format == "pdf":
-            target = self._photo_export_allocate_target(bundle_root, index=1, base_name="contact-sheet", suffix=".pdf", filename_mode="original")
-            if len(page_images) == 1:
-                page_images[0].save(target, "PDF", resolution=150.0)
+        pdf_pages: list[Any] = []
+        page_items: list[dict[str, Any]] = []
+
+        def close_page_item_images(items: list[dict[str, Any]]) -> None:
+            for item in items:
+                image = item.get("image")
+                close = getattr(image, "close", None)
+                if callable(close):
+                    close()
+
+        def flush_contact_page() -> None:
+            if not page_items:
+                return
+            page_number = counts["pages"] + 1
+            page = render_contact_page(page_number, page_items)
+            counts["pages"] = page_number
+            if output_format == "pdf":
+                pdf_pages.append(page)
             else:
-                page_images[0].save(target, "PDF", resolution=150.0, save_all=True, append_images=page_images[1:])
-            target_paths.append(str(target))
-        else:
-            suffix = ".jpg" if output_format == "jpeg" else ".png"
-            for page_number, page in enumerate(page_images, start=1):
-                base_name = "contact-sheet" if len(page_images) == 1 else f"contact-sheet-{page_number:03d}"
+                suffix = ".jpg" if output_format == "jpeg" else ".png"
+                base_name = "contact-sheet" if pages == 1 else f"contact-sheet-{page_number:03d}"
                 target = self._photo_export_allocate_target(bundle_root, index=page_number, base_name=base_name, suffix=suffix, filename_mode="original")
                 self._photo_export_save_pil_image(
                     page,
@@ -27575,6 +33458,72 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     max_dimension=0,
                 )
                 target_paths.append(str(target))
+                close = getattr(page, "close", None)
+                if callable(close):
+                    close()
+            close_page_item_images(page_items)
+            page_items.clear()
+
+        for index, source_value in enumerate(unique_paths, start=1):
+            source = Path(source_value).expanduser()
+            row = {
+                "index": index,
+                "sourcePath": source_value,
+                "result": "missing",
+                "label": source.name or "Photo",
+                "mediaKind": "",
+                "thumbnailSource": "",
+                "previewPath": "",
+                "previewError": "",
+                "error": "",
+            }
+            thumb_image = None
+            try:
+                resolved = safe_resolve(source)
+            except OSError as exc:
+                row["error"] = str(exc)
+                counts["missing"] += 1
+            else:
+                row["sourcePath"] = str(resolved)
+                if not resolved.exists() or not resolved.is_file():
+                    row["error"] = "Source file is missing."
+                    counts["missing"] += 1
+                else:
+                    suffix = resolved.suffix.lower()
+                    payload = self._photo_export_sidecar_payload(str(resolved))
+                    row["label"] = contact_label(payload, resolved)
+                    try:
+                        row["mediaKind"] = "image" if suffix in IMAGE_EXTENSIONS else ("video" if suffix in VIDEO_EXTENSIONS else "")
+                        thumb, thumbnail_source, preview_path, preview_error = load_contact_thumbnail(resolved, suffix)
+                        row["thumbnailSource"] = thumbnail_source
+                        row["previewPath"] = preview_path
+                        row["previewError"] = preview_error
+                        resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS", getattr(Image, "LANCZOS", 1))
+                        thumb.thumbnail((tile_size, tile_size), resampling)
+                        row["result"] = "included"
+                        counts["included"] += 1
+                        thumb_image = thumb
+                    except Exception as exc:
+                        row["result"] = "unsupported"
+                        row["error"] = str(exc)[:240]
+                        counts["unsupported"] += 1
+            rows.append(row)
+            page_items.append({"row": row, "image": thumb_image})
+            if len(page_items) >= per_page:
+                flush_contact_page()
+        flush_contact_page()
+
+        if output_format == "pdf":
+            target = self._photo_export_allocate_target(bundle_root, index=1, base_name="contact-sheet", suffix=".pdf", filename_mode="original")
+            if len(pdf_pages) == 1:
+                pdf_pages[0].save(target, "PDF", resolution=150.0)
+            else:
+                pdf_pages[0].save(target, "PDF", resolution=150.0, save_all=True, append_images=pdf_pages[1:])
+            target_paths.append(str(target))
+            for page in pdf_pages:
+                close = getattr(page, "close", None)
+                if callable(close):
+                    close()
 
         manifest = {
             "generatedAt": generated_at,
@@ -28447,23 +34396,30 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             depth_result = None
         if depth_result is not None and depth_result.available and depth_result.depth is not None:
             # depth in [0,1], 1 = nearest -> keep subject (near) sharp.
-            weight = depth_result.depth.astype(np.float32)
+            mask_array = np.clip(depth_result.depth * 255.0, 0, 255).astype(np.uint8)
+            mask = Image.fromarray(mask_array, "L")
+            if mask.size != (width, height):
+                mask = mask.resize((width, height), resampling)
             algorithm = "depth-anything-v2"
             depth_model = depth_result.model_name
         else:
-            yy, xx = np.mgrid[0:height, 0:width]
-            cy, cx = (height - 1) / 2.0, (width - 1) / 2.0
+            mask_max_dimension = min(max(width, height), 768)
+            mask_scale = mask_max_dimension / max(max(width, height), 1)
+            mask_width = max(2, int(round(width * mask_scale)))
+            mask_height = max(2, int(round(height * mask_scale)))
+            yy, xx = np.ogrid[0:mask_height, 0:mask_width]
+            cy, cx = (mask_height - 1) / 2.0, (mask_width - 1) / 2.0
             norm = np.sqrt(((xx - cx) / max(cx, 1)) ** 2 + ((yy - cy) / max(cy, 1)) ** 2)
-            weight = np.clip(1.0 - norm, 0.0, 1.0).astype(np.float32)
+            mask_array = np.clip((1.0 - norm) * 255.0, 0, 255).astype(np.uint8)
+            mask = Image.fromarray(mask_array, "L")
+            if mask.size != (width, height):
+                mask = mask.resize((width, height), resampling)
 
-        # Smooth the focus mask to avoid hard transitions, then composite.
-        mask = Image.fromarray(np.clip(weight * 255.0, 0, 255).astype(np.uint8), "L")
+        # Smooth the focus mask to avoid hard transitions, then composite with
+        # Pillow so full-size exports avoid multiple float RGB frame buffers.
         mask = mask.filter(ImageFilter.GaussianBlur(max(1, radius // 3)))
-        weight = (np.asarray(mask, dtype=np.float32) / 255.0)[:, :, None]
-        sharp = np.asarray(rgb, dtype=np.float32)
-        blurred = np.asarray(rgb.filter(ImageFilter.GaussianBlur(radius)), dtype=np.float32)
-        composited = sharp * weight + blurred * (1.0 - weight)
-        result = Image.fromarray(np.clip(composited, 0, 255).astype(np.uint8), "RGB")
+        blurred = rgb.filter(ImageFilter.GaussianBlur(radius))
+        result = Image.composite(rgb, blurred, mask)
         return result, {
             "algorithm": algorithm,
             "depthModel": depth_model,
@@ -29233,15 +35189,33 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "groupPets": list(group_pets),
             })
 
-        for group in self.project.db.list_photo_people_groups():
+        saved_people_groups = self.project.db.list_photo_people_groups()
+        visible_saved_people_groups: list[tuple[dict[str, Any], list[str], list[str]]] = []
+        saved_group_key_asset_ids: list[str] = []
+        for group in saved_people_groups:
             member_people = [str(person or "").strip() for person in group.get("memberPeople", []) if str(person or "").strip()]
             member_pets = [self._clean_photo_pet_label(pet) for pet in group.get("memberPets", []) if self._clean_photo_pet_label(pet)]
             if group.get("hidden") or not text_matches([group.get("name", ""), *member_people, *member_pets, *group.get("excludePeople", []), *group.get("excludePets", [])]):
                 continue
+            visible_saved_people_groups.append((group, member_people, member_pets))
+            key_asset_id = str(group.get("keyAssetId", "") or "")
+            if key_asset_id:
+                saved_group_key_asset_ids.append(key_asset_id)
+
+        saved_group_assets_by_id = {
+            str(asset.get("assetId", "") or ""): asset
+            for asset in self.project.db.photo_assets_by_ids(saved_group_key_asset_ids)
+        }
+        hydrate_visibility_sources(
+            str(asset.get("sourcePath", "") or "")
+            for asset in saved_group_assets_by_id.values()
+        )
+
+        for group, member_people, member_pets in visible_saved_people_groups:
             cover_source = ""
             key_asset_id = str(group.get("keyAssetId", "") or "")
             if key_asset_id:
-                asset = self.project.db.photo_asset_by_id(key_asset_id)
+                asset = saved_group_assets_by_id.get(key_asset_id)
                 source = str((asset or {}).get("sourcePath", "") or "")
                 if source_visible(source):
                     cover_source = source
@@ -29325,8 +35299,23 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
     def search_photo_library(self, params: dict[str, Any]) -> dict[str, Any]:
         query = str(params.get("query", "") or "").strip()
+        # Deterministic renderer fault/interrupt coverage. These hooks are inert
+        # outside an explicitly configured test process and keep production
+        # request semantics free of synthetic params or client-visible flags.
+        test_delay_query = str(os.environ.get("CROSSAGE_TEST_SEARCH_DELAY_QUERY", "") or "").strip()
+        if test_delay_query and query == test_delay_query:
+            try:
+                delay_ms = max(0, min(5_000, int(os.environ.get("CROSSAGE_TEST_SEARCH_DELAY_MS", "0") or 0)))
+            except (TypeError, ValueError):
+                delay_ms = 0
+            if delay_ms:
+                sleep(delay_ms / 1000.0)
+        test_failure_query = str(os.environ.get("CROSSAGE_TEST_SEARCH_FAILURE_QUERY", "") or "").strip()
+        if test_failure_query and query == test_failure_query:
+            raise RuntimeError("Injected local search failure.")
         limit = max(1, min(25, int(params.get("limit", 6) or 6)))
         suggestion_limit = max(1, min(80, int(params.get("suggestionLimit", 24) or 24)))
+        preview_budget = max(0, min(limit, int(params.get("previewBudget", 0) or 0)))
         library_root_filter = self._photo_library_root_filter_from_params(params)
         library_root_source_filters = self._photo_library_root_source_text_filters(library_root_filter)
         needle = query.casefold()
@@ -29381,6 +35370,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 continue
             seen_asset_ids.add(asset_id)
             photo_asset_ids.append(asset_id)
+        audio_match_by_asset_id = self.project.db.best_photo_audio_segments_for_assets(photo_asset_ids, query)
         photo_assets = self.project.db.photo_assets_by_ids(photo_asset_ids)
         matches_by_source = self._photo_matches_by_source_for_source_paths(
             str(asset.get("sourcePath", "") or "")
@@ -29405,6 +35395,36 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             for entry in photo_entries
         }
         photo_total = max(photo_total, len(photo_asset_ids))
+        search_asset_cache = {
+            str(entry.get("sourcePath", "") or ""): entry.get("_asset")
+            for entry in photo_entries
+            if str(entry.get("sourcePath", "") or "") and isinstance(entry.get("_asset"), dict)
+        }
+        search_asset_ids = [
+            str(asset.get("assetId", "") or "")
+            for asset in search_asset_cache.values()
+            if str(asset.get("assetId", "") or "")
+        ]
+        search_metadata_cache = {
+            str(entry.get("_assetId", "") or ""): entry.get("_metadata")
+            for entry in photo_entries
+            if str(entry.get("_assetId", "") or "") and isinstance(entry.get("_metadata"), dict)
+        }
+        search_edit_stack_cache = self.project.db.photo_edit_stacks_for_assets(search_asset_ids)
+        search_people_cache = self.project.db.photo_asset_people_by_ids(search_asset_ids)
+        search_duplicate_cache = self.project.db.photo_duplicate_groups_for_assets(
+            search_asset_ids,
+            ensure_current=False,
+        )
+        search_media_pair_cache = self.project.db.photo_media_pairs_for_assets(search_asset_ids)
+        search_version_count_cache = self.project.db.photo_edit_stack_version_counts_for_assets(search_asset_ids)
+        search_manual_memberships = self.project.db.photo_asset_album_memberships_by_ids(search_asset_ids)
+        search_album_rows = self.project.db.list_photo_albums()
+        search_album_memberships = self._photo_album_memberships_for_assets(
+            search_asset_cache,
+            search_manual_memberships,
+            search_album_rows,
+        )
 
         def plural(count: int, singular: str, multiple: str | None = None) -> str:
             return f"{count} {singular if count == 1 else (multiple or singular + 's')}"
@@ -29484,6 +35504,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "File": "Filename",
                 "Media": "Media type",
                 "Source folder": "Source folder",
+                "Transcript": "Transcript",
+                "Sound event": "Sound event",
             }.get(clean, clean)
 
         def search_match_reasons(candidates: list[tuple[str, Any]], *, semantic_query: str = "") -> list[str]:
@@ -29520,15 +35542,23 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             text = str(value or "").casefold()
             return bool(text and any(active_needle in text for active_needle in search_needles))
 
-        def photo_result(entry: dict[str, Any]) -> dict[str, Any]:
+        def photo_result(entry: dict[str, Any], *, preview_create: bool = False) -> dict[str, Any]:
             source = str(entry.get("sourcePath", "") or "")
             row = self._photo_item_row(
                 source_path=source,
                 media_kind=str(entry.get("mediaKind", "image") or "image"),
-                preview_create=False,
+                preview_create=preview_create,
                 candidate=entry.get("candidate"),
                 matches=entry.get("matches", []),
                 scan_date=str(entry.get("scanDate", "") or ""),
+                media_pair_cache=search_media_pair_cache,
+                edit_stack_version_count_cache=search_version_count_cache,
+                asset_cache=search_asset_cache,
+                metadata_cache=search_metadata_cache,
+                edit_stack_cache=search_edit_stack_cache,
+                asset_people_cache=search_people_cache,
+                duplicate_group_cache=search_duplicate_cache,
+                album_memberships_cache=search_album_memberships,
             )
             title = str(row.get("title", "") or "").strip() or Path(source).name or "Photo"
             subtitle = joined([
@@ -29545,9 +35575,14 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             depth_text = ", ".join(self._photo_entry_depth_metadata_text(entry))
             iptc_text = ", ".join(self._photo_entry_iptc_metadata_text(entry))
             technical_text = ", ".join(self._photo_entry_technical_metadata_text(entry))
+            audio_match = audio_match_by_asset_id.get(str(row.get("assetId", "") or ""), {})
+            audio_transcript = str(audio_match.get("text", "") or "") if audio_match.get("segmentKind") == "speech" else ""
+            audio_event = str(audio_match.get("label", "") or "") if audio_match.get("segmentKind") == "sound" else ""
             semantic_query = semantic_match_by_asset_id.get(str(row.get("assetId", "") or ""))
             snippet_candidates = [
                 ("Title", title),
+                ("Transcript", audio_transcript),
+                ("Sound event", audio_event),
                 ("Caption", row.get("caption", "")),
                 ("Detected text", ocr_text),
                 ("Detected items", detected_item_text),
@@ -29575,7 +35610,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "",
             )
             match_reasons = search_match_reasons(snippet_candidates, semantic_query=semantic_query)
-            return {
+            result = {
                 "id": f"photo:{source}",
                 "kind": "photo",
                 "title": title,
@@ -29590,6 +35625,19 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "folderId": "all",
                 "searchText": source or title,
             }
+            if audio_match:
+                result.update(
+                    {
+                        "resultKind": "audioSegment",
+                        "timestampMs": max(0, int(audio_match.get("timestampMs", 0) or 0)),
+                        "startMs": max(0, int(audio_match.get("startMs", 0) or 0)),
+                        "endMs": max(0, int(audio_match.get("endMs", 0) or 0)),
+                        "audioSegmentKind": str(audio_match.get("segmentKind", "") or ""),
+                        "audioLanguage": str(audio_match.get("language", "") or ""),
+                        "audioConfidence": audio_match.get("confidence"),
+                    }
+                )
+            return result
 
         def folder_haystack(folder: dict[str, Any]) -> list[str]:
             place = folder.get("place", {}) if isinstance(folder.get("place", {}), dict) else {}
@@ -29859,7 +35907,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     ])
                     date_items.append(bucket)
 
-        photo_items = [photo_result(entry) for entry in photo_entries]
+        # Search can span a very large catalog, but only a bounded first row of
+        # results needs immediate visual identity. Generate previews for that
+        # visible budget and leave every later result lazy/cached.
+        photo_items = [
+            photo_result(entry, preview_create=index < preview_budget)
+            for index, entry in enumerate(photo_entries)
+        ]
         for item in photo_items:
             item_penalty = photo_entry_curation_penalty_by_source.get(str(item.get("sourcePath", "") or ""), 0)
             add_suggestion(item.get("title", ""), item_penalty)
@@ -29944,9 +35998,40 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if isinstance(raw_paths, list) and raw_paths:
             for value in raw_paths:
                 text = str(value or "").strip()
-                if text and text not in source_paths:
-                    source_paths.append(text)
+                if not text:
+                    continue
+                variants = [text]
+                try:
+                    resolved = str(Path(text).expanduser().resolve())
+                except OSError:
+                    resolved = str(Path(text).expanduser())
+                if resolved not in variants:
+                    variants.append(resolved)
+                for variant in variants:
+                    if variant not in source_paths:
+                        source_paths.append(variant)
         return self.project.db.list_photo_semantic_candidate_assets(source_paths=source_paths or None)
+
+    def _video_semantic_candidate_assets(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        """Resolve visible video assets for visual-segment indexing and search."""
+        raw_paths = params.get("sourcePaths")
+        source_paths: list[str] = []
+        if isinstance(raw_paths, list) and raw_paths:
+            for value in raw_paths:
+                text = str(value or "").strip()
+                if not text:
+                    continue
+                variants = [text]
+                try:
+                    resolved = str(Path(text).expanduser().resolve())
+                except OSError:
+                    resolved = str(Path(text).expanduser())
+                if resolved not in variants:
+                    variants.append(resolved)
+                for variant in variants:
+                    if variant not in source_paths:
+                        source_paths.append(variant)
+        return self.project.db.list_video_semantic_candidate_assets(source_paths=source_paths or None)
 
     def _photo_semantic_file_stat(self, path: Path) -> tuple[int, int]:
         try:
@@ -29955,8 +36040,524 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         except OSError:
             return -1, -1
 
+    def _photo_semantic_index_paths(self, model_name: str) -> tuple[Path, Path]:
+        model_key = hashlib.sha256(str(model_name or "").encode("utf-8")).hexdigest()[:20]
+        index_root = self.project.root / "indexes"
+        return (
+            index_root / f"photo-semantic-{model_key}.npz",
+            index_root / f"photo-semantic-{model_key}.json",
+        )
+
+    def _video_semantic_index_paths(self, model_name: str, index_version: str) -> tuple[Path, Path]:
+        model_key = hashlib.sha256(
+            f"{str(model_name or '')}\0{str(index_version or '')}".encode("utf-8")
+        ).hexdigest()[:20]
+        index_root = self.project.root / "indexes"
+        return (
+            index_root / f"video-semantic-{model_key}.npz",
+            index_root / f"video-semantic-{model_key}.json",
+        )
+
+    def _invalidate_photo_semantic_index_cache(self, model_name: str = "") -> None:
+        with self._photo_semantic_index_lock:
+            if model_name:
+                self._photo_semantic_index_cache.pop(str(model_name), None)
+            else:
+                self._photo_semantic_index_cache.clear()
+
+    def _invalidate_video_semantic_index_cache(self, model_name: str = "") -> None:
+        with self._video_semantic_index_lock:
+            if model_name:
+                prefix = f"{str(model_name)}\0"
+                for key in [candidate for candidate in self._video_semantic_index_cache if candidate.startswith(prefix)]:
+                    self._video_semantic_index_cache.pop(key, None)
+            else:
+                self._video_semantic_index_cache.clear()
+
+    def _photo_semantic_index(
+        self,
+        model_name: str,
+        dimension: int,
+        *,
+        allow_ann_build: bool = False,
+        snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        clean_model = str(model_name or "").strip()
+        clean_dimension = max(1, int(dimension))
+        generation = self.project.db.photo_semantic_index_generation()
+        cached = self._photo_semantic_index_cache.get(clean_model)
+        cached_store = cached.get("store") if cached is not None else None
+        cached_needs_ann = bool(
+            isinstance(cached_store, VectorStore)
+            and cached_store.index_report.get("annBuildDeferred")
+        )
+        if (
+            cached is not None
+            and int(cached.get("generation", -1)) == generation
+            and int(cached.get("dimension", 0)) == clean_dimension
+            and not (allow_ann_build and cached_needs_ann)
+        ):
+            return cached
+
+        with self._photo_semantic_index_lock:
+            generation = self.project.db.photo_semantic_index_generation()
+            cached = self._photo_semantic_index_cache.get(clean_model)
+            cached_store = cached.get("store") if cached is not None else None
+            cached_needs_ann = bool(
+                isinstance(cached_store, VectorStore)
+                and cached_store.index_report.get("annBuildDeferred")
+            )
+            if (
+                cached is not None
+                and int(cached.get("generation", -1)) == generation
+                and int(cached.get("dimension", 0)) == clean_dimension
+                and not (allow_ann_build and cached_needs_ann)
+            ):
+                return cached
+
+            if snapshot is None:
+                snapshot = self.project.db.photo_semantic_index_snapshot(model_name=clean_model)
+            generation = int(snapshot.get("generation", 0) or 0)
+            vectors_by_id: dict[str, list[float]] = {}
+            records_by_id: dict[str, dict[str, Any]] = {}
+            invalid_rows = int(snapshot.get("invalidRows", 0) or 0)
+            for item in snapshot.get("items", []):
+                if not isinstance(item, dict):
+                    invalid_rows += 1
+                    continue
+                asset_id = str(item.get("assetId", "") or "").strip()
+                source_path = str(item.get("sourcePath", "") or "").strip()
+                vector = item.get("vector")
+                if not asset_id or not source_path or not isinstance(vector, list) or len(vector) != clean_dimension:
+                    invalid_rows += 1
+                    continue
+                vectors_by_id[asset_id] = vector
+                file_size_value = item.get("fileSize", -1)
+                file_mtime_value = item.get("fileMtimeNs", -1)
+                records_by_id[asset_id] = {
+                    "sourcePath": source_path,
+                    "fileSize": int(-1 if file_size_value is None else file_size_value),
+                    "fileMtimeNs": int(-1 if file_mtime_value is None else file_mtime_value),
+                    "updatedAt": str(item.get("updatedAt", "") or ""),
+                }
+
+            store = VectorStore(
+                dimension=clean_dimension,
+                defer_ann_build=not allow_ann_build,
+            )
+            index_path, metadata_path = self._photo_semantic_index_paths(clean_model)
+            metadata: dict[str, Any] = {}
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            expected_ids = set(vectors_by_id)
+            loaded_from_disk = (
+                str(metadata.get("modelName", "") or "") == clean_model
+                and int(metadata.get("generation", -1)) == generation
+                and int(metadata.get("dimension", 0) or 0) == clean_dimension
+                and int(metadata.get("vectorCount", -1)) == len(expected_ids)
+                and store.load(index_path, expected_ids=expected_ids)
+            )
+            save_report: dict[str, Any] = {}
+            if not loaded_from_disk:
+                store.rebuild(vectors_by_id)
+            needs_ann_persistence = bool(
+                allow_ann_build
+                and store.backend_name == "faiss-hnsw-sq8-ip+exact-rerank"
+                and not store.index_report.get("loadedFromSidecar")
+            )
+            defer_persistence_to_job = bool(
+                not allow_ann_build
+                and store.index_report.get("annBuildDeferred")
+                and not loaded_from_disk
+            )
+            if (not loaded_from_disk or needs_ann_persistence) and not defer_persistence_to_job:
+                save_report = store.save(index_path)
+                if save_report.get("ok"):
+                    self.project._write_json_atomic(
+                        metadata_path,
+                        {
+                            "formatVersion": 1,
+                            "modelName": clean_model,
+                            "generation": generation,
+                            "dimension": clean_dimension,
+                            "vectorCount": len(expected_ids),
+                            "backend": store.backend_name,
+                            "updatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                        },
+                    )
+            result = {
+                "generation": generation,
+                "dimension": clean_dimension,
+                "store": store,
+                "recordsById": records_by_id,
+                "invalidRows": invalid_rows,
+                "loadedFromDisk": bool(loaded_from_disk),
+                "persistentPath": str(index_path),
+                "saveReport": save_report,
+                "persistenceDeferred": defer_persistence_to_job,
+            }
+            self._photo_semantic_index_cache[clean_model] = result
+            return result
+
+    def _build_photo_semantic_vector_index(self, model_name: str) -> dict[str, Any]:
+        snapshot = self.project.db.photo_semantic_index_snapshot(model_name=model_name)
+        items = snapshot.get("items", []) if isinstance(snapshot.get("items"), list) else []
+        dimension = 0
+        for item in items:
+            vector = item.get("vector") if isinstance(item, dict) else None
+            if isinstance(vector, list) and vector:
+                dimension = len(vector)
+                break
+        if dimension <= 0:
+            return {
+                "ready": True,
+                "vectorCount": 0,
+                "message": "No semantic vectors are available to index.",
+            }
+        self._invalidate_photo_semantic_index_cache(model_name)
+        state = self._photo_semantic_index(
+            model_name,
+            dimension,
+            allow_ann_build=True,
+            snapshot=snapshot,
+        )
+        store = state["store"]
+        report = dict(store.index_report)
+        return {
+            "ready": not bool(report.get("annBuildDeferred")),
+            "vectorCount": store.size,
+            "generation": int(state.get("generation", 0) or 0),
+            "persistent": bool(Path(str(state.get("persistentPath", ""))).is_file()),
+            "loadedFromDisk": bool(state.get("loadedFromDisk", False)),
+            "saveReport": state.get("saveReport", {}),
+            **report,
+        }
+
+    def _video_semantic_index(
+        self,
+        model_name: str,
+        dimension: int,
+        *,
+        index_version: str = VIDEO_SEMANTIC_INDEX_VERSION,
+        allow_ann_build: bool = False,
+        snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        clean_model = str(model_name or "").strip()
+        clean_version = str(index_version or "").strip()
+        clean_dimension = max(1, int(dimension))
+        cache_key = f"{clean_model}\0{clean_version}"
+        generation = self.project.db.video_semantic_index_generation()
+        cached = self._video_semantic_index_cache.get(cache_key)
+        cached_store = cached.get("store") if cached is not None else None
+        cached_needs_ann = bool(
+            isinstance(cached_store, VectorStore)
+            and cached_store.index_report.get("annBuildDeferred")
+        )
+        if (
+            cached is not None
+            and int(cached.get("generation", -1)) == generation
+            and int(cached.get("dimension", 0)) == clean_dimension
+            and not (allow_ann_build and cached_needs_ann)
+        ):
+            return cached
+
+        with self._video_semantic_index_lock:
+            generation = self.project.db.video_semantic_index_generation()
+            cached = self._video_semantic_index_cache.get(cache_key)
+            cached_store = cached.get("store") if cached is not None else None
+            cached_needs_ann = bool(
+                isinstance(cached_store, VectorStore)
+                and cached_store.index_report.get("annBuildDeferred")
+            )
+            if (
+                cached is not None
+                and int(cached.get("generation", -1)) == generation
+                and int(cached.get("dimension", 0)) == clean_dimension
+                and not (allow_ann_build and cached_needs_ann)
+            ):
+                return cached
+
+            if snapshot is None:
+                snapshot = self.project.db.video_semantic_index_snapshot(
+                    model_name=clean_model,
+                    index_version=clean_version,
+                )
+            generation = int(snapshot.get("generation", 0) or 0)
+            vectors_by_id: dict[str, list[float]] = {}
+            records_by_id: dict[str, dict[str, Any]] = {}
+            invalid_rows = int(snapshot.get("invalidRows", 0) or 0)
+            for item in snapshot.get("items", []):
+                if not isinstance(item, dict):
+                    invalid_rows += 1
+                    continue
+                segment_id = str(item.get("segmentId", "") or "").strip()
+                source_path = str(item.get("sourcePath", "") or "").strip()
+                vector = item.get("vector")
+                if not segment_id or not source_path or not isinstance(vector, list) or len(vector) != clean_dimension:
+                    invalid_rows += 1
+                    continue
+                vectors_by_id[segment_id] = vector
+                file_size_value = item.get("fileSize", -1)
+                file_mtime_value = item.get("fileMtimeNs", -1)
+                records_by_id[segment_id] = {
+                    "assetId": str(item.get("assetId", "") or ""),
+                    "sourcePath": source_path,
+                    "sourceFingerprint": str(item.get("sourceFingerprint", "") or ""),
+                    "fileSize": int(-1 if file_size_value is None else file_size_value),
+                    "fileMtimeNs": int(-1 if file_mtime_value is None else file_mtime_value),
+                    "startMs": max(0, int(item.get("startMs", 0) or 0)),
+                    "endMs": max(0, int(item.get("endMs", 0) or 0)),
+                    "timestampMs": max(0, int(item.get("timestampMs", 0) or 0)),
+                    "frameIndex": max(0, int(item.get("frameIndex", 0) or 0)),
+                    "durationMs": max(0, int(item.get("durationMs", 0) or 0)),
+                    "previewPath": str(item.get("previewPath", "") or ""),
+                    "sampleCount": max(1, int(item.get("sampleCount", 1) or 1)),
+                    "updatedAt": str(item.get("updatedAt", "") or ""),
+                }
+
+            store = VectorStore(dimension=clean_dimension, defer_ann_build=not allow_ann_build)
+            index_path, metadata_path = self._video_semantic_index_paths(clean_model, clean_version)
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            expected_ids = set(vectors_by_id)
+            loaded_from_disk = (
+                str(metadata.get("modelName", "") or "") == clean_model
+                and str(metadata.get("indexVersion", "") or "") == clean_version
+                and int(metadata.get("generation", -1)) == generation
+                and int(metadata.get("dimension", 0) or 0) == clean_dimension
+                and int(metadata.get("vectorCount", -1)) == len(expected_ids)
+                and store.load(index_path, expected_ids=expected_ids)
+            )
+            save_report: dict[str, Any] = {}
+            if not loaded_from_disk:
+                store.rebuild(vectors_by_id)
+            needs_ann_persistence = bool(
+                allow_ann_build
+                and store.backend_name == "faiss-hnsw-sq8-ip+exact-rerank"
+                and not store.index_report.get("loadedFromSidecar")
+            )
+            defer_persistence_to_job = bool(
+                not allow_ann_build
+                and store.index_report.get("annBuildDeferred")
+                and not loaded_from_disk
+            )
+            if (not loaded_from_disk or needs_ann_persistence) and not defer_persistence_to_job:
+                save_report = store.save(index_path)
+                if save_report.get("ok"):
+                    self.project._write_json_atomic(
+                        metadata_path,
+                        {
+                            "formatVersion": 1,
+                            "modelName": clean_model,
+                            "indexVersion": clean_version,
+                            "generation": generation,
+                            "dimension": clean_dimension,
+                            "vectorCount": len(expected_ids),
+                            "backend": store.backend_name,
+                            "updatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                        },
+                    )
+            result = {
+                "generation": generation,
+                "dimension": clean_dimension,
+                "indexVersion": clean_version,
+                "store": store,
+                "recordsById": records_by_id,
+                "invalidRows": invalid_rows,
+                "loadedFromDisk": bool(loaded_from_disk),
+                "persistentPath": str(index_path),
+                "saveReport": save_report,
+                "persistenceDeferred": defer_persistence_to_job,
+            }
+            self._video_semantic_index_cache[cache_key] = result
+            return result
+
+    def _build_video_semantic_vector_index(
+        self,
+        model_name: str,
+        index_version: str = VIDEO_SEMANTIC_INDEX_VERSION,
+    ) -> dict[str, Any]:
+        snapshot = self.project.db.video_semantic_index_snapshot(
+            model_name=model_name,
+            index_version=index_version,
+        )
+        items = snapshot.get("items", []) if isinstance(snapshot.get("items"), list) else []
+        dimension = 0
+        for item in items:
+            vector = item.get("vector") if isinstance(item, dict) else None
+            if isinstance(vector, list) and vector:
+                dimension = len(vector)
+                break
+        if dimension <= 0:
+            return {
+                "ready": True,
+                "vectorCount": 0,
+                "indexVersion": index_version,
+                "message": "No video segment vectors are available to index.",
+            }
+        self._invalidate_video_semantic_index_cache(model_name)
+        state = self._video_semantic_index(
+            model_name,
+            dimension,
+            index_version=index_version,
+            allow_ann_build=True,
+            snapshot=snapshot,
+        )
+        store = state["store"]
+        report = dict(store.index_report)
+        save_report = state.get("saveReport", {}) if isinstance(state.get("saveReport"), dict) else {}
+        public_save_report = {
+            key: value
+            for key, value in save_report.items()
+            if key not in {"path", "indexPath", "metadataPath"}
+        }
+        return {
+            "ready": not bool(report.get("annBuildDeferred")),
+            "vectorCount": store.size,
+            "generation": int(state.get("generation", 0) or 0),
+            "indexVersion": index_version,
+            "persistent": bool(Path(str(state.get("persistentPath", ""))).is_file()),
+            "loadedFromDisk": bool(state.get("loadedFromDisk", False)),
+            "saveReport": public_save_report,
+            **report,
+        }
+
+    def _semantic_search_video_segments(
+        self,
+        *,
+        query_values: Any,
+        model_name: str,
+        params: dict[str, Any],
+        limit: int,
+    ) -> dict[str, Any]:
+        """Return source-validated visual segment hits for a semantic query."""
+        candidates = self._video_semantic_candidate_assets(params)
+        index_state = self._video_semantic_index(model_name, int(query_values.size))
+        store = index_state["store"]
+        records_by_id = index_state.get("recordsById", {}) if isinstance(index_state.get("recordsById"), dict) else {}
+        candidate_paths = {
+            str(asset.get("assetId", "") or ""): str(asset.get("sourcePath", "") or "")
+            for asset in candidates
+            if str(asset.get("assetId", "") or "") and str(asset.get("sourcePath", "") or "")
+        }
+        segment_ids_by_asset: dict[str, set[str]] = {}
+        for segment_id, record in records_by_id.items():
+            if not isinstance(record, dict):
+                continue
+            asset_id = str(record.get("assetId", "") or "")
+            if asset_id in candidate_paths:
+                segment_ids_by_asset.setdefault(asset_id, set()).add(str(segment_id))
+
+        missing_asset_ids: set[str] = set()
+        available_ids: set[str] = set()
+        for asset_id, source_path in candidate_paths.items():
+            segment_ids = segment_ids_by_asset.get(asset_id, set())
+            if not segment_ids:
+                missing_asset_ids.add(asset_id)
+                continue
+            path = Path(source_path).expanduser()
+            file_size, file_mtime_ns = self._photo_semantic_file_stat(path)
+            first_record = records_by_id.get(next(iter(segment_ids)), {})
+            expected_size = int(first_record.get("fileSize", -1) if first_record.get("fileSize") is not None else -1)
+            expected_mtime = int(first_record.get("fileMtimeNs", -1) if first_record.get("fileMtimeNs") is not None else -1)
+            if file_size < 0 or file_mtime_ns < 0 or file_size != expected_size or file_mtime_ns != expected_mtime:
+                missing_asset_ids.add(asset_id)
+                continue
+            available_ids.update(segment_ids)
+
+        explicit_scope = isinstance(params.get("sourcePaths"), list) and bool(params.get("sourcePaths"))
+        try:
+            per_asset_limit = max(1, min(10, int(params.get("videoSegmentsPerAsset", 3) or 3)))
+        except (TypeError, ValueError):
+            per_asset_limit = 3
+        probe_limit = min(store.size, max(limit * 6, limit + 48))
+        hits: list[dict[str, Any]] = []
+        stale_asset_ids: set[str] = set()
+        fingerprint_cache: dict[str, str] = {}
+        while probe_limit > 0:
+            ranked = (
+                store.search_subset(query_values, available_ids, k=probe_limit)
+                if explicit_scope
+                else store.search(query_values, k=probe_limit)
+            )
+            hits = []
+            stale_asset_ids.clear()
+            returned_by_asset: dict[str, int] = {}
+            for hit in ranked:
+                if hit.item_id not in available_ids:
+                    continue
+                record = records_by_id.get(hit.item_id, {})
+                asset_id = str(record.get("assetId", "") or "")
+                source_path = candidate_paths.get(asset_id, "")
+                preview_path = str(record.get("previewPath", "") or "")
+                if not asset_id or not source_path or not preview_path or not Path(preview_path).is_file():
+                    if asset_id:
+                        stale_asset_ids.add(asset_id)
+                    continue
+                if returned_by_asset.get(asset_id, 0) >= per_asset_limit:
+                    continue
+                expected_fingerprint = str(record.get("sourceFingerprint", "") or "")
+                actual_fingerprint = fingerprint_cache.get(source_path)
+                if actual_fingerprint is None:
+                    try:
+                        actual_fingerprint = video_source_fingerprint(Path(source_path))
+                    except OSError:
+                        actual_fingerprint = ""
+                    fingerprint_cache[source_path] = actual_fingerprint
+                if not actual_fingerprint or actual_fingerprint != expected_fingerprint:
+                    stale_asset_ids.add(asset_id)
+                    continue
+                start_ms = max(0, int(record.get("startMs", 0) or 0))
+                end_ms = max(0, int(record.get("endMs", 0) or 0))
+                timestamp_ms = max(0, int(record.get("timestampMs", 0) or 0))
+                if end_ms <= start_ms or not start_ms <= timestamp_ms < end_ms:
+                    stale_asset_ids.add(asset_id)
+                    continue
+                returned_by_asset[asset_id] = returned_by_asset.get(asset_id, 0) + 1
+                hits.append(
+                    {
+                        "segmentId": str(hit.item_id),
+                        "assetId": asset_id,
+                        "sourcePath": source_path,
+                        "score": float(hit.score),
+                        "startMs": start_ms,
+                        "endMs": end_ms,
+                        "timestampMs": timestamp_ms,
+                        "durationMs": max(end_ms, int(record.get("durationMs", end_ms) or end_ms)),
+                        "frameIndex": max(0, int(record.get("frameIndex", 0) or 0)),
+                        "sampleCount": max(1, int(record.get("sampleCount", 1) or 1)),
+                        "previewPath": preview_path,
+                    }
+                )
+                if len(hits) >= limit:
+                    break
+            if len(hits) >= limit or explicit_scope or probe_limit >= store.size:
+                break
+            probe_limit = min(store.size, max(probe_limit + 1, probe_limit * 2))
+
+        missing_asset_ids.update(stale_asset_ids)
+        missing_source_paths = [candidate_paths[asset_id] for asset_id in sorted(missing_asset_ids) if candidate_paths.get(asset_id)]
+        return {
+            "candidateCount": len(candidates),
+            "scored": len(available_ids),
+            "missingAssets": len(missing_asset_ids),
+            "missingSourcePaths": missing_source_paths,
+            "hits": hits,
+            "indexState": index_state,
+            "indexReport": dict(store.index_report),
+            "annBuildPending": bool(store.index_report.get("annBuildDeferred")),
+        }
+
     def semantic_search_photos(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Rank photos against a free-text query with on-device SigLIP 2 embeddings.
+        """Rank images and timestamped video segments with on-device SigLIP 2 embeddings.
 
         Fully offline (ONNX/onnxruntime CPU). Degrades to an explicit
         ``available: False`` payload when the 'siglip2' model pack is not installed,
@@ -29993,82 +36594,307 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
 
         model_name = str(report.get("modelName", "SigLIP2") or "SigLIP2")
         candidates = self._photo_semantic_candidate_assets(params)
-        scored: list[tuple[float, str]] = []
-        encoded = 0
-        cached = 0
+        candidate_paths: dict[str, str] = {}
         skipped = 0
         for asset in candidates:
-            asset_id = str(asset.get("assetId", "") or "")
-            source_path = str(asset.get("sourcePath", "") or "")
+            asset_id = str(asset.get("assetId", "") or "").strip()
+            source_path = str(asset.get("sourcePath", "") or "").strip()
             if not asset_id or not source_path:
                 skipped += 1
                 continue
+            candidate_paths[asset_id] = source_path
+
+        index_state = self._photo_semantic_index(model_name, int(query_values.size))
+        store = index_state["store"]
+        indexed_ids = set(store.ids)
+        candidate_ids = set(candidate_paths)
+        available_ids = candidate_ids & indexed_ids
+        initial_cached_ids = set(available_ids)
+        missing_ids = candidate_ids - indexed_ids
+        encoded = 0
+        inline_budget = 0
+        allow_inline_indexing = bool(params.get("allowInlineIndexing", params.get("indexMissingInline", False)))
+        try:
+            inline_budget_limit = max(0, min(100, int(params.get("inlineIndexBudget", params.get("encodeBudget", 0)) or 0)))
+        except (TypeError, ValueError):
+            inline_budget_limit = 0
+        missing_source_paths: list[str] = []
+        for asset_id in sorted(missing_ids):
+            source_path = candidate_paths[asset_id]
             path = Path(source_path).expanduser()
             if path.suffix.lower() not in IMAGE_EXTENSIONS or not path.exists():
                 skipped += 1
                 continue
-            file_size, file_mtime_ns = self._photo_semantic_file_stat(path)
-            vector_values = self.project.db.photo_semantic_embedding_for_asset(
-                asset_id=asset_id,
-                model_name=model_name,
-                file_size=file_size,
-                file_mtime_ns=file_mtime_ns,
-            )
-            if vector_values is not None:
-                cached += 1
-                vector = np.asarray(vector_values, dtype=np.float32).reshape(-1)
-            else:
-                try:
-                    encoded_vector = siglip_engine.encode_image_path_cached(path)
-                except Exception:
-                    encoded_vector = None
-                if encoded_vector is None:
-                    skipped += 1
-                    continue
-                vector = np.asarray(encoded_vector, dtype=np.float32).reshape(-1)
-                self.project.db.upsert_photo_semantic_embedding(
-                    asset_id=asset_id,
-                    model_name=model_name,
-                    source_path=source_path,
-                    file_size=file_size,
-                    file_mtime_ns=file_mtime_ns,
-                    vector=vector.tolist(),
-                )
-                encoded += 1
+            if len(missing_source_paths) < 1000:
+                missing_source_paths.append(source_path)
+            if not allow_inline_indexing or inline_budget >= inline_budget_limit:
+                continue
+            inline_budget += 1
+            try:
+                encoded_vector = siglip_engine.encode_image_path_cached(path)
+            except Exception:
+                encoded_vector = None
+            if encoded_vector is None:
+                skipped += 1
+                continue
+            vector = np.asarray(encoded_vector, dtype=np.float32).reshape(-1)
             if vector.shape != query_values.shape or not np.isfinite(vector).all():
                 skipped += 1
                 continue
-            scored.append((float(np.dot(query_values, vector)), source_path))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        top = scored[:limit]
-        results = [{"sourcePath": path, "score": round(score, 4)} for score, path in top]
-        # `items` carries a previewPath so the main process decorates it into a
-        # vintrace-media:// previewUrl (thumbnails) — same path the photo grid uses.
-        items: list[dict[str, Any]] = []
-        for score, path in top:
-            try:
-                preview_path = self.project.preview_path_for(path, create=True) or ""
-            except Exception:
-                preview_path = ""
-            items.append({
+            file_size, file_mtime_ns = self._photo_semantic_file_stat(path)
+            self.project.db.upsert_photo_semantic_embedding(
+                asset_id=asset_id,
+                model_name=model_name,
+                source_path=source_path,
+                file_size=file_size,
+                file_mtime_ns=file_mtime_ns,
+                vector=vector.tolist(),
+            )
+            encoded += 1
+
+        if encoded:
+            self._invalidate_photo_semantic_index_cache(model_name)
+            index_state = self._photo_semantic_index(model_name, int(query_values.size))
+            store = index_state["store"]
+            indexed_ids = set(store.ids)
+            available_ids = candidate_ids & indexed_ids
+            missing_ids = candidate_ids - indexed_ids
+
+        explicit_scope = isinstance(params.get("sourcePaths"), list) and bool(params.get("sourcePaths"))
+        probe_limit = min(store.size, max(limit * 4, limit + 32))
+        top: list[tuple[float, str]] = []
+        stale_ids: set[str] = set()
+        while probe_limit > 0:
+            hits = (
+                store.search_subset(query_values, available_ids, k=probe_limit)
+                if explicit_scope
+                else store.search(query_values, k=probe_limit)
+            )
+            top = []
+            stale_ids.clear()
+            for hit in hits:
+                if hit.item_id not in available_ids:
+                    continue
+                source_path = candidate_paths.get(hit.item_id, "")
+                record = index_state.get("recordsById", {}).get(hit.item_id, {})
+                path = Path(source_path).expanduser()
+                file_size, file_mtime_ns = self._photo_semantic_file_stat(path)
+                expected_file_size = record.get("fileSize", -1)
+                expected_file_mtime = record.get("fileMtimeNs", -1)
+                if (
+                    file_size < 0
+                    or file_mtime_ns < 0
+                    or file_size != int(-1 if expected_file_size is None else expected_file_size)
+                    or file_mtime_ns != int(-1 if expected_file_mtime is None else expected_file_mtime)
+                ):
+                    stale_ids.add(hit.item_id)
+                    if path.exists() and len(missing_source_paths) < 1000 and source_path not in missing_source_paths:
+                        missing_source_paths.append(source_path)
+                    continue
+                top.append((hit.score, source_path))
+                if len(top) >= limit:
+                    break
+            if len(top) >= limit or explicit_scope or probe_limit >= store.size:
+                break
+            probe_limit = min(store.size, max(probe_limit + 1, probe_limit * 2))
+
+        missing_photo_embeddings = len(missing_ids | stale_ids)
+        cached = len(initial_cached_ids)
+        video_error = ""
+        try:
+            video_search = self._semantic_search_video_segments(
+                query_values=query_values,
+                model_name=model_name,
+                params=params,
+                limit=limit,
+            )
+        except Exception as exc:
+            video_error = str(exc)[:300]
+            video_search = {
+                "candidateCount": len(self._video_semantic_candidate_assets(params)),
+                "scored": 0,
+                "missingAssets": 0,
+                "missingSourcePaths": [],
+                "hits": [],
+                "indexState": {},
+                "indexReport": {},
+                "annBuildPending": False,
+            }
+        ranked_media: list[dict[str, Any]] = [
+            {
+                "resultKind": "image",
                 "sourcePath": path,
-                "score": round(score, 4),
+                "score": float(score),
+            }
+            for score, path in top
+        ]
+        for hit in video_search.get("hits", []):
+            if isinstance(hit, dict):
+                ranked_media.append({"resultKind": "videoSegment", **hit})
+        ranked_media.sort(
+            key=lambda item: (
+                -float(item.get("score", 0.0) or 0.0),
+                str(item.get("sourcePath", "") or ""),
+                int(item.get("timestampMs", 0) or 0),
+            )
+        )
+        ranked_media = ranked_media[:limit]
+        results: list[dict[str, Any]] = []
+        for hit in ranked_media:
+            result = {
+                "sourcePath": str(hit.get("sourcePath", "") or ""),
+                "score": round(float(hit.get("score", 0.0) or 0.0), 4),
+            }
+            if hit.get("resultKind") == "videoSegment":
+                result.update(
+                    {
+                        "resultKind": "videoSegment",
+                        "mediaKind": "video",
+                        "segmentId": str(hit.get("segmentId", "") or ""),
+                        "assetId": str(hit.get("assetId", "") or ""),
+                        "startMs": max(0, int(hit.get("startMs", 0) or 0)),
+                        "endMs": max(0, int(hit.get("endMs", 0) or 0)),
+                        "timestampMs": max(0, int(hit.get("timestampMs", 0) or 0)),
+                        "durationMs": max(0, int(hit.get("durationMs", 0) or 0)),
+                        "frameIndex": max(0, int(hit.get("frameIndex", 0) or 0)),
+                    }
+                )
+            results.append(result)
+        # `items` carries a previewPath so the main process decorates it into a
+        # vintrace-media:// previewUrl. Video hits use the indexed representative frame.
+        try:
+            preview_budget = max(0, min(limit, int(params.get("previewBudget", 0) or 0)))
+        except (TypeError, ValueError):
+            preview_budget = 0
+        items: list[dict[str, Any]] = []
+        for index, hit in enumerate(ranked_media):
+            path = str(hit.get("sourcePath", "") or "")
+            is_video_segment = hit.get("resultKind") == "videoSegment"
+            if is_video_segment:
+                preview_path = str(hit.get("previewPath", "") or "")
+            else:
+                try:
+                    preview_path = self.project.preview_path_for(path, create=index < preview_budget) or ""
+                except Exception:
+                    preview_path = ""
+            item = {
+                "sourcePath": path,
+                "score": round(float(hit.get("score", 0.0) or 0.0), 4),
                 "previewPath": preview_path,
-                "mediaKind": self._media_kind_for_source(path),
+                "mediaKind": "video" if is_video_segment else self._media_kind_for_source(path),
                 "name": Path(path).name,
-            })
+            }
+            if is_video_segment:
+                item.update(
+                    {
+                        "resultKind": "videoSegment",
+                        "segmentId": str(hit.get("segmentId", "") or ""),
+                        "assetId": str(hit.get("assetId", "") or ""),
+                        "startMs": max(0, int(hit.get("startMs", 0) or 0)),
+                        "endMs": max(0, int(hit.get("endMs", 0) or 0)),
+                        "timestampMs": max(0, int(hit.get("timestampMs", 0) or 0)),
+                        "durationMs": max(0, int(hit.get("durationMs", 0) or 0)),
+                        "frameIndex": max(0, int(hit.get("frameIndex", 0) or 0)),
+                    }
+                )
+            items.append(item)
+        queued_job: dict[str, Any] = {}
+        queue_missing = bool(params.get("queueMissing", params.get("autoQueue", True)))
+        ann_build_pending = bool(store.index_report.get("annBuildDeferred"))
+        video_ann_build_pending = bool(video_search.get("annBuildPending", False))
+        missing_video_assets = max(0, int(video_search.get("missingAssets", 0) or 0))
+        missing_embeddings = missing_photo_embeddings + missing_video_assets
+        scored_count = len(available_ids) + max(0, int(video_search.get("scored", 0) or 0))
+        dropped = max(0, scored_count - len(ranked_media))
+        queue_vector_index = bool(params.get("queueVectorIndex", params.get("autoQueueVectorIndex", True)))
+        should_queue_missing = bool(
+            queue_missing
+            and (missing_video_assets > 0 or (missing_photo_embeddings > 0 and not allow_inline_indexing))
+        )
+        should_queue_ann = bool((ann_build_pending or video_ann_build_pending) and queue_vector_index)
+        if should_queue_missing or should_queue_ann:
+            explicit_paths = explicit_scope
+            try:
+                queue_budget_limit = max(100, min(5000, int(params.get("indexBudgetLimit", 1000) or 1000)))
+            except (TypeError, ValueError):
+                queue_budget_limit = 1000
+            if should_queue_ann and not should_queue_missing:
+                queue_scope = {
+                    "vectorIndexOnly": True,
+                    "rebuildVectorIndex": True,
+                }
+            else:
+                queue_scope = {
+                    "pendingOnly": True,
+                    "budgetLimit": queue_budget_limit,
+                    "rebuildVectorIndex": True,
+                }
+                all_missing_source_paths = list(dict.fromkeys([
+                    *missing_source_paths,
+                    *(video_search.get("missingSourcePaths", []) if isinstance(video_search.get("missingSourcePaths"), list) else []),
+                ]))[:1000]
+                if explicit_paths and all_missing_source_paths:
+                    queue_scope["sourcePaths"] = all_missing_source_paths
+                else:
+                    queue_scope["all"] = True
+            try:
+                queue_payload = self._enqueue_photo_indexing_job_once("semantic", queue_scope, limit=10)
+                queued_job = queue_payload.get("job", {}) if isinstance(queue_payload.get("job"), dict) else {}
+            except Exception:
+                queued_job = {}
         return {
             "available": True,
             "engine": report.get("modelName", "SigLIP2"),
             "query": query,
-            "candidateCount": len(candidates),
-            "scored": len(scored),
+            "candidateCount": len(candidates) + max(0, int(video_search.get("candidateCount", 0) or 0)),
+            "imageCandidateCount": len(candidates),
+            "videoCandidateCount": max(0, int(video_search.get("candidateCount", 0) or 0)),
+            "scored": scored_count,
+            "scoredImages": len(available_ids),
+            "scoredVideoSegments": max(0, int(video_search.get("scored", 0) or 0)),
             "encoded": encoded,
             "cached": cached,
             "skipped": skipped,
-            "dropped": 0,
+            "missingEmbeddings": missing_embeddings,
+            "missingImageEmbeddings": missing_photo_embeddings,
+            "missingVideoAssets": missing_video_assets,
+            "queuedJob": queued_job,
+            "queued": bool(queued_job),
+            "dropped": dropped,
             "results": results,
             "items": items,
+            "index": {
+                **store.index_report,
+                "generation": int(index_state.get("generation", 0) or 0),
+                "invalidRows": int(index_state.get("invalidRows", 0) or 0),
+                "loadedFromDisk": bool(index_state.get("loadedFromDisk", False)),
+                "persistent": bool(Path(str(index_state.get("persistentPath", ""))).is_file()),
+                "buildPending": ann_build_pending,
+                "buildQueued": bool(queued_job) and ann_build_pending,
+            },
+            "videoIndex": {
+                **(video_search.get("indexReport", {}) if isinstance(video_search.get("indexReport"), dict) else {}),
+                "indexVersion": VIDEO_SEMANTIC_INDEX_VERSION,
+                "generation": int(
+                    (video_search.get("indexState", {}) if isinstance(video_search.get("indexState"), dict) else {}).get("generation", 0)
+                    or 0
+                ),
+                "invalidRows": int(
+                    (video_search.get("indexState", {}) if isinstance(video_search.get("indexState"), dict) else {}).get("invalidRows", 0)
+                    or 0
+                ),
+                "loadedFromDisk": bool(
+                    (video_search.get("indexState", {}) if isinstance(video_search.get("indexState"), dict) else {}).get("loadedFromDisk", False)
+                ),
+                "persistent": bool(
+                    Path(str(
+                        (video_search.get("indexState", {}) if isinstance(video_search.get("indexState"), dict) else {}).get("persistentPath", "")
+                    )).is_file()
+                ),
+                "buildPending": video_ann_build_pending,
+                "buildQueued": bool(queued_job) and video_ann_build_pending,
+                **({"error": video_error} if video_error else {}),
+            },
         }
 
     def list_photo_assets(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -30089,12 +36915,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         if query:
             search_result = self.project.db.search_photo_assets(query, offset=offset, limit=limit, media_kind=media_kind)
             asset_ids = search_result["assetIds"]
-            assets = [
-                asset
-                for asset_id in asset_ids
-                for asset in [self.project.db.photo_asset_by_id(asset_id)]
-                if asset
-            ]
+            assets = self.project.db.photo_assets_by_ids(asset_ids)
             # PC: a search-indexed id can fail to hydrate only if the asset was
             # deleted between the FTS query and hydration. Discount those from
             # total so the client's offset/total pagination math stays
@@ -30105,14 +36926,17 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         else:
             assets = self.project.db.list_photo_assets(offset=offset, limit=limit, media_kind=media_kind)
             total = self.project.db.count_photo_assets(media_kind=media_kind)
+        hydrated_asset_ids = [str(asset.get("assetId", "") or "") for asset in assets if str(asset.get("assetId", "") or "")]
+        metadata_by_asset_id = self.project.db.photo_asset_metadata_by_ids(hydrated_asset_ids)
+        people_by_asset_id = self.project.db.photo_asset_people_by_ids(hydrated_asset_ids)
         items = [
             {
                 **asset,
                 "metadata": {
                     **asset.get("metadata", {}),
-                    **self.project.db.photo_asset_metadata_by_id(str(asset.get("assetId", ""))),
+                    **metadata_by_asset_id.get(str(asset.get("assetId", "") or ""), {}),
                 },
-                "people": self.project.db.list_photo_asset_people(str(asset.get("assetId", ""))),
+                "people": people_by_asset_id.get(str(asset.get("assetId", "") or ""), []),
             }
             for asset in assets
         ]
@@ -30293,6 +37117,203 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             }
         )
         return result
+
+    def suggest_photo_relationship_names(
+        self,
+        params: dict[str, Any],
+        *,
+        include_reviewed: bool = False,
+    ) -> dict[str, Any]:
+        if self.project.config.require_consent and not self.consent_on_file:
+            return {
+                "available": False,
+                "reason": "Confirm permission before analyzing identity relationships.",
+                "generatedAt": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+                "graphVersion": "relationship-name-v1",
+                "graphHash": "",
+                "graphStats": {
+                    "nodes": 0,
+                    "namedPeople": 0,
+                    "unknownClusters": 0,
+                    "edges": 0,
+                    "candidatesEvaluated": 0,
+                    "blockedByDirectCooccurrence": 0,
+                },
+                "suggestions": [],
+                "reviewRequired": True,
+                "offline": True,
+            }
+        graph = self.project.db.photo_relationship_graph(
+            confident_threshold=float(self.project.config.thresholds.confident),
+        )
+        profiles = self.project.db.list_photo_people_profiles()
+        excluded_people = {
+            name
+            for name, profile in profiles.items()
+            if bool(profile.get("hidden"))
+        }
+        if bool(getattr(self.project.config, "per_subject_consent", False)):
+            excluded_people.update(
+                name
+                for node in graph.get("nodes", [])
+                if isinstance(node, dict)
+                for name in [str(node.get("personName", "") or "").strip()]
+                if name
+                and not name.casefold().startswith("unmatched cluster")
+                and not self.project.consent_for_person(name)
+            )
+        reviewed_ids = (
+            set()
+            if include_reviewed
+            else self.project.db.photo_relationship_name_reviewed_ids()
+        )
+        ranked = rank_relationship_name_suggestions(
+            graph.get("nodes", []),
+            graph.get("edges", []),
+            excluded_people=excluded_people,
+            dismissed_suggestion_ids=reviewed_ids,
+            source_cluster=str(params.get("sourceCluster", params.get("source_cluster", "")) or ""),
+            min_score=float(params.get("minScore", params.get("min_score", 0.38)) or 0.38),
+            min_source_assets=int(params.get("minSourceAssets", 2) or 2),
+            min_relationship_support=int(params.get("minRelationshipSupport", 2) or 2),
+            per_cluster_limit=int(params.get("perClusterLimit", 3) or 3),
+            limit=int(params.get("limit", 50) or 50),
+        )
+        return {
+            "available": True,
+            "reason": "",
+            "generatedAt": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            **ranked,
+            "reviewRequired": True,
+            "autoApplied": 0,
+            "offline": True,
+        }
+
+    def review_photo_relationship_name_suggestion(self, params: dict[str, Any]) -> dict[str, Any]:
+        suggestion_id = str(params.get("suggestionId", "") or "").strip()
+        source_cluster = " ".join(str(params.get("sourceCluster", "") or "").strip().split())[:200]
+        target_person = " ".join(str(params.get("targetPerson", "") or "").strip().split())[:200]
+        decision = str(params.get("decision", "") or "").strip().lower()
+        if decision not in {"dismissed", "applied"}:
+            raise ValueError("decision must be dismissed or applied.")
+        existing = self.project.db.photo_relationship_name_review(suggestion_id)
+        idempotency_key = str(params.get("idempotencyKey", "") or "").strip()[:200]
+        existing_for_key = self.project.db.photo_relationship_name_review_by_idempotency_key(idempotency_key)
+        if existing_for_key and str(existing_for_key.get("suggestionId", "")) != suggestion_id:
+            raise ValueError("This idempotencyKey was already used for another relationship review.")
+        if existing and str(existing.get("decision", "")) == "applied":
+            if decision == "applied" and idempotency_key and idempotency_key == str(existing.get("idempotencyKey", "")):
+                return {
+                    **(existing.get("result", {}) if isinstance(existing.get("result"), dict) else {}),
+                    "review": existing,
+                    "applied": True,
+                    "dismissed": False,
+                    "idempotentReplay": True,
+                }
+            raise ValueError("This relationship suggestion was already applied.")
+        current = self.suggest_photo_relationship_names(
+            {
+                "sourceCluster": source_cluster,
+                "limit": 200,
+                "perClusterLimit": 10,
+                "minScore": params.get("minScore", 0.38),
+            },
+            include_reviewed=True,
+        )
+        if not current.get("available"):
+            raise PermissionError(str(current.get("reason", "Permission is required.")))
+        suggestion = next(
+            (
+                row
+                for row in current.get("suggestions", [])
+                if isinstance(row, dict)
+                and str(row.get("suggestionId", "")) == suggestion_id
+                and str(row.get("sourceCluster", "")) == source_cluster
+                and str(row.get("targetPerson", "")) == target_person
+            ),
+            None,
+        )
+        if suggestion is None:
+            raise ValueError("Relationship suggestion evidence is stale; refresh suggestions before reviewing it.")
+        evidence_hash = str(suggestion.get("evidenceHash", "") or "")
+        if decision == "dismissed":
+            review = self.project.db.save_photo_relationship_name_review(
+                suggestion_id=suggestion_id,
+                source_cluster=source_cluster,
+                target_person=target_person,
+                evidence_hash=evidence_hash,
+                decision="dismissed",
+                result={"score": float(suggestion.get("score", 0.0) or 0.0)},
+            )
+            self.project._append_audit(
+                {
+                    "action": "dismiss_photo_relationship_name_suggestion",
+                    "sourcePersonRef": self.project._audit_person_ref(source_cluster),
+                    "targetPersonRef": self.project._audit_person_ref(target_person),
+                    "suggestionId": suggestion_id,
+                    "evidenceHash": evidence_hash,
+                }
+            )
+            return {
+                "review": review,
+                "suggestion": suggestion,
+                "applied": False,
+                "dismissed": True,
+                "idempotentReplay": bool(existing and str(existing.get("decision", "")) == "dismissed"),
+            }
+
+        if params.get("confirm") is not True:
+            raise ValueError("Applying a relationship naming suggestion requires confirm=true after review.")
+        if not idempotency_key:
+            raise ValueError("Applying a relationship naming suggestion requires idempotencyKey.")
+        if bool(getattr(self.project.config, "per_subject_consent", False)) and not self.project.consent_for_person(target_person):
+            raise PermissionError("The target person does not have active subject consent.")
+        renamed = self.project.rename_person(source_cluster, target_person)
+        operation = renamed.get("operation", {}) if isinstance(renamed.get("operation"), dict) else {}
+        operation_id = str(operation.get("operationId", "") or "")
+        public_result = {
+            "applied": True,
+            "dismissed": False,
+            "idempotentReplay": False,
+            "renamed": {
+                "references": int(renamed.get("references", 0) or 0),
+                "candidates": int(renamed.get("candidates", 0) or 0),
+                "peopleRows": int(renamed.get("peopleRows", 0) or 0),
+                "groupRows": int(renamed.get("groupRows", 0) or 0),
+                "profileMerged": bool(renamed.get("profileMerged", False)),
+                "identityMerged": bool(renamed.get("identityMerged", False)),
+            },
+            "operationId": operation_id,
+            "operation": operation,
+        }
+        stored_result = {
+            key: value
+            for key, value in public_result.items()
+            if key != "operation"
+        }
+        review = self.project.db.save_photo_relationship_name_review(
+            suggestion_id=suggestion_id,
+            source_cluster=source_cluster,
+            target_person=target_person,
+            evidence_hash=evidence_hash,
+            decision="applied",
+            idempotency_key=idempotency_key,
+            operation_id=operation_id,
+            result=stored_result,
+        )
+        self.project._append_audit(
+            {
+                "action": "apply_photo_relationship_name_suggestion",
+                "sourcePersonRef": self.project._audit_person_ref(source_cluster),
+                "targetPersonRef": self.project._audit_person_ref(target_person),
+                "suggestionId": suggestion_id,
+                "evidenceHash": evidence_hash,
+                "operationId": operation_id,
+                "relationshipScore": float(suggestion.get("score", 0.0) or 0.0),
+                "relationshipSupport": int(suggestion.get("relationshipSupport", 0) or 0),
+            }
+        )
+        return {**public_result, "review": review, "suggestion": suggestion}
 
     def save_photo_person_profile(self, params: dict[str, Any]) -> dict[str, Any]:
         manual_order_value = params.get("manualOrder")
@@ -30670,20 +37691,24 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "profile": profile_result.get("profile", {}),
         }
 
-    def assign_photo_pet(self, params: dict[str, Any]) -> dict[str, Any]:
+    def _photo_pet_asset_from_params(self, params: dict[str, Any], conn: sqlite3.Connection) -> dict[str, Any]:
+        source_path = str(params.get("sourcePath", "") or "").strip()
+        asset_id = str(params.get("assetId", "") or "").strip()
+        asset = self.project.db.photo_asset_by_id(asset_id, conn) if asset_id else None
+        if asset is None and source_path:
+            asset = self.project.db.photo_asset_by_path(source_path, conn)
+        if asset is None:
+            raise ValueError("A sourcePath or assetId is required.")
+        return asset
+
+    def _assign_photo_pet_in_conn(self, params: dict[str, Any], conn: sqlite3.Connection) -> dict[str, Any]:
         pet_name = self._clean_photo_pet_label(params.get("petName", params.get("name", "")))
         if not pet_name:
             raise ValueError("petName is required.")
-        source_path = str(params.get("sourcePath", "") or "").strip()
-        asset_id = str(params.get("assetId", "") or "").strip()
-        asset = self.project.db.photo_asset_by_id(asset_id) if asset_id else None
-        if asset is None and source_path:
-            asset = self.project.db.photo_asset_by_path(source_path)
-        if asset is None:
-            raise ValueError("A sourcePath or assetId is required.")
+        asset = self._photo_pet_asset_from_params(params, conn)
 
         asset_id = str(asset.get("assetId", "") or "")
-        source_path = str(asset.get("sourcePath", "") or source_path)
+        source_path = str(asset.get("sourcePath", "") or str(params.get("sourcePath", "") or ""))
         metadata = asset.get("metadata", {}) if isinstance(asset.get("metadata"), dict) else {}
         pet_kind = self._photo_pet_kind_from_text(params.get("petKind", params.get("kind", "")))
         if not pet_kind:
@@ -30693,7 +37718,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 matches_by_source={},
             )
             entry["_asset"] = asset
-            entry["_metadata"] = self.project.db.photo_asset_metadata_by_id(asset_id)
+            entry["_metadata"] = self.project.db.photo_asset_metadata_by_id(asset_id, conn)
             review_record = self._photo_pet_review_record_for_entry(entry)
             pet_kind = self._photo_pet_kind_from_text((review_record or {}).get("kind", "")) or "pet"
 
@@ -30727,18 +37752,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         updated_asset = self.project.db.update_photo_asset_metadata_json(
             asset_id=asset_id,
             patch={"pets": updated_pets},
+            conn=conn,
         )
-        profile = self.project.db.save_photo_pet_profile(pet_name=pet_name, pet_kind=pet_kind)
-        self.project._append_audit(
-            {
-                "action": "assign_photo_pet",
-                "asset_id": asset_id,
-                "source_path": source_path,
-                "pet_name": pet_name,
-                "pet_kind": pet_kind,
-                "assigned": assigned,
-            }
-        )
+        profile = self.project.db.save_photo_pet_profile(pet_name=pet_name, pet_kind=pet_kind, conn=conn)
         return {
             "assetId": asset_id,
             "sourcePath": source_path,
@@ -30749,17 +37765,78 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "profile": profile,
         }
 
-    def dismiss_photo_pet_review(self, params: dict[str, Any]) -> dict[str, Any]:
-        source_path = str(params.get("sourcePath", "") or "").strip()
-        asset_id = str(params.get("assetId", "") or "").strip()
-        asset = self.project.db.photo_asset_by_id(asset_id) if asset_id else None
-        if asset is None and source_path:
-            asset = self.project.db.photo_asset_by_path(source_path)
-        if asset is None:
-            raise ValueError("A sourcePath or assetId is required.")
+    def assign_photo_pet(self, params: dict[str, Any]) -> dict[str, Any]:
+        with self.project.db.connect() as conn:
+            result = self._assign_photo_pet_in_conn(params, conn)
+        self.project._append_audit(
+            {
+                "action": "assign_photo_pet",
+                "asset_id": result.get("assetId", ""),
+                "source_path": result.get("sourcePath", ""),
+                "pet_name": result.get("petName", ""),
+                "pet_kind": result.get("petKind", ""),
+                "assigned": bool(result.get("assigned", False)),
+            }
+        )
+        return result
+
+    def bulk_assign_photo_pet(self, params: dict[str, Any]) -> dict[str, Any]:
+        pet_name = self._clean_photo_pet_label(params.get("petName", params.get("name", "")))
+        if not pet_name:
+            raise ValueError("petName is required.")
+        raw_items = params.get("items", params.get("assets", []))
+        if not isinstance(raw_items, list):
+            raise ValueError("items must be a list of photo references.")
+        clean_items = [item for item in raw_items if isinstance(item, dict)]
+        if len(clean_items) != len(raw_items):
+            raise ValueError("Each pet assignment item must be an object.")
+        if not clean_items:
+            return {"petName": pet_name, "requested": 0, "assigned": 0, "failed": 0, "items": [], "failures": []}
+        if len(clean_items) > 2000:
+            raise ValueError("bulk_assign_photo_pet is limited to 2000 items per request.")
+
+        items: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        assigned = 0
+        with self.project.db.connect() as conn:
+            for item in clean_items:
+                scoped_item = {**item, "petName": pet_name}
+                if "petKind" not in scoped_item and "kind" not in scoped_item:
+                    scoped_item["petKind"] = params.get("petKind", params.get("kind", ""))
+                try:
+                    result = self._assign_photo_pet_in_conn(scoped_item, conn)
+                    items.append(result)
+                    assigned += 1
+                except Exception as exc:
+                    failures.append({
+                        "assetId": str(item.get("assetId", "") or ""),
+                        "sourcePath": str(item.get("sourcePath", "") or ""),
+                        "reason": str(exc)[:300],
+                    })
+        failed = len(failures)
+        self.project._append_audit(
+            {
+                "action": "bulk_assign_photo_pet",
+                "requested": len(clean_items),
+                "assigned": assigned,
+                "failed": failed,
+                "pet_name": pet_name,
+            }
+        )
+        return {
+            "petName": pet_name,
+            "requested": len(clean_items),
+            "assigned": assigned,
+            "failed": failed,
+            "items": items,
+            "failures": failures[:50],
+        }
+
+    def _dismiss_photo_pet_review_in_conn(self, params: dict[str, Any], conn: sqlite3.Connection) -> dict[str, Any]:
+        asset = self._photo_pet_asset_from_params(params, conn)
 
         asset_id = str(asset.get("assetId", "") or "")
-        source_path = str(asset.get("sourcePath", "") or source_path)
+        source_path = str(asset.get("sourcePath", "") or str(params.get("sourcePath", "") or ""))
         metadata = asset.get("metadata", {}) if isinstance(asset.get("metadata"), dict) else {}
         entry = self._photo_source_entry(
             source_path=source_path,
@@ -30767,7 +37844,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             matches_by_source={},
         )
         entry["_asset"] = asset
-        entry["_metadata"] = self.project.db.photo_asset_metadata_by_id(asset_id)
+        entry["_metadata"] = self.project.db.photo_asset_metadata_by_id(asset_id, conn)
         review_record = self._photo_pet_review_record_for_entry(entry)
         pet_kind = self._photo_pet_kind_from_text(params.get("petKind", params.get("kind", "")))
         if not pet_kind:
@@ -30798,15 +37875,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "petReviewDismissedKinds": [self._photo_pet_kind_label(kind) for kind in sorted(dismissed_kinds)],
                 "petReviewDismissedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             },
-        )
-        self.project._append_audit(
-            {
-                "action": "dismiss_photo_pet_review",
-                "asset_id": asset_id,
-                "source_path": source_path,
-                "pet_kind": pet_kind,
-                "already_dismissed": already_dismissed,
-            }
+            conn=conn,
         )
         return {
             "assetId": asset_id,
@@ -30815,6 +37884,67 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "petKindLabel": self._photo_pet_kind_label(pet_kind),
             "dismissed": not already_dismissed,
             "asset": updated_asset,
+        }
+
+    def dismiss_photo_pet_review(self, params: dict[str, Any]) -> dict[str, Any]:
+        with self.project.db.connect() as conn:
+            result = self._dismiss_photo_pet_review_in_conn(params, conn)
+        self.project._append_audit(
+            {
+                "action": "dismiss_photo_pet_review",
+                "asset_id": result.get("assetId", ""),
+                "source_path": result.get("sourcePath", ""),
+                "pet_kind": result.get("petKind", ""),
+                "already_dismissed": not bool(result.get("dismissed", False)),
+            }
+        )
+        return result
+
+    def bulk_dismiss_photo_pet_review(self, params: dict[str, Any]) -> dict[str, Any]:
+        raw_items = params.get("items", params.get("assets", []))
+        if not isinstance(raw_items, list):
+            raise ValueError("items must be a list of photo references.")
+        clean_items = [item for item in raw_items if isinstance(item, dict)]
+        if len(clean_items) != len(raw_items):
+            raise ValueError("Each pet review dismissal item must be an object.")
+        if not clean_items:
+            return {"requested": 0, "dismissed": 0, "failed": 0, "items": [], "failures": []}
+        if len(clean_items) > 2000:
+            raise ValueError("bulk_dismiss_photo_pet_review is limited to 2000 items per request.")
+
+        items: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        dismissed = 0
+        with self.project.db.connect() as conn:
+            for item in clean_items:
+                scoped_item = dict(item)
+                if "petKind" not in scoped_item and "kind" not in scoped_item:
+                    scoped_item["petKind"] = params.get("petKind", params.get("kind", ""))
+                try:
+                    result = self._dismiss_photo_pet_review_in_conn(scoped_item, conn)
+                    items.append(result)
+                    dismissed += 1
+                except Exception as exc:
+                    failures.append({
+                        "assetId": str(item.get("assetId", "") or ""),
+                        "sourcePath": str(item.get("sourcePath", "") or ""),
+                        "reason": str(exc)[:300],
+                    })
+        failed = len(failures)
+        self.project._append_audit(
+            {
+                "action": "bulk_dismiss_photo_pet_review",
+                "requested": len(clean_items),
+                "dismissed": dismissed,
+                "failed": failed,
+            }
+        )
+        return {
+            "requested": len(clean_items),
+            "dismissed": dismissed,
+            "failed": failed,
+            "items": items,
+            "failures": failures[:50],
         }
 
     def save_photo_people_group(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -30910,10 +38040,6 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             self.project.candidates.pop(str(candidate_id or ""), None)
         if result.get("candidateIds"):
             self._invalidate_photo_matches_cache()
-        try:
-            self.project.db.ensure_photo_duplicate_groups()
-        except Exception:
-            pass
         self.project._append_audit(
             {
                 "action": "permanently_delete_photos",
@@ -30981,38 +38107,42 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         result = self.project.db.undo_photo_operation(str(params.get("operationId", "") or ""))
         operation = result.get("operation") if isinstance(result.get("operation"), dict) else {}
         undo_payload = operation.get("undoPayload", {}) if isinstance(operation, dict) else {}
+        reload_warnings: list[dict[str, str]] = []
         if bool(result.get("undone")) and isinstance(undo_payload, dict) and str(undo_payload.get("kind", "") or "") == "asset_catalog":
             try:
                 self.project.load()
-            except Exception:
-                pass
+            except Exception as exc:
+                reload_warnings.append({"stage": "project.load", "error": str(exc)[:300]})
         elif bool(result.get("undone")) and isinstance(undo_payload, dict) and str(undo_payload.get("kind", "") or "") == "asset_state":
             try:
                 self._refresh_project_candidates_from_db()
-            except Exception:
-                pass
+            except Exception as exc:
+                reload_warnings.append({"stage": "refresh_candidates", "error": str(exc)[:300]})
         elif bool(result.get("undone")) and isinstance(undo_payload, dict) and str(undo_payload.get("kind", "") or "") == "person_labels":
             try:
-                self._refresh_project_candidates_from_db()
+                candidate_ids = [
+                    str(item.get("candidateId", "") or "").strip()
+                    for item in undo_payload.get("candidateRows", [])
+                    if isinstance(item, dict)
+                ]
+                self._refresh_project_candidates_from_db(candidate_ids)
                 self.project.restore_person_label_references(undo_payload)
-            except Exception:
-                pass
+            except Exception as exc:
+                reload_warnings.append({"stage": "restore_person_labels", "error": str(exc)[:300]})
         elif bool(result.get("undone")) and isinstance(undo_payload, dict) and str(undo_payload.get("kind", "") or "") == "review_candidate_correction":
             try:
-                self._refresh_project_candidates_from_db()
                 candidate_payload = undo_payload.get("candidate", {}) if isinstance(undo_payload.get("candidate", {}), dict) else {}
                 candidate_id = str(candidate_payload.get("candidate_id", candidate_payload.get("candidateId", "")) or "").strip()
+                self._refresh_project_candidates_from_db([candidate_id] if candidate_id else [])
                 if candidate_id:
                     self.project._mark_candidate_dirty(candidate_id)
                 self.project.save(snapshot_candidates=True, flush_candidate_index=True)
-            except Exception:
-                pass
-        try:
-            self.project.db.ensure_photo_duplicate_groups()
-        except Exception:
-            pass
+            except Exception as exc:
+                reload_warnings.append({"stage": "review_candidate_correction", "error": str(exc)[:300]})
         if bool(result.get("undone")):
             self._invalidate_photo_matches_cache()
+        if reload_warnings:
+            result["reloadWarnings"] = reload_warnings
         self.project._append_audit(
             {
                 "action": "undo_photo_operation",
@@ -31020,6 +38150,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "undone": bool(result.get("undone")),
                 "restored": int(result.get("restored", 0) or 0),
                 "missing": int(result.get("missing", 0) or 0),
+                "reload_warning_count": len(reload_warnings),
             }
         )
         return result
@@ -31203,8 +38334,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return {"entries": entries} if entries else {}
 
     def _photo_metadata_update_operation_keys(self, params: dict[str, Any]) -> tuple[bool, set[str]]:
-        metadata_edit_present = any(key in params for key in ("title", "caption", "dateOverride", "captureDate", "originalCaptureDate", "locationOverride", "locationHidden", "keywords", "accessibilityDescription", "descriptionRegions", "objectTagReview", "utilityClassifierReview", "localDepthControls"))
-        operation_keys = {"title", "caption", "favorite", "dateOverride", "captureDate", "locationOverride", "locationHidden", "keywords", "edited", "accessibilityDescription", "descriptionRegions", "objectTagReview", "utilityClassifierReview", "localDepthControls"}
+        metadata_edit_present = any(key in params for key in ("title", "caption", "rating", "colorLabel", "pickStatus", "dateOverride", "captureDate", "originalCaptureDate", "locationOverride", "locationHidden", "keywords", "accessibilityDescription", "descriptionRegions", "objectTagReview", "utilityClassifierReview", "localDepthControls"))
+        operation_keys = {"title", "caption", "favorite", "rating", "colorLabel", "pickStatus", "dateOverride", "captureDate", "locationOverride", "locationHidden", "keywords", "edited", "accessibilityDescription", "descriptionRegions", "objectTagReview", "utilityClassifierReview", "localDepthControls"}
         requested_operation_keys = {key for key in operation_keys if key in params}
         if "originalCaptureDate" in params:
             requested_operation_keys.add("captureDate")
@@ -31233,6 +38364,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             )
         if key == "captureDate":
             return str(metadata.get("captureDate", metadata.get("originalCaptureDate", "")) or "")
+        if key == "rating":
+            return (
+                max(0, min(5, int(metadata.get("rating", 0) or 0))),
+                bool(metadata.get("ratingExplicit")),
+            )
         if key in {"favorite", "hidden", "locationHidden", "edited"}:
             return bool(metadata.get(key))
         return str(metadata.get(key, "") or "")
@@ -31721,6 +38857,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             title=str(params.get("title", "")) if "title" in params else None,
             caption=str(params.get("caption", "")) if "caption" in params else None,
             favorite=bool(params.get("favorite")) if "favorite" in params else None,
+            rating=params.get("rating") if "rating" in params else None,
+            color_label=str(params.get("colorLabel", "")) if "colorLabel" in params else None,
+            pick_status=str(params.get("pickStatus", "")) if "pickStatus" in params else None,
             hidden=bool(params.get("hidden")) if "hidden" in params else None,
             deleted_at=(deleted_at_value or None) if deleted_at_present else None,
             clear_deleted=deleted_at_present and not deleted_at_value,
@@ -31820,6 +38959,9 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "caption_set": bool(metadata.get("caption")),
                 "keyword_count": len(metadata.get("keywords", []) if isinstance(metadata.get("keywords"), list) else []),
                 "favorite": bool(metadata.get("favorite")),
+                "rating": int(metadata.get("rating", 0) or 0),
+                "color_label": str(metadata.get("colorLabel", "") or ""),
+                "pick_status": str(metadata.get("pickStatus", "") or ""),
                 "operation_id": operation.get("operationId", "") if isinstance(operation, dict) else "",
             }
         )
@@ -31993,13 +39135,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         return asset
 
     def _photo_edit_stack_sidecar_path(self, asset_id: str) -> Path:
-        clean_asset_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(asset_id or "").strip()) or f"asset-{uuid.uuid4().hex}"
+        clean_asset_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(asset_id or "").strip()) or new_id("asset")
         root = (self.project.root / "photo-edit-stacks").resolve()
         root.mkdir(parents=True, exist_ok=True)
         return root / f"{clean_asset_id}.json"
 
     def _photo_edit_stack_preview_path(self, asset_id: str) -> Path:
-        clean_asset_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(asset_id or "").strip()) or f"asset-{uuid.uuid4().hex}"
+        clean_asset_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(asset_id or "").strip()) or new_id("asset")
         root = (self.project.root / "photo-edit-previews").resolve()
         root.mkdir(parents=True, exist_ok=True)
         return root / f"{clean_asset_id}.jpg"
@@ -32013,6 +39155,103 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             return True
         except (OSError, ValueError):
             return False
+
+    def _photo_generative_root(self, name: str) -> Path:
+        if name not in {"previews", "artifacts"}:
+            raise ValueError("Unknown generative photo workspace directory.")
+        root = (self.project.root / f"photo-generative-{name}").resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _photo_generated_artifact_operation(self, operation: dict[str, Any]) -> dict[str, Any] | None:
+        kind = str(operation.get("kind", "") or "").strip().lower()
+        if kind != "local_generative_edit":
+            return None
+        try:
+            schema_version = int(operation.get("schemaVersion", 1) or 1)
+        except (TypeError, ValueError):
+            schema_version = 0
+        artifact_path = str(operation.get("artifactPath", "") or "").strip()
+        artifact_sha256 = str(operation.get("artifactSha256", "") or "").strip().lower()
+        if not artifact_path or not re.fullmatch(r"[a-f0-9]{64}", artifact_sha256):
+            raise PhotoGenerativeIntegrityError("A generated edit artifact reference is incomplete.")
+        try:
+            artifact = Path(artifact_path).expanduser().resolve()
+            artifact.relative_to(self._photo_generative_root("artifacts"))
+        except (OSError, ValueError) as exc:
+            raise PhotoGenerativeIntegrityError("A generated edit artifact is outside the protected workspace directory.") from exc
+        if not artifact.is_file() or hash_generative_file(artifact) != artifact_sha256:
+            raise PhotoGenerativeIntegrityError("A generated edit artifact is missing or failed its integrity check.")
+        provenance = operation.get("provenance") if isinstance(operation.get("provenance"), dict) else {}
+        if operation.get("aiGenerated") is not True or provenance.get("aiGenerated") is not True or provenance.get("offlineInference") is not True:
+            raise PhotoGenerativeIntegrityError("A generated edit artifact has incomplete provenance.")
+        if schema_version < 2:
+            if str(provenance.get("outputSha256", "") or "").lower() != artifact_sha256:
+                raise PhotoGenerativeIntegrityError("A legacy generated edit artifact has incomplete provenance.")
+            return {**operation, "artifactPath": str(artifact), "artifactSha256": artifact_sha256}
+
+        model_output_sha256 = str(operation.get("modelOutputSha256", "") or "").strip().lower()
+        if (
+            not re.fullmatch(r"[a-f0-9]{64}", model_output_sha256)
+            or str(provenance.get("outputSha256", "") or "").strip().lower() != model_output_sha256
+        ):
+            raise PhotoGenerativeIntegrityError("The generated model output hash is missing or inconsistent.")
+        content_credentials = operation.get("contentCredentials")
+        if not isinstance(content_credentials, dict):
+            raise PhotoGenerativeIntegrityError("The generated edit is missing its Content Credential summary.")
+        inspected = self._content_credentials.inspect(artifact, asset_sha256=artifact_sha256)
+        requires_local_trust = bool(self.project.workspace_encryption.enabled)
+        if not (
+            inspected.get("present") is True
+            and inspected.get("embedded") is True
+            and inspected.get("cryptographicallyValid") is True
+            and inspected.get("topLevelAiEdit") is True
+            and inspected.get("trustScope") == "workspace-local"
+            and inspected.get("assetSha256") == artifact_sha256
+            and (inspected.get("locallyTrusted") is True or not requires_local_trust)
+        ):
+            raise PhotoGenerativeIntegrityError("The generated edit Content Credential failed verification.")
+        return {
+            **operation,
+            "artifactPath": str(artifact),
+            "artifactSha256": artifact_sha256,
+            "modelOutputSha256": model_output_sha256,
+            "contentCredentials": inspected,
+        }
+
+    def _photo_edit_stack_normalize_generated_operations(
+        self,
+        operations: list[dict[str, Any]],
+        previous_stack: dict[str, Any],
+        *,
+        allow_new_generated_artifact: bool,
+    ) -> list[dict[str, Any]]:
+        prior_operations = previous_stack.get("operations") if isinstance(previous_stack.get("operations"), list) else []
+        prior_generated = {
+            (str(operation.get("artifactPath", "") or ""), str(operation.get("artifactSha256", "") or "").lower()): operation
+            for operation in prior_operations
+            if isinstance(operation, dict) and str(operation.get("kind", "") or "").strip().lower() == "local_generative_edit"
+        }
+        normalized: list[dict[str, Any]] = []
+        generated_count = 0
+        for index, operation in enumerate(operations):
+            generated = self._photo_generated_artifact_operation(operation)
+            if generated is None:
+                normalized.append(operation)
+                continue
+            generated_count += 1
+            if generated_count > 1 or index != 0:
+                raise ValueError("An edit stack may contain one generated base artifact, and it must be first.")
+            key = (str(generated["artifactPath"]), str(generated["artifactSha256"]))
+            if not allow_new_generated_artifact:
+                prior = prior_generated.get(key)
+                if not isinstance(prior, dict):
+                    raise ValueError("Generated artifacts can be added only through a confirmed generative preview.")
+                generated = self._photo_generated_artifact_operation(prior) or generated
+            normalized.append(deepcopy(generated))
+        if prior_generated and generated_count == 0 and not allow_new_generated_artifact:
+            raise ValueError("Revert the generated edit before replacing its protected base artifact.")
+        return normalized
 
     def _photo_edit_stack_rotate_degrees(self, value: Any) -> int:
         rotate_aliases = {
@@ -33329,12 +40568,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
     ) -> tuple[int, int] | None:
         from PIL import Image, ImageOps
 
-        transforms = [
-            transform
-            for operation in operations
-            if (transform := self._photo_edit_stack_image_operation(operation)) is not None
-        ]
-        if not transforms:
+        steps: list[tuple[str, Any]] = []
+        for operation in operations:
+            generated = self._photo_generated_artifact_operation(operation)
+            if generated is not None:
+                steps.append(("generated", generated))
+                continue
+            transform = self._photo_edit_stack_image_operation(operation)
+            if transform is not None:
+                steps.append(("transform", transform))
+        if not steps:
             return None
 
         output = load_image(source)
@@ -33342,7 +40585,11 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         output_quality = quality
         output_max_dimension = max_dimension
         resample_bicubic = getattr(getattr(Image, "Resampling", Image), "BICUBIC", Image.BICUBIC)
-        for rotate_degrees, straighten_degrees, manual_crop_rect, crop_aspect, flip_horizontal, flip_vertical, adjustments, filter_preset, filter_intensity, markup_annotations, retouch_spots, operation_quality, operation_max_dimension in transforms:
+        for step_kind, step in steps:
+            if step_kind == "generated":
+                output = load_image(Path(str(step["artifactPath"]))).convert("RGB")
+                continue
+            rotate_degrees, straighten_degrees, manual_crop_rect, crop_aspect, flip_horizontal, flip_vertical, adjustments, filter_preset, filter_intensity, markup_annotations, retouch_spots, operation_quality, operation_max_dimension = step
             if use_operation_render_settings:
                 output_quality = operation_quality
                 output_max_dimension = operation_max_dimension
@@ -33566,8 +40813,15 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         asset: dict[str, Any],
         operations: list[dict[str, Any]],
         params: dict[str, Any],
+        *,
+        allow_new_generated_artifact: bool = False,
     ) -> dict[str, Any]:
         previous_stack = self.project.db.photo_edit_stack_by_asset(asset_id=str(asset.get("assetId", ""))) or {}
+        operations = self._photo_edit_stack_normalize_generated_operations(
+            operations,
+            previous_stack,
+            allow_new_generated_artifact=allow_new_generated_artifact,
+        )
         rendered_preview_path = str(params.get("renderedPreviewPath", "") or "").strip()
         if rendered_preview_path and not self._photo_path_is_workspace_owned(rendered_preview_path):
             raise ValueError("Rendered preview path must be inside this workspace.")
@@ -33736,11 +40990,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         operations = [operation for operation in version.get("operations", []) if isinstance(operation, dict)]
         if not operations:
             raise ValueError("Photo edit stack version has no operations to restore.")
-        stack = self.save_photo_edit_stack({
-            "assetId": version.get("assetId", ""),
-            "sourcePath": version.get("sourcePath", ""),
-            "operations": operations,
-        })
+        stack = self._save_photo_edit_stack_for_asset(
+            asset,
+            operations,
+            {
+                "assetId": version.get("assetId", ""),
+                "sourcePath": version.get("sourcePath", ""),
+                "operations": operations,
+            },
+            allow_new_generated_artifact=True,
+        )
         self.project._append_audit(
             {
                 "action": "restore_photo_edit_stack_version",
@@ -33777,6 +41036,1189 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         )
         return result
 
+    def inspect_photo_content_credentials(self, params: dict[str, Any]) -> dict[str, Any]:
+        asset = self._photo_edit_stack_asset(params)
+        scope = str(params.get("scope", "active") or "active").strip().lower()
+        if scope not in {"active", "original"}:
+            raise ValueError("Content Credential scope must be active or original.")
+        try:
+            original_path = safe_resolve(Path(str(asset.get("sourcePath", "") or "")).expanduser())
+        except OSError as exc:
+            raise FileNotFoundError("The photo source is unavailable for Content Credential inspection.") from exc
+        target_path = original_path
+        metadata_key = "contentCredentials"
+        if scope == "active":
+            stack = self.project.db.photo_edit_stack_by_asset(asset_id=str(asset.get("assetId", ""))) or {}
+            operations = stack.get("operations") if isinstance(stack.get("operations"), list) else []
+            for operation in operations:
+                if not isinstance(operation, dict):
+                    continue
+                generated = self._photo_generated_artifact_operation(operation)
+                if generated is not None:
+                    target_path = Path(str(generated["artifactPath"])).expanduser().resolve()
+                    metadata_key = "editContentCredentials"
+                    break
+        summary = self._content_credentials.inspect(target_path)
+        self.project.db.update_photo_asset_metadata_json(
+            asset_id=str(asset.get("assetId", "")),
+            patch={metadata_key: deepcopy(summary)},
+            refresh_index=False,
+        )
+        self.project._append_audit(
+            {
+                "action": "inspect_photo_content_credentials",
+                "asset_id": asset.get("assetId", ""),
+                "scope": scope,
+                "present": bool(summary.get("present")),
+                "embedded": bool(summary.get("embedded")),
+                "validation_state": summary.get("validationState", ""),
+                "locally_trusted": bool(summary.get("locallyTrusted")),
+                "globally_trusted": bool(summary.get("globallyTrusted")),
+                "contains_ai_history": bool(summary.get("containsAiHistory")),
+            }
+        )
+        return {
+            "assetId": str(asset.get("assetId", "")),
+            "scope": scope,
+            "metadataKey": metadata_key,
+            "contentCredentials": summary,
+        }
+
+    def _purge_photo_generative_previews_locked(self) -> None:
+        now = monotonic()
+        expired = [
+            preview_id
+            for preview_id, record in self._photo_generative_previews.items()
+            if float(record.get("expiresMonotonic", 0) or 0) <= now
+        ]
+        if len(self._photo_generative_previews) - len(expired) > 8:
+            remaining = sorted(
+                (
+                    (preview_id, float(record.get("createdMonotonic", 0) or 0))
+                    for preview_id, record in self._photo_generative_previews.items()
+                    if preview_id not in expired
+                ),
+                key=lambda item: item[1],
+            )
+            expired.extend(preview_id for preview_id, _ in remaining[: len(remaining) - 8])
+        for preview_id in dict.fromkeys(expired):
+            record = self._photo_generative_previews.pop(preview_id, {})
+            path = str(record.get("previewPath", "") or "")
+            try:
+                target = Path(path).expanduser().resolve()
+                target.relative_to(self._photo_generative_root("previews"))
+                target.unlink(missing_ok=True)
+            except (OSError, ValueError):
+                pass
+
+    def _photo_generative_input_path(
+        self,
+        asset: dict[str, Any],
+        destination: Path,
+    ) -> tuple[Path, list[dict[str, Any]], str, str]:
+        source_path = str(asset.get("sourcePath", "") or "")
+        if not source_path:
+            raise ValueError("The photo source is unavailable for generative editing.")
+        try:
+            source = safe_resolve(Path(source_path).expanduser())
+        except OSError as exc:
+            raise FileNotFoundError("The photo source is unavailable for generative editing.") from exc
+        if not source.is_file() or source.suffix.lower() not in IMAGE_EXTENSIONS:
+            raise ValueError("Local generative editing is available for imported still images.")
+        source_sha256 = hash_generative_file(source)
+        stack = self.project.db.photo_edit_stack_by_asset(asset_id=str(asset.get("assetId", ""))) or {}
+        operations = [
+            operation
+            for operation in (stack.get("operations", []) if isinstance(stack.get("operations"), list) else [])
+            if isinstance(operation, dict)
+        ]
+        base_hash = hashlib.sha256(
+            json.dumps(operations, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        ).hexdigest()
+        if not operations:
+            return source, operations, base_hash, source_sha256
+        rendered = self._photo_edit_stack_render_image_operations(
+            source,
+            destination,
+            operations,
+            render_format="png",
+            quality=100,
+            max_dimension=0,
+            preserve_color_profile=True,
+        )
+        if rendered is None or not destination.is_file():
+            raise ValueError("The current edit stack cannot be prepared for generative editing.")
+        return destination, operations, base_hash, source_sha256
+
+    def render_photo_generative_preview(
+        self,
+        params: dict[str, Any],
+        *,
+        progress: Any | None = None,
+    ) -> dict[str, Any]:
+        asset = self._photo_edit_stack_asset(params)
+        mode = str(params.get("mode", "") or "").strip().lower()
+        if mode not in {"cleanup", "upscale", "expand", "reframe", "relight"}:
+            raise ValueError("Choose Clean Up, Upscale, Expand, Reframe, or Relight.")
+        allowed_params = {
+            "maskRects": deepcopy(params.get("maskRects", params.get("mask", []))),
+            "scale": params.get("scale", 2),
+            "tile": params.get("tile", 128),
+            "aspect": params.get("aspect", params.get("targetAspect", "original")),
+            "prompt": params.get("prompt", ""),
+            "seed": params.get("seed", 42),
+            "steps": params.get("steps", 20),
+        }
+        preview_id = new_id("generativePreview")
+        clean_asset_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(asset.get("assetId", "") or "")) or "asset"
+        preview_path = self._photo_generative_root("previews") / f"{clean_asset_id}-{preview_id}.png"
+        stop_heartbeat = threading.Event()
+
+        def emit(payload: dict[str, Any]) -> None:
+            if progress:
+                progress(payload, "photo_generative_preview")
+
+        def heartbeat() -> None:
+            while not stop_heartbeat.wait(20.0):
+                emit({"phase": "running", "mode": mode, "message": "Local generative edit is still running"})
+
+        emit({"phase": "preparing", "mode": mode, "message": "Preparing the non-destructive local preview"})
+        heartbeat_thread = threading.Thread(target=heartbeat, name="photo-generative-heartbeat", daemon=True)
+        heartbeat_thread.start()
+        try:
+            with tempfile.TemporaryDirectory(prefix="vintrace-generative-base-") as temp_dir:
+                base_path = Path(temp_dir) / "base.png"
+                input_path, base_operations, base_operations_sha256, asset_source_sha256 = self._photo_generative_input_path(asset, base_path)
+                result = run_photo_generative_edit(
+                    mode,
+                    input_path,
+                    preview_path,
+                    allowed_params,
+                    root=str(params.get("root", "") or "") or None,
+                )
+        finally:
+            stop_heartbeat.set()
+            heartbeat_thread.join(timeout=2.0)
+        created_at = datetime.utcnow()
+        expires_at = created_at + timedelta(hours=2)
+        record = {
+            "previewId": preview_id,
+            "assetId": str(asset.get("assetId", "")),
+            "previewPath": str(preview_path),
+            "previewSha256": str(result["outputSha256"]),
+            "mode": mode,
+            "tier": str(result["tier"]),
+            "width": int(result["width"]),
+            "height": int(result["height"]),
+            "provenance": deepcopy(result["provenance"]),
+            "baseOperations": deepcopy(base_operations),
+            "baseOperationsSha256": base_operations_sha256,
+            "assetSourceSha256": asset_source_sha256,
+            "createdAt": created_at.isoformat(timespec="seconds") + "Z",
+            "expiresAt": expires_at.isoformat(timespec="seconds") + "Z",
+            "createdMonotonic": monotonic(),
+            "expiresMonotonic": monotonic() + 2 * 60 * 60,
+        }
+        with self._photo_generative_lock:
+            self._purge_photo_generative_previews_locked()
+            self._photo_generative_previews[preview_id] = record
+            self._purge_photo_generative_previews_locked()
+        self.project._append_audit(
+            {
+                "action": "render_photo_generative_preview",
+                "asset_id": record["assetId"],
+                "preview_id": preview_id,
+                "mode": mode,
+                "tier": record["tier"],
+                "output_sha256": record["previewSha256"],
+                "offline_inference": True,
+                "applied": False,
+            }
+        )
+        emit({"phase": "complete", "mode": mode, "message": "Local generative preview is ready"})
+        return {
+            "previewId": preview_id,
+            "assetId": record["assetId"],
+            "mode": mode,
+            "tier": record["tier"],
+            "generativePreviewPath": str(preview_path),
+            "generativePreviewSha256": record["previewSha256"],
+            "width": record["width"],
+            "height": record["height"],
+            "durationSeconds": float(result["durationSeconds"]),
+            "offlineInference": True,
+            "aiGenerated": True,
+            "provenance": deepcopy(record["provenance"]),
+            "createdAt": record["createdAt"],
+            "expiresAt": record["expiresAt"],
+            "requiresConfirmation": True,
+            "sourceChanged": False,
+        }
+
+    def apply_photo_generative_edit(self, params: dict[str, Any]) -> dict[str, Any]:
+        if params.get("confirm") is not True:
+            raise ValueError("Applying a generative edit requires explicit confirmation.")
+        preview_id = str(params.get("previewId", "") or "").strip()
+        idempotency_key = str(params.get("idempotencyKey", "") or "").strip()
+        if not preview_id:
+            raise ValueError("previewId is required.")
+        if not idempotency_key or len(idempotency_key) > 160:
+            raise ValueError("A non-empty idempotencyKey of at most 160 characters is required.")
+        with self._photo_generative_lock:
+            self._purge_photo_generative_previews_locked()
+            completed = self._photo_generative_applied.get(idempotency_key)
+            if completed:
+                if completed.get("previewId") != preview_id:
+                    raise ValueError("This idempotency key was already used for another generative preview.")
+                return {**deepcopy(completed["result"]), "idempotentReplay": True}
+            record = deepcopy(self._photo_generative_previews.get(preview_id, {}))
+        if not record:
+            raise ValueError("The generative preview was not found or has expired.")
+        requested_asset_id = str(params.get("assetId", "") or "").strip()
+        if requested_asset_id and requested_asset_id != str(record["assetId"]):
+            raise ValueError("The generative preview belongs to another photo.")
+        asset = self._photo_edit_stack_asset({"assetId": record["assetId"]})
+        current_stack = self.project.db.photo_edit_stack_by_asset(asset_id=str(record["assetId"])) or {}
+        current_operations = [
+            operation
+            for operation in (current_stack.get("operations", []) if isinstance(current_stack.get("operations"), list) else [])
+            if isinstance(operation, dict)
+        ]
+        current_operations_sha256 = hashlib.sha256(
+            json.dumps(current_operations, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        ).hexdigest()
+        if current_operations_sha256 != str(record.get("baseOperationsSha256", "")):
+            raise ValueError("The photo edit stack changed after this preview. Generate a new preview before applying it.")
+        generated_parent: Path | None = None
+        preceding_ordinary_edit = False
+        for operation in current_operations:
+            generated_operation = self._photo_generated_artifact_operation(operation)
+            if generated_operation is not None:
+                generated_parent = Path(str(generated_operation["artifactPath"])).expanduser().resolve()
+            else:
+                preceding_ordinary_edit = True
+        try:
+            current_source = safe_resolve(Path(str(asset.get("sourcePath", "") or "")).expanduser())
+        except OSError as exc:
+            raise FileNotFoundError("The photo source changed or is no longer available.") from exc
+        if not current_source.is_file() or hash_generative_file(current_source) != str(record.get("assetSourceSha256", "")):
+            raise ValueError("The photo source changed after this preview. Generate a new preview before applying it.")
+        preview_path = Path(str(record["previewPath"])).expanduser().resolve()
+        try:
+            preview_path.relative_to(self._photo_generative_root("previews"))
+        except ValueError as exc:
+            raise PhotoGenerativeIntegrityError("The generative preview path is invalid.") from exc
+        if not preview_path.is_file() or hash_generative_file(preview_path) != str(record["previewSha256"]):
+            raise PhotoGenerativeIntegrityError("The generative preview changed before confirmation.")
+        clean_asset_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(record["assetId"])) or "asset"
+        artifact_path = self._photo_generative_root("artifacts") / f"{clean_asset_id}-{preview_id}.png"
+        previous_stack = current_stack
+        version: dict[str, Any] = {}
+        artifact_created = False
+        try:
+            parent_path = generated_parent or current_source
+            raw_provenance = record.get("provenance") if isinstance(record.get("provenance"), dict) else {}
+            raw_parameters = raw_provenance.get("parameters") if isinstance(raw_provenance.get("parameters"), dict) else {}
+            raw_prompt = str(raw_parameters.get("prompt", "") or "")
+            prompt_sha256 = hashlib.sha256(raw_prompt.encode("utf-8")).hexdigest() if raw_prompt else ""
+            signed = self._content_credentials.sign_edited_asset(
+                unsigned_path=preview_path,
+                destination_path=artifact_path,
+                parent_path=parent_path,
+                operation_kind="generative",
+                preceding_ordinary_edit=preceding_ordinary_edit,
+                provenance={
+                    "model": {
+                        **(raw_provenance.get("model") if isinstance(raw_provenance.get("model"), dict) else {}),
+                        "tier": str(record.get("tier", "") or ""),
+                    },
+                    "catalog": {
+                        "id": "vintrace-photo-generative",
+                        "version": str(raw_provenance.get("catalogVersion", "") or ""),
+                        "sha256": str(raw_provenance.get("catalogSha256", "") or ""),
+                    },
+                    "runtime": (
+                        raw_provenance.get("runtime") if isinstance(raw_provenance.get("runtime"), dict) else {}
+                    ),
+                    "edit": {
+                        "mode": str(record.get("mode", "") or ""),
+                        "tier": str(record.get("tier", "") or ""),
+                        "operation": "generative-edit",
+                        "baseEditStackHash": str(record.get("baseOperationsSha256", "") or ""),
+                    },
+                    "hashes": {"promptSha256": prompt_sha256},
+                },
+            )
+            artifact_created = True
+            content_credentials = signed.get("contentCredentials")
+            if not isinstance(content_credentials, dict):
+                raise PhotoGenerativeIntegrityError("The committed generative artifact is missing its Content Credential.")
+            if previous_stack:
+                labels = {
+                    "cleanup": "Before AI Clean Up",
+                    "upscale": "Before AI Upscale",
+                    "expand": "Before AI Expand",
+                    "reframe": "Before AI Reframe",
+                    "relight": "Before AI Relight",
+                }
+                version = self.project.db.create_photo_edit_stack_version(
+                    asset_id=str(record["assetId"]),
+                    label=labels.get(str(record["mode"]), "Before AI edit"),
+                )
+            persisted_provenance = deepcopy(raw_provenance)
+            persisted_parameters = (
+                deepcopy(persisted_provenance.get("parameters"))
+                if isinstance(persisted_provenance.get("parameters"), dict)
+                else {}
+            )
+            persisted_parameters.pop("prompt", None)
+            if prompt_sha256:
+                persisted_parameters["promptSha256"] = prompt_sha256
+            persisted_provenance["parameters"] = persisted_parameters
+            operation = {
+                "kind": "local_generative_edit",
+                "schemaVersion": 2,
+                "operationId": new_id("generativeEdit"),
+                "mode": str(record["mode"]),
+                "tier": str(record["tier"]),
+                "artifactPath": str(artifact_path),
+                "artifactSha256": str(signed["artifactSha256"]),
+                "modelOutputSha256": str(signed["modelOutputSha256"]),
+                "width": int(record["width"]),
+                "height": int(record["height"]),
+                "aiGenerated": True,
+                "offlineInference": True,
+                "baseOperationsSha256": str(record["baseOperationsSha256"]),
+                "createdAt": str(record["createdAt"]),
+                "provenance": persisted_provenance,
+                "contentCredentials": deepcopy(content_credentials),
+            }
+            stack = self._save_photo_edit_stack_for_asset(
+                asset,
+                [operation],
+                {"assetId": record["assetId"], "operations": [operation]},
+                allow_new_generated_artifact=True,
+            )
+            try:
+                self.project.db.update_photo_asset_metadata(asset_id=str(record["assetId"]), edited=True)
+                self.project.db.update_photo_asset_metadata_json(
+                    asset_id=str(record["assetId"]),
+                    patch={"editContentCredentials": deepcopy(content_credentials)},
+                    refresh_index=False,
+                )
+            except Exception:
+                # The edit stack is authoritative; a cosmetic metadata flag must not
+                # roll back a successfully committed, hash-verified artifact.
+                pass
+        except Exception:
+            if version.get("versionId"):
+                try:
+                    self.project.db.delete_photo_edit_stack_version(
+                        str(version["versionId"]),
+                        asset_id=str(record["assetId"]),
+                    )
+                except Exception:
+                    pass
+            if artifact_created and artifact_path.is_file():
+                try:
+                    artifact_path.unlink()
+                except OSError:
+                    pass
+            raise
+        try:
+            preview_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        result = {
+            "previewId": preview_id,
+            "assetId": str(record["assetId"]),
+            "mode": str(record["mode"]),
+            "tier": str(record["tier"]),
+            "applied": True,
+            "sourceChanged": False,
+            "aiGenerated": True,
+            "offlineInference": True,
+            "artifactSha256": str(signed["artifactSha256"]),
+            "modelOutputSha256": str(signed["modelOutputSha256"]),
+            "contentCredentials": deepcopy(content_credentials),
+            "stack": stack,
+            "version": version,
+            "versionCreated": bool(version),
+            "idempotentReplay": False,
+        }
+        with self._photo_generative_lock:
+            self._photo_generative_previews.pop(preview_id, None)
+            self._photo_generative_applied[idempotency_key] = {"previewId": preview_id, "result": deepcopy(result)}
+            while len(self._photo_generative_applied) > 64:
+                self._photo_generative_applied.pop(next(iter(self._photo_generative_applied)))
+        self.project._append_audit(
+            {
+                "action": "apply_photo_generative_edit",
+                "asset_id": record["assetId"],
+                "preview_id": preview_id,
+                "mode": record["mode"],
+                "tier": record["tier"],
+                "artifact_sha256": signed["artifactSha256"],
+                "model_output_sha256": signed["modelOutputSha256"],
+                "c2pa_manifest_id": content_credentials.get("manifestId", ""),
+                "c2pa_locally_trusted": bool(content_credentials.get("locallyTrusted")),
+                "c2pa_globally_trusted": bool(content_credentials.get("globallyTrusted")),
+                "version_id": version.get("versionId", ""),
+                "confirmed": True,
+                "source_changed": False,
+                "offline_inference": True,
+            }
+        )
+        return result
+
+    def discard_photo_generative_preview(self, params: dict[str, Any]) -> dict[str, Any]:
+        preview_id = str(params.get("previewId", "") or "").strip()
+        if not preview_id:
+            raise ValueError("previewId is required.")
+        with self._photo_generative_lock:
+            self._purge_photo_generative_previews_locked()
+            record = self._photo_generative_previews.pop(preview_id, {})
+        if not record:
+            return {"previewId": preview_id, "discarded": False, "reason": "not_found"}
+        requested_asset_id = str(params.get("assetId", "") or "").strip()
+        if requested_asset_id and requested_asset_id != str(record.get("assetId", "")):
+            with self._photo_generative_lock:
+                self._photo_generative_previews[preview_id] = record
+            raise ValueError("The generative preview belongs to another photo.")
+        removed = False
+        try:
+            target = Path(str(record.get("previewPath", ""))).expanduser().resolve()
+            target.relative_to(self._photo_generative_root("previews"))
+            removed = target.exists()
+            target.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            removed = False
+        self.project._append_audit(
+            {
+                "action": "discard_photo_generative_preview",
+                "asset_id": record.get("assetId", ""),
+                "preview_id": preview_id,
+                "mode": record.get("mode", ""),
+                "discarded": True,
+                "removed": removed,
+            }
+        )
+        return {"previewId": preview_id, "assetId": record.get("assetId", ""), "discarded": True, "removed": removed}
+
+    def _photo_story_runtime_options(self, params: dict[str, Any] | None = None) -> dict[str, str]:
+        body = params if isinstance(params, dict) else {}
+        settings = self.photo_library_settings({})
+        local = settings.get("localSettings", {}) if isinstance(settings.get("localSettings"), dict) else {}
+        preference = str(
+            body.get("modelTier", body.get("tier", body.get("preference", local.get("visionModelTier", "auto"))))
+            or "auto"
+        ).strip().lower()
+        if preference not in {"auto", "quality", "low-memory"}:
+            preference = "auto"
+        power_mode = str(body.get("powerMode", local.get("indexingPowerMode", "balanced")) or "balanced").strip().lower()
+        if power_mode not in {"low", "balanced", "performance"}:
+            power_mode = "balanced"
+        return {"preference": preference, "powerMode": power_mode}
+
+    def photo_story_status(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        options = self._photo_story_runtime_options(params)
+        try:
+            status = portable_photo_vlm_status(
+                preference=options["preference"],
+                power_mode=options["powerMode"],
+            )
+            route = status.get("route") if isinstance(status.get("route"), dict) else {}
+            available = bool(route.get("available", False))
+            reason = str(route.get("reason", "") or "")
+        except (PhotoVlmIntegrityError, PhotoVlmUnavailableError) as exc:
+            status = {}
+            route = {}
+            available = False
+            reason = str(exc)
+        public_route = {
+            key: route.get(key)
+            for key in ("available", "requested", "tier", "reason", "modelId")
+            if key in route
+        }
+        return {
+            "available": available,
+            "offline": True,
+            "privacyDefault": "path-free-local",
+            "generatorVersion": STORY_GENERATOR_VERSION,
+            "maxAssets": MAX_STORY_ASSETS,
+            "styles": ["journal", "concise", "cinematic"],
+            "preference": options["preference"],
+            "powerMode": options["powerMode"],
+            "route": public_route,
+            "reason": reason or ("Ready to write a local story." if available else "Install a verified local photo VLM pack."),
+        }
+
+    def _photo_story_public(self, story: dict[str, Any]) -> dict[str, Any]:
+        public = deepcopy(story)
+        private_paths = {
+            str(path or "").strip()
+            for path in public.get("sourcePaths", []) if str(path or "").strip()
+        }
+        for chapter in public.get("chapters", []) if isinstance(public.get("chapters"), list) else []:
+            if isinstance(chapter, dict):
+                private_paths.update(
+                    str(path or "").strip()
+                    for path in chapter.get("sourcePaths", []) if str(path or "").strip()
+                )
+        source_asset_ids = public.get("sourceAssetIds") if isinstance(public.get("sourceAssetIds"), list) else []
+        public["coverAssetId"] = str(source_asset_ids[0] if source_asset_ids else "")
+        public.pop("sourcePaths", None)
+        public.pop("coverSourcePath", None)
+        for chapter in public.get("chapters", []) if isinstance(public.get("chapters"), list) else []:
+            if not isinstance(chapter, dict):
+                continue
+            chapter.pop("sourcePaths", None)
+            for caption in chapter.get("captions", []) if isinstance(chapter.get("captions"), list) else []:
+                if isinstance(caption, dict):
+                    caption.pop("sourcePath", None)
+        history = public.get("history") if isinstance(public.get("history"), list) else []
+        public["history"] = [
+            {key: row.get(key) for key in ("versionId", "savedAt", "label", "contentSha256")}
+            for row in history
+            if isinstance(row, dict)
+        ]
+
+        blocked_keys = {
+            "sourcepath",
+            "sourcepaths",
+            "coversourcepath",
+            "filepath",
+            "filepaths",
+            "modelroot",
+            "root",
+            "directory",
+            "executable",
+            "cwd",
+        }
+
+        def path_free(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {
+                    str(key): path_free(item)
+                    for key, item in value.items()
+                    if re.sub(r"[^a-z]", "", str(key).lower()) not in blocked_keys
+                }
+            if isinstance(value, list):
+                return [path_free(item) for item in value]
+            if isinstance(value, str):
+                text = value
+                for private_path in sorted(private_paths, key=len, reverse=True):
+                    text = text.replace(private_path, "[local photo]")
+                return text
+            return value
+
+        cleaned = path_free(public)
+        return cleaned if isinstance(cleaned, dict) else {}
+
+    def photo_stories(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        body = params if isinstance(params, dict) else {}
+        memory_id = str(body.get("memoryId", "") or "").strip()
+        stories = self.project.db.photo_stories(memory_id=memory_id)
+        return {
+            "stories": [self._photo_story_public(story) for story in stories],
+            "total": len(stories),
+            "memoryId": memory_id,
+            "offline": True,
+        }
+
+    def _photo_story_place_text(self, metadata: dict[str, Any]) -> str:
+        buckets = [metadata]
+        for key in ("location", "place", "reverseGeocode", "exif", "xmp"):
+            nested = metadata.get(key)
+            if isinstance(nested, dict):
+                buckets.append(nested)
+        values: list[str] = []
+        seen: set[str] = set()
+        for bucket in buckets:
+            for key in (
+                "placeName",
+                "locationName",
+                "name",
+                "locality",
+                "city",
+                "subAdministrativeArea",
+                "administrativeArea",
+                "state",
+                "country",
+            ):
+                text = clean_story_text(bucket.get(key), 80)
+                normalized = text.casefold()
+                if text and normalized not in seen:
+                    seen.add(normalized)
+                    values.append(text)
+                if len(values) >= 2:
+                    return ", ".join(values)
+        return ", ".join(values)
+
+    def _photo_story_source_scope(self, params: dict[str, Any]) -> tuple[list[str], str, str]:
+        memory_id = str(params.get("memoryId", "") or "").strip()
+        if memory_id.startswith("memory:"):
+            memory_id = memory_id[len("memory:"):]
+        title_hint = clean_story_text(params.get("titleHint", params.get("title", "")), 120)
+        if memory_id:
+            memory = self._photo_memory_by_id(memory_id)
+            if not memory:
+                raise ValueError("The selected photo memory is unavailable.")
+            source_paths = self._visible_source_paths_in_order(memory.get("sourcePaths", []))
+            return source_paths, memory_id, title_hint or clean_story_text(memory.get("name"), 120)
+        raw_paths = params.get("sourcePaths", params.get("sources", []))
+        raw_ids = params.get("assetIds", [])
+        if not isinstance(raw_paths, list) or not isinstance(raw_ids, list):
+            raise ValueError("sourcePaths and assetIds must be lists.")
+        requested_paths = [str(path or "").strip() for path in raw_paths if str(path or "").strip()]
+        for asset_id in raw_ids:
+            asset = self.project.db.photo_asset_by_id(str(asset_id or ""))
+            if asset and str(asset.get("sourcePath", "") or ""):
+                requested_paths.append(str(asset["sourcePath"]))
+        return self._visible_source_paths_in_order(requested_paths), "", title_hint
+
+    def _photo_story_facts(self, source_paths: list[str]) -> list[dict[str, Any]]:
+        assets = self.project.db.photo_assets_by_paths(source_paths)
+        by_source = {
+            str(asset.get("sourcePath", "") or ""): asset
+            for asset in assets
+            if str(asset.get("sourcePath", "") or "") and str(asset.get("assetId", "") or "")
+        }
+        asset_ids = [str(asset.get("assetId", "") or "") for asset in assets if str(asset.get("assetId", "") or "")]
+        metadata_by_id = self.project.db.photo_asset_metadata_by_ids(asset_ids)
+        people_by_id = self.project.db.photo_asset_people_by_ids(asset_ids)
+        facts: list[dict[str, Any]] = []
+        for source_path in source_paths:
+            asset = by_source.get(source_path)
+            if not asset or str(asset.get("mediaKind", "image") or "image") != "image":
+                continue
+            asset_id = str(asset["assetId"])
+            metadata = {
+                **(asset.get("metadata", {}) if isinstance(asset.get("metadata"), dict) else {}),
+                **metadata_by_id.get(asset_id, {}),
+            }
+            local_vision = metadata.get("localVision") if isinstance(metadata.get("localVision"), dict) else {}
+            manual_caption = clean_story_text(
+                metadata.get("caption", metadata.get("description", metadata.get("title", ""))),
+                600,
+            )
+            local_caption = clean_story_text(local_vision.get("caption"), 600)
+            caption = manual_caption or local_caption
+            caption_source = "manual" if manual_caption else str(local_vision.get("source", "") or "local-vision")
+            tag_values: list[Any] = []
+            if isinstance(local_vision.get("tags"), list):
+                tag_values.extend(local_vision["tags"])
+            tag_values.extend(
+                record.get("label", "")
+                for record in self.project.db.photo_object_tags_from_metadata(metadata)
+                if isinstance(record, dict)
+            )
+            people: list[str] = []
+            for row in people_by_id.get(asset_id, []):
+                if not isinstance(row, dict):
+                    continue
+                name = clean_story_text(row.get("name", row.get("personName", row.get("displayName", ""))), 80)
+                if name and name not in people:
+                    people.append(name)
+            facts.append({
+                "assetId": asset_id,
+                "sourcePath": source_path,
+                "contentHash": str(asset.get("contentHash", "") or ""),
+                "fileSignature": asset.get("fileSignature", {}) if isinstance(asset.get("fileSignature"), dict) else {},
+                "updatedAt": str(asset.get("updatedAt", "") or ""),
+                "captureDate": str(asset.get("captureDate", "") or ""),
+                "place": self._photo_story_place_text(metadata),
+                "people": people,
+                "tags": tag_values,
+                "caption": caption,
+                "captionSource": caption_source,
+                "captionProvenance": local_vision.get("model", {}) if isinstance(local_vision.get("model"), dict) else {},
+            })
+        return facts
+
+    def _photo_story_visible_assets_by_ids(self, asset_ids: list[str]) -> list[dict[str, Any]]:
+        ordered_ids = [str(asset_id or "").strip() for asset_id in asset_ids if str(asset_id or "").strip()]
+        if len(ordered_ids) != len(set(ordered_ids)) or len(ordered_ids) < 2:
+            raise ValueError("The photo story source list is invalid.")
+        assets = self.project.db.photo_assets_by_ids(ordered_ids)
+        by_id = {
+            str(asset.get("assetId", "") or ""): asset
+            for asset in assets
+            if str(asset.get("assetId", "") or "")
+        }
+        metadata_by_id = self.project.db.photo_asset_metadata_by_ids(ordered_ids)
+        resolved: list[dict[str, Any]] = []
+        for asset_id in ordered_ids:
+            asset = by_id.get(asset_id)
+            metadata = metadata_by_id.get(asset_id, {})
+            source_path = str(asset.get("sourcePath", "") or "") if asset else ""
+            unavailable = (
+                not asset
+                or str(asset.get("mediaKind", "image") or "image") != "image"
+                or not source_path
+                or not Path(source_path).is_file()
+                or bool(str(asset.get("missingAt", "") or ""))
+                or bool(metadata.get("hidden", False))
+                or bool(str(metadata.get("deletedAt", "") or ""))
+            )
+            if unavailable:
+                raise ValueError(
+                    "One or more story photos are hidden, deleted, missing, or no longer available. "
+                    "Restore them before creating a movie."
+                )
+            resolved.append(asset)
+        return resolved
+
+    @staticmethod
+    def _photo_story_fact_sha256(fact: dict[str, Any]) -> str:
+        clean = clean_story_fact(fact)
+        if clean is None:
+            return ""
+        prompt_fact = {
+            "assetId": clean["assetId"],
+            "contentHash": clean["contentHash"],
+            "captureDate": clean["captureDate"],
+            "place": clean["place"],
+            "people": clean["people"],
+            "tags": clean["tags"],
+            "caption": clean["caption"],
+        }
+        encoded = json.dumps(prompt_fact, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _photo_story_assert_facts_unchanged(self, facts: list[dict[str, Any]]) -> None:
+        asset_ids = [str(fact.get("assetId", "") or "") for fact in facts]
+        assets = self._photo_story_visible_assets_by_ids(asset_ids)
+        current_paths = [str(asset.get("sourcePath", "") or "") for asset in assets]
+        current_by_id = {
+            str(fact.get("assetId", "") or ""): fact
+            for fact in self._photo_story_facts(current_paths)
+        }
+        for fact in facts:
+            asset_id = str(fact.get("assetId", "") or "")
+            current = current_by_id.get(asset_id)
+            if current is None or self._photo_story_fact_sha256(current) != self._photo_story_fact_sha256(fact):
+                raise ValueError("A source photo or its story metadata changed while the draft was being written. Generate it again.")
+
+    def _photo_story_resolved_sources(self, story: dict[str, Any]) -> dict[str, Any]:
+        clean = clean_photo_story_record(story)
+        if clean is None:
+            raise ValueError("The photo story is invalid.")
+        asset_ids = [str(asset_id or "") for asset_id in clean.get("sourceAssetIds", [])]
+        assets = self._photo_story_visible_assets_by_ids(asset_ids)
+        source_by_asset = {
+            str(asset.get("assetId", "") or ""): str(asset.get("sourcePath", "") or "")
+            for asset in assets
+        }
+        current_facts = {
+            str(fact.get("assetId", "") or ""): clean_story_fact(fact)
+            for fact in self._photo_story_facts([source_by_asset[asset_id] for asset_id in asset_ids])
+        }
+        expected_manifest = {
+            str(row.get("assetId", "") or ""): str(row.get("contentHash", "") or "")
+            for row in clean.get("generation", {}).get("sourceManifest", [])
+            if isinstance(row, dict)
+        }
+        for asset_id in asset_ids:
+            current = current_facts.get(asset_id)
+            expected_hash = expected_manifest.get(asset_id, "")
+            if not current or not expected_hash or str(current.get("contentHash", "") or "") != expected_hash:
+                raise ValueError("A story photo changed after this draft was generated. Generate a new draft before creating a movie.")
+
+        previous_by_asset = dict(zip(asset_ids, clean.get("sourcePaths", [])))
+        previous_cover = str(clean.get("coverSourcePath", "") or "")
+        cover_asset_id = next(
+            (asset_id for asset_id, source_path in previous_by_asset.items() if source_path == previous_cover),
+            asset_ids[0],
+        )
+        candidate = deepcopy(clean)
+        candidate["sourcePaths"] = [source_by_asset[asset_id] for asset_id in asset_ids]
+        candidate["coverSourcePath"] = source_by_asset[cover_asset_id]
+        for chapter in candidate.get("chapters", []):
+            if not isinstance(chapter, dict):
+                continue
+            chapter_ids = [str(asset_id or "") for asset_id in chapter.get("sourceAssetIds", [])]
+            chapter["sourcePaths"] = [source_by_asset[asset_id] for asset_id in chapter_ids]
+            for caption in chapter.get("captions", []) if isinstance(chapter.get("captions"), list) else []:
+                if isinstance(caption, dict):
+                    caption["sourcePath"] = source_by_asset.get(str(caption.get("assetId", "") or ""), "")
+        resolved = clean_photo_story_record(candidate)
+        if resolved is None:
+            raise ValueError("The photo story could not be linked to its current source photos.")
+        return resolved
+
+    def _photo_story_persist_generated_caption(
+        self,
+        fact: dict[str, Any],
+        generated: dict[str, Any],
+        generated_at: str,
+    ) -> None:
+        asset_id = str(fact.get("assetId", "") or "")
+        if not asset_id:
+            return
+        caption = clean_story_text(generated.get("caption"), 600)
+        tags = [clean_story_text(tag, 80) for tag in generated.get("tags", []) if clean_story_text(tag, 80)][:16]
+        if not caption and not tags:
+            return
+        try:
+            self.project.db.update_photo_asset_metadata_json(
+                asset_id=asset_id,
+                patch={
+                    "localVision": {
+                        "status": "indexed",
+                        "indexedAt": generated_at,
+                        "source": str(generated.get("source", "") or "vlm"),
+                        "caption": caption,
+                        "tags": tags,
+                        "tagCount": len(tags),
+                        "imageWidth": int(generated.get("imageWidth", 0) or 0),
+                        "imageHeight": int(generated.get("imageHeight", 0) or 0),
+                        "elapsedMs": float(generated.get("elapsedMs", 0) or 0),
+                        "route": generated.get("route", {}) if isinstance(generated.get("route"), dict) else {},
+                        "model": generated.get("model", {}) if isinstance(generated.get("model"), dict) else {},
+                        "error": "",
+                        "humanReviewRequired": True,
+                    }
+                },
+            )
+        except Exception:
+            # The story can still use this local result when metadata persistence
+            # loses a race with an unrelated library update.
+            return
+
+    def generate_photo_story(
+        self,
+        params: dict[str, Any],
+        *,
+        progress: Any | None = None,
+        model_runner: Any | None = None,
+        caption_runner: Any | None = None,
+    ) -> dict[str, Any]:
+        if params.get("confirm") is not True:
+            raise ValueError("Generating and saving a photo story requires explicit confirmation.")
+        idempotency_key = str(params.get("idempotencyKey", "") or "").strip()
+        if not idempotency_key or len(idempotency_key) > 160:
+            raise ValueError("A non-empty idempotencyKey of at most 160 characters is required.")
+        idempotency_sha256 = hashlib.sha256(f"photo-story:{idempotency_key}".encode("utf-8")).hexdigest()
+        with self._photo_story_lock:
+            for existing in self.project.db.photo_stories():
+                generation = existing.get("generation") if isinstance(existing.get("generation"), dict) else {}
+                if str(generation.get("idempotencyKeySha256", "") or "") == idempotency_sha256:
+                    return {"story": self._photo_story_public(existing), "idempotentReplay": True, "offline": True}
+        source_paths, memory_id, title_hint = self._photo_story_source_scope(params)
+        available_facts = self._photo_story_facts(source_paths)
+        facts = select_story_facts(available_facts, MAX_STORY_ASSETS)
+        if len(facts) < 2:
+            raise ValueError("A local story requires at least two visible still photos.")
+        options = self._photo_story_runtime_options(params)
+        status = self.photo_story_status(params)
+        if not status.get("available"):
+            raise ValueError(str(status.get("reason", "") or "Install a verified local photo VLM pack."))
+
+        def emit(payload: dict[str, Any]) -> None:
+            if progress:
+                progress(payload, "photo_story")
+
+        generated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        should_generate_missing = bool(params.get("generateMissingCaptions", True))
+        caption_call = caption_runner or run_photo_vlm
+        missing = [fact for fact in facts if not clean_story_text(fact.get("caption"), 600)]
+        for index, fact in enumerate(missing):
+            if not should_generate_missing:
+                break
+            emit({
+                "phase": "captioning",
+                "processed": index,
+                "total": len(missing),
+                "message": f"Writing local visual caption {index + 1} of {len(missing)}",
+            })
+            try:
+                generated = caption_call(
+                    fact["sourcePath"],
+                    preference=options["preference"],
+                    power_mode=options["powerMode"],
+                )
+            except PhotoVlmError as exc:
+                raise ValueError(f"A local visual caption could not be generated: {exc}") from exc
+            fact["caption"] = clean_story_text(generated.get("caption"), 600)
+            fact["captionSource"] = str(generated.get("source", "") or "vlm")
+            fact["tags"] = generated.get("tags", []) if isinstance(generated.get("tags"), list) else fact.get("tags", [])
+            fact["captionProvenance"] = generated.get("model", {}) if isinstance(generated.get("model"), dict) else {}
+            self._photo_story_persist_generated_caption(fact, generated, generated_at)
+        emit({"phase": "narrating", "processed": len(missing), "total": len(missing), "message": "Writing the local chapter draft"})
+        story = build_generated_story(
+            facts,
+            source_memory_id=memory_id,
+            title_hint=title_hint,
+            style=str(params.get("style", "journal") or "journal"),
+            requested_chapters=params.get("chapterCount"),
+            model_runner=model_runner or run_photo_vlm_chat,
+            preference=options["preference"],
+            power_mode=options["powerMode"],
+            story_id=new_id("story"),
+            generated_at=generated_at,
+        )
+        story["generation"]["idempotencyKeySha256"] = idempotency_sha256
+        story["generation"]["sourceSelection"] = {
+            "available": len(available_facts),
+            "selected": len(facts),
+            "omitted": max(0, len(available_facts) - len(facts)),
+        }
+        self._photo_story_assert_facts_unchanged(facts)
+        story = self._photo_story_resolved_sources(story)
+        with self._photo_story_lock:
+            for existing in self.project.db.photo_stories():
+                generation = existing.get("generation") if isinstance(existing.get("generation"), dict) else {}
+                if str(generation.get("idempotencyKeySha256", "") or "") == idempotency_sha256:
+                    return {"story": self._photo_story_public(existing), "idempotentReplay": True, "offline": True}
+            saved = self.project.db.save_photo_story(story)
+        self.project._append_audit({
+            "action": "generate_photo_story",
+            "story_id": saved.get("id", ""),
+            "memory_id": memory_id,
+            "asset_count": len(saved.get("sourceAssetIds", [])),
+            "chapter_count": len(saved.get("chapters", [])),
+            "input_sha256": saved.get("generation", {}).get("inputSha256", ""),
+            "content_sha256": saved.get("currentContentSha256", ""),
+            "model_tier": saved.get("generation", {}).get("route", {}).get("tier", ""),
+            "offline": True,
+            "human_review_required": True,
+        })
+        emit({"phase": "complete", "message": "Local story draft ready", "storyId": saved.get("id", "")})
+        return {"story": self._photo_story_public(saved), "idempotentReplay": False, "offline": True}
+
+    def _photo_story_existing(self, story_id: Any) -> dict[str, Any]:
+        story = self.project.db.photo_story_by_id(str(story_id or ""))
+        if not story:
+            raise ValueError("The photo story was not found.")
+        return story
+
+    def save_photo_story(self, params: dict[str, Any]) -> dict[str, Any]:
+        with self._photo_story_lock:
+            return self._save_photo_story_locked(params)
+
+    def _save_photo_story_locked(self, params: dict[str, Any]) -> dict[str, Any]:
+        story = self._photo_story_existing(params.get("storyId", params.get("id", "")))
+        try:
+            expected_revision = int(params.get("expectedRevision", 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("expectedRevision must be an integer.") from exc
+        if expected_revision != int(story.get("revision", 1) or 1):
+            raise ValueError("The photo story changed after it was opened. Refresh before saving.")
+        existing_captions = {
+            str(caption.get("assetId", "") or ""): caption
+            for chapter in story.get("chapters", [])
+            if isinstance(chapter, dict)
+            for caption in (chapter.get("captions", []) if isinstance(chapter.get("captions"), list) else [])
+            if isinstance(caption, dict)
+        }
+        raw_chapters = params.get("chapters", story.get("chapters", []))
+        if not isinstance(raw_chapters, list):
+            raise ValueError("chapters must be a list.")
+        chapters: list[dict[str, Any]] = []
+        for raw in raw_chapters:
+            if not isinstance(raw, dict):
+                continue
+            captions: list[dict[str, Any]] = []
+            raw_captions = raw.get("captions") if isinstance(raw.get("captions"), list) else []
+            for item in raw_captions:
+                if not isinstance(item, dict):
+                    continue
+                asset_id = str(item.get("assetId", "") or "")
+                text = clean_story_text(item.get("text"), 220)
+                previous = existing_captions.get(asset_id, {})
+                previous_text = clean_story_text(previous.get("text"), 220)
+                captions.append({
+                    "assetId": asset_id,
+                    "text": text,
+                    "source": str(previous.get("source", "") or "manual") if text == previous_text else "manual",
+                })
+            chapters.append({
+                "id": raw.get("id", ""),
+                "title": raw.get("title", ""),
+                "narrative": raw.get("narrative", ""),
+                "sourceAssetIds": raw.get("sourceAssetIds", []),
+                "captions": captions,
+            })
+        candidate = clean_photo_story_record({
+            **story,
+            "title": params.get("title", story.get("title", "")),
+            "subtitle": params.get("subtitle", story.get("subtitle", "")),
+            "style": params.get("style", story.get("style", "journal")),
+            "coverSourcePath": params.get("coverSourcePath", story.get("coverSourcePath", "")),
+            "chapters": chapters,
+        })
+        if candidate is None:
+            raise ValueError("The edited photo story has no valid chapters or sources.")
+        if story_content_sha256(candidate) == story_content_sha256(story):
+            return {"story": self._photo_story_public(story), "saved": False, "unchanged": True}
+        saved_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        snapshot = story_history_snapshot(
+            story,
+            version_id=new_id("story-version"),
+            saved_at=saved_at,
+            label=str(params.get("versionLabel", "") or f"Before edit {int(story.get('revision', 1) or 1) + 1}"),
+        )
+        candidate["history"] = [snapshot, *(story.get("history", []) if isinstance(story.get("history"), list) else [])]
+        candidate["generation"] = deepcopy(story.get("generation", {}))
+        candidate["revision"] = int(story.get("revision", 1) or 1) + 1
+        saved = self.project.db.save_photo_story(candidate)
+        self.project._append_audit({
+            "action": "save_photo_story",
+            "story_id": saved.get("id", ""),
+            "revision": saved.get("revision", 1),
+            "chapter_count": len(saved.get("chapters", [])),
+            "content_sha256": saved.get("currentContentSha256", ""),
+            "human_edited": bool(saved.get("humanEdited", False)),
+        })
+        return {"story": self._photo_story_public(saved), "saved": True, "unchanged": False}
+
+    def restore_photo_story_version(self, params: dict[str, Any]) -> dict[str, Any]:
+        with self._photo_story_lock:
+            return self._restore_photo_story_version_locked(params)
+
+    def _restore_photo_story_version_locked(self, params: dict[str, Any]) -> dict[str, Any]:
+        story = self._photo_story_existing(params.get("storyId", params.get("id", "")))
+        try:
+            expected_revision = int(params.get("expectedRevision", 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("expectedRevision must be an integer.") from exc
+        if expected_revision != int(story.get("revision", 1) or 1):
+            raise ValueError("The photo story changed after it was opened. Refresh before restoring.")
+        version_id = str(params.get("versionId", "") or "").strip()
+        version = next(
+            (
+                row for row in story.get("history", [])
+                if isinstance(row, dict) and str(row.get("versionId", "") or "") == version_id
+            ),
+            None,
+        )
+        if not version or not isinstance(version.get("content"), dict):
+            raise ValueError("The requested photo story version was not found.")
+        restored_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        before_restore = story_history_snapshot(
+            story,
+            version_id=new_id("story-version"),
+            saved_at=restored_at,
+            label="Before version restore",
+        )
+        candidate = clean_photo_story_record({
+            **story,
+            **deepcopy(version["content"]),
+            "generation": deepcopy(story.get("generation", {})),
+            "history": [before_restore, *story.get("history", [])],
+            "revision": int(story.get("revision", 1) or 1) + 1,
+        })
+        if candidate is None:
+            raise ValueError("The saved photo story version is no longer valid.")
+        saved = self.project.db.save_photo_story(candidate)
+        self.project._append_audit({
+            "action": "restore_photo_story_version",
+            "story_id": saved.get("id", ""),
+            "version_id": version_id,
+            "revision": saved.get("revision", 1),
+            "content_sha256": saved.get("currentContentSha256", ""),
+        })
+        return {"story": self._photo_story_public(saved), "restored": True, "versionId": version_id}
+
+    def delete_photo_story(self, params: dict[str, Any]) -> dict[str, Any]:
+        with self._photo_story_lock:
+            return self._delete_photo_story_locked(params)
+
+    def _delete_photo_story_locked(self, params: dict[str, Any]) -> dict[str, Any]:
+        if params.get("confirm") is not True:
+            raise ValueError("Deleting a photo story requires explicit confirmation.")
+        story = self._photo_story_existing(params.get("storyId", params.get("id", "")))
+        deleted = self.project.db.delete_photo_story(str(story["id"]))
+        self.project._append_audit({"action": "delete_photo_story", "story_id": story["id"], "deleted": int(deleted)})
+        return {"storyId": story["id"], "deleted": int(deleted)}
+
+    def export_photo_story(self, params: dict[str, Any]) -> dict[str, Any]:
+        story = self._photo_story_existing(params.get("storyId", params.get("id", "")))
+        folder_value = str(params.get("folder", "") or "").strip()
+        export_root = safe_resolve(Path(folder_value).expanduser()) if folder_value else (self.project.root / "exports").resolve()
+        export_root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        slug = re.sub(r"[^a-z0-9]+", "-", str(story.get("title", "") or "photo-story").lower()).strip("-")[:60] or "photo-story"
+        base = export_root / f"vintrace-photo-story-{slug}-{stamp}"
+        suffix = 2
+        while base.with_suffix(".md").exists() or base.with_suffix(".json").exists():
+            base = export_root / f"vintrace-photo-story-{slug}-{stamp}-{suffix}"
+            suffix += 1
+        generated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        public_story = self._photo_story_public(story)
+        payload = {
+            "format": "vintrace-photo-story-v1",
+            "generatedAt": generated_at,
+            "offline": True,
+            "pathFree": True,
+            "story": public_story,
+        }
+        json_path = base.with_suffix(".json")
+        markdown_path = base.with_suffix(".md")
+        json_temp = json_path.with_suffix(".json.tmp")
+        json_temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        json_temp.replace(json_path)
+        lines = [f"# {story['title']}"]
+        if story.get("subtitle"):
+            lines.extend(["", str(story["subtitle"])])
+        for chapter in story.get("chapters", []):
+            lines.extend(["", f"## {chapter.get('title', 'Chapter')}"])
+            if chapter.get("narrative"):
+                lines.extend(["", str(chapter["narrative"])])
+            for caption in chapter.get("captions", []):
+                lines.extend([
+                    "",
+                    f"- {caption.get('text', '')}",
+                    f"  <!-- asset:{caption.get('assetId', '')} -->",
+                ])
+        lines.extend([
+            "",
+            "---",
+            f"Generated locally by {STORY_GENERATOR_VERSION}; human review required.",
+            f"Content SHA-256: {story.get('currentContentSha256', '')}",
+        ])
+        markdown_temp = markdown_path.with_suffix(".md.tmp")
+        markdown_temp.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        markdown_temp.replace(markdown_path)
+        result = {
+            "storyId": story["id"],
+            "markdownPath": str(markdown_path),
+            "jsonPath": str(json_path),
+            "generatedAt": generated_at,
+            "contentSha256": story.get("currentContentSha256", ""),
+            "markdownSha256": sha256_file(markdown_path),
+            "jsonSha256": sha256_file(json_path),
+            "pathFree": True,
+            "offline": True,
+        }
+        self.project._append_audit({
+            "action": "export_photo_story",
+            "story_id": story["id"],
+            "content_sha256": story.get("currentContentSha256", ""),
+            "markdown_sha256": result["markdownSha256"],
+            "json_sha256": result["jsonSha256"],
+            "path_free": True,
+        })
+        return result
+
+    def create_photo_story_slideshow(self, params: dict[str, Any]) -> dict[str, Any]:
+        story = self._photo_story_existing(params.get("storyId", params.get("id", "")))
+        resolved_story = self._photo_story_resolved_sources(story)
+        payload = story_slideshow_payload(resolved_story)
+        project_id = str(params.get("projectId", "") or "").strip()
+        if project_id:
+            payload["id"] = project_id
+        project = self.save_photo_slideshow_project(payload)
+        self.project._append_audit({
+            "action": "create_photo_story_slideshow",
+            "story_id": story["id"],
+            "project_id": project.get("id", ""),
+            "content_sha256": story.get("currentContentSha256", ""),
+            "slide_count": len(project.get("sourcePaths", [])),
+        })
+        return {"story": self._photo_story_public(story), "project": project, "offline": True}
+
     def duplicate_photo_asset_version(self, params: dict[str, Any]) -> dict[str, Any]:
         asset = self._photo_edit_stack_asset(params)
         managed_root_param = str(params.get("managedRoot", params.get("defaultManagedRoot", "")) or "").strip()
@@ -33794,11 +42236,19 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             if isinstance(operation, dict)
         ]
         if operations:
-            cloned_stack = self.save_photo_edit_stack({
-                "assetId": result.get("assetId", ""),
-                "sourcePath": result.get("sourcePath", ""),
-                "operations": operations,
-            })
+            cloned_asset = self.project.db.photo_asset_by_id(str(result.get("assetId", "") or ""))
+            if not isinstance(cloned_asset, dict):
+                raise ValueError("The duplicated photo asset could not be reloaded.")
+            cloned_stack = self._save_photo_edit_stack_for_asset(
+                cloned_asset,
+                operations,
+                {
+                    "assetId": result.get("assetId", ""),
+                    "sourcePath": result.get("sourcePath", ""),
+                    "operations": operations,
+                },
+                allow_new_generated_artifact=True,
+            )
             self.project.db.update_photo_asset_metadata(
                 asset_id=str(result.get("assetId", "") or ""),
                 edited=True,
@@ -33951,7 +42401,382 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         days = max(1, min(3650, days))
         return (datetime.utcnow() - timedelta(days=days)).isoformat(timespec="seconds") + "Z"
 
+    def _photo_folder_enrichment_scope_key(self, params: dict[str, Any], library_root: str) -> str:
+        return json.dumps(
+            {
+                "libraryRoot": str(library_root or ""),
+                "includeHiddenPeople": bool(params.get("includeHiddenPeople", False)),
+                "includeHiddenGroups": bool(params.get("includeHiddenGroups", False)),
+                "includeHiddenPets": bool(params.get("includeHiddenPets", False)),
+                "sourceFolderLimit": max(0, min(200, int(params.get("sourceFolderLimit", 48) or 48))),
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+    def _list_photo_folders_interactive(self, params: dict[str, Any]) -> dict[str, Any]:
+        include_hidden_people = bool(params.get("includeHiddenPeople", False))
+        library_root_filter = self._photo_library_root_filter_from_params(params)
+        source_filters = self._photo_library_root_source_text_filters(library_root_filter)
+        requested_preview_budget = max(0, min(64, int(params.get("coverPreviewBudget", params.get("coverPreviewCreateBudget", 0)) or 0)))
+        summaries = self.project.db.photo_folder_fast_summaries(
+            confident_threshold=float(self.project.config.thresholds.confident),
+            library_root=library_root_filter,
+            source_text_filters=source_filters,
+        )
+        revision = self.project.db.photo_smart_album_materialization_revision()
+        people_profiles = self.project.db.list_photo_people_profiles()
+
+        def cover(source_path: str) -> str | None:
+            return self.project.preview_path_for(source_path, create=False) if source_path else None
+
+        def summary_folder(folder_id: str, name: str, summary: dict[str, Any], **extra: Any) -> dict[str, Any]:
+            cover_source = str(summary.get("coverSourcePath", "") or "")
+            return {
+                "id": folder_id,
+                "kind": "utility",
+                "name": name,
+                "count": int(summary.get("count", 0) or 0),
+                "coverPreviewPath": cover(cover_source),
+                "coverSourcePath": cover_source,
+                **extra,
+            }
+
+        visible = summaries.get("visible", {}) if isinstance(summaries.get("visible"), dict) else {}
+        favorites = summaries.get("favorites", {}) if isinstance(summaries.get("favorites"), dict) else {}
+        edited = summaries.get("edited", {}) if isinstance(summaries.get("edited"), dict) else {}
+        hidden = summaries.get("hidden", {}) if isinstance(summaries.get("hidden"), dict) else {}
+        deleted = summaries.get("deleted", {}) if isinstance(summaries.get("deleted"), dict) else {}
+        duplicate_groups = revision.get("photoDuplicateGroups", {}) if isinstance(revision.get("photoDuplicateGroups"), dict) else {}
+        duplicate_items = revision.get("photoDuplicateGroupItems", {}) if isinstance(revision.get("photoDuplicateGroupItems"), dict) else {}
+        location_rows = revision.get("photoAssetLocations", {}) if isinstance(revision.get("photoAssetLocations"), dict) else {}
+        recent_since = self._photo_recent_activity_since()
+        recently_viewed = self.project.db.photo_asset_event_summary(
+            "viewed",
+            source_text_filters=source_filters,
+            since=recent_since,
+        )
+        recently_shared = self.project.db.photo_asset_event_summary(
+            "shared",
+            source_text_filters=source_filters,
+            since=recent_since,
+        )
+        import_sessions_with_archived = self.project.db.list_photo_import_sessions(limit=1000, include_archived=True)
+        import_sessions_all = [session for session in import_sessions_with_archived if not bool(session.get("archived", False))]
+        archived_import_sessions_all = [session for session in import_sessions_with_archived if bool(session.get("archived", False))]
+        import_sessions = import_sessions_all[:200]
+        archived_import_sessions = archived_import_sessions_all[:200]
+        import_ids = [str(session.get("importId", "") or "") for session in import_sessions_all if str(session.get("importId", "") or "")]
+        latest_import_id = str(import_sessions_all[0].get("importId", "") or "") if import_sessions_all else ""
+        recent_import_ids: list[str] = []
+        saved_import_ids: list[str] = []
+        recent_cutoff = datetime.utcnow() - timedelta(days=30)
+        for session in import_sessions_all:
+            value = str(session.get("completedAt", "") or session.get("updatedAt", "") or session.get("startedAt", "") or "")
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if parsed.tzinfo is not None:
+                parsed = parsed.replace(tzinfo=None)
+            if parsed < recent_cutoff:
+                continue
+            import_id = str(session.get("importId", "") or "")
+            if not import_id:
+                continue
+            recent_import_ids.append(import_id)
+            if str(session.get("sourceKind", "") or "").strip().lower() in PHOTO_APP_IMPORT_SOURCE_KINDS:
+                saved_import_ids.append(import_id)
+
+        def import_folder_summary(import_ids_for_folder: list[str], *, visibility: str = "all") -> dict[str, Any]:
+            clean_ids = [str(import_id or "").strip() for import_id in import_ids_for_folder if str(import_id or "").strip()]
+            if not clean_ids:
+                return {"count": 0, "coverSourcePath": ""}
+            page = self.project.db.list_photo_asset_page(
+                offset=0,
+                limit=1,
+                visibility=visibility,
+                source_scan_runs=clean_ids,
+                source_text_filters=source_filters,
+                sort="newest",
+            )
+            assets = page.get("assets", []) if isinstance(page.get("assets", []), list) else []
+            return {
+                "count": int(page.get("total", 0) or 0),
+                "coverSourcePath": str(assets[0].get("sourcePath", "") or "") if assets else "",
+            }
+
+        import_summary = import_folder_summary(import_ids)
+        last_import_summary = import_folder_summary([latest_import_id] if latest_import_id else [])
+        recently_imported_summary = import_folder_summary(recent_import_ids)
+        recently_saved_summary = import_folder_summary(saved_import_ids, visibility="visible")
+        recent_import_id_set = set(recent_import_ids)
+        recently_imported_sessions = [
+            session
+            for session in import_sessions
+            if str(session.get("importId", "") or "") in recent_import_id_set
+        ]
+        generated_cache = self.project.db.photo_generated_collection_cache(library_root_filter)
+        trips = self._photo_refresh_generated_summary_previews(
+            generated_cache.get("trips", []) if isinstance(generated_cache.get("trips", []), list) else []
+        )
+        memories = self._photo_refresh_generated_summary_previews(
+            generated_cache.get("memories", []) if isinstance(generated_cache.get("memories", []), list) else []
+        )
+        trip_sources = {
+            str(source_path or "")
+            for trip in trips
+            for source_path in (trip.get("sourcePaths", []) if isinstance(trip, dict) and isinstance(trip.get("sourcePaths", []), list) else [])
+            if str(source_path or "")
+        }
+        memory_sources = {
+            str(source_path or "")
+            for memory in memories
+            for source_path in (memory.get("sourcePaths", []) if isinstance(memory, dict) and isinstance(memory.get("sourcePaths", []), list) else [])
+            if str(source_path or "")
+        }
+        trip_cover = str((trips[0] if trips else {}).get("coverSourcePath", "") or "")
+        memory_cover = str((memories[0] if memories else {}).get("coverSourcePath", "") or "")
+        folders: list[dict[str, Any]] = [
+            {
+                "id": "all",
+                "kind": "all",
+                "name": "All Photos",
+                "count": int(visible.get("count", 0) or 0),
+                "coverPreviewPath": cover(str(visible.get("coverSourcePath", "") or "")),
+                "coverSourcePath": str(visible.get("coverSourcePath", "") or ""),
+            },
+            summary_folder("favorites", "Favorites", favorites),
+            summary_folder("recentlyAdded", "Recently Added", visible),
+            summary_folder("recentlyEdited", "Recently Edited", edited),
+            summary_folder("recentlyViewed", "Recently Viewed", recently_viewed),
+            summary_folder("recentlyShared", "Recently Shared", recently_shared),
+            summary_folder("recentlySaved", "Recently Saved", recently_saved_summary),
+            summary_folder(
+                "imports",
+                "Imports",
+                import_summary,
+                importSessionCount=len(import_sessions_all),
+                importSessions=import_sessions,
+                archivedImportSessionCount=len(archived_import_sessions_all),
+                archivedImportSessions=archived_import_sessions,
+            ),
+            summary_folder(
+                "lastImport",
+                "Last Import",
+                last_import_summary,
+                importSession=import_sessions[0] if import_sessions else None,
+            ),
+            summary_folder(
+                "recentlyImported",
+                "Recently Imported",
+                recently_imported_summary,
+                importSessionCount=len(recent_import_ids),
+                importSessions=recently_imported_sessions,
+            ),
+            summary_folder(
+                "duplicates",
+                "Duplicates",
+                {"count": int(duplicate_items.get("count", 0) or 0), "coverSourcePath": ""},
+                groupCount=int(duplicate_groups.get("count", 0) or 0),
+            ),
+            summary_folder("hidden", "Hidden", hidden),
+            summary_folder("recentlyDeleted", "Recently Deleted", deleted),
+            summary_folder(
+                "places",
+                "Places",
+                {"count": int(location_rows.get("count", 0) or 0), "coverSourcePath": ""},
+                placeCount=int(location_rows.get("count", 0) or 0),
+            ),
+            summary_folder(
+                "trips",
+                "Trips",
+                {"count": len(trip_sources), "coverSourcePath": trip_cover},
+                tripCount=len(trips),
+            ),
+            summary_folder(
+                "memories",
+                "Memories",
+                {"count": len(memory_sources), "coverSourcePath": memory_cover},
+                memoryCount=len(memories),
+            ),
+        ]
+        media_names = {
+            "image": "Images",
+            "video": "Videos",
+            "screenshot": "Screenshots",
+            "screen_recording": "Screen Recordings",
+            "panorama": "Panoramas",
+            "portrait": "Portraits",
+            "burst": "Bursts",
+            "time_lapse": "Time-lapse",
+            "raw": "RAW",
+            "live_photo": "Live Photos",
+            "other": "Other Media",
+        }
+        media_summaries = summaries.get("media", {}) if isinstance(summaries.get("media"), dict) else {}
+        for media_kind, name in media_names.items():
+            summary = media_summaries.get(media_kind, {}) if isinstance(media_summaries.get(media_kind), dict) else {}
+            if int(summary.get("count", 0) or 0) > 0:
+                folders.append(summary_folder(f"media:{media_kind}", name, summary, mediaKind=media_kind))
+
+        for row in summaries.get("people", []) if isinstance(summaries.get("people", []), list) else []:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("personName", "") or "")
+            source = str(row.get("coverSourcePath", "") or "")
+            count = int(row.get("count", 0) or 0)
+            if not name or count <= 0:
+                continue
+            if name.startswith("Unmatched cluster"):
+                folders.append({
+                    "id": f"unknown:{name}",
+                    "kind": "unknown",
+                    "name": name,
+                    "count": count,
+                    "coverPreviewPath": cover(source),
+                    "coverSourcePath": source,
+                })
+                continue
+            profile = people_profiles.get(name) or {
+                "personName": name,
+                "keyAssetId": "",
+                "keyAssetCrop": {},
+                "favorite": False,
+                "hidden": False,
+                "manualOrder": None,
+                "createdAt": "",
+                "updatedAt": "",
+            }
+            if profile.get("hidden") and not include_hidden_people:
+                continue
+            folders.append({
+                "id": f"person:{name}",
+                "kind": "person",
+                "name": name,
+                "count": count,
+                "coverPreviewPath": cover(source),
+                "coverSourcePath": source,
+                "personProfile": profile,
+            })
+
+        manual_album_summaries = summaries.get("manualAlbums", {}) if isinstance(summaries.get("manualAlbums"), dict) else {}
+        smart_album_summaries = summaries.get("smartAlbums", {}) if isinstance(summaries.get("smartAlbums"), dict) else {}
+        album_rows = self.project.db.list_photo_albums()
+        for album in album_rows:
+            album_id = str(album.get("albumId", "") or "")
+            source = manual_album_summaries if str(album.get("albumKind", "smart") or "smart") == "manual" else smart_album_summaries
+            summary = source.get(album_id, {}) if isinstance(source.get(album_id), dict) else {}
+            folders.append(self._photo_album_folder(album, summary={
+                "count": int(summary.get("count", 0) or 0),
+                "coverSourcePath": str(album.get("coverSourcePath", "") or summary.get("coverSourcePath", "") or ""),
+                "coverMatches": bool(summary.get("count", 0)),
+            }))
+        for album_folder in self.project.db.list_photo_album_folders():
+            direct_albums = [album for album in album_rows if str(album.get("folderId", "") or "") == str(album_folder.get("folderId", "") or "")]
+            direct_summaries = [
+                (manual_album_summaries if str(album.get("albumKind", "smart") or "smart") == "manual" else smart_album_summaries).get(str(album.get("albumId", "") or ""), {})
+                for album in direct_albums
+            ]
+            folder_count = sum(int(summary.get("count", 0) or 0) for summary in direct_summaries if isinstance(summary, dict))
+            folder_cover = next((str(summary.get("coverSourcePath", "") or "") for summary in direct_summaries if isinstance(summary, dict) and str(summary.get("coverSourcePath", "") or "")), "")
+            folders.append(self._photo_album_folder_node(
+                album_folder,
+                summary={"count": folder_count, "coverSourcePath": folder_cover},
+                albums=album_rows,
+            ))
+        for trip in trips:
+            source = str(trip.get("coverSourcePath", "") or "")
+            folders.append({
+                "id": f"trip:{trip.get('tripId', '')}",
+                "kind": "trip",
+                "name": str(trip.get("name", "") or "Trip"),
+                "count": int(trip.get("count", 0) or 0),
+                "coverPreviewPath": cover(source),
+                "coverSourcePath": source,
+                "tripId": str(trip.get("tripId", "") or ""),
+                "trip": trip,
+            })
+        for memory in memories:
+            source = str(memory.get("coverSourcePath", "") or "")
+            folders.append({
+                "id": f"memory:{memory.get('memoryId', '')}",
+                "kind": "memory",
+                "name": str(memory.get("name", "") or "Memory"),
+                "count": int(memory.get("count", 0) or 0),
+                "coverPreviewPath": cover(source),
+                "coverSourcePath": source,
+                "memoryId": str(memory.get("memoryId", "") or ""),
+                "memory": memory,
+            })
+        enrichment_revision = self.project.db.photo_folder_enrichment_revision()
+        enrichment_scope_key = self._photo_folder_enrichment_scope_key(params, library_root_filter)
+        enrichment_cache = self.project.db.photo_folder_enrichment_cache(enrichment_scope_key)
+        enrichment_available = bool(
+            enrichment_revision
+            and str(enrichment_cache.get("revision", "") or "") == enrichment_revision
+            and isinstance(enrichment_cache.get("folders", []), list)
+        )
+        if enrichment_available:
+            fast_folders_by_id = {str(folder.get("id", "") or ""): folder for folder in folders}
+            merged_folders: list[dict[str, Any]] = []
+            seen_folder_ids: set[str] = set()
+            for folder in enrichment_cache.get("folders", []):
+                if not isinstance(folder, dict):
+                    continue
+                folder_id = str(folder.get("id", "") or "")
+                if not folder_id or folder_id in seen_folder_ids:
+                    continue
+                merged_folders.append(folder)
+                seen_folder_ids.add(folder_id)
+            for folder_id, folder in fast_folders_by_id.items():
+                if folder_id and folder_id not in seen_folder_ids:
+                    merged_folders.append(folder)
+                    seen_folder_ids.add(folder_id)
+            folders = merged_folders
+        return {
+            "folders": folders,
+            "coverPreviewBudget": requested_preview_budget,
+            "coverPreviewAttempts": 0,
+            "coverPreviewGenerated": 0,
+            "coverPreviewExisting": sum(1 for folder in folders if folder.get("coverPreviewPath")),
+            "partial": not enrichment_available,
+            "railMode": "interactive",
+            "catalogRevision": enrichment_revision,
+            "enriched": enrichment_available,
+        }
+
+    def _queue_photo_folder_enrichment(self, params: dict[str, Any]) -> bool:
+        with self._photo_folder_enrichment_lock:
+            current = self._photo_folder_enrichment_future
+            if current is not None and not current.done():
+                return False
+            if self._photo_folder_enrichment_executor is None:
+                self._photo_folder_enrichment_executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="photo-folder-enrichment",
+                )
+            worker_params = {
+                **params,
+                "railMode": "full",
+                "coverPreviewBudget": 0,
+                "coverPreviewCreateBudget": 0,
+            }
+            self._photo_folder_enrichment_future = self._photo_folder_enrichment_executor.submit(
+                self.list_photo_folders,
+                worker_params,
+            )
+            return True
+
     def list_photo_folders(self, params: dict[str, Any]) -> dict[str, Any]:
+        rail_mode = str(params.get("railMode", params.get("mode", "")) or "").strip().lower()
+        if rail_mode in {"background", "deferred", "enrich"}:
+            queued = self._queue_photo_folder_enrichment(params)
+            result = self._list_photo_folders_interactive(params)
+            result.update({"enrichmentQueued": queued, "enrichmentRunning": True})
+            return result
+        if rail_mode in {"interactive", "fast", "core"}:
+            return self._list_photo_folders_interactive(params)
         # Tally distinct source photos per person / unknown cluster (one tile per
         # photo even when a photo holds several faces).
         include_hidden_people = bool(params.get("includeHiddenPeople", False))
@@ -33961,6 +42786,26 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         library_root_source_filters = self._photo_library_root_source_text_filters(library_root_filter)
         cover_preview_budget = max(0, min(64, int(params.get("coverPreviewBudget", params.get("coverPreviewCreateBudget", 0)) or 0)))
         source_folder_limit = max(0, min(200, int(params.get("sourceFolderLimit", 48) or 48)))
+        rail_cache_key = json.dumps(params, separators=(",", ":"), sort_keys=True, default=str)
+        database_change_key = self.project.db._scale_summary_stat_key()
+        candidate_change_key = (
+            self._photo_matches_cache_generation,
+            id(self.project.candidates),
+            len(self.project.candidates),
+        )
+        with self._photo_folder_rail_cache_lock:
+            cached_rail = self._photo_folder_rail_cache.get(rail_cache_key)
+        if (
+            cached_rail is not None
+            and cached_rail[0] == database_change_key
+            and cached_rail[1] == candidate_change_key
+        ):
+            return deepcopy(cached_rail[2])
+        # The rich rail is assembled through several bounded reads rather than
+        # one long SQLite transaction. Record the logical catalog revision
+        # before hydration so an import/Memory/profile write that lands midway
+        # cannot be published later as an "enriched" snapshot of older data.
+        enrichment_revision_at_start = self.project.db.photo_folder_enrichment_revision()
         people: dict[str, set[str]] = {}
         unknown: dict[str, set[str]] = {}
         people_groups: dict[tuple[tuple[str, ...], tuple[str, ...]], set[str]] = {}
@@ -33970,15 +42815,28 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
         unknown_cover: dict[str, str] = {}
         people_group_cover: dict[tuple[tuple[str, ...], tuple[str, ...]], str] = {}
         pet_cover: dict[str, str] = {}
-        matches_by_source = self._photo_matches_by_source()
         people_profiles = self.project.db.list_photo_people_profiles()
         pet_profiles = self.project.db.list_photo_pet_profiles()
         utility_profiles = self.project.db.list_photo_utility_profiles()
         saved_people_groups = self.project.db.list_photo_people_groups()
         visible_all = self._filter_photo_entries_by_library_root(
-            self._visible_photo_entries(self._all_photo_entries(matches_by_source)),
+            self._visible_photo_entries(self._all_photo_entries()),
             library_root_filter,
         )
+        # Folder covers, memories, and utility classifiers repeatedly consult
+        # object tags while ranking the same visible entries. Hydrate them in
+        # bounded SQL batches once; otherwise the rich folder rail performs an
+        # N+1 database open/query/close cycle for every asset.
+        visible_asset_ids = [
+            str((entry.get("_asset") or {}).get("assetId", entry.get("_assetId", "")) or "")
+            for entry in visible_all
+            if isinstance(entry, dict)
+        ]
+        object_tags_by_asset = self.project.db.photo_object_tags_for_assets(visible_asset_ids)
+        for entry in visible_all:
+            asset = entry.get("_asset") if isinstance(entry, dict) else None
+            asset_id = str((asset or {}).get("assetId", entry.get("_assetId", "")) or "") if isinstance(entry, dict) else ""
+            entry["_objectTags"] = object_tags_by_asset.get(asset_id, [])
         visible_sources = {str(entry.get("sourcePath", "") or "") for entry in visible_all if str(entry.get("sourcePath", "") or "")}
         visible_entries_by_source = {str(entry.get("sourcePath", "") or ""): entry for entry in visible_all if str(entry.get("sourcePath", "") or "")}
         curation_preferences = self.project.db.photo_curation_preferences()
@@ -34107,12 +42965,18 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             asset_metadata = asset.get("metadata", {}) if isinstance(asset, dict) else {}
             if not isinstance(asset_metadata, dict):
                 asset_metadata = {}
+            classifier_match_context = self._photo_utility_classifier_match_context(
+                source_path=source_path,
+                metadata=entry_metadata,
+                asset_metadata=asset_metadata,
+            )
             for classifier_id in PHOTO_UTILITY_CLASSIFIERS:
-                if self._photo_utility_classifier_matches(
+                if self._photo_utility_classifier_match_evidence(
                     classifier_id=classifier_id,
                     source_path=source_path,
                     metadata=entry_metadata,
                     asset_metadata=asset_metadata,
+                    match_context=classifier_match_context,
                 ):
                     classifier_utility_entries_by_id[classifier_id].append(entry)
             for group_key, _group, member_people, excluded_people, member_pets, excluded_pets in saved_group_specs:
@@ -34129,7 +42993,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             entry = self._photo_source_entry(
                 source_path=source_path,
                 media_kind=str(candidate.media_kind or self._media_kind_for_source(source_path)),
-                matches_by_source=matches_by_source,
+                matches_by_source={},
                 candidate=candidate,
             )
             if not self._photo_entry_default_visible(entry):
@@ -34149,7 +43013,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             return str(cover_entry.get("sourcePath", "") or "")
 
         def person_profile(name: str) -> dict[str, Any]:
-            return people_profiles.get(name) or self.project.db.photo_person_profile(name)
+            return people_profiles.get(name) or {
+                "personName": name,
+                "keyAssetId": "",
+                "keyAssetCrop": {},
+                "favorite": False,
+                "hidden": False,
+                "manualOrder": None,
+                "createdAt": "",
+                "updatedAt": "",
+            }
 
         def person_cover_source(name: str, fallback: str | None) -> str:
             profile = person_profile(name)
@@ -34195,7 +43068,16 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             return curation_cover_source(entries)
 
         def pet_profile(name: str) -> dict[str, Any]:
-            return pet_profiles.get(name) or self.project.db.photo_pet_profile(name)
+            return pet_profiles.get(name) or {
+                "petName": name,
+                "petKind": "pet",
+                "keyAssetId": "",
+                "favorite": False,
+                "hidden": False,
+                "manualOrder": None,
+                "createdAt": "",
+                "updatedAt": "",
+            }
 
         def pet_cover_source(name: str, entries: list[dict[str, Any]], fallback: str | None) -> str:
             profile = pet_profile(name)
@@ -34753,7 +43635,60 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 }
             )
         cover_preview_status = self._apply_photo_folder_cover_previews(folders, cover_preview_budget)
-        return {"folders": folders, **cover_preview_status}
+        enrichment_revision = self.project.db.photo_folder_enrichment_revision()
+        if enrichment_revision != enrichment_revision_at_start:
+            try:
+                enrichment_attempt = max(0, int(params.get("_enrichmentAttempt", 0) or 0))
+            except (TypeError, ValueError):
+                enrichment_attempt = 0
+            if enrichment_attempt < 2:
+                return self.list_photo_folders({
+                    **params,
+                    "railMode": "full",
+                    "_enrichmentAttempt": enrichment_attempt + 1,
+                })
+            # Continuous mutation is rare, but even then an older snapshot must
+            # never receive the current revision or enter either cache. The
+            # caller/poller will keep the fast catalog and schedule another pass.
+            return {
+                "folders": folders,
+                **cover_preview_status,
+                "partial": True,
+                "railMode": "full",
+                "catalogRevision": enrichment_revision,
+                "enriched": False,
+                "staleDuringBuild": True,
+            }
+        enrichment_scope_key = self._photo_folder_enrichment_scope_key(params, library_root_filter)
+        persistent_folders = [
+            deepcopy(folder)
+            for folder in folders
+            if str(folder.get("kind", "") or "") not in {"trip", "memory"}
+            and str(folder.get("id", "") or "") not in {"trips", "memories"}
+        ]
+        self.project.db.save_photo_folder_enrichment_cache(
+            enrichment_scope_key,
+            revision=enrichment_revision,
+            folders=persistent_folders,
+        )
+        result = {
+            "folders": folders,
+            **cover_preview_status,
+            "partial": False,
+            "railMode": "full",
+            "catalogRevision": enrichment_revision,
+            "enriched": True,
+        }
+        final_database_change_key = self.project.db._scale_summary_stat_key()
+        with self._photo_folder_rail_cache_lock:
+            if rail_cache_key not in self._photo_folder_rail_cache and len(self._photo_folder_rail_cache) >= 16:
+                self._photo_folder_rail_cache.pop(next(iter(self._photo_folder_rail_cache)))
+            self._photo_folder_rail_cache[rail_cache_key] = (
+                final_database_change_key,
+                candidate_change_key,
+                deepcopy(result),
+            )
+        return result
 
     def state(self, preview_create_budget: int = 8, candidate_limit: int = 500) -> dict[str, Any]:
         candidate_limit = max(250, min(10_000, int(candidate_limit)))
@@ -34798,8 +43733,13 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     preview_cache[cache_key] = None
             return preview_cache[cache_key]
 
-        def candidate_sort_key(item: Any) -> tuple[bool, float, str]:
-            return (item.status != "pending", -float(item.score), item.person_name.lower())
+        def candidate_sort_key(item: Any) -> tuple[bool, float, float, str]:
+            return (
+                item.status != "pending",
+                -float(getattr(item, "review_priority", 0.0) or 0.0),
+                -float(item.score),
+                item.person_name.lower(),
+            )
 
         if index_ready:
             try:
@@ -34842,7 +43782,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
             metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
             candidate_id = str(payload.get("candidateId", payload.get("candidate_id", "")) or "")
-            candidate = self.project.candidates.get(candidate_id)
+            candidate = self.project.candidate_by_id(candidate_id)
             source_path = candidate.source_path if candidate else ""
             reference_suggestions.append(
                 {
@@ -34864,6 +43804,80 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     "promotedAt": artifact.get("promoted_at", artifact.get("promotedAt")),
                     "metrics": metrics,
                     "payload": payload,
+                }
+            )
+        synthetic_review_status = self.project.synthetic_enrollment_review_status(limit=20)
+        synthetic_enrollment_reviews: list[dict[str, Any]] = []
+        for artifact in synthetic_review_status.get("artifacts", []):
+            payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+            metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
+            source_path = str(payload.get("sourcePath", "") or "")
+            synthetic_enrollment_reviews.append(
+                {
+                    "artifactId": str(artifact.get("artifactId", "") or ""),
+                    "artifactHash": str(artifact.get("artifactHash", "") or ""),
+                    "status": str(artifact.get("status", "") or ""),
+                    "personName": str(payload.get("personName", "") or ""),
+                    "ageBucket": str(payload.get("ageBucket", "unknown") or "unknown"),
+                    "sourceHash": str(payload.get("sourceHash", "") or ""),
+                    "recognizerModel": str(payload.get("recognizerModel", "") or ""),
+                    "screenModelId": str(payload.get("screenModelId", "") or ""),
+                    "screenModelVersion": str(payload.get("screenModelVersion", "") or ""),
+                    "screenAvailable": bool(payload.get("screenAvailable")),
+                    "reviewReason": str(payload.get("reviewReason", "") or ""),
+                    "stableScore": metrics.get("stableScore"),
+                    "originalScore": metrics.get("originalScore"),
+                    "recompressedScore": metrics.get("recompressedScore"),
+                    "reviewThreshold": metrics.get("reviewThreshold"),
+                    "quality": float(payload.get("quality", metrics.get("quality", 0.0)) or 0.0),
+                    "poseBucket": str(payload.get("poseBucket", "unknown") or "unknown"),
+                    "previewPath": preview_for(source_path),
+                    "previewUrl": preview_for(source_path),
+                    "sourceAvailable": bool(source_path and Path(source_path).is_file()),
+                    "createdAt": str(artifact.get("createdAt", "") or ""),
+                    "promotedAt": artifact.get("promotedAt"),
+                }
+            )
+        synthetic_age_review_status = self.project.synthetic_age_image_review_status(limit=20)
+        synthetic_age_image_reviews: list[dict[str, Any]] = []
+        for artifact in synthetic_age_review_status.get("artifacts", []):
+            payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+            metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
+            generated_path = ""
+            try:
+                stored_path = str(payload.get("generatedPath", "") or "")
+                if stored_path:
+                    generated_path = str(self.project._synthetic_age_image_path(stored_path, require_file=False))
+            except (OSError, ValueError):
+                generated_path = ""
+            generation = payload.get("generationProvenance") if isinstance(payload.get("generationProvenance"), dict) else {}
+            model = generation.get("model") if isinstance(generation.get("model"), dict) else {}
+            synthetic_age_image_reviews.append(
+                {
+                    "artifactId": str(artifact.get("artifactId", "") or ""),
+                    "artifactHash": str(artifact.get("artifactHash", "") or ""),
+                    "status": str(artifact.get("status", "") or ""),
+                    "personName": str(payload.get("personName", "") or ""),
+                    "targetAgeBucket": str(payload.get("targetAgeBucket", "unknown") or "unknown"),
+                    "parentRefId": str(payload.get("parentRefId", "") or ""),
+                    "generatedHash": str(payload.get("generatedHash", "") or ""),
+                    "generatedPath": generated_path,
+                    "recognizerModel": str(payload.get("recognizerModel", "") or ""),
+                    "generationModel": str(model.get("id", artifact.get("modelName", "")) or ""),
+                    "generationModelRevision": str(model.get("revision", "") or ""),
+                    "generationLicense": str(model.get("license", "") or ""),
+                    "quality": float(metrics.get("quality", 0.0) or 0.0),
+                    "targetIdentityCosine": float(metrics.get("targetIdentityCosine", 0.0) or 0.0),
+                    "parentCosine": float(metrics.get("parentCosine", 0.0) or 0.0),
+                    "nearestOtherCosine": metrics.get("nearestOtherCosine"),
+                    "identityMargin": metrics.get("identityMargin"),
+                    "reasons": [str(item) for item in metrics.get("reasons", []) if isinstance(item, str)],
+                    "reviewOnly": True,
+                    "authenticCapture": False,
+                    "futureAppearancePrediction": False,
+                    "generatedAvailable": bool(generated_path and Path(generated_path).is_file()),
+                    "createdAt": str(artifact.get("createdAt", "") or ""),
+                    "promotedAt": artifact.get("promotedAt"),
                 }
             )
 
@@ -34892,12 +43906,23 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "videoMoments": video_moments,
             "reviewInsights": review_insights,
             "referenceSuggestions": reference_suggestions,
+            "syntheticEnrollmentScreen": synthetic_review_status.get("model", {}),
+            "syntheticEnrollmentReviews": synthetic_enrollment_reviews,
+            "syntheticAgeImageReviewStatus": {
+                key: value
+                for key, value in synthetic_age_review_status.items()
+                if key != "artifacts"
+            },
+            "syntheticAgeImageReviews": synthetic_age_image_reviews,
             "config": {
                 "modelPack": self.project.config.model_pack,
                 "modelRoot": self.project.config.model_root,
                 "perSubjectConsent": bool(self.project.config.per_subject_consent),
                 "jurisdictionPreset": str(self.project.config.jurisdiction_preset),
                 "retentionReviewedDays": int(self.project.config.retention_reviewed_days),
+                "retentionPendingDays": int(self.project.config.retention_pending_days),
+                "retentionAuditDays": int(self.project.config.retention_audit_days),
+                "retentionEnforcementEnabled": bool(self.project.config.retention_enforcement_enabled),
                 "thresholds": {
                     "confident": self.project.config.thresholds.confident,
                     "likely": self.project.config.thresholds.likely,
@@ -34918,6 +43943,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "safeModeZeroAdmittance": self.project.config.safe_mode_zero_admittance,
                 "safeModeThreshold": self.project.config.safe_mode_threshold,
                 "safeModeProfile": self.project.config.safe_mode_profile,
+                "safeModeMultimodal": self.project.config.safe_mode_multimodal,
                 "safeModeProfiles": dict(SAFE_MODE_PROFILES),
                 "safeModeTemperature": self.project.config.safe_mode_temperature,
                 "storageBudgetBytes": self.project.config.storage_budget_bytes,
@@ -34940,7 +43966,7 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "reviewOnly": self.project.config.review_only,
                 "requireConsent": self.project.config.require_consent,
             },
-            "safeModeModel": safety_model_report(),
+            "safeModeModel": safety_model_report(multimodal_enabled=self.project.config.safe_mode_multimodal),
             "safeModeExplain": explain_model_report(),
             "modelSetup": self._model_status(),
             "modelCompatibility": self.project.model_compatibility_report(self.engine_name),
@@ -34957,6 +43983,18 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     "modelName": ref.model_name,
                     "poseBucket": ref.pose_bucket,
                     "createdAt": ref.created_at,
+                    "referenceKind": ref.reference_kind,
+                    "syntheticMethodVersion": ref.synthetic_method_version,
+                    "syntheticTargetAgeBucket": ref.synthetic_target_age_bucket,
+                    "parentRefIds": list(ref.parent_ref_ids),
+                    "syntheticScreenScore": ref.synthetic_screen_score,
+                    "syntheticScreenOriginalScore": ref.synthetic_screen_original_score,
+                    "syntheticScreenRecompressedScore": ref.synthetic_screen_recompressed_score,
+                    "syntheticScreenThreshold": ref.synthetic_screen_threshold,
+                    "syntheticScreenModelId": ref.synthetic_screen_model_id,
+                    "syntheticScreenModelVersion": ref.synthetic_screen_model_version,
+                    "syntheticScreenReviewed": ref.synthetic_screen_reviewed,
+                    "syntheticScreenHumanOverride": ref.synthetic_screen_human_override,
                 }
                 for ref in sorted(self.project.references.values(), key=lambda item: (item.person_name.lower(), item.source_path))
             ],
@@ -34976,11 +44014,19 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     "poseBucket": candidate.pose_bucket,
                     "status": candidate.status,
                     "note": candidate.note,
+                    "riskFlags": self._candidate_risk_flags(candidate),
                     "mediaKind": candidate.media_kind,
                     "mediaSourcePath": candidate.media_source_path,
                     "videoTimestampMs": candidate.video_timestamp_ms,
                     "videoFrameIndex": candidate.video_frame_index,
                     "videoDurationMs": candidate.video_duration_ms,
+                    "videoTrackId": candidate.video_track_id,
+                    "videoTrackVersion": candidate.video_track_version,
+                    "videoTrackStartMs": candidate.video_track_start_ms,
+                    "videoTrackEndMs": candidate.video_track_end_ms,
+                    "videoTrackFrameCount": candidate.video_track_frame_count,
+                    "videoTrackKeyframeTimestampsMs": list(candidate.video_track_keyframe_timestamps_ms),
+                    "videoTrackKeyframeIndices": list(candidate.video_track_keyframe_indices),
                     "sourceHash": candidate.source_hash,
                     "createdAt": candidate.created_at,
                     "captureDate": candidate.capture_date,
@@ -34989,6 +44035,8 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                     "ageGapConfidence": candidate.age_gap_confidence,
                     "captureDateProvenance": candidate.capture_date_provenance,
                     "referenceCaptureDateProvenance": candidate.reference_capture_date_provenance,
+                    "reviewPriority": float(getattr(candidate, "review_priority", 0.0) or 0.0),
+                    "reviewLane": str(getattr(candidate, "review_lane", "") or ""),
                 }
                 for candidate in top_candidates
             ],
@@ -35012,9 +44060,23 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             "skipped": 0,
             "errors": 0,
             "unmatched": 0,
+            "clusterPasses": 0,
+            "clusterModelGroups": 0,
+            "clusterComponents": 0,
+            "clusterUniqueInputs": 0,
+            "clusterDuplicateInputs": 0,
+            "clusterNoise": 0,
+            "clusterSpoolPeak": 0,
             "safeFiltered": 0,
             "videoFiles": 0,
             "videoFrames": 0,
+            "videoTrackObservations": 0,
+            "videoTracks": 0,
+            "videoTrackTemplates": 0,
+            "videoTrackSingletons": 0,
+            "videoTrackKeyframes": 0,
+            "videoTrackMatches": 0,
+            "videoTrackUnmatched": 0,
             "videoProtected": 0,
             "excluded": 0,
             "poseFrontal": 0,
@@ -35040,9 +44102,22 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "skipped",
                 "errors",
                 "unmatched",
+                "clusterPasses",
+                "clusterModelGroups",
+                "clusterComponents",
+                "clusterUniqueInputs",
+                "clusterDuplicateInputs",
+                "clusterNoise",
                 "safeFiltered",
                 "videoFiles",
                 "videoFrames",
+                "videoTrackObservations",
+                "videoTracks",
+                "videoTrackTemplates",
+                "videoTrackSingletons",
+                "videoTrackKeyframes",
+                "videoTrackMatches",
+                "videoTrackUnmatched",
                 "videoProtected",
                 "excluded",
                 "poseFrontal",
@@ -35057,6 +44132,10 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
                 "hardPoseUnsupported",
             ):
                 totals[key] += int(metrics.get(key, 0)) if isinstance(metrics, dict) else 0
+            totals["clusterSpoolPeak"] = max(
+                totals["clusterSpoolPeak"],
+                int(metrics.get("clusterSpoolPeak", 0)) if isinstance(metrics, dict) else 0,
+            )
             totals["durationMs"] += int(run.get("durationMs", 0)) if isinstance(run, dict) else 0
         totals["lastCompletedAt"] = self.project.scan_history[0].get("completedAt") if self.project.scan_history else None
         return totals
@@ -35081,28 +44160,17 @@ class DesktopApi(PublicDatasetBenchmarkMixin):
             return
         phase = str(payload.get("phase", ""))
         payload = self._with_resource_status(payload, force=phase in {"started", "complete", "cancelled", "error"})
-        if phase in {"complete", "cancelled"}:
-            self._last_progress_state_at = 0.0
-            self._last_progress_state_added = 0
+        if phase == "cancelled":
             progress({**payload, "state": self.state(preview_create_budget=0)})
             return
-        if phase == "candidate":
-            added = int(payload.get("added", 0) or 0)
-            total = int(payload.get("total", 0) or 0)
-            now = monotonic()
-            should_send_state = (
-                added <= 3
-                or total <= 25
-                or added - self._last_progress_state_added >= 5
-                or now - self._last_progress_state_at >= 0.75
-            )
-            if should_send_state:
-                self._last_progress_state_at = now
-                self._last_progress_state_added = added
-                progress({**payload, "state": self.state(preview_create_budget=0)})
-                return
-            progress(payload)
-            return
+        # Candidate ticks can arrive many times per second. Serializing the full
+        # application state here rebuilt candidate/reference arrays, crossed the
+        # process boundary, and forced a root React render during active scans.
+        # The progress payload already carries live counts; one authoritative
+        # state snapshot is emitted for cancellation, where the command may not
+        # return normally. Successful commands return one authoritative state
+        # after all verification/finalization work, so attaching another here
+        # would duplicate serialization, IPC transfer, and a root React render.
         progress(payload)
 
 
@@ -35126,6 +44194,9 @@ ERROR_CODE_BY_EXCEPTION = {
     "InterruptedError": ("E-SCAN-CANCELLED", "scan", "info", True),
     "OperationalError": ("E-DB-SQLITE", "database", "error", False),
     "DatabaseError": ("E-DB-SQLITE", "database", "error", False),
+    "LocalSyncError": ("E-SYNC-LOCAL", "sync", "warn", True),
+    "LocalSyncIntegrityError": ("E-SYNC-AUTH", "security", "error", True),
+    "WorkspaceEncryptionError": ("E-WORKSPACE-ENCRYPTION", "security", "error", True),
 }
 
 
@@ -35277,6 +44348,7 @@ def main() -> None:
     parser.add_argument("--mcp-transport", choices=["stdio", "streamable-http"], default="stdio")
     parser.add_argument("--mcp-host", default="127.0.0.1")
     parser.add_argument("--mcp-port", type=int, default=8765)
+    parser.add_argument("--mcp-tool-profile", choices=["full", "images"], default="full")
     parser.add_argument("--allow-remote-mcp-http", action="store_true")
     args = parser.parse_args()
     workspace = Path(args.workspace).expanduser().resolve() if args.workspace else None
@@ -35289,6 +44361,7 @@ def main() -> None:
             host=args.mcp_host,
             port=args.mcp_port,
             allow_remote_http=args.allow_remote_mcp_http,
+            tool_profile=args.mcp_tool_profile,
         )
         return
     serve(workspace)

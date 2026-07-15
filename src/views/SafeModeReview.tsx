@@ -32,7 +32,15 @@ export interface SafeModeFlaggedItem {
   score: number;
   reason: string;
   modelName: string;
+  categoryScores?: Record<string, number>;
 }
+
+const SAFE_MODE_CATEGORY_LABELS: Record<string, string> = {
+  sexually_explicit: "Sexually explicit",
+  violence_gore: "Violence or gore",
+  dangerous_activity: "Dangerous activity",
+  self_harm: "Self-harm",
+};
 
 interface SafeModeReviewProps {
   open: boolean;
@@ -355,6 +363,17 @@ export default function SafeModeReview({
                     <figcaption>
                       <span className="safe-review-name" title={item.sourcePath}>{item.name || item.sourcePath}</span>
                       {item.reason && <span className="safe-review-reason">{item.reason}</span>}
+                      {item.categoryScores && Object.keys(item.categoryScores).length > 0 && (
+                        <div className="safe-review-chips" aria-label={uiText("Policy category scores")}>
+                          {Object.entries(item.categoryScores)
+                            .sort((left, right) => Number(right[1]) - Number(left[1]))
+                            .map(([category, score]) => (
+                              <span key={category} className="safe-review-chip" title={`${Number(score).toFixed(3)}`}>
+                                {uiText(SAFE_MODE_CATEGORY_LABELS[category] || category.replace(/_/g, " "))} {Math.round(Number(score) * 100)}%
+                              </span>
+                            ))}
+                        </div>
+                      )}
                       {(() => {
                         const ex = explainById[item.assetId];
                         if (!ex) {

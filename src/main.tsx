@@ -218,6 +218,7 @@ class RendererBoundary extends React.Component<{ children: React.ReactNode }, { 
 async function startRenderer() {
   const language = readBootLanguage();
   applyBootLanguage(language);
+  document.documentElement.dataset.rendererGpu = window.crossAge?.rendererGpuMode || "hardware";
   await preloadLanguage(language);
 
   const rootElement = document.getElementById("root");

@@ -1,0 +1,114 @@
+{
+  "corpus": {
+    "dimension": 512,
+    "formerOverflowCap": 20000,
+    "generatedNumericEmbeddingsOnly": true,
+    "models": 2,
+    "rows": 20100,
+    "seed": 20260712
+  },
+  "environment": {
+    "faissAvailable": true,
+    "numpy": "2.4.6",
+    "platform": "macOS-26.4.1-arm64-arm-64bit-Mach-O",
+    "python": "3.13.12"
+  },
+  "forward": {
+    "cleanupVerified": true,
+    "clusterSeconds": 0.43134,
+    "groups": [
+      {
+        "components": 45,
+        "dimension": 512,
+        "model": "benchmark-model-1",
+        "noiseUnique": 1005,
+        "rows": 10050,
+        "uniqueRows": 10050
+      },
+      {
+        "components": 45,
+        "dimension": 512,
+        "model": "benchmark-model-2",
+        "noiseUnique": 1005,
+        "rows": 10050,
+        "uniqueRows": 10050
+      }
+    ],
+    "spoolPeak": 20100,
+    "spoolSeconds": 0.538548,
+    "totalSeconds": 0.969888
+  },
+  "forwardAlternateCommitBatch": {
+    "cleanupVerified": true,
+    "clusterSeconds": 0.361933,
+    "groups": [
+      {
+        "components": 45,
+        "dimension": 512,
+        "model": "benchmark-model-1",
+        "noiseUnique": 1005,
+        "rows": 10050,
+        "uniqueRows": 10050
+      },
+      {
+        "components": 45,
+        "dimension": 512,
+        "model": "benchmark-model-2",
+        "noiseUnique": 1005,
+        "rows": 10050,
+        "uniqueRows": 10050
+      }
+    ],
+    "spoolPeak": 20100,
+    "spoolSeconds": 0.398048,
+    "totalSeconds": 0.759982
+  },
+  "gates": {
+    "commitBatchInvariant": true,
+    "exceedsFormerOverflowCap": true,
+    "inputOrderInvariant": true,
+    "modelSpacesIsolated": true,
+    "singleTerminalPopulation": true,
+    "stableHashedNames": true,
+    "tempSpoolCleaned": true
+  },
+  "generatedAt": "2026-07-12T10:46:15+00:00",
+  "implementationVersion": "global-cosine-knn-v1",
+  "limitations": [
+    "This is a deterministic scale/correctness benchmark over generated numeric embeddings, not an identity-quality benchmark.",
+    "The exact kNN graph remains bounded by available CPU time and memory for a single recognizer model group."
+  ],
+  "recommendation": "ML-08",
+  "result": {
+    "clusteredUniqueRows": 18090,
+    "components": 90,
+    "noiseUniqueRows": 2010
+  },
+  "schemaVersion": 1,
+  "shuffled": {
+    "cleanupVerified": true,
+    "clusterSeconds": 0.363042,
+    "groups": [
+      {
+        "components": 45,
+        "dimension": 512,
+        "model": "benchmark-model-1",
+        "noiseUnique": 1005,
+        "rows": 10050,
+        "uniqueRows": 10050
+      },
+      {
+        "components": 45,
+        "dimension": 512,
+        "model": "benchmark-model-2",
+        "noiseUnique": 1005,
+        "rows": 10050,
+        "uniqueRows": 10050
+      }
+    ],
+    "spoolPeak": 20100,
+    "spoolSeconds": 0.605648,
+    "totalSeconds": 0.968689
+  },
+  "status": "pass"
+}

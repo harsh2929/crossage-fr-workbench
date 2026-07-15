@@ -48,6 +48,15 @@ Use this checklist for every DMG/EXE shared with a tester. Do not use tester pho
 - Test update check on stable/beta/internal channels.
 - Confirm crash/error report preview does not send anything without consent.
 
+## Mobile Companion
+
+- Configure a trusted same-origin HTTPS proxy to the managed loopback server.
+- In AI Agents, create a one-day metadata-only pairing and scan it on a phone.
+- Confirm library/search work, previews fail, and no edit/import/export controls appear.
+- Create a preview-enabled pairing and confirm Safe Mode still protects preview delivery.
+- Sign out on the phone, pair again, then revoke the device on desktop and confirm the open phone session fails without restarting Vintrace.
+- Confirm an expired or already-used pairing link cannot create another session.
+
 ## Release Gate
 
 Run these from a clean checkout before sharing a build:
@@ -58,6 +67,8 @@ npm run build
 npm run test:pipeline
 npm run test:edge
 npm run test:mcp
+npm run test:mobile-companion
+npm run test:e2e:mobile
 npm run test:clean
 npm run bench:accuracy
 npm run bench:scale
@@ -65,7 +76,13 @@ npm run update:dry-run
 npm run release:check
 ```
 
+Public installers must come from the tag-bound `Cross-Platform Release` workflow. The individual macOS, Windows, and Linux workflows produce caller-scoped build artifacts only and are not release publishers.
+
 Confirm the `selfLearningRd` row is present in the JSON output and remains
 non-authorizing for true retraining unless Phase 5/6 evidence has been approved.
 
-For Windows installers, use the GitHub Actions `Windows Release` workflow and download the `Vintrace-Windows-Installer` artifact.
+For a public release candidate, complete the exact artifact and assistive-technology matrix in [Accessibility Manual Release Sign-Off](accessibility-manual-signoff.md). Automated accessibility results do not replace that signed record.
+
+Do not represent the product as commercially licensed, priced, or entitled until [Distribution and Business Decision Record](distribution-business-decision-record.md) is approved and its implementation consequences are verified.
+
+For Windows testing, use the `.exe` from the complete `Vintrace-Cross-Platform-Release` Actions artifact before publication or from the verified public release afterward. The reusable Windows build artifact is intermediate evidence, not an independently publishable release.

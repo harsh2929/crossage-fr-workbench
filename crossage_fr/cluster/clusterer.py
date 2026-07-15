@@ -13,6 +13,8 @@ robustness if the graph pass yields nothing.
 from __future__ import annotations
 
 import importlib.util
+from collections.abc import Callable, Sequence
+import hashlib
 
 import numpy as np
 
@@ -20,6 +22,21 @@ import numpy as np
 # splits. Should ultimately be tuned against a labeled clustering benchmark.
 DEFAULT_EDGE_THRESHOLD = 0.5
 DEFAULT_KNN = 20
+KNN_QUERY_BATCH_SIZE = 512
+NUMPY_KNN_TEMP_BUDGET_BYTES = 96 * 1024 * 1024
+DBSCAN_FALLBACK_MAX_ROWS = 5_000
+
+
+VectorRows = Sequence[Sequence[float]] | np.ndarray
+
+
+def _as_matrix(vectors: VectorRows) -> np.ndarray:
+    values = np.asarray(vectors, dtype="float32")
+    if values.ndim != 2:
+        raise ValueError("Face embeddings must be a two-dimensional matrix.")
+    if values.shape[1] == 0 or not np.all(np.isfinite(values)):
+        raise ValueError("Face embeddings must contain finite values.")
+    return np.ascontiguousarray(values, dtype="float32")
 
 
 def _normalize(values: np.ndarray) -> np.ndarray:
@@ -28,8 +45,13 @@ def _normalize(values: np.ndarray) -> np.ndarray:
     return values / norms
 
 
-def _knn(values: np.ndarray, k: int) -> list[list[tuple[int, float]]]:
-    """For each row, its up-to-k most cosine-similar other rows (faiss if present)."""
+def _union_knn_graph(
+    values: np.ndarray,
+    k: int,
+    threshold: float,
+    union: Callable[[int, int], None],
+) -> None:
+    """Union qualifying kNN edges without materializing Python neighbor lists."""
     n = values.shape[0]
     k = max(1, min(int(k), n - 1))
     if importlib.util.find_spec("faiss") is not None:
@@ -38,25 +60,67 @@ def _knn(values: np.ndarray, k: int) -> list[list[tuple[int, float]]]:
 
             index = faiss.IndexFlatIP(values.shape[1])
             index.add(values)
-            sims, idx = index.search(values, min(k + 1, n))
-            result: list[list[tuple[int, float]]] = []
-            for i in range(n):
-                neighbors = [(int(j), float(s)) for j, s in zip(idx[i], sims[i]) if int(j) != i]
-                result.append(neighbors[:k])
-            return result
+            search_k = min(k + 1, n)
+            for start in range(0, n, KNN_QUERY_BATCH_SIZE):
+                stop = min(n, start + KNN_QUERY_BATCH_SIZE)
+                sims, indices = index.search(values[start:stop], search_k)
+                for local_index, (neighbor_ids, neighbor_sims) in enumerate(zip(indices, sims)):
+                    source = start + local_index
+                    accepted = 0
+                    for neighbor, similarity in zip(neighbor_ids, neighbor_sims):
+                        target = int(neighbor)
+                        if target < 0 or target == source:
+                            continue
+                        if float(similarity) >= threshold:
+                            union(source, target)
+                        accepted += 1
+                        if accepted >= k:
+                            break
+            return
         except Exception:
             pass
-    sims = values @ values.T
-    np.fill_diagonal(sims, -1.0)
-    result = []
-    for i in range(n):
-        top = np.argpartition(-sims[i], k - 1)[:k] if k < n else np.argsort(-sims[i])
-        result.append([(int(j), float(sims[i][int(j)])) for j in top])
-    return result
+
+    # Exact NumPy fallback with a dynamic temporary-memory budget instead of an
+    # unbounded n x n similarity matrix.
+    bytes_per_pair = np.dtype("float32").itemsize + np.dtype(np.intp).itemsize
+    numpy_batch_size = max(
+        1,
+        min(KNN_QUERY_BATCH_SIZE, NUMPY_KNN_TEMP_BUDGET_BYTES // max(1, n * bytes_per_pair)),
+    )
+    for start in range(0, n, numpy_batch_size):
+        stop = min(n, start + numpy_batch_size)
+        similarities = values[start:stop] @ values.T
+        row_indices = np.arange(stop - start)
+        similarities[row_indices, np.arange(start, stop)] = -np.inf
+        neighbors = np.argpartition(-similarities, kth=k - 1, axis=1)[:, :k]
+        for local_index, neighbor_ids in enumerate(neighbors):
+            source = start + local_index
+            for target in neighbor_ids:
+                target_index = int(target)
+                if float(similarities[local_index, target_index]) >= threshold:
+                    union(source, target_index)
+
+
+def _canonicalize_labels(labels: list[int], values: np.ndarray) -> list[int]:
+    """Canonicalize component ordinals from vector content, not input order."""
+    components: dict[int, list[int]] = {}
+    for index, label in enumerate(labels):
+        if label >= 0:
+            components.setdefault(int(label), []).append(index)
+    if not components:
+        return [-1] * len(labels)
+
+    component_order: list[tuple[str, int]] = []
+    for label, members in components.items():
+        row_hashes = sorted(hashlib.sha256(values[index].tobytes(order="C")).digest() for index in members)
+        digest = hashlib.sha256(b"".join(row_hashes)).hexdigest()
+        component_order.append((digest, label))
+    remap = {label: ordinal for ordinal, (_digest, label) in enumerate(sorted(component_order))}
+    return [remap[int(label)] if label >= 0 else -1 for label in labels]
 
 
 def cluster_vectors_graph(
-    vectors: list[list[float]],
+    vectors: VectorRows,
     min_cluster_size: int = 2,
     *,
     k: int = DEFAULT_KNN,
@@ -69,7 +133,7 @@ def cluster_vectors_graph(
     n = len(vectors)
     if n < max(2, int(min_cluster_size)):
         return [-1] * n
-    values = _normalize(np.asarray(vectors, dtype="float32"))
+    values = _normalize(_as_matrix(vectors))
 
     parent = list(range(n))
 
@@ -86,10 +150,7 @@ def cluster_vectors_graph(
         if ra != rb:
             parent[rb] = ra
 
-    for i, neighbors in enumerate(_knn(values, k)):
-        for j, sim in neighbors:
-            if sim >= threshold:
-                union(i, j)
+    _union_knn_graph(values, k, float(threshold), union)
 
     components: dict[int, list[int]] = {}
     for i in range(n):
@@ -101,28 +162,30 @@ def cluster_vectors_graph(
             for member in members:
                 labels[member] = next_label
             next_label += 1
-    return labels
+    return _canonicalize_labels(labels, values)
 
 
 def _dbscan_fallback(values: np.ndarray, min_cluster_size: int) -> list[int] | None:
+    if len(values) > DBSCAN_FALLBACK_MAX_ROWS:
+        return None
     if importlib.util.find_spec("sklearn") is None:
         return None
     try:
         from sklearn.cluster import DBSCAN
 
         labels = [int(label) for label in DBSCAN(eps=0.35, min_samples=min_cluster_size, metric="cosine").fit_predict(values)]
-        return labels if any(label >= 0 for label in labels) else None
+        return _canonicalize_labels(labels, values) if any(label >= 0 for label in labels) else None
     except Exception:
         return None
 
 
-def cluster_vectors(vectors: list[list[float]], min_cluster_size: int = 2) -> list[int]:
+def cluster_vectors(vectors: VectorRows, min_cluster_size: int = 2) -> list[int]:
     if len(vectors) < min_cluster_size:
         return [-1 for _ in vectors]
     labels = cluster_vectors_graph(vectors, min_cluster_size)
     if any(label >= 0 for label in labels):
         return labels
-    fallback = _dbscan_fallback(_normalize(np.asarray(vectors, dtype="float32")), min_cluster_size)
+    fallback = _dbscan_fallback(_normalize(_as_matrix(vectors)), min_cluster_size)
     if fallback is not None:
         return fallback
     return [-1 for _ in vectors]

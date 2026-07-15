@@ -1,0 +1,395 @@
+.photo-tether-launcher {
+  justify-content: center;
+  margin: 6px 10px 2px;
+  min-height: 36px;
+  position: relative;
+  width: calc(100% - 20px);
+}
+
+.photo-tether-launcher-live {
+  background: var(--green);
+  border: 2px solid var(--control-bg);
+  border-radius: 50%;
+  height: 9px;
+  position: absolute;
+  right: 10px;
+  width: 9px;
+}
+
+.photo-tether-backdrop {
+  align-items: center;
+  background: rgba(18, 20, 24, 0.5);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 24px;
+  position: fixed;
+  z-index: 2450;
+}
+
+.photo-tether-dialog {
+  background: var(--photo-source-surface);
+  border: 1px solid var(--separator);
+  border-radius: 8px;
+  box-shadow: 0 24px 80px rgba(18, 22, 28, 0.3);
+  color: var(--text);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  max-height: min(820px, calc(100vh - 48px));
+  overflow: hidden;
+  width: min(820px, calc(100vw - 48px));
+}
+
+.photo-tether-head,
+.photo-tether-band-head,
+.photo-tether-folder-row,
+.photo-tether-camera-status,
+.photo-tether-live-review,
+.photo-tether-actions,
+.photo-tether-action-status,
+.photo-tether-history li {
+  align-items: center;
+  display: flex;
+}
+
+.photo-tether-head {
+  border-bottom: 1px solid var(--separator-soft);
+  justify-content: space-between;
+  min-height: 68px;
+  padding: 12px 16px;
+}
+
+.photo-tether-head > div {
+  display: grid;
+  gap: 2px;
+}
+
+.photo-tether-head h3 {
+  font-size: 18px;
+  letter-spacing: 0;
+  margin: 0;
+}
+
+.photo-tether-state {
+  align-items: center;
+  color: var(--secondary);
+  display: flex;
+  font-size: 11px;
+  font-weight: 650;
+  gap: 5px;
+  text-transform: uppercase;
+}
+
+.photo-tether-state.active {
+  color: color-mix(in srgb, var(--green) 82%, black);
+}
+
+.photo-tether-body {
+  min-height: 0;
+  overflow: auto;
+}
+
+.photo-tether-band {
+  border-bottom: 1px solid var(--separator-soft);
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+}
+
+.photo-tether-band-head {
+  justify-content: space-between;
+  min-height: 22px;
+}
+
+.photo-tether-band-head strong {
+  align-items: center;
+  display: flex;
+  font-size: 13px;
+  gap: 5px;
+}
+
+.photo-tether-band-head span {
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.photo-tether-segmented {
+  background: var(--fill);
+  display: grid;
+  gap: 2px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 3px;
+}
+
+.photo-tether-segmented button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--secondary);
+  display: flex;
+  font-size: 13px;
+  font-weight: 650;
+  gap: 6px;
+  justify-content: center;
+  min-height: 34px;
+  padding: 6px 10px;
+}
+
+.photo-tether-segmented button.active {
+  background: var(--content-strong);
+  border-color: var(--control-border);
+  box-shadow: var(--inner-highlight);
+  color: var(--text);
+}
+
+.photo-tether-folder-row,
+.photo-tether-camera-status {
+  gap: 8px;
+  min-height: 34px;
+}
+
+.photo-tether-folder-row > span {
+  color: var(--secondary);
+  flex: 1;
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-tether-camera-status {
+  border-left: 3px solid var(--orange);
+  color: var(--secondary);
+  padding-left: 8px;
+}
+
+.photo-tether-camera-status.ok {
+  border-left-color: var(--green);
+  color: color-mix(in srgb, var(--green) 82%, black);
+}
+
+.photo-tether-camera-status span {
+  flex: 1;
+  font-size: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.photo-tether-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.photo-tether-field > span {
+  color: var(--secondary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.photo-tether-field input,
+.photo-tether-field select {
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: 6px;
+  color: var(--control-text);
+  font-size: 13px;
+  min-height: 36px;
+  min-width: 0;
+  padding: 7px 10px;
+  width: 100%;
+}
+
+.photo-tether-name-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) 140px;
+}
+
+.photo-tether-options {
+  display: grid;
+  gap: 8px 14px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.photo-tether-options label {
+  align-items: center;
+  display: flex;
+  font-size: 12px;
+  gap: 7px;
+  min-height: 28px;
+}
+
+.photo-tether-options input {
+  height: 16px;
+  margin: 0;
+  width: 16px;
+}
+
+.photo-tether-live-review {
+  gap: 12px;
+  min-width: 0;
+}
+
+.photo-tether-preview {
+  align-items: center;
+  aspect-ratio: 4 / 3;
+  background: var(--fill);
+  border: 1px solid var(--separator-soft);
+  border-radius: 6px;
+  color: var(--tertiary);
+  display: flex;
+  flex: 0 0 144px;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.photo-tether-preview img {
+  height: 100%;
+  object-fit: contain;
+  width: 100%;
+}
+
+.photo-tether-live-review > div:last-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.photo-tether-live-review strong {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-tether-live-review span,
+.photo-tether-live-review time {
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.photo-tether-history {
+  display: grid;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.photo-tether-history li {
+  border-top: 1px solid var(--separator-soft);
+  gap: 9px;
+  min-height: 34px;
+}
+
+.photo-tether-history li > span {
+  color: var(--tertiary);
+  font-variant-numeric: tabular-nums;
+  width: 32px;
+}
+
+.photo-tether-history li strong {
+  flex: 1;
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-tether-history li small {
+  color: var(--secondary);
+  font-size: 11px;
+}
+
+.photo-tether-history li small.imported {
+  color: color-mix(in srgb, var(--green) 82%, black);
+}
+
+.photo-tether-history li small.failed,
+.photo-tether-history li small.interrupted {
+  color: var(--orange);
+}
+
+.photo-tether-actions {
+  border-top: 1px solid var(--separator-soft);
+  gap: 8px;
+  justify-content: flex-end;
+  min-height: 66px;
+  padding: 10px 16px;
+}
+
+.photo-tether-actions > button {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  min-height: 38px;
+}
+
+.photo-tether-actions > button.primary {
+  background: color-mix(in srgb, var(--accent) 82%, black);
+  border-color: color-mix(in srgb, var(--accent) 82%, black);
+  color: #fff;
+}
+
+.photo-tether-action-status {
+  color: var(--secondary);
+  flex: 1;
+  font-size: 12px;
+  gap: 6px;
+  min-width: 0;
+}
+
+.photo-tether-action-status:has(svg) {
+  color: var(--orange);
+}
+
+.photo-tether-action-status span {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .photo-tether-backdrop {
+    align-items: stretch;
+    padding: 0;
+  }
+
+  .photo-tether-dialog {
+    border: 0;
+    border-radius: 0;
+    height: 100%;
+    max-height: none;
+    width: 100%;
+  }
+
+  .photo-tether-options {
+    grid-template-columns: 1fr;
+  }
+
+  .photo-tether-name-grid {
+    grid-template-columns: minmax(0, 1fr) 112px;
+  }
+
+  .photo-tether-preview {
+    flex-basis: 108px;
+  }
+
+  .photo-tether-actions {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .photo-tether-action-status {
+    flex-basis: 100%;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .photo-tether-state.active,
+  .photo-tether-camera-status.ok,
+  .photo-tether-history li small.imported {
+    color: var(--green);
+  }
+}

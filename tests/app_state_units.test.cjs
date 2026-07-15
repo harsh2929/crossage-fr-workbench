@@ -12,9 +12,20 @@ const appLocalStateSource = fs.readFileSync(path.join(root, "src", "appLocalStat
 const appToolStateSource = fs.readFileSync(path.join(root, "src", "appToolState.ts"), "utf8");
 const appFolderTreeStateSource = fs.readFileSync(path.join(root, "src", "appFolderTreeState.ts"), "utf8");
 const appRuntimeStateSource = fs.readFileSync(path.join(root, "src", "appRuntimeState.ts"), "utf8");
+const appReviewFocusHistoryStateSource = fs.readFileSync(path.join(root, "src", "appReviewFocusHistoryState.ts"), "utf8");
+const appPreferencesStateSource = fs.readFileSync(path.join(root, "src", "appPreferencesState.ts"), "utf8");
+const appMediaDestinationsStateSource = fs.readFileSync(path.join(root, "src", "appMediaDestinationsState.ts"), "utf8");
+const appReviewSessionStateSource = fs.readFileSync(path.join(root, "src", "appReviewSessionState.ts"), "utf8");
+const scanProgressStoreSource = fs.readFileSync(path.join(root, "src", "scanProgressStore.ts"), "utf8");
 const appStorageOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-storage-diagnostics-")), "appStorageDiagnostics.cjs");
 const appSettingsOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-settings-")), "appSettings.cjs");
 const appLocalStateOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-local-state-")), "appLocalState.cjs");
+const appReviewFocusHistoryStateOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-review-focus-history-state-")), "appReviewFocusHistoryState.cjs");
+const appPreferencesStateOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-preferences-state-")), "appPreferencesState.cjs");
+const appMediaDestinationsStateOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-media-destinations-state-")), "appMediaDestinationsState.cjs");
+const appReviewSessionStateOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-review-session-state-")), "appReviewSessionState.cjs");
+const appStateSequencerOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-state-sequencer-")), "appStateSequencer.cjs");
+const scanProgressStoreOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "scan-progress-store-")), "scanProgressStore.cjs");
 const bridgeOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-bridge-validation-")), "bridgeValidation.cjs");
 const i18nOutFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "app-i18n-")), "i18n.cjs");
 
@@ -42,6 +53,55 @@ esbuild.buildSync({
   outfile: appLocalStateOutFile,
 });
 const appLocalState = require(appLocalStateOutFile);
+esbuild.buildSync({
+  entryPoints: [path.join(root, "src", "appReviewFocusHistoryState.ts")],
+  bundle: true,
+  format: "cjs",
+  platform: "node",
+  outfile: appReviewFocusHistoryStateOutFile,
+});
+const appReviewFocusHistoryState = require(appReviewFocusHistoryStateOutFile);
+esbuild.buildSync({
+  entryPoints: [path.join(root, "src", "appPreferencesState.ts")],
+  bundle: true,
+  define: { "import.meta.env": JSON.stringify({ DEV: true }) },
+  format: "cjs",
+  platform: "node",
+  outfile: appPreferencesStateOutFile,
+});
+const appPreferencesState = require(appPreferencesStateOutFile);
+esbuild.buildSync({
+  entryPoints: [path.join(root, "src", "appMediaDestinationsState.ts")],
+  bundle: true,
+  format: "cjs",
+  platform: "node",
+  outfile: appMediaDestinationsStateOutFile,
+});
+const appMediaDestinationsState = require(appMediaDestinationsStateOutFile);
+esbuild.buildSync({
+  entryPoints: [path.join(root, "src", "appReviewSessionState.ts")],
+  bundle: true,
+  format: "cjs",
+  platform: "node",
+  outfile: appReviewSessionStateOutFile,
+});
+const appReviewSessionState = require(appReviewSessionStateOutFile);
+esbuild.buildSync({
+  entryPoints: [path.join(root, "src", "appStateSequencer.ts")],
+  bundle: true,
+  format: "cjs",
+  platform: "node",
+  outfile: appStateSequencerOutFile,
+});
+const appStateSequencer = require(appStateSequencerOutFile);
+esbuild.buildSync({
+  entryPoints: [path.join(root, "src", "scanProgressStore.ts")],
+  bundle: true,
+  format: "cjs",
+  platform: "node",
+  outfile: scanProgressStoreOutFile,
+});
+const scanProgressStore = require(scanProgressStoreOutFile);
 esbuild.buildSync({
   entryPoints: [path.join(root, "src", "bridgeValidation.ts")],
   bundle: true,
@@ -88,15 +148,73 @@ function countUseStateCalls(sourceText) {
 
 const appComponentSource = sliceBalancedFunction(source, "export default function App()");
 
-run("wrapped invoke applies piggybacked state once", () => {
+function fakeAppState(workspace) {
+  return { workspace, counts: { pending: 0, candidates: 0 }, config: {}, references: [], candidates: [] };
+}
+
+function isFakeAppState(value) {
+  return Boolean(value && typeof value === "object" && value.counts);
+}
+
+run("app state sequencer extracts direct and command-piggybacked states", () => {
+  const direct = fakeAppState("direct");
+  const piggybacked = fakeAppState("piggybacked");
+  assert.strictEqual(appStateSequencer.commandStateFromResult(direct, isFakeAppState), direct);
+  assert.strictEqual(appStateSequencer.commandStateFromResult({ ok: true, state: piggybacked }, isFakeAppState), piggybacked);
+  assert.strictEqual(appStateSequencer.commandStateFromResult({ ok: true, state: { workspace: "missing-counts" } }, isFakeAppState), null);
+  assert.strictEqual(appStateSequencer.commandStateFromResult({ ok: true }, isFakeAppState), null);
+});
+
+run("app state sequencer drops stale out-of-order IPC replies", () => {
+  const applied = [];
+  let appliedSeq = 0;
+  let result = appStateSequencer.applySequencedState({
+    state: fakeAppState("newer"),
+    sendSeq: 2,
+    appliedSeq,
+    applyState: (state) => applied.push(state.workspace),
+  });
+  assert.deepStrictEqual(result, { applied: true, appliedSeq: 2 });
+  appliedSeq = result.appliedSeq;
+
+  result = appStateSequencer.applySequencedState({
+    state: fakeAppState("older"),
+    sendSeq: 1,
+    appliedSeq,
+    applyState: (state) => applied.push(state.workspace),
+  });
+  assert.deepStrictEqual(result, { applied: false, appliedSeq: 2 });
+
+  result = appStateSequencer.applySequencedState({
+    state: null,
+    sendSeq: 3,
+    appliedSeq,
+    applyState: (state) => applied.push(state.workspace),
+  });
+  assert.deepStrictEqual(result, { applied: false, appliedSeq: 2 });
+  assert.deepStrictEqual(applied, ["newer"]);
+});
+
+run("wrapped invoke uses the tested app state sequencer", () => {
   const invokeStart = source.indexOf("  async function invoke<T = unknown>");
   assert.ok(invokeStart >= 0, "missing App invoke wrapper");
   const invokeEnd = source.indexOf("\n  // Stable identities", invokeStart);
   assert.ok(invokeEnd > invokeStart, "missing invoke wrapper end marker");
   const invokeBlock = source.slice(invokeStart, invokeEnd);
-  assert.match(invokeBlock, /const maybeCommand = result as CommandResult;/);
-  assert.match(invokeBlock, /const nextState = maybeCommand\.state \? \(maybeCommand\.state as AppState\) : maybeState\.counts \? maybeState : null;/);
-  assert.match(invokeBlock, /if \(nextState && sendSeq >= ipcAppliedSeqRef\.current\) \{[\s\S]*?ipcAppliedSeqRef\.current = sendSeq;[\s\S]*?applyState\(nextState\);[\s\S]*?\}/);
+  assert.match(source, /import \{ applySequencedState, commandStateFromResult \} from "\.\/appStateSequencer";/);
+  assert.match(invokeBlock, /const applyResult = applySequencedState\(\{/);
+  assert.match(invokeBlock, /state: commandStateFromResult<AppState>\(result, isAppStateResult\)/);
+  assert.match(invokeBlock, /ipcAppliedSeqRef\.current = applyResult\.appliedSeq;/);
+  assert.doesNotMatch(invokeBlock, /const maybeCommand = result as CommandResult;/);
+});
+
+run("app state discriminator rejects report objects that only share counts", () => {
+  const predicate = sliceBalancedFunction(source, "function isAppStateResult");
+  assert.match(predicate, /typeof candidate\.workspace === "string"/);
+  assert.match(predicate, /candidate\.config\.thresholds/);
+  assert.match(predicate, /Array\.isArray\(candidate\.references\)/);
+  assert.match(predicate, /Array\.isArray\(candidate\.candidates\)/);
+  assert.notEqual(predicate.trim(), 'function isAppStateResult(value: unknown): value is AppState {\n  return Boolean(value && typeof value === "object" && "counts" in value);\n}');
 });
 
 run("wrapped invoke handlers do not reapply result.state", () => {
@@ -122,6 +240,92 @@ run("applyState normalizes against the latest applied state ref", () => {
   assert.doesNotMatch(applyBlock, /lastAppliedWorkspaceRef/);
   const startupBlock = source.slice(source.indexOf("async function loadInitialState"), applyStart);
   assert.match(startupBlock, /normalizeAppState\(next, appStateRef\.current\)/);
+});
+
+run("app state normalization preserves compliance configuration", () => {
+  const normalizeBlock = sliceBalancedFunction(source, "function normalizeAppState");
+  for (const field of [
+    "perSubjectConsent",
+    "jurisdictionPreset",
+    "retentionReviewedDays",
+    "retentionPendingDays",
+    "retentionAuditDays",
+    "retentionEnforcementEnabled",
+    "safeModeMultimodal",
+    "safeModeZeroAdmittance",
+  ]) {
+    assert.match(normalizeBlock, new RegExp(`${field}:`), `${field} is missing from normalized app config`);
+  }
+});
+
+run("startup defers optional work and batches auxiliary state", () => {
+  const startupStart = source.indexOf("async function loadInitialState");
+  const startupEnd = source.indexOf("  function recordLatency", startupStart);
+  assert.ok(startupStart >= 0, "missing loadInitialState");
+  assert.ok(startupEnd > startupStart, "missing loadInitialState end marker");
+  const startupBlock = source.slice(startupStart, startupEnd);
+  assert.match(startupBlock, /void Promise\.all\(\[/);
+  assert.match(startupBlock, /getSystemIntegration\(\)/);
+  assert.match(startupBlock, /getUpdateStatus\(\)/);
+  assert.match(startupBlock, /getPhotoSources\(\)/);
+  assert.match(startupBlock, /getWorkspaceLockStatus\(\)/);
+  assert.match(startupBlock, /listExternalEditors\(\)/);
+  assert.doesNotMatch(startupBlock, /loadWorkspaces\(\)/);
+  assert.doesNotMatch(startupBlock, /warmPreviewCache\(/);
+
+  const optionalDataStart = source.indexOf('activeTab !== "settings" || settingsSection !== "advanced"');
+  const optionalDataEnd = source.indexOf("  useEffect(() => {", optionalDataStart + 1);
+  assert.ok(optionalDataStart >= 0, "missing lazy public dataset gate");
+  const optionalDataBlock = source.slice(optionalDataStart, optionalDataEnd);
+  assert.match(optionalDataBlock, /public_dataset_catalog/);
+
+  const workspaceGateStart = source.indexOf('activeTab !== "settings" || settingsSection !== "general"');
+  const workspaceGateEnd = source.indexOf("  useEffect(() => {", workspaceGateStart + 1);
+  assert.ok(workspaceGateStart >= 0, "missing lazy workspace list gate");
+  const workspaceGateBlock = source.slice(workspaceGateStart, workspaceGateEnd);
+  assert.match(workspaceGateBlock, /workspaceListLoadedForRef\.current/);
+  assert.match(workspaceGateBlock, /void loadWorkspaces\(\)/);
+
+  const routeWarmStart = source.indexOf("const preloadRoutes = () => {");
+  const routeWarmEnd = source.indexOf("  function confirmDialogMessage", routeWarmStart);
+  assert.ok(routeWarmStart >= 0, "missing idle route warmup");
+  const routeWarmBlock = source.slice(routeWarmStart, routeWarmEnd);
+  assert.match(routeWarmBlock, /requestIdleCallback/);
+  assert.match(routeWarmBlock, /setTimeout\(preloadRoutes, 700\)/);
+  assert.match(routeWarmBlock, /loadSearchViewModule\(\)/);
+  const photosWarmStart = source.indexOf("const preloadInteractiveRouteModules = () => {");
+  const photosWarmEnd = source.indexOf("  useEffect(() => {", photosWarmStart + 1);
+  assert.ok(photosWarmStart >= 0, "missing startup Photos module preload");
+  const photosWarmBlock = source.slice(photosWarmStart, photosWarmEnd);
+  assert.match(photosWarmBlock, /requestIdleCallback\(preloadPhotosModule, \{ timeout: 1_200 \}\)/);
+  assert.match(photosWarmBlock, /requestAnimationFrame\(\(\) => \{/);
+  assert.match(photosWarmBlock, /void Promise\.allSettled\(\[/);
+  assert.match(photosWarmBlock, /loadSearchViewModule\(\)/);
+  assert.match(photosWarmBlock, /loadMcpAgentsPanelModule\(\)/);
+  assert.match(photosWarmBlock, /void loadPhotosViewModule\(\)/);
+  assert.doesNotMatch(photosWarmBlock, /window\.crossAge\.invoke/);
+  assert.match(source, /<CachedRoute active=\{activeTab === "agents"\} warm>/);
+  assert.match(source, /<CachedRoute active=\{activeTab === "search"\} warm>/);
+  assert.match(source, /<CachedRoute active=\{showPhotosBody\}>/);
+  const cachedRouteStart = source.indexOf("function CachedRoute(");
+  const cachedRouteEnd = source.indexOf("\ntype UiMessageValue", cachedRouteStart);
+  assert.ok(cachedRouteStart >= 0 && cachedRouteEnd > cachedRouteStart, "missing CachedRoute implementation");
+  const cachedRouteBlock = source.slice(cachedRouteStart, cachedRouteEnd);
+  assert.match(cachedRouteBlock, /if \(active \|\| \(warm && cachedChildren\.current === null\)\)/);
+  assert.doesNotMatch(cachedRouteBlock, /requestAnimationFrame/);
+  assert.match(source, /<McpAgentsPanel active=\{activeTab === "agents"\}/);
+  assert.match(source, /<SearchView\s+active=\{activeTab === "search"\}/);
+
+  const jurisdictionGateStart = source.indexOf('settingsSection !== "privacy" || jurisdictionCatalogLoadedRef.current');
+  const jurisdictionGateEnd = source.indexOf("  useEffect(() => {", jurisdictionGateStart + 1);
+  assert.ok(jurisdictionGateStart >= 0, "missing lazy jurisdiction catalog gate");
+  assert.match(source.slice(jurisdictionGateStart, jurisdictionGateEnd), /void loadJurisdictions\(\)/);
+  const complianceGateStart = source.indexOf('settingsSection !== "privacy" || !state?.workspace');
+  const complianceGateEnd = source.indexOf("  useEffect(() => {", complianceGateStart + 1);
+  assert.ok(complianceGateStart >= 0, "missing lazy compliance status gate");
+  assert.match(source.slice(complianceGateStart, complianceGateEnd), /void loadComplianceStatus\(true\)/);
+  const prelude = source.slice(source.indexOf("export default function App()"), source.indexOf("const \[performanceChoice"));
+  assert.doesNotMatch(prelude, /loadJurisdictions\(\)/);
 });
 
 run("boot splash clock is scoped to BootScreen", () => {
@@ -252,28 +456,268 @@ run("storage diagnostics redact scoped keys and dispatch deduped warnings", () =
 
 run("app localStorage helpers report failures instead of silent fallbacks", () => {
   assert.match(source, /from "\.\/appLocalState";/);
+  assert.match(source, /from "\.\/appReviewFocusHistoryState";/);
+  assert.match(source, /from "\.\/appPreferencesState";/);
+  assert.match(source, /from "\.\/appMediaDestinationsState";/);
+  assert.match(source, /from "\.\/appReviewSessionState";/);
+  assert.match(appLocalStateSource, /const LOCAL_STATE_MAX_BYTES = 262144;/);
   assert.match(appLocalStateSource, /recordAppStorageIssue\("scanQueue", "read"/);
   assert.match(appLocalStateSource, /recordAppStorageIssue\("scanQueue", "write"/);
   assert.match(appLocalStateSource, /recordAppStorageIssue\("savedScanSources", "read"/);
   assert.match(appLocalStateSource, /recordAppStorageIssue\("savedReviewViews", "write"/);
+  assert.match(appReviewFocusHistoryStateSource, /const REVIEW_FOCUS_HISTORY_MAX_BYTES = 262144;/);
+  assert.match(appReviewFocusHistoryStateSource, /recordAppStorageIssue\("reviewFocusHistory", "read"/);
+  assert.match(appReviewFocusHistoryStateSource, /recordAppStorageIssue\("reviewFocusHistory", "write"/);
+  assert.match(appPreferencesStateSource, /recordAppStorageIssue\("language", "read"/);
+  assert.match(appPreferencesStateSource, /recordAppStorageIssue\("onboarding", "write"/);
+  assert.match(appPreferencesStateSource, /recordAppStorageIssue\("photoImportFlag", "read"/);
+  assert.match(appPreferencesStateSource, /recordAppStorageIssue\("agentDiscovery", "write"/);
+  assert.match(appMediaDestinationsStateSource, /recordAppStorageIssue\("mediaDestinations", "read"/);
+  assert.match(appMediaDestinationsStateSource, /recordAppStorageIssue\("mediaDestinations", "write"/);
   assert.match(source, /window\.addEventListener\(APP_STORAGE_ISSUE_EVENT, handleStorageIssue\)/);
+});
+
+run("app localStorage helpers reject oversized scan state before JSON parse", () => {
+  const originalWindow = global.window;
+  const originalCustomEvent = global.CustomEvent;
+  const originalConsoleWarn = console.warn;
+  const events = [];
+  console.warn = () => {};
+  global.CustomEvent = class CustomEvent {
+    constructor(type, init) {
+      this.type = type;
+      this.detail = init && init.detail;
+    }
+  };
+  global.window = {
+    localStorage: {
+      getItem: () => "[" + " ".repeat(262145) + "]",
+      setItem: () => {},
+    },
+    dispatchEvent: (event) => {
+      events.push(event.detail);
+      return true;
+    },
+  };
+  appStorageDiagnostics.clearAppStorageDiagnosticsForTest();
+  try {
+    assert.deepStrictEqual(appLocalState.readSavedScanSources("/workspace"), []);
+    assert.deepStrictEqual(appLocalState.readScanQueue("/workspace"), []);
+    assert.deepStrictEqual(appLocalState.readSavedReviewViews("/workspace"), []);
+    assert.deepStrictEqual(appReviewFocusHistoryState.readReviewFocusHistory("/workspace"), []);
+    const areas = events.map((item) => item.area);
+    assert.deepStrictEqual(areas, ["savedScanSources", "scanQueue", "savedReviewViews", "reviewFocusHistory"]);
+    assert.ok(events.every((item) => item.message.includes("256 KiB")));
+  } finally {
+    console.warn = originalConsoleWarn;
+    if (originalWindow === undefined) {
+      delete global.window;
+    } else {
+      global.window = originalWindow;
+    }
+    if (originalCustomEvent === undefined) {
+      delete global.CustomEvent;
+    } else {
+      global.CustomEvent = originalCustomEvent;
+    }
+    appStorageDiagnostics.clearAppStorageDiagnosticsForTest();
+  }
 });
 
 run("app persisted scan and review state is extracted from App", () => {
   assert.doesNotMatch(source, /function readScanQueue/);
   assert.doesNotMatch(source, /function readSavedScanSources/);
   assert.doesNotMatch(source, /function readSavedReviewViews/);
+  assert.doesNotMatch(source, /function readReviewFocusHistory/);
+  assert.doesNotMatch(source, /function writeReviewFocusHistory/);
+  assert.doesNotMatch(source, /function readInitialLanguage/);
+  assert.doesNotMatch(source, /function writeLanguage/);
+  assert.doesNotMatch(source, /function readOnboardingDismissed/);
+  assert.doesNotMatch(source, /function writeOnboardingDismissed/);
+  assert.doesNotMatch(source, /vintrace\.hasImportedPhotos/);
+  assert.doesNotMatch(source, /vintrace:media-destinations/);
+  assert.doesNotMatch(source, /vintrace:review:/);
+  assert.doesNotMatch(source, /setReviewFocusHistory/);
   assert.match(appLocalStateSource, /export function normalizeScanQueue/);
   assert.match(appLocalStateSource, /export function normalizeSavedReviewViews/);
+  assert.match(appReviewFocusHistoryStateSource, /export function readReviewFocusHistory/);
+  assert.match(appReviewFocusHistoryStateSource, /export function useReviewFocusHistoryState/);
+  assert.match(appPreferencesStateSource, /export function readInitialLanguage/);
+  assert.match(appPreferencesStateSource, /export function readPhotoImportFlag/);
+  assert.match(appPreferencesStateSource, /export function readAgentDiscoverySeen/);
+  assert.match(appMediaDestinationsStateSource, /export function readMediaActionDestinations/);
+  assert.match(appMediaDestinationsStateSource, /export function upsertMediaActionDestination/);
+  assert.match(appReviewSessionStateSource, /export function readReviewPref/);
+  assert.match(appReviewSessionStateSource, /export function writeReviewPref/);
+  assert.match(source, /const \{ reviewFocusHistory, addReviewFocusHistory, removeReviewFocusHistory \} = useReviewFocusHistoryState\(state\?\.workspace\);/);
+});
+
+run("review focus history state persists normalized records by workspace", () => {
+  const originalWindow = global.window;
+  const originalConsoleWarn = console.warn;
+  const writes = new Map();
+  console.warn = () => {};
+  global.window = {
+    localStorage: {
+      getItem: (key) => writes.get(key) || null,
+      setItem: (key, value) => writes.set(key, value),
+    },
+  };
+  appStorageDiagnostics.clearAppStorageDiagnosticsForTest();
+  try {
+    appReviewFocusHistoryState.writeReviewFocusHistory("/workspace-a", [{
+      id: "",
+      label: "  Ada Review  ",
+      candidateIds: [" ada-1 ", "ada-1", "grace-1"],
+      createdAt: 1000,
+      lastUsedAt: 1000,
+    }]);
+    assert.strictEqual(writes.size, 1);
+    assert.deepStrictEqual(
+      appReviewFocusHistoryState.readReviewFocusHistory("/workspace-a").map((record) => [record.label, record.candidateIds]),
+      [["Ada Review", ["ada-1", "grace-1"]]]
+    );
+    assert.deepStrictEqual(appReviewFocusHistoryState.readReviewFocusHistory("/workspace-b"), []);
+    assert.deepStrictEqual(appStorageDiagnostics.getAppStorageDiagnostics(), []);
+  } finally {
+    console.warn = originalConsoleWarn;
+    if (originalWindow === undefined) {
+      delete global.window;
+    } else {
+      global.window = originalWindow;
+    }
+    appStorageDiagnostics.clearAppStorageDiagnosticsForTest();
+  }
+});
+
+run("app preference helpers persist first-run choices outside App", () => {
+  const originalWindow = global.window;
+  const originalConsoleWarn = console.warn;
+  const writes = new Map();
+  console.warn = () => {};
+  global.window = {
+    localStorage: {
+      getItem: (key) => writes.get(key) || null,
+      setItem: (key, value) => writes.set(key, value),
+    },
+  };
+  try {
+    appStorageDiagnostics.clearAppStorageDiagnosticsForTest();
+    appPreferencesState.writeLanguage("fr");
+    assert.strictEqual(appPreferencesState.readInitialLanguage(), "fr");
+    appPreferencesState.writeOnboardingDismissed();
+    assert.strictEqual(appPreferencesState.readOnboardingDismissed(), true);
+    assert.strictEqual(appPreferencesState.readPhotoImportFlag(), false);
+    appPreferencesState.writePhotoImportFlag();
+    assert.strictEqual(appPreferencesState.readPhotoImportFlag(), true);
+    assert.strictEqual(appPreferencesState.readAgentDiscoverySeen(), false);
+    appPreferencesState.writeAgentDiscoverySeen();
+    assert.strictEqual(appPreferencesState.readAgentDiscoverySeen(), true);
+    assert.deepStrictEqual(appStorageDiagnostics.getAppStorageDiagnostics(), []);
+  } finally {
+    console.warn = originalConsoleWarn;
+    if (originalWindow === undefined) {
+      delete global.window;
+    } else {
+      global.window = originalWindow;
+    }
+    appStorageDiagnostics.clearAppStorageDiagnosticsForTest();
+  }
+});
+
+run("media action destination helpers cap recents and report storage issues", () => {
+  const originalWindow = global.window;
+  const originalCustomEvent = global.CustomEvent;
+  const originalConsoleWarn = console.warn;
+  const writes = new Map();
+  const events = [];
+  console.warn = () => {};
+  global.CustomEvent = class CustomEvent {
+    constructor(type, init) {
+      this.type = type;
+      this.detail = init && init.detail;
+    }
+  };
+  global.window = {
+    localStorage: {
+      getItem: (key) => writes.get(key) || null,
+      setItem: (key, value) => writes.set(key, value),
+    },
+    dispatchEvent: (event) => {
+      events.push(event.detail);
+      return true;
+    },
+  };
+  appStorageDiagnostics.clearAppStorageDiagnosticsForTest();
+  try {
+    let destinations = [];
+    for (const folder of ["/a", "/b", "/c", "/d", "/e", "/f", "/g", "/c"]) {
+      destinations = appMediaDestinationsState.upsertMediaActionDestination(destinations, ` ${folder} `);
+    }
+    assert.deepStrictEqual(destinations, ["/c", "/g", "/f", "/e", "/d", "/b"]);
+    appMediaDestinationsState.writeMediaActionDestinations("/workspace", [...destinations, 42, "/ignored"]);
+    assert.deepStrictEqual(appMediaDestinationsState.readMediaActionDestinations("/workspace"), destinations);
+
+    global.window.localStorage.getItem = () => "{";
+    assert.deepStrictEqual(appMediaDestinationsState.readMediaActionDestinations("/workspace"), []);
+    assert.strictEqual(events.at(-1).area, "mediaDestinations");
+    assert.strictEqual(events.at(-1).operation, "read");
+  } finally {
+    console.warn = originalConsoleWarn;
+    if (originalWindow === undefined) {
+      delete global.window;
+    } else {
+      global.window = originalWindow;
+    }
+    if (originalCustomEvent === undefined) {
+      delete global.CustomEvent;
+    } else {
+      global.CustomEvent = originalCustomEvent;
+    }
+    appStorageDiagnostics.clearAppStorageDiagnosticsForTest();
+  }
+});
+
+run("review session prefs remain best-effort and session scoped", () => {
+  const originalWindow = global.window;
+  const writes = new Map();
+  global.window = {
+    sessionStorage: {
+      getItem: (key) => writes.get(key) || null,
+      setItem: (key, value) => writes.set(key, value),
+    },
+  };
+  try {
+    assert.strictEqual(appReviewSessionState.reviewPrefStorageKey("lane"), "vintrace:review:lane");
+    assert.strictEqual(appReviewSessionState.readReviewPref("sort", "score"), "score");
+    appReviewSessionState.writeReviewPref({
+      statusFilter: "accepted",
+      search: "Ada",
+      sort: "newest",
+      people: ["Ada", "Grace"],
+    });
+    assert.strictEqual(appReviewSessionState.readReviewPref("statusFilter", "pending"), "accepted");
+    assert.deepStrictEqual(appReviewSessionState.readReviewPref("people", []), ["Ada", "Grace"]);
+    global.window.sessionStorage.getItem = () => "{";
+    assert.strictEqual(appReviewSessionState.readReviewPref("sort", "score"), "score");
+  } finally {
+    if (originalWindow === undefined) {
+      delete global.window;
+    } else {
+      global.window = originalWindow;
+    }
+  }
 });
 
 run("App tool result state lives outside the main component", () => {
   assert.match(source, /useAppToolPanelState\(\)/);
   assert.doesNotMatch(source, /const \[backupVerification, setBackupVerification\] = useState/);
   assert.doesNotMatch(source, /const \[runtimeSelfTest, setRuntimeSelfTest\] = useState/);
+  assert.doesNotMatch(source, /const \[modelLifecycleStatus, setModelLifecycleStatus\] = useState/);
   assert.doesNotMatch(source, /const \[latencySamples, setLatencySamples\] = useState/);
   assert.match(appToolStateSource, /export function useAppToolPanelState\(\)/);
   assert.match(appToolStateSource, /const \[backupVerification, setBackupVerification\] = useState/);
+  assert.match(appToolStateSource, /const \[modelLifecycleStatus, setModelLifecycleStatus\] = useState/);
   assert.match(appToolStateSource, /const \[latencySamples, setLatencySamples\] = useState/);
 });
 
@@ -305,8 +749,49 @@ run("App runtime and photo bridge state live outside the main component", () => 
   assert.match(appRuntimeStateSource, /export function useAppPhotoBridgeState\(\)/);
   assert.match(appRuntimeStateSource, /const \[photoSources, setPhotoSources\] = useState<SystemPhotoSource\[\]>\(\[\]\);/);
   assert.match(appRuntimeStateSource, /export function useAppRuntimeStatusState\(\)/);
-  assert.match(appRuntimeStateSource, /const \[scanProgress, setScanProgress\] = useState<ScanProgress \| null>\(null\);/);
+  assert.doesNotMatch(appRuntimeStateSource, /scanProgress/);
   assert.match(appRuntimeStateSource, /const \[folderAnalysis, setFolderAnalysis\] = useState<FolderAnalysis \| null>\(null\);/);
+});
+
+run("scan progress stream is isolated from App root state", () => {
+  assert.match(scanProgressStoreSource, /export function useScanProgress\(\): ScanProgress \| null \{/);
+  assert.match(scanProgressStoreSource, /useSyncExternalStore\(/);
+  assert.match(scanProgressStoreSource, /export function setScanProgressSnapshot\(next: ScanProgress \| null\): void/);
+  assert.match(source, /import \{ scanProgressIsActive, setScanProgressSnapshot, useScanProgress \} from "\.\/scanProgressStore";/);
+  assert.match(source, /setScanProgressSnapshot\(pendingScanProgress\);/);
+  assert.match(source, /const \[liveScanActive, setLiveScanActive\] = useState\(false\);/);
+  assert.match(source, /const \[scanRuntimePressure, setScanRuntimePressure\] = useState\(""\);/);
+  assert.doesNotMatch(source, /setScanProgress\(pendingScanProgress\)/);
+  assert.doesNotMatch(appComponentSource, /scanProgress,\s*setScanProgress/);
+  const photosStart = source.indexOf("<PhotosView");
+  const photosEnd = source.indexOf("appShortcutCommand={photoAppShortcutCommand}", photosStart);
+  assert.ok(photosStart >= 0 && photosEnd > photosStart, "PhotosView prop block should exist");
+  assert.doesNotMatch(source.slice(photosStart, photosEnd), /scanProgress/);
+  assert.match(source, /function ScanActivity\([\s\S]*const progress = useScanProgress\(\);/);
+  assert.match(source, /function BackgroundJobCenter\([\s\S]*const scanProgress = useScanProgress\(\);/);
+  assert.match(source, /function PerformanceCenter\([\s\S]*const scanProgress = useScanProgress\(\);/);
+});
+
+run("scan progress store notifies only subscribed progress consumers", () => {
+  scanProgressStore.setScanProgressSnapshot(null);
+  const seen = [];
+  const unsubscribe = scanProgressStore.subscribeScanProgress(() => {
+    seen.push(scanProgressStore.getScanProgressSnapshot());
+  });
+  const first = { phase: "started", processed: 1 };
+  scanProgressStore.setScanProgressSnapshot(first);
+  assert.strictEqual(scanProgressStore.getScanProgressSnapshot(), first);
+  assert.deepStrictEqual(seen, [first]);
+  scanProgressStore.setScanProgressSnapshot(first);
+  assert.deepStrictEqual(seen, [first], "same snapshot object should not notify again");
+  const done = { phase: "complete", processed: 2 };
+  scanProgressStore.setScanProgressSnapshot(done);
+  assert.deepStrictEqual(seen, [first, done]);
+  assert.strictEqual(scanProgressStore.scanProgressIsActive(first), true);
+  assert.strictEqual(scanProgressStore.scanProgressIsActive(done), false);
+  unsubscribe();
+  scanProgressStore.setScanProgressSnapshot(null);
+  assert.deepStrictEqual(seen, [first, done]);
 });
 
 run("App component direct state count stays below the medium audit threshold", () => {
@@ -344,6 +829,40 @@ run("app local scan state normalizers cap and repair stored rows", () => {
   assert.ok(!("message" in queue[2]));
   assert.strictEqual(appLocalState.savedScanSourcesKey("/workspace"), "vintrace:scan-sources:/workspace");
   assert.strictEqual(appLocalState.scanQueueKey(null), "vintrace:scan-queue:default");
+});
+
+run("App drag-drop and queued scans use normalized latest-path helpers", () => {
+  const enrollDrop = sliceBalancedFunction(source, "  async function handleEnrollDrop");
+  assert.match(enrollDrop, /files\.map\(\(file\) => getPathForFile\(file\)\)\.filter\(Boolean\)/);
+  assert.doesNotMatch(enrollDrop, /window\.crossAge\.getPathForFile/);
+
+  const touchSavedSource = sliceBalancedFunction(source, "  function touchSavedScanSource");
+  assert.match(touchSavedSource, /setSavedScanSources\(\(current\) =>/);
+  assert.match(touchSavedSource, /writeSavedScanSources\(state\?\.workspace, sorted\)/);
+
+  const runQueue = sliceBalancedFunction(source, "  async function runScanQueue");
+  assert.match(runQueue, /touchSavedScanSource\(item\.path\)/);
+  assert.match(runQueue, /Math\.max\(result\.metrics\?\.errors \?\? 0, result\.errors\?\.length \?\? 0\)/);
+  assert.match(runQueue, /Folder could not be scanned\. Check that it still exists and is readable\./);
+  assert.doesNotMatch(runQueue, /savedScanSources\.map\(\(source\) => source\.path === item\.path/);
+});
+
+run("Review bulk selection exposes one loaded-candidate select action", () => {
+  assert.match(source, />Select shown<\/button>/);
+  assert.doesNotMatch(source, />Select loaded<\/button>/);
+  assert.doesNotMatch(source, /function selectAllFiltered\(\)/);
+  assert.match(source, /function selectVisible\(\) \{\s*setSelectedIds\(new Set\(visibleCandidates\.map/);
+});
+
+run("DiagnosticsPanel memoizes full JSON preview work", () => {
+  const diagnosticsStart = source.indexOf("function DiagnosticsPanel");
+  const diagnosticsEnd = source.indexOf("\nconst JURISDICTION_OPTIONS", diagnosticsStart);
+  assert.ok(diagnosticsStart >= 0, "missing DiagnosticsPanel");
+  assert.ok(diagnosticsEnd > diagnosticsStart, "missing DiagnosticsPanel end marker");
+  const diagnosticsPanel = source.slice(diagnosticsStart, diagnosticsEnd);
+  assert.match(diagnosticsPanel, /const reportPreview = useMemo\(\(\) => \(report \? JSON\.stringify\(report, null, 2\) : ""\), \[report\]\);/);
+  assert.match(diagnosticsPanel, /const trimmedPreview = useMemo\(/);
+  assert.doesNotMatch(diagnosticsPanel, /const reportPreview = report \? JSON\.stringify\(report, null, 2\) : "";/);
 });
 
 run("app saved review view normalizer caps and validates user-writable rows", () => {
@@ -483,6 +1002,28 @@ run("app settings preset inference is unit-testable", () => {
   assert.strictEqual(appSettings.normalizeLearningMode("OFF"), "off");
   assert.strictEqual(appSettings.normalizeLearningMode("AUTO-STAGE"), "auto_stage");
   assert.strictEqual(appSettings.normalizeLearningMode("surprise"), "manual");
+});
+
+run("fresh settings defaults stay in parity with the backend preset", () => {
+  assert.deepStrictEqual(appSettings.defaultScanExclusions.dirNames, [
+    ".git", ".hg", ".svn", ".cache", ".mypy_cache", ".pytest_cache", ".venv", "__pycache__",
+    "$RECYCLE.BIN", "System Volume Information", "node_modules", "venv",
+  ]);
+  const recommended = appSettings.settingsPresets.find((preset) => preset.key === "recommended").values;
+  assert.strictEqual(appSettings.inferSettingsMode({
+    ...recommended,
+    scanExclusions: appSettings.defaultScanExclusions,
+  }), "recommended");
+});
+
+run("UI state truth and transient feedback contracts are explicit", () => {
+  assert.match(source, /const activeModelReady = Boolean\(state\.modelSetup\?\.ready && !state\.modelSetup\?\.fallbackActive\);/);
+  assert.match(source, /disabled=\{busy \|\| stagedSwitch \|\| !activeModelReady\}/);
+  assert.match(source, /!workspaceLocked && !agentDiscoverySeen && activeTab === "library"/);
+  assert.match(source, /setNotice\(\(current\) => current === notice \? null : current\);/);
+  assert.match(source, /"accuracy_validation_history",\s*\{ limit: 20 \},\s*\{ quiet: true \}/);
+  assert.match(source, /<McpAgentsPanel active copyText=\{props\.copyText\} uiText=\{props\.uiText\} variant="settings" \/>/);
+  assert.match(source, /const overBudget = budgetBytes > 0\s*\? \(health\?\.storageOverBudgetBytes \?\? Math\.max\(0, storageBytes - budgetBytes\)\)\s*:\s*0;/);
 });
 
 run("i18n dev diagnostics warn before raw-key fallback", () => {

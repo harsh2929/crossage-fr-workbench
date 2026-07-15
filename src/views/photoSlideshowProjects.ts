@@ -26,6 +26,35 @@ export type PhotoSlideshowTitleCardLayout = "center" | "lower-third" | "left";
 export type PhotoSlideshowTitleCardFontScale = "compact" | "regular" | "large";
 export const PHOTO_SLIDESHOW_CAPTION_LIMIT = 8;
 export const PHOTO_SLIDESHOW_PROJECT_LIMIT = 30;
+export const PHOTO_SLIDESHOW_PROJECTS_KEY = "vintrace.photos.slideshowProjects";
+export const PHOTO_SLIDESHOW_THEME_TEMPLATES_KEY = "vintrace.photos.slideshowThemeTemplates";
+export const PHOTO_SLIDESHOW_MUSIC_FREQUENCIES: Record<PhotoSlideshowProjectMusic, number> = {
+  none: 0,
+  calm: 220,
+  bright: 440,
+  cinematic: 110,
+  custom: 0,
+};
+
+export type PhotoSlideshowThemeTemplateLibraryExportValue = {
+  path?: string;
+  targetPath?: string;
+  exported?: number;
+  templateCount?: number;
+  format?: string;
+  generatedAt?: string;
+  templates?: PhotoSlideshowThemeTemplate[];
+};
+
+export type PhotoSlideshowThemeTemplateLibraryImportValue = {
+  imported?: number;
+  created?: number;
+  updated?: number;
+  skipped?: number;
+  sourcePath?: string;
+  format?: string;
+  templates?: PhotoSlideshowThemeTemplate[];
+};
 
 export interface PhotoSlideshowCaptionRegion {
   x: number;
@@ -66,6 +95,9 @@ export interface PhotoSlideshowProjectTimelineItem {
   captions?: PhotoSlideshowCaption[];
   transitionEffect?: PhotoSlideshowTransitionEffect;
   transitionDurationMs?: number;
+  chapterId?: string;
+  chapterTitle?: string;
+  chapterNarrative?: string;
 }
 
 export interface PhotoSlideshowThemeTimelineItem extends PhotoSlideshowProjectTimelineItem {
@@ -121,6 +153,9 @@ export interface PhotoSlideshowProject {
   name: string;
   title: string;
   sourceLabel: string;
+  storyId?: string;
+  storyContentSha256?: string;
+  storyGenerationSha256?: string;
   sourcePaths: string[];
   theme: PhotoSlideshowProjectTheme;
   themeTimelinePreset: PhotoSlideshowThemeTimelineChoice;
@@ -976,6 +1011,9 @@ export function cleanPhotoSlideshowTimelineItems(value: unknown, sourcePaths: st
     captions?: PhotoSlideshowCaption[];
     transitionEffect?: PhotoSlideshowTransitionEffect;
     transitionDurationMs?: number;
+    chapterId?: string;
+    chapterTitle?: string;
+    chapterNarrative?: string;
   }>();
   rawItems.forEach((item) => {
     const record = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
@@ -1015,6 +1053,9 @@ export function cleanPhotoSlideshowTimelineItems(value: unknown, sourcePaths: st
       ...(hasTransitionDuration
         ? { transitionDurationMs: cleanTransitionDurationMs(record.transitionDurationMs ?? record.transitionMs ?? record.transitionDuration ?? record.transitionOutMs) }
         : {}),
+      ...(cleanId(record.chapterId) ? { chapterId: cleanId(record.chapterId) } : {}),
+      ...(cleanText(record.chapterTitle, "") ? { chapterTitle: cleanText(record.chapterTitle, "").slice(0, 100) } : {}),
+      ...(cleanText(record.chapterNarrative, "") ? { chapterNarrative: cleanText(record.chapterNarrative, "").slice(0, 700) } : {}),
     };
     bySource.set(sourcePath, cleanItem);
   });
@@ -1037,6 +1078,9 @@ export function cleanPhotoSlideshowTimelineItems(value: unknown, sourcePaths: st
       ...(item?.captions?.length ? { captions: item.captions } : {}),
       ...(transitionEffect ? { transitionEffect } : {}),
       ...(typeof item?.transitionDurationMs === "number" ? { transitionDurationMs: transitionEffect === "cut" ? 0 : item.transitionDurationMs } : {}),
+      ...(item?.chapterId ? { chapterId: item.chapterId } : {}),
+      ...(item?.chapterTitle ? { chapterTitle: item.chapterTitle } : {}),
+      ...(item?.chapterNarrative ? { chapterNarrative: item.chapterNarrative } : {}),
     };
   });
 }
@@ -1099,6 +1143,9 @@ export function normalizePhotoSlideshowProject(value: unknown): PhotoSlideshowPr
     name,
     title: cleanText(record.title, name),
     sourceLabel: cleanText(record.sourceLabel, ""),
+    storyId: cleanId(record.storyId),
+    storyContentSha256: /^[a-f0-9]{64}$/i.test(String(record.storyContentSha256 || "")) ? String(record.storyContentSha256).toLowerCase() : "",
+    storyGenerationSha256: /^[a-f0-9]{64}$/i.test(String(record.storyGenerationSha256 || "")) ? String(record.storyGenerationSha256).toLowerCase() : "",
     sourcePaths,
     theme: cleanChoice(record.theme, THEME_OPTIONS, "classic"),
     themeTimelinePreset: cleanChoice(record.themeTimelinePreset ?? record.themePreset ?? record.timelinePreset, THEME_TIMELINE_OPTIONS, "auto"),
@@ -1154,6 +1201,25 @@ export function normalizePhotoSlideshowProjectList(values: unknown, limit = Numb
     .slice(0, limit);
 }
 
+export function readStoredPhotoSlideshowProjects(key: string): PhotoSlideshowProject[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(key);
+    return normalizePhotoSlideshowProjectList(raw ? JSON.parse(raw) : []);
+  } catch {
+    return [];
+  }
+}
+
+export function storePhotoSlideshowProjects(key: string, values: PhotoSlideshowProject[]) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(normalizePhotoSlideshowProjectList(values)));
+  } catch {
+    // Local storage can be unavailable in hardened browser contexts.
+  }
+}
+
 export function normalizePhotoSlideshowThemeTemplate(value: unknown): PhotoSlideshowThemeTemplate | null {
   const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
   const now = new Date(0).toISOString();
@@ -1202,6 +1268,25 @@ export function normalizePhotoSlideshowThemeTemplateList(values: unknown, limit 
     .slice(0, limit);
 }
 
+export function readStoredPhotoSlideshowThemeTemplates(key: string): PhotoSlideshowThemeTemplate[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(key);
+    return normalizePhotoSlideshowThemeTemplateList(raw ? JSON.parse(raw) : []);
+  } catch {
+    return [];
+  }
+}
+
+export function storePhotoSlideshowThemeTemplates(key: string, values: PhotoSlideshowThemeTemplate[]) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(normalizePhotoSlideshowThemeTemplateList(values)));
+  } catch {
+    // Local storage can be unavailable in hardened browser contexts.
+  }
+}
+
 export function photoSlideshowProjectSourcePaths(
   items: PhotoSlideshowProjectItemLike[],
   selectedSources?: Iterable<string>,
@@ -1222,6 +1307,9 @@ export function upsertPhotoSlideshowProject(
     name: string;
     title?: string;
     sourceLabel?: string;
+    storyId?: string;
+    storyContentSha256?: string;
+    storyGenerationSha256?: string;
     sourcePaths: string[];
     theme?: PhotoSlideshowProjectTheme | string;
     themeTimelinePreset?: PhotoSlideshowThemeTimelineChoice | string;
@@ -1269,7 +1357,10 @@ export function upsertPhotoSlideshowProject(
   const nameKey = name.toLocaleLowerCase();
   const existingById = requestedId ? normalizedProjects.find((project) => project.id === requestedId) : undefined;
   const existingByName = normalizedProjects.find((project) => project.name.toLocaleLowerCase() === nameKey);
-  if (existingById && existingByName && existingByName.id !== existingById.id) {
+  if (
+    (existingById && existingByName && existingByName.id !== existingById.id)
+    || (requestedId && !existingById && existingByName)
+  ) {
     return normalizedProjects;
   }
   const existing = existingById || existingByName;
@@ -1281,6 +1372,9 @@ export function upsertPhotoSlideshowProject(
     name,
     title: cleanText(draft.title, name),
     sourceLabel: draft.sourceLabel || existing?.sourceLabel || "",
+    storyId: draft.storyId ?? existing?.storyId ?? "",
+    storyContentSha256: draft.storyContentSha256 ?? existing?.storyContentSha256 ?? "",
+    storyGenerationSha256: draft.storyGenerationSha256 ?? existing?.storyGenerationSha256 ?? "",
     sourcePaths,
     theme: draft.theme || existing?.theme || "classic",
     themeTimelinePreset: draft.themeTimelinePreset || existing?.themeTimelinePreset || "auto",

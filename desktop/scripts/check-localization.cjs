@@ -8,22 +8,45 @@ const vm = require("vm");
 const repoRoot = path.resolve(__dirname, "..", "..");
 const i18nPath = path.join(repoRoot, "src", "i18n.ts");
 const appPath = path.join(repoRoot, "src", "App.tsx");
-const extraUiPaths = [
+const photosUiPaths = [
   path.join(repoRoot, "src", "views", "PhotosView.tsx"),
-  path.join(repoRoot, "src", "views", "SafeModeReview.tsx")
+  path.join(repoRoot, "src", "views", "photoSourceImportPanel.tsx"),
+  path.join(repoRoot, "src", "views", "PhotoCatalogPortabilityPanel.tsx"),
+];
+const extraUiPaths = [
+  ...photosUiPaths,
+  path.join(repoRoot, "src", "views", "PhotoStoryEditorPanel.tsx"),
+  path.join(repoRoot, "src", "views", "photoBurstStackPanel.tsx"),
+  path.join(repoRoot, "src", "views", "SafeModeReview.tsx"),
+  path.join(repoRoot, "src", "shell", "McpAgentsPanel.tsx"),
+  path.join(repoRoot, "src", "shell", "LocalSyncPanel.tsx"),
+  path.join(repoRoot, "src", "shell", "AgentDiscoveryBanner.tsx")
 ];
 const source = fs.readFileSync(i18nPath, "utf8");
-const photosUiSource = fs.existsSync(extraUiPaths[0])
-  ? fs.readFileSync(extraUiPaths[0], "utf8")
-  : "";
+const photosUiSource = photosUiPaths
+  .filter((filePath) => fs.existsSync(filePath))
+  .map((filePath) => fs.readFileSync(filePath, "utf8"))
+  .join("\n");
 const appSource = [appPath, ...extraUiPaths]
   .filter((filePath) => fs.existsSync(filePath))
   .map((filePath) => fs.readFileSync(filePath, "utf8"))
   .join("\n");
 const checks = [];
-const PHOTOS_UI_TEXT_COVERAGE_FLOOR = 0.90;
-const VISIBLE_LITERAL_LANGUAGE_COVERAGE_FLOOR = 0.90;
-const VISIBLE_LITERAL_UNCOVERED_BASELINE = 48;
+const PHOTOS_UI_TEXT_COVERAGE_FLOOR = 0.93;
+const VISIBLE_LITERAL_LANGUAGE_COVERAGE_FLOOR = 0.97;
+const VISIBLE_LITERAL_UNCOVERED_BASELINE = 12;
+const LANGUAGE_DIRECTIONS = {
+  en: "ltr",
+  zh: "ltr",
+  es: "ltr",
+  fr: "ltr",
+  ar: "rtl",
+  hi: "ltr",
+  ja: "ltr"
+};
+const RTL_TEXT_PATTERN = /[\u0590-\u08ff]/;
+const LTR_ISOLATE_START = "\u2068";
+const LTR_ISOLATE_END = "\u2069";
 
 function add(name, ok, detail, data = {}) {
   checks.push({ name, ok: Boolean(ok), detail, ...data });
@@ -46,6 +69,47 @@ function loadI18n() {
       esModuleInterop: true
     }
   }).outputText;
+  const localeDependencyModules = new Map();
+  function loadLocaleDependency(request) {
+    const dependencyFiles = {
+      "../photoSourcePhrases": "photoSourcePhrases.ts",
+      "../photoAgentPhrases": "photoAgentPhrases.ts",
+      "../photoGenerativePhrases": "photoGenerativePhrases.ts",
+      "../photoStoryPhrases": "photoStoryPhrases.ts",
+      "../photoCullingPhrases": "photoCullingPhrases.ts",
+      "../photoVideoSemanticPhrases": "photoVideoSemanticPhrases.ts",
+      "../photoRelationshipPhrases": "photoRelationshipPhrases.ts",
+      "../photoSpatialPhrases": "photoSpatialPhrases.ts",
+      "../modelLifecyclePhrases": "modelLifecyclePhrases.ts",
+      "../photoAudioPhrases": "photoAudioPhrases.ts",
+      "../localSyncPhrases": "localSyncPhrases.ts",
+      "../photoProCurationPhrases": "photoProCurationPhrases.ts",
+      "../photoTetherPhrases": "photoTetherPhrases.ts",
+      "../photoCatalogPhrases": "photoCatalogPhrases.ts",
+      "../uiCoveragePhrases": "uiCoveragePhrases.ts",
+      "../compliancePhrases": "compliancePhrases.ts",
+      "../safeModeGuardrailPhrases": "safeModeGuardrailPhrases.ts"
+    };
+    const dependencyFile = dependencyFiles[request];
+    if (!dependencyFile) {
+      throw new Error(`Unsupported locale dependency: ${request}`);
+    }
+    if (localeDependencyModules.has(request)) return localeDependencyModules.get(request);
+    const dependencyPath = path.join(repoRoot, "src", "i18n", dependencyFile);
+    const dependencySource = fs.readFileSync(dependencyPath, "utf8");
+    const dependencyCompiled = ts.transpileModule(dependencySource, {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+        esModuleInterop: true
+      }
+    }).outputText;
+    const dependencySandbox = { exports: {}, module: { exports: {} }, console };
+    dependencySandbox.module.exports = dependencySandbox.exports;
+    vm.runInNewContext(dependencyCompiled, dependencySandbox, { filename: dependencyPath });
+    localeDependencyModules.set(request, dependencySandbox.module.exports);
+    return dependencySandbox.module.exports;
+  }
   function loadLocaleModule(request) {
     if (!request.startsWith("./i18n/locales/")) {
       throw new Error(`Unsupported localization checker import: ${request}`);
@@ -63,7 +127,8 @@ function loadI18n() {
     const localeSandbox = {
       exports: {},
       module: { exports: {} },
-      console
+      console,
+      require: loadLocaleDependency
     };
     localeSandbox.module.exports = localeSandbox.exports;
     vm.runInNewContext(localeCompiled, localeSandbox, { filename: localePath });
@@ -96,6 +161,7 @@ function visibleLiteralCandidates() {
   return [...candidates].filter((text) => {
     if (!/[A-Za-z]/.test(text)) return false;
     if (/^(http|vintrace|rgba|rgb|sha|E-|[a-z]+:)/i.test(text)) return false;
+    if (/^(Claude Desktop|Codex|FFmpeg|OpenAPI|Promise|PAGE && \()$/.test(text)) return false;
     if (/[{}[\]<>]/.test(text)) return false;
     return true;
   }).sort();
@@ -123,6 +189,8 @@ async function main() {
 const i18n = loadI18n();
 const languages = (i18n.languageOptions || []).map((item) => item.code);
 const nonEnglish = languages.filter((code) => code !== "en");
+const rtlLanguages = languages.filter((code) => LANGUAGE_DIRECTIONS[code] === "rtl");
+const nonEnglishLtrLanguages = nonEnglish.filter((code) => LANGUAGE_DIRECTIONS[code] === "ltr");
 if (typeof i18n.preloadLanguage === "function") {
   await Promise.all(nonEnglish.map((language) => i18n.preloadLanguage(language)));
 }
@@ -130,6 +198,19 @@ const translationKeys = extractUnionKeys("TranslationKey");
 const messageKeys = extractUnionKeys("UiMessageKey");
 
 add("language set", ["en", "zh", "es", "fr", "ar", "hi", "ja"].every((code) => languages.includes(code)), languages.join(", "));
+const missingDirectionMetadata = languages.filter((code) => !LANGUAGE_DIRECTIONS[code]);
+add(
+  "language direction metadata",
+  missingDirectionMetadata.length === 0,
+  missingDirectionMetadata.length ? `missing: ${missingDirectionMetadata.join(", ")}` : languages.map((code) => `${code}:${LANGUAGE_DIRECTIONS[code]}`).join(", "),
+  { missing: missingDirectionMetadata }
+);
+add(
+  "reverse-direction language coverage",
+  rtlLanguages.length > 0 && nonEnglishLtrLanguages.length > 0,
+  `rtl=${rtlLanguages.join(", ") || "none"}; nonEnglishLtr=${nonEnglishLtrLanguages.join(", ") || "none"}`,
+  { rtlLanguages, nonEnglishLtrLanguages }
+);
 add("translation keys discovered", translationKeys.length > 20, `${translationKeys.length} keys`);
 add("message keys discovered", messageKeys.length > 20, `${messageKeys.length} keys`);
 
@@ -189,9 +270,45 @@ for (const language of nonEnglish) {
   add(`critical ui messages ${language}`, untranslated.length === 0, untranslated.join(", ") || "covered", { untranslated });
 }
 
+const reverseDirectionLiterals = [
+  "All Photos",
+  "Photo preview",
+  "Choose person photo folder",
+  "Search matches",
+  "Clear results",
+  "Copy files",
+  "Move files"
+];
+
+for (const language of rtlLanguages) {
+  const untranslated = reverseDirectionLiterals.filter((text) => i18n.translateUiText(language, text) === text);
+  const missingRtlScript = reverseDirectionLiterals.filter((text) => !RTL_TEXT_PATTERN.test(i18n.translateUiText(language, text)));
+  add(
+    `reverse-direction literals ${language}`,
+    untranslated.length === 0 && missingRtlScript.length === 0,
+    untranslated.concat(missingRtlScript).join(", ") || "covered",
+    { untranslated, missingRtlScript }
+  );
+  const mixedDirectionMessage = i18n.formatUiMessage(language, "notice.backupCreated", {
+    name: "Vintrace-2026-backup.zip",
+    bytes: "12 MB"
+  });
+  const missingIsolates = ["Vintrace-2026-backup.zip", "12 MB"].filter(
+    (value) => !mixedDirectionMessage.includes(`${LTR_ISOLATE_START}${value}${LTR_ISOLATE_END}`)
+  );
+  add(
+    `reverse-direction ui message isolation ${language}`,
+    missingIsolates.length === 0,
+    missingIsolates.join(", ") || "LTR placeholders isolated",
+    { missingIsolates }
+  );
+}
+
 const visibleLiterals = visibleLiteralCandidates();
 const uncovered = visibleLiterals.filter((text) => nonEnglish.every((language) => i18n.translateUiText(language, text) === text));
-add("visible literal translation coverage", visibleLiterals.length > 100, `${visibleLiterals.length - uncovered.length}/${visibleLiterals.length} visible literals have a non-English mapping`, {
+const visibleLiteralTranslated = visibleLiterals.length - uncovered.length;
+const visibleLiteralCoverage = visibleLiterals.length ? visibleLiteralTranslated / visibleLiterals.length : 1;
+add("visible literal translation coverage", visibleLiterals.length > 100 && visibleLiteralCoverage >= VISIBLE_LITERAL_LANGUAGE_COVERAGE_FLOOR, `${visibleLiteralTranslated}/${visibleLiterals.length} (${(visibleLiteralCoverage * 100).toFixed(1)}%) visible literals have a non-English mapping`, {
   uncovered: uncovered.slice(0, 80)
 });
 add("visible literal uncovered ratchet", uncovered.length <= VISIBLE_LITERAL_UNCOVERED_BASELINE, `${uncovered.length}/${VISIBLE_LITERAL_UNCOVERED_BASELINE} uncovered visible literals`, {

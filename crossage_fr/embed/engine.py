@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 import glob
 import importlib.util
@@ -9,6 +10,7 @@ import math
 import os
 import os.path as osp
 import re
+import threading
 
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
@@ -144,6 +146,33 @@ ARCFACE_DST = np.array(
     dtype="float64",
 )
 _ARCFACE_EYE_SPAN = float(np.linalg.norm(ARCFACE_DST[1] - ARCFACE_DST[0]))
+ALIGNMENT_RECOVERY_THRESHOLD = 0.15
+ALIGNMENT_RECOVERY_MIN_ERROR_GAIN = 0.03
+ALIGNMENT_RECOVERY_MIN_QUALITY_GAIN = 0.04
+ALIGNMENT_RECOVERY_MIN_COSINE = 0.20
+
+
+@dataclass(slots=True)
+class AlignmentHypothesis:
+    strategy: str
+    landmarks: np.ndarray
+    align_error: float
+
+
+@dataclass(slots=True)
+class AlignmentRecognitionAttempt:
+    strategy: str
+    landmarks: np.ndarray
+    align_error: float
+    aligned_bgr: np.ndarray
+    raw_embedding: np.ndarray
+    vector: np.ndarray
+    norm_quality: float
+    fiqa_score: float | None
+
+    @property
+    def quality(self) -> float:
+        return effective_quality(self.norm_quality, self.fiqa_score)
 
 
 def alignment_error(kps: np.ndarray | None) -> float:
@@ -184,6 +213,143 @@ def alignment_error(kps: np.ndarray | None) -> float:
     transformed = (scale * (src @ rot.T)) + translation
     residual = float(np.sqrt(((transformed - dst) ** 2).sum(axis=1).mean()))
     return residual / _ARCFACE_EYE_SPAN if _ARCFACE_EYE_SPAN > 0 else residual
+
+
+def _similarity_project(source: np.ndarray, target: np.ndarray, points: np.ndarray) -> np.ndarray | None:
+    """Fit a similarity transform from source to target and project points."""
+    src = np.asarray(source, dtype="float64")
+    dst = np.asarray(target, dtype="float64")
+    values = np.asarray(points, dtype="float64")
+    if src.shape != dst.shape or src.ndim != 2 or src.shape[0] < 2 or src.shape[1] != 2:
+        return None
+    src_mean = src.mean(axis=0)
+    dst_mean = dst.mean(axis=0)
+    src_centered = src - src_mean
+    dst_centered = dst - dst_mean
+    variance = float((src_centered ** 2).sum() / src.shape[0])
+    if variance <= 1e-12:
+        return None
+    covariance = (dst_centered.T @ src_centered) / src.shape[0]
+    try:
+        left, singular, right = np.linalg.svd(covariance)
+    except np.linalg.LinAlgError:
+        return None
+    direction = np.ones(2, dtype="float64")
+    if np.linalg.det(left @ right) < 0:
+        direction[-1] = -1.0
+    rotation = left @ np.diag(direction) @ right
+    scale = float((singular * direction).sum() / variance)
+    translation = dst_mean - scale * (rotation @ src_mean)
+    projected = (scale * (values @ rotation.T)) + translation
+    return projected if np.isfinite(projected).all() else None
+
+
+def alignment_recovery_hypotheses(
+    kps: np.ndarray | None,
+    bbox: np.ndarray | tuple[float, ...] | None,
+    *,
+    max_hypotheses: int = 4,
+) -> list[AlignmentHypothesis]:
+    """Generate bounded alternate 5-point warps for a suspect detector geometry."""
+    if kps is None:
+        return []
+    try:
+        original = np.asarray(kps, dtype="float64")[:5, :2]
+    except (TypeError, ValueError, IndexError):
+        return []
+    if original.shape != (5, 2) or not np.isfinite(original).all():
+        return []
+    original_error = alignment_error(original)
+    if original_error <= ALIGNMENT_RECOVERY_THRESHOLD:
+        return []
+
+    candidates: list[AlignmentHypothesis] = []
+
+    def add(strategy: str, landmarks: np.ndarray | None) -> None:
+        if landmarks is None:
+            return
+        points = np.asarray(landmarks, dtype="float64")
+        if points.shape != (5, 2) or not np.isfinite(points).all():
+            return
+        error = alignment_error(points)
+        if error > original_error - ALIGNMENT_RECOVERY_MIN_ERROR_GAIN:
+            return
+        if any(np.allclose(points, row.landmarks, atol=1e-3) for row in candidates):
+            return
+        candidates.append(AlignmentHypothesis(strategy, points.astype("float32"), error))
+
+    add("swap-eye-mouth-pairs", original[[1, 0, 2, 4, 3]])
+
+    leave_one_out: list[AlignmentHypothesis] = []
+    for excluded in range(5):
+        keep = np.asarray([index for index in range(5) if index != excluded], dtype=np.int64)
+        predicted = _similarity_project(ARCFACE_DST[keep], original[keep], ARCFACE_DST)
+        if predicted is None:
+            continue
+        repaired = original.copy()
+        repaired[excluded] = predicted[excluded]
+        error = alignment_error(repaired)
+        if error <= original_error - ALIGNMENT_RECOVERY_MIN_ERROR_GAIN:
+            leave_one_out.append(
+                AlignmentHypothesis(
+                    f"repair-landmark-{excluded}",
+                    repaired.astype("float32"),
+                    error,
+                )
+            )
+    leave_one_out.sort(key=lambda row: (row.align_error, row.strategy))
+    for hypothesis in leave_one_out[:2]:
+        add(hypothesis.strategy, hypothesis.landmarks)
+
+    if bbox is not None:
+        try:
+            box = np.asarray(bbox, dtype="float64").reshape(-1)
+        except (TypeError, ValueError):
+            box = np.asarray([], dtype="float64")
+        if box.size >= 4 and np.isfinite(box[:4]).all():
+            x1, y1, x2, y2 = (float(value) for value in box[:4])
+            width = max(1.0, x2 - x1)
+            height = max(1.0, y2 - y1)
+            scale = max(width, height) / 112.0
+            center = np.asarray([(x1 + x2) * 0.5, (y1 + y2) * 0.5 - 0.03 * height])
+            bbox_landmarks = (ARCFACE_DST - np.asarray([56.0, 56.0])) * scale + center
+            add("bbox-canonical-warp", bbox_landmarks)
+
+    candidates.sort(key=lambda row: (row.align_error, row.strategy))
+    return candidates[: max(0, int(max_hypotheses))]
+
+
+def select_alignment_recovery(
+    original: AlignmentRecognitionAttempt,
+    alternatives: list[AlignmentRecognitionAttempt],
+) -> tuple[AlignmentRecognitionAttempt, float]:
+    """A/B gate alternate crops; return the original unless a candidate clearly wins."""
+    if original.align_error <= ALIGNMENT_RECOVERY_THRESHOLD:
+        return original, 0.0
+    baseline = original.quality - 0.18 * original.align_error + 0.05
+    selected = original
+    selected_gain = 0.0
+    selected_score = baseline
+    for candidate in alternatives:
+        if candidate.align_error > original.align_error - ALIGNMENT_RECOVERY_MIN_ERROR_GAIN:
+            continue
+        if candidate.vector.shape != original.vector.shape:
+            continue
+        cosine = float(np.dot(original.vector, candidate.vector))
+        if not math.isfinite(cosine) or cosine < ALIGNMENT_RECOVERY_MIN_COSINE:
+            continue
+        if (original.fiqa_score is None) != (candidate.fiqa_score is None):
+            continue
+        quality_gain = candidate.quality - original.quality
+        if quality_gain < ALIGNMENT_RECOVERY_MIN_QUALITY_GAIN:
+            continue
+        score = candidate.quality - 0.18 * candidate.align_error + 0.05 * max(0.0, cosine)
+        if score < baseline + 0.02 or score <= selected_score:
+            continue
+        selected = candidate
+        selected_gain = quality_gain
+        selected_score = score
+    return selected, selected_gain
 
 
 def inter_eye_distance(kps: np.ndarray | None) -> float:
@@ -255,15 +421,33 @@ def plan_detect_sizes(
     return [(size, size) for size in sizes]
 
 
-def detect_cache_tag(sizes: list[tuple[int, int]]) -> str:
-    """Cache-key suffix for a multi-scale detection plan (empty for single-scale).
+def plan_tiled_detect(config: object, *, detector_dynamic: bool) -> bool:
+    """Return whether the normal detection pass should add tiled detection.
 
-    Tagging only the multi-scale plan means single-scale caches keep working and
-    are never silently served stale when multi-scale is enabled.
+    Tiling is intentionally narrower than multi-scale detection: it can add dozens
+    of detector invocations on large photos, so reserve it for explicit/effective
+    Quality mode instead of making every default RuntimeConfig pay the cost.
     """
-    if len(sizes) <= 1:
-        return ""
-    return "ms" + "-".join(str(size[0]) for size in sizes)
+    if not detector_dynamic:
+        return False
+    if not bool(getattr(config, "multi_scale_detect", True)):
+        return False
+    mode = str(getattr(config, "performance_mode", "auto") or "auto").strip().lower()
+    return mode == "quality"
+
+
+def detect_cache_tag(sizes: list[tuple[int, int]], *, tiled: bool = False, tile_size: int | None = None) -> str:
+    """Cache-key suffix for detection plans (empty for legacy single-scale).
+
+    Tagging only non-legacy plans means single-scale caches keep working and are
+    never silently served stale when multi-scale or tiled detection is enabled.
+    """
+    base = "" if len(sizes) <= 1 else "ms" + "-".join(str(size[0]) for size in sizes)
+    if not tiled:
+        return base
+    tile = int(tile_size) if tile_size is not None else (int(sizes[0][0]) if sizes else 0)
+    tile_tag = f"tile{tile}" if tile > 0 else "tile"
+    return f"{base}-{tile_tag}" if base else tile_tag
 
 
 def quality_from_norm(norm: float, model_name: str | None = None) -> float:
@@ -380,6 +564,7 @@ class ImageChopsSafe:
 
 class InsightFaceEmbeddingEngine(EmbeddingEngine):
     model_name = "insightface-antelopev2"
+    alignment_recovery_version = "align-recovery-v1"
 
     def __init__(self, config: RuntimeConfig, model_pack: str | None = None):
         import onnxruntime
@@ -397,6 +582,11 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
         self.recognizer_filename = str(getattr(config, "recognizer_filename", "") or "")
         self._face_cls = Face
         model_dir = str(resolved_model_pack_dir(model_roots_for_engine(config)[0], pack) or "")
+        self._model_zoo = model_zoo
+        self._model_dir = model_dir
+        self._active_provider_names = list(providers)
+        self._runtime_provider_fallback_attempted = False
+        self._runtime_provider_fallback_lock = threading.Lock()
         # USC-04: verify on-disk model integrity before loading and OUTSIDE the
         # try/except below, so a ModelIntegrityError fails closed instead of being
         # swallowed into the CPU-fallback path (which would load the same files).
@@ -410,6 +600,8 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
         except Exception:
             self.det_model = self._load_model(model_zoo, model_dir, "detection", ["CPUExecutionProvider"], None)
             self.rec_model = self._load_model(model_zoo, model_dir, "recognition", ["CPUExecutionProvider"], None)
+            self._active_provider_names = ["CPUExecutionProvider"]
+            self._runtime_provider_fallback_attempted = True
             ctx_id = -1
         detector_size = max(320, min(1024, int(getattr(config, "face_detector_size", 640))))
         detector_size = int(round(detector_size / 32) * 32)
@@ -452,18 +644,21 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
             multi_scale=bool(getattr(config, "multi_scale_detect", True)),
             dynamic=detector_dynamic,
         )
-        # Tiling reuses the same recall-vs-compute opt-in as multi-scale.
-        self.tiled_detect_enabled = bool(getattr(config, "multi_scale_detect", True)) and detector_dynamic
+        self.tiled_detect_enabled = plan_tiled_detect(config, detector_dynamic=detector_dynamic)
         self.tile_overlap = 0.2
         # Flip-TTA: off by default (2x recognizer cost); best enabled only on the small
         # verification/candidate set, not a full-library sweep.
         self.flip_tta = bool(getattr(config, "flip_tta", False))
         # Cache tag so multi-scale/tiled rows never collide with / serve stale single-scale rows.
-        self.detect_cache_tag = detect_cache_tag(self._normal_input_sizes)
-        # FIQA seam (Phase 2.2): use a dropped-in recognition-aware quality model when
-        # present, else fall back to the calibrated embedding norm. None by default.
+        self.detect_cache_tag = detect_cache_tag(
+            self._normal_input_sizes,
+            tiled=self.tiled_detect_enabled,
+            tile_size=detector_size,
+        )
+        # The bundled, integrity-checked eDifFIQA(T) model replaces the embedding-norm
+        # proxy; the norm remains an explicit fallback if the model cannot be loaded.
         try:
-            self.fiqa = load_fiqa_scorer(find_fiqa_model(Path.cwd()))
+            self.fiqa = load_fiqa_scorer(find_fiqa_model())
         except Exception:
             self.fiqa = None
 
@@ -474,6 +669,52 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
         return self._embed_with_detector(image, path=path, rescue=True)
 
     def _embed_with_detector(self, image: Image.Image, path: Path | None = None, *, rescue: bool) -> list[EmbeddingResult]:
+        try:
+            return self._embed_with_active_provider(image, path=path, rescue=rescue)
+        except ModelIntegrityError:
+            raise
+        except Exception as exc:
+            if not self._activate_cpu_runtime_fallback(exc):
+                raise
+            return self._embed_with_active_provider(image, path=path, rescue=rescue)
+
+    def _activate_cpu_runtime_fallback(self, error: Exception) -> bool:
+        with self._runtime_provider_fallback_lock:
+            if self._runtime_provider_fallback_attempted or self._active_provider_names == ["CPUExecutionProvider"]:
+                return False
+            self._runtime_provider_fallback_attempted = True
+            try:
+                detector = self._load_model(
+                    self._model_zoo,
+                    self._model_dir,
+                    "detection",
+                    ["CPUExecutionProvider"],
+                    None,
+                )
+                recognizer = self._load_model(
+                    self._model_zoo,
+                    self._model_dir,
+                    "recognition",
+                    ["CPUExecutionProvider"],
+                    None,
+                )
+                detector.prepare(-1, input_size=(self.detector_size, self.detector_size), det_thresh=0.5)
+                recognizer.prepare(-1)
+            except ModelIntegrityError:
+                raise
+            except Exception:
+                return False
+            self.det_model = detector
+            self.rec_model = recognizer
+            self._active_provider_names = ["CPUExecutionProvider"]
+            self.engine_detail = "Runtime execution-provider fallback: CPUExecutionProvider"
+            _LOG.warning(
+                "Face inference provider failed at runtime (%s); retried once on CPUExecutionProvider.",
+                type(error).__name__,
+            )
+            return True
+
+    def _embed_with_active_provider(self, image: Image.Image, path: Path | None = None, *, rescue: bool) -> list[EmbeddingResult]:
         rgb = np.asarray(image)
         bgr = rgb[:, :, ::-1]
         if rescue:
@@ -511,12 +752,24 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
                 # averaged template there; the returned `vector` stays unit-norm
                 # for cosine matching.
                 raw_norm = float(np.linalg.norm(face.embedding))
-                fiqa_score = self._fiqa_score(source_bgr, kps_for_index)
+                recovery = getattr(face, "_vintrace_alignment", None)
+                if not isinstance(recovery, dict):
+                    recovery = {}
+                if "fiqa_score" in recovery:
+                    fiqa_score = recovery.get("fiqa_score")
+                else:
+                    fiqa_score = self._fiqa_score(source_bgr, kps_for_index)
                 quality = effective_quality(quality_from_norm(raw_norm, self.model_name), fiqa_score)
                 pose_bucket = self._pose_bucket_for_face(source_bgr, face.bbox, kps_for_index, rescue=rescue)
                 det_score = float(getattr(face, "det_score", 0.0) or 0.0)
                 ied_px = inter_eye_distance(kps_for_index)
-                align_err = alignment_error(kps_for_index)
+                original_align_err = float(recovery.get("original_error", alignment_error(kps_for_index)) or 0.0)
+                align_err = float(recovery.get("selected_error", original_align_err) or 0.0)
+                alignment_rescued = bool(recovery.get("rescued", False))
+                alignment_strategy = str(recovery.get("strategy", "") or "") if alignment_rescued else ""
+                note_parts = [f"profile-rescue:{variant}" if rescue else ""]
+                if alignment_rescued:
+                    note_parts.append(f"alignment-rescue:{alignment_strategy}")
                 results.append(
                     EmbeddingResult(
                         vector=vector.tolist(),
@@ -524,12 +777,17 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
                         quality_norm=raw_norm,
                         bbox=bbox_values,
                         model_name=self.model_name,
-                        note=f"profile-rescue:{variant}" if rescue else "",
+                        note=";".join(part for part in note_parts if part),
                         pose_bucket=pose_bucket,
                         det_score=det_score,
                         ied_px=ied_px,
                         fiqa_score=float(fiqa_score) if fiqa_score is not None else 0.0,
                         align_error=align_err,
+                        alignment_rescued=alignment_rescued,
+                        alignment_strategy=alignment_strategy,
+                        alignment_original_error=original_align_err,
+                        alignment_quality_gain=float(recovery.get("quality_gain", 0.0) or 0.0),
+                        alignment_attempts=int(recovery.get("attempts", 0) or 0),
                     )
                 )
                 if rescue and len(results) >= 3:
@@ -590,25 +848,114 @@ class InsightFaceEmbeddingEngine(EmbeddingEngine):
         return canvas
 
     def _recognize(self, source_bgr: np.ndarray, face: object, kps: np.ndarray | None) -> np.ndarray:
-        """Set face.embedding (single crop, for the quality norm) and return the
-        matching vector -- flip-TTA averaged when enabled, else the plain embedding."""
-        if self.flip_tta and kps is not None:
-            try:
-                from insightface.utils import face_align
+        """Recognize a face and conservatively recover suspect landmark warps.
 
-                size = int(getattr(self.rec_model, "input_size", (112, 112))[0]) or 112
-                aligned = face_align.norm_crop(source_bgr, kps, image_size=size)
-                feat1 = np.asarray(self.rec_model.get_feat(aligned), dtype="float32").flatten()
-                feat2 = np.asarray(self.rec_model.get_feat(np.ascontiguousarray(aligned[:, ::-1])), dtype="float32").flatten()
-                # Keep the quality proxy on the same two-crop evidence as the
-                # returned template, but before final normalization so the
-                # existing ArcFace norm calibration remains meaningful.
-                face.embedding = ((feat1 + feat2) * 0.5).astype("float32", copy=False)
-                return flip_average(feat1, feat2)
+        The original five-point crop always remains the control. Alternate crops
+        are bounded and accepted only when geometry and FIQA improve while the
+        resulting template remains consistent with the control embedding.
+        """
+        original_error = alignment_error(kps)
+        if kps is not None:
+            try:
+                original = self._recognition_attempt(
+                    source_bgr,
+                    np.asarray(kps, dtype="float32")[:5, :2],
+                    strategy="original-5pt",
+                )
+                hypotheses = alignment_recovery_hypotheses(kps, getattr(face, "bbox", None))
+                alternatives: list[AlignmentRecognitionAttempt] = []
+                attempted = 0
+                for hypothesis in hypotheses:
+                    attempted += 1
+                    try:
+                        alternatives.append(
+                            self._recognition_attempt(
+                                source_bgr,
+                                hypothesis.landmarks,
+                                strategy=hypothesis.strategy,
+                            )
+                        )
+                    except Exception:
+                        continue
+                selected, quality_gain = select_alignment_recovery(original, alternatives)
+                rescued = selected is not original
+                face.embedding = selected.raw_embedding
+                face._vintrace_alignment = {
+                    "attempts": attempted,
+                    "rescued": rescued,
+                    "strategy": selected.strategy if rescued else "",
+                    "original_error": original.align_error,
+                    "selected_error": selected.align_error,
+                    "quality_gain": quality_gain if rescued else 0.0,
+                    "fiqa_score": selected.fiqa_score,
+                }
+                return selected.vector
             except Exception:
                 pass
+
+        # Preserve InsightFace's original path if alignment or feature extraction
+        # cannot produce a valid A/B control embedding.
         self.rec_model.get(source_bgr, face)
+        face._vintrace_alignment = {
+            "attempts": 0,
+            "rescued": False,
+            "strategy": "",
+            "original_error": original_error,
+            "selected_error": original_error,
+            "quality_gain": 0.0,
+        }
         return l2_normalize(face.embedding, dtype=np.float32)
+
+    def _recognition_attempt(
+        self,
+        source_bgr: np.ndarray,
+        landmarks: np.ndarray,
+        *,
+        strategy: str,
+    ) -> AlignmentRecognitionAttempt:
+        from insightface.utils import face_align
+
+        points = np.asarray(landmarks, dtype="float32")
+        if points.shape != (5, 2) or not np.isfinite(points).all():
+            raise ValueError("Recognition landmarks must be five finite 2-D points")
+        input_size = getattr(self.rec_model, "input_size", (112, 112))
+        size = int(input_size[0] if isinstance(input_size, (list, tuple)) else input_size) or 112
+        aligned = face_align.norm_crop(source_bgr, points, image_size=size)
+        if not isinstance(aligned, np.ndarray) or aligned.ndim != 3 or aligned.size == 0:
+            raise ValueError("Face alignment returned an invalid crop")
+        feat1 = np.asarray(self.rec_model.get_feat(aligned), dtype="float32").reshape(-1)
+        if feat1.size == 0 or not np.isfinite(feat1).all():
+            raise ValueError("Recognizer returned an invalid embedding")
+        raw_embedding = feat1
+        vector = l2_normalize(feat1, dtype=np.float32)
+        if self.flip_tta:
+            flipped = np.ascontiguousarray(aligned[:, ::-1])
+            feat2 = np.asarray(self.rec_model.get_feat(flipped), dtype="float32").reshape(-1)
+            if feat2.shape != feat1.shape or not np.isfinite(feat2).all():
+                raise ValueError("Recognizer returned an invalid flip embedding")
+            raw_embedding = ((feat1 + feat2) * 0.5).astype("float32", copy=False)
+            vector = flip_average(feat1, feat2)
+        raw_norm = float(np.linalg.norm(raw_embedding))
+        if not math.isfinite(raw_norm) or raw_norm <= 1e-12:
+            raise ValueError("Recognizer returned a zero-norm embedding")
+        scorer = getattr(self, "fiqa", None)
+        fiqa_score: float | None = None
+        if scorer is not None:
+            try:
+                fiqa_value = float(scorer.score_aligned(aligned))
+                fiqa_score = fiqa_value if math.isfinite(fiqa_value) else None
+            except Exception:
+                fiqa_score = None
+        return AlignmentRecognitionAttempt(
+            strategy=strategy,
+            landmarks=points,
+            align_error=alignment_error(points),
+            aligned_bgr=aligned,
+            raw_embedding=raw_embedding,
+            vector=vector,
+            norm_quality=quality_from_norm(raw_norm, self.model_name),
+            fiqa_score=fiqa_score,
+        )
 
     def _fiqa_score(self, source_bgr: np.ndarray, kps: np.ndarray | None) -> float | None:
         scorer = getattr(self, "fiqa", None)

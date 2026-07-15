@@ -3,8 +3,8 @@
   "name": "vintrace",
   "display_name": "Vintrace",
   "version": "0.1.0",
-  "description": "Consent-gated local MCP access to Vintrace enrollment, scanning, Safe Mode, review queues, metrics, and audit context.",
-  "long_description": "Vintrace exposes a local, review-first face-recognition workbench to MCP clients. Agents can read project state, enroll consented references, scan image and video folders, inspect Safe Mode assessments, triage review candidates, export reports, audit workspace health, and update review decisions only with explicit confirmation for destructive or decision-changing actions.",
+  "description": "Agent-native image operations: discover external visuals, import safely, understand, curate, edit, deliver, and review at library scale.",
+  "long_description": "Vintrace exposes a consent-gated, local-first image platform to MCP clients. Agents can discover bounded metadata in human-authorized Slack, web, cloud-drive, Dropbox, and WebDAV sources; import reviewed media into managed storage with stable IDs; search the full photo and video library; fetch structured context; request bounded Safe Mode-approved previews; plan every mutation; obtain host-rendered MCP elicitation for approval with a compatible explicit-confirmation fallback; execute idempotent non-destructive or destructive actions in separate lanes; use operator-enabled principal-scoped progressive delegation for a fixed reversible curation allowlist; run and cancel durable MCP Tasks for scans, indexing, semantic embedding, imports, and exports; manage albums and edit stacks; export artifacts; and use the existing human-reviewed face-recognition, compliance, diagnostics, and audit workflows without receiving connector credentials or broad filesystem access.",
   "author": {
     "name": "Vintrace"
   },
@@ -13,10 +13,13 @@
     "entry_point": "server/crossage-backend/crossage-backend",
     "mcp_config": {
       "command": "${__dirname}${/}server${/}crossage-backend${/}crossage-backend",
-      "args": ["--mcp", "--workspace", "${user_config.workspace}"],
+      "args": ["--mcp", "--workspace", "${user_config.workspace}", "--mcp-tool-profile", "images"],
       "env": {
         "VINTRACE_WORKSPACE": "${user_config.workspace}",
         "CROSSAGE_WORKSPACE": "${user_config.workspace}",
+        "VINTRACE_MCP_ALLOWED_ROOTS": "${user_config.workspace}",
+        "VINTRACE_REQUIRE_DB_ENCRYPTION": "1",
+        "VINTRACE_DB_RECOVERY_PASSPHRASE": "${user_config.recovery_passphrase}",
         "VINTRACE_REPORT_PATH": "${__dirname}${/}report.md",
         "CROSSAGE_SAFE_MODEL_DIR": "${__dirname}${/}models${/}safety",
         "CROSSAGE_REPORT_PATH": "${__dirname}${/}report.md"
@@ -112,6 +115,10 @@
     {
       "name": "query_candidates",
       "description": "Page and search review candidates without loading the full queue."
+    },
+    {
+      "name": "ordered_review_candidates",
+      "description": "Return the active-learning ordered review queue using the current calibration."
     },
     {
       "name": "clear_review_queue",
@@ -240,6 +247,18 @@
     {
       "name": "reject_reference_suggestion",
       "description": "Reject a staged suggested reference artifact, requiring confirm=true."
+    },
+    {
+      "name": "synthetic_enrollment_screen_status",
+      "description": "Read the verified local screen report and staged enrollment authenticity reviews."
+    },
+    {
+      "name": "approve_synthetic_enrollment_review",
+      "description": "Re-verify and approve a held enrollment; a persisting warning requires confirm=true and an explicit synthetic override."
+    },
+    {
+      "name": "reject_synthetic_enrollment_review",
+      "description": "Reject a held enrollment authenticity review without altering source media, requiring confirm=true."
     },
     {
       "name": "stage_calibration",
@@ -412,6 +431,126 @@
     {
       "name": "installer_self_diagnostics",
       "description": "Run first-run installer diagnostics for model download, decoders, Safe Mode, workspace, and packaged backend readiness."
+    },
+    {
+      "name": "list_jurisdictions",
+      "description": "List supported privacy and retention jurisdiction presets."
+    },
+    {
+      "name": "set_jurisdiction_preset",
+      "description": "Apply a bounded privacy and retention jurisdiction preset."
+    },
+    {
+      "name": "export_examination_report",
+      "description": "Export a reviewed examination report for the active workspace or one named person."
+    },
+    {
+      "name": "list_workspaces",
+      "description": "List registered Vintrace workspaces without exposing unrestricted filesystem contents."
+    },
+    {
+      "name": "export_compliance_pack",
+      "description": "Export the workspace compliance evidence pack."
+    },
+    {
+      "name": "audit_chain_status",
+      "description": "Verify the append-only workspace audit chain and report integrity status."
+    },
+    {
+      "name": "list_image_capabilities",
+      "description": "Discover the live image action catalog, categories, side effects, required fields, and scale limits."
+    },
+    {
+      "name": "get_image_library_overview",
+      "description": "Read image-library counts, collections, index/export jobs, settings, and optional health context."
+    },
+    {
+      "name": "list_inbound_visual_sources",
+      "description": "List operator-authorized Slack, web, cloud-drive, Dropbox, and WebDAV visual sources without exposing credentials."
+    },
+    {
+      "name": "discover_inbound_visuals",
+      "description": "Discover bounded metadata from one authorized inbound visual source without importing pixels."
+    },
+    {
+      "name": "import_inbound_visuals",
+      "description": "Import a reviewed remote selection into managed storage with stable IDs, explicit download consent, confirmation, and idempotency."
+    },
+    {
+      "name": "sync_inbound_visuals",
+      "description": "Incrementally sync changed remote media into managed storage with explicit download consent, confirmation, and idempotency."
+    },
+    {
+      "name": "search_images",
+      "description": "Search images and videos by text, meaning, metadata, date, people, pets, places, albums, quality, and visibility without disclosing pixels."
+    },
+    {
+      "name": "fetch_image_assets",
+      "description": "Fetch path-redacted structured context for stable image asset IDs."
+    },
+    {
+      "name": "elicit_image_asset_choice",
+      "description": "Ask a form-capable host to let the human choose one verified stable asset ID from a bounded set, with an explicit-ID fallback."
+    },
+    {
+      "name": "analyze_image_assets",
+      "description": "Read existing on-device OCR, objects, barcodes, quality, people, albums, metadata, and edit context without requesting pixels."
+    },
+    {
+      "name": "get_image_preview",
+      "description": "Return one bounded, audited, Safe Mode-approved short-lived JPEG resource link by stable asset ID."
+    },
+    {
+      "name": "plan_image_action",
+      "description": "Validate and explain any cataloged image action without executing it."
+    },
+    {
+      "name": "run_image_read_action",
+      "description": "Execute one cataloged read-only long-tail image action."
+    },
+    {
+      "name": "run_image_write_action",
+      "description": "Execute one confirmed non-destructive image action exactly once per idempotency key."
+    },
+    {
+      "name": "run_destructive_image_action",
+      "description": "Execute one explicitly approved destructive image action exactly once per idempotency key."
+    },
+    {
+      "name": "get_image_job",
+      "description": "Poll or list normalized scan, image-indexing, export, and inbound-connector jobs."
+    },
+    {
+      "name": "get_agent_activity",
+      "description": "Review the path-free agent activity, approval, failure, replay, and pixel-disclosure timeline."
+    },
+    {
+      "name": "list_image_operations",
+      "description": "List a unified operation feed across imports, indexing, exports, repairs, library changes, and agent writes."
+    },
+    {
+      "name": "get_image_operation",
+      "description": "Inspect one image operation with a path-free output manifest and bounded generated-output resources."
+    },
+    {
+      "name": "list_image_recipes",
+      "description": "Discover built-in and custom multi-step image workflow recipes with explicit approval points."
+    },
+    {
+      "name": "get_image_recipe",
+      "description": "Read one complete plan-only image workflow recipe."
+    },
+    {
+      "name": "plan_image_recipe",
+      "description": "Bind typed inputs into a recipe and return an approval-aware plan without executing any step."
+    },
+    {
+      "name": "save_image_recipe",
+      "description": "Save a validated custom multi-step recipe with explicit confirmation and durable idempotency."
+    },
+    {
+      "name": "delete_image_recipe",
+      "description": "Delete one custom recipe with destructive approval and durable idempotency."
     }
   ],
   "prompts": [
@@ -431,9 +570,27 @@
       "name": "safe_mode_policy",
       "description": "Summarize the Safe Mode handling policy for sensitive images and videos.",
       "text": "Use the safe_mode_policy MCP prompt from this server."
+    },
+    {
+      "name": "plan_image_workflow",
+      "description": "Turn an image-library goal into a search-first, approval-aware, idempotent execution plan.",
+      "arguments": ["goal", "constraints"],
+      "text": "Use the plan_image_workflow MCP prompt from this server."
+    },
+    {
+      "name": "curate_image_selection",
+      "description": "Guide a bounded semantic-plus-metadata image curation pass with minimal pixel disclosure.",
+      "arguments": ["goal", "max_candidates", "constraints"],
+      "text": "Use the curate_image_selection MCP prompt from this server."
+    },
+    {
+      "name": "inbound_visual_workflow",
+      "description": "Guide external discovery, reviewed managed import, stable-ID understanding, curation, and delivery.",
+      "arguments": ["goal", "preferred_source"],
+      "text": "Use the inbound_visual_workflow MCP prompt from this server."
     }
   ],
-  "keywords": ["mcp", "face-recognition", "photo-review", "desktop", "safe-mode"],
+  "keywords": ["mcp", "images", "photos", "vision", "digital-asset-management", "face-recognition", "photo-review", "desktop", "safe-mode", "local-first"],
   "compatibility": {
     "platforms": ["darwin", "win32"]
   },
@@ -444,6 +601,13 @@
       "description": "Directory where references, review candidates, settings, and audit logs are stored.",
       "required": true,
       "default": "${DOCUMENTS}${/}Vintrace Workspace"
+    },
+    "recovery_passphrase": {
+      "type": "string",
+      "title": "Agent recovery code",
+      "description": "Recovery code created in Vintrace Privacy settings for this workspace.",
+      "required": true,
+      "sensitive": true
     }
   }
 }

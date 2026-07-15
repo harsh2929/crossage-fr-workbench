@@ -1,11 +1,13 @@
 const { app, BrowserWindow, dialog, ipcMain, session, Menu, Tray, nativeImage, shell, Notification, clipboard, protocol, net, safeStorage, nativeTheme, ShareMenu, systemPreferences, powerMonitor } = require("electron");
 const { spawn, spawnSync } = require("child_process");
+const nodeHttp = require("http");
 const path = require("path");
 const fs = require("fs");
 const readline = require("readline");
 const os = require("os");
 const crypto = require("crypto");
 const { pathToFileURL, fileURLToPath } = require("url");
+const { Worker } = require("worker_threads");
 // EIPC-01: self-contained helpers extracted to a unit-testable module.
 const {
   writeJsonAtomic,
@@ -17,6 +19,7 @@ const {
   isSubpath,
   safeRealpath,
   backendRestartDelayMs,
+  resolveRendererGpuMode,
   canonicalPathKey,
   pathTrustKeyFromResolved,
   buildContentSecurityPolicy,
@@ -24,8 +27,29 @@ const {
   buildTrustedMediaPathSet,
   filterStableWatchFiles,
 } = require("./main/util.cjs");
-const { buildSystemPhotoSources } = require("./main/photo-sources.cjs");
+const {
+  resolveReleasePublicKey,
+  verifyDownloadedUpdate,
+} = require("./main/update-security.cjs");
+const { buildSystemPhotoSources, photoPrivacySettingsUrl } = require("./main/photo-sources.cjs");
+const {
+  derivePhotoIndexingRuntimePolicy,
+  normalizePhotoIndexingPowerMode,
+} = require("./main/photo-indexing-runtime.cjs");
+const { createInboundConnectorVault } = require("./main/inbound-connectors.cjs");
+const { createPhotoTetherRuntime } = require("./main/photo-tether-runtime.cjs");
 const { parseProtocolUrl } = require("./main/external-open.cjs");
+const {
+  RECOVERY_PASSPHRASE_ENV: WORKSPACE_RECOVERY_PASSPHRASE_ENV,
+  REQUIRE_ENCRYPTION_ENV: WORKSPACE_REQUIRE_ENCRYPTION_ENV,
+  commitWorkspaceKeyRotation,
+  configureWorkspaceRecoveryPassphrase,
+  reconcileWorkspaceKeyRotation,
+  resolveDesktopWorkspaceKeys,
+  safeStorageProtectionStatus,
+  stageWorkspaceKeyRotation,
+  workspaceRecoveryStatus,
+} = require("./main/workspace-encryption.cjs");
 const {
   buildMcpConnectionInfo,
   mcpStdioInvocation,
@@ -33,6 +57,13 @@ const {
   DEFAULT_HTTP_HOST: MCP_HTTP_HOST,
   DEFAULT_HTTP_PORT: MCP_HTTP_PORT,
 } = require("./main/mcp-connection.cjs");
+const {
+  createMobileCompanion,
+  ensureMobileCredentialFile,
+  listMobileCompanions,
+  normalizeMobilePublicUrl,
+  revokeMobileCompanion,
+} = require("./main/mobile-companion.cjs");
 
 let autoUpdater = null;
 try {
@@ -42,6 +73,7 @@ try {
 }
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+const DAM_CATALOG_PROVIDERS = new Set(["lightroom_catalog", "capture_one_catalog"]);
 
 // Test isolation: when launched under the e2e harness (multi-instance flag set by
 // every Playwright spec) with a per-test registry home, relocate Electron's
@@ -71,6 +103,11 @@ if (process.env.CROSSAGE_ALLOW_MULTI_INSTANCE === "1") {
   }
 }
 
+const inboundConnectorVault = createInboundConnectorVault({
+  safeStorage,
+  userDataPath: app.getPath("userData"),
+});
+
 // Under the e2e harness, suppress native shell reveal/open so tests don't spawn
 // real Finder/Explorer windows that pile up across runs. The IPC contract (return
 // shape + audit) is preserved so assertions still pass. Production never sets the
@@ -98,6 +135,8 @@ async function openShellPath(target) {
 let mainWindow = null;
 let backend = null;
 let folderWatch = null;
+let photoTetherRuntime = null;
+let activePhotoCatalogCancelToken = "";
 let tray = null;
 let isQuitting = false;
 let rendererReady = false;
@@ -108,14 +147,28 @@ const userGrantedExternalEditorPaths = new Set();
 const queryTrustedMediaPaths = new Set();
 let queryTrustedMediaPathsVersion = 0;
 let trustedMediaPathCache = null;
+let trustedPreviewsPathCache = null;
 let pathTrustGeneration = 0;
 const recentDiagnosticEvents = [];
+const diagnosticWriteQueue = [];
+let diagnosticWriteRunning = false;
 let workspaceLockUnlocked = true;
 let workspaceLockInitialized = false;
+let workspaceLockEnabled = false;
+let workspaceLockWorkspace = "";
+let backendJsonParserWorker = null;
+let backendJsonParserNextId = 1;
+const backendJsonParserPending = new Map();
 let photoIndexingHeadlessInitialTimer = null;
 let photoIndexingHeadlessTimer = null;
 let photoIndexingHeadlessRunning = false;
 let photoIndexingHeadlessLastRuntimeSkipKey = "";
+let photoIndexingHeadlessSettingsCache = null;
+let photoIndexingHeadlessSettingsCachedAt = 0;
+let photoIndexingHeadlessSettingsWorkspace = "";
+let photoIndexingHeadlessSpeedLimit = 100;
+let photoIndexingHeadlessThermalState = "unknown";
+let photoIndexingHeadlessPowerListenersRegistered = false;
 const MAX_DIAGNOSTIC_EVENTS = 240;
 const MAX_DIAGNOSTIC_LOG_BYTES = 2 * 1024 * 1024;
 const MAX_BACKEND_STDERR_TAIL_BYTES = 64 * 1024;
@@ -124,6 +177,7 @@ const USER_GRANTED_PATH_LIMIT = Math.max(1000, Math.min(50000, Number.parseInt(p
 const MEDIA_PREPARE_PATH_LIMIT = Math.max(1, Math.min(5000, Number.parseInt(process.env.CROSSAGE_MEDIA_PREPARE_PATH_LIMIT || "1000", 10) || 1000));
 const MEDIA_PREPARE_SIDECAR_LIMIT = Math.max(0, Math.min(MEDIA_PREPARE_PATH_LIMIT, Number.parseInt(process.env.CROSSAGE_MEDIA_PREPARE_SIDECAR_LIMIT || "64", 10) || 64));
 const BACKEND_TIMEOUT_KILL_GRACE_MS = Math.max(1000, Number.parseInt(process.env.CROSSAGE_BACKEND_TIMEOUT_KILL_GRACE_MS || "5000", 10) || 5000);
+const BACKEND_MAIN_THREAD_PARSE_LIMIT = Math.max(32_768, Number.parseInt(process.env.CROSSAGE_BACKEND_MAIN_THREAD_PARSE_LIMIT || "262144", 10) || 262_144);
 const WATCH_MAX_QUEUE = Math.max(500, Number.parseInt(process.env.CROSSAGE_WATCH_MAX_QUEUE || "5000", 10) || 5000);
 const WATCH_SCAN_BATCH_SIZE = Math.max(25, Number.parseInt(process.env.CROSSAGE_WATCH_SCAN_BATCH_SIZE || "250", 10) || 250);
 const WATCH_STABLE_CONCURRENCY = Math.max(1, Math.min(64, Number.parseInt(process.env.CROSSAGE_WATCH_STABLE_CONCURRENCY || "8", 10) || 8));
@@ -142,11 +196,14 @@ let updateState = {
   canCheck: false,
   checking: false,
   downloading: false,
+  verifying: false,
   available: false,
   downloaded: false,
+  downloadVerified: false,
   appVersion: safeAppVersion(),
   latestVersion: null,
   progress: null,
+  verification: null,
   error: null,
   provider: "none",
   channel: "stable",
@@ -416,6 +473,15 @@ const BACKEND_COMMAND_TIMEOUT_MS = Math.max(
   60_000,
   Number.parseInt(process.env.CROSSAGE_BACKEND_COMMAND_TIMEOUT_MS || "3600000", 10) || 3_600_000
 );
+const BACKEND_GENERATIVE_COMMAND_TIMEOUT_MS = Math.max(
+  BACKEND_COMMAND_TIMEOUT_MS,
+  Number.parseInt(process.env.VINTRACE_GENERATIVE_COMMAND_TIMEOUT_MS || "10800000", 10) || 10_800_000
+);
+const BACKEND_GENERATIVE_COMMANDS = new Set([
+  "install_photo_generative_pack",
+  "render_photo_generative_preview",
+  "generate_synthetic_age_image_reviews"
+]);
 // CP-03: the single global 1h timeout mis-scaled both fast reads (which queue
 // behind a serial scan) and large scans. Instead of a per-wall-clock cap, use a
 // progress-aware watchdog that only fails when the backend has produced NO
@@ -455,6 +521,12 @@ function nativeUiText(source) {
 const TRUSTED_BACKEND_COMMANDS = new Set([
   "get_state",
   "model_status",
+  "model_lifecycle_status",
+  "run_model_lifecycle_evaluation",
+  "stage_model_lifecycle_candidate",
+  "promote_model_lifecycle_candidate",
+  "rollback_model_lifecycle_baseline",
+  "rollback_model_configuration",
   "set_model_root",
   "download_model",
   "set_workspace",
@@ -462,6 +534,15 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "enroll",
   "enroll_paths",
   "enroll_age_groups",
+  "synthetic_enrollment_screen_status",
+  "approve_synthetic_enrollment_review",
+  "reject_synthetic_enrollment_review",
+  "build_age_trajectory_references",
+  "remove_age_trajectory_references",
+  "synthetic_age_image_review_status",
+  "generate_synthetic_age_image_reviews",
+  "approve_synthetic_age_image_review",
+  "reject_synthetic_age_image_review",
   "scan",
   "scan_paths",
   "cancel_scan",
@@ -474,16 +555,24 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "bulk_set_status",
   "set_candidate_note",
   "block_false_match",
+  "bulk_block_false_matches",
   "reassign_candidate_person",
+  "bulk_reassign_candidate_person",
   "duplicate_people",
   "apply_review_rules",
   "query_candidates",
+  "ordered_review_candidates",
   "suggest_photo_review_more_candidates",
+  "suggest_photo_relationship_names",
+  "review_photo_relationship_name_suggestion",
   "list_photo_folders",
   "list_photo_folder_items",
   "list_photo_date_buckets",
   "search_photo_library",
   "semantic_search_photos",
+  "photo_library_agent_status",
+  "query_photo_library_agent",
+  "execute_photo_library_agent_plan",
   "list_photo_assets",
   "list_photo_burst_stacks",
   "set_photo_burst_selection",
@@ -498,7 +587,9 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "save_photo_utility_profile",
   "rename_photo_pet",
   "assign_photo_pet",
+  "bulk_assign_photo_pet",
   "dismiss_photo_pet_review",
+  "bulk_dismiss_photo_pet_review",
   "save_photo_people_group",
   "delete_photo_people_group",
   "update_photo_asset_metadata",
@@ -513,6 +604,24 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "create_photo_edit_stack_version",
   "restore_photo_edit_stack_version",
   "delete_photo_edit_stack_version",
+  "photo_generative_status",
+  "photo_content_credentials_status",
+  "inspect_photo_content_credentials",
+  "install_photo_generative_pack",
+  "render_photo_generative_preview",
+  "apply_photo_generative_edit",
+  "discard_photo_generative_preview",
+  "photo_story_status",
+  "photo_stories",
+  "generate_photo_story",
+  "save_photo_story",
+  "delete_photo_story",
+  "restore_photo_story_version",
+  "export_photo_story",
+  "create_photo_story_slideshow",
+  "photo_culling_status",
+  "analyze_photo_burst_culling",
+  "apply_photo_culling_recommendation",
   "duplicate_photo_asset_version",
   "duplicate_photo_asset_rendered_version",
   "record_photo_asset_event",
@@ -525,6 +634,27 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "merge_photo_duplicates",
   "dismiss_photo_duplicate_group",
   "import_photos",
+  "photo_source_status",
+  "photo_source_jobs",
+  "photo_source_job_status",
+  "run_photo_source_job",
+  "cancel_photo_source_job",
+  "retry_photo_source_job",
+  "dismiss_photo_source_job",
+  "list_photo_source_people_hints",
+  "review_photo_source_people_hint",
+  "revoke_photo_source_consent",
+  "apple_photos_status",
+  "list_apple_photos_libraries",
+  "preview_apple_photos_library",
+  "import_apple_photos_library",
+  "sync_apple_photos_library",
+  "export_apple_photos_assets",
+  "windows_photo_source_status",
+  "list_windows_photo_folders",
+  "preview_windows_photo_folder",
+  "import_windows_photo_folder",
+  "sync_windows_photo_folder",
   "update_photo_import_session_provenance",
   "bulk_update_photo_import_session_provenance",
   "archive_photo_import_sessions",
@@ -551,8 +681,24 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "photo_ocr_index_status",
   "index_photo_barcodes",
   "photo_barcode_index_status",
+  "photo_vlm_status",
+  "install_photo_vlm",
   "index_photo_objects",
   "photo_object_index_status",
+  "photo_audio_status",
+  "photo_audio_segments",
+  "index_photo_audio",
+  "local_sync_status",
+  "local_sync_initialize",
+  "local_sync_start",
+  "local_sync_stop",
+  "local_sync_create_invitation",
+  "local_sync_accept_invitation",
+  "local_sync_sync_peer",
+  "local_sync_revoke_peer",
+  "local_sync_conflicts",
+  "local_sync_export_recovery",
+  "local_sync_restore_recovery",
   "enqueue_photo_indexing_job",
   "photo_indexing_jobs",
   "run_photo_indexing_job",
@@ -562,6 +708,7 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "photo_curation_preferences",
   "save_photo_curation_preferences",
   "photo_user_memories",
+  "photo_user_memory_source_order",
   "save_photo_user_memory",
   "delete_photo_user_memory",
   "photo_slideshow_theme_templates",
@@ -587,12 +734,17 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "delete_photo_album_folder",
   "move_photo_album_to_folder",
   "reorder_photo_album_folder_children",
+  "photo_album_source_order",
   "add_photo_album_items",
   "remove_photo_album_items",
   "reorder_photo_album_items",
   "suggest_photo_albums",
   "photo_color_profile_status",
   "validate_photo_color_profile",
+  "start_photo_export_job",
+  "photo_export_job_status",
+  "photo_export_jobs",
+  "cancel_photo_export_job",
   "export_photo_selection",
   "export_photo_contact_sheet",
   "export_photo_video_frame",
@@ -622,6 +774,12 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "export_audit_log",
   "export_consent_receipt",
   "retention_policy_report",
+  "compliance_status",
+  "biometric_retention_policy",
+  "acknowledge_ai_disclosure",
+  "enforce_retention_policy",
+  "export_biometric_retention_policy",
+  "record_biometric_policy_publication",
   "export_safe_mode_audit",
   "model_drift_report",
   "reference_gap_report",
@@ -657,6 +815,7 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "public_dataset_catalog",
   "inspect_public_dataset",
   "run_public_dataset_benchmark",
+  "run_cross_age_trajectory_benchmark",
   "compare_public_dataset_models",
   "apply_model_recommendation",
   "calibration_summary",
@@ -686,6 +845,7 @@ const TRUSTED_BACKEND_COMMANDS = new Set([
   "import_training_examples",
   "privacy_report",
   "delete_face_data",
+  "delete_subject_data",
   "optimize_workspace",
   "enforce_storage_budget",
   "add_calibration_label",
@@ -720,11 +880,13 @@ protocol.registerSchemesAsPrivileged([
   }
 ]);
 
+const rendererGpuMode = resolveRendererGpuMode();
+process.env.CROSSAGE_RENDERER_GPU_MODE = rendererGpuMode;
+
 function configureRendererStability() {
-  if (process.platform !== "darwin" || process.env.CROSSAGE_ENABLE_GPU === "1") {
-    return;
-  }
-  // Avoid macOS Metal/Electron GPU-process traps; recognition compute stays in the backend.
+  if (rendererGpuMode !== "software") return;
+  // Explicit compatibility fallback for unstable GPU/driver combinations and
+  // hidden macOS automation. Normal desktop sessions stay hardware accelerated.
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch("disable-gpu");
   app.commandLine.appendSwitch("disable-gpu-compositing");
@@ -819,6 +981,15 @@ function safeAppVersion() {
     return app.getVersion();
   } catch {
     return "0.0.0";
+  }
+}
+
+function releasePublishConfig() {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8"));
+    return pkg?.build?.publish || null;
+  } catch {
+    return null;
   }
 }
 
@@ -952,11 +1123,7 @@ function workspaceLockFilePath(workspace = activeWorkspacePath()) {
 }
 
 function workspaceLockSupported() {
-  try {
-    return Boolean(safeStorage?.isEncryptionAvailable?.());
-  } catch {
-    return false;
-  }
+  return safeStorageProtectionStatus(safeStorage).ok;
 }
 
 function readWorkspaceLock(workspace = activeWorkspacePath()) {
@@ -977,7 +1144,8 @@ function writeWorkspaceLock(row, workspace = activeWorkspacePath()) {
 function getWorkspaceLockStatus() {
   const workspace = activeWorkspacePath();
   const lockPath = workspaceLockFilePath(workspace);
-  const enabled = pathAvailable(lockPath);
+  initializeWorkspaceLockForActiveWorkspace();
+  const enabled = workspaceLockEnabled;
   const supported = workspaceLockSupported();
   const locked = Boolean(enabled && !workspaceLockUnlocked);
   return {
@@ -1008,13 +1176,17 @@ function enableWorkspaceLock() {
     encryption: "electron.safeStorage",
     note: "Controls app access on this OS user account. Original photo files are not modified."
   });
+  workspaceLockEnabled = true;
+  workspaceLockInitialized = true;
+  workspaceLockWorkspace = activeWorkspacePath();
   workspaceLockUnlocked = true;
   appendDiagnosticEvent({ type: "workspace_lock_enabled", level: "info", workspace: activeWorkspacePath() });
   return getWorkspaceLockStatus();
 }
 
 function lockWorkspaceNow() {
-  if (!pathAvailable(workspaceLockFilePath())) {
+  initializeWorkspaceLockForActiveWorkspace();
+  if (!workspaceLockEnabled) {
     throw createAppError("E-WORKSPACE-LOCK-OFF", "Enable Workspace Lock before locking this app folder.");
   }
   workspaceLockUnlocked = false;
@@ -1063,20 +1235,27 @@ function disableWorkspaceLock() {
   } catch {
     // Already off.
   }
+  workspaceLockEnabled = false;
+  workspaceLockInitialized = true;
+  workspaceLockWorkspace = activeWorkspacePath();
   workspaceLockUnlocked = true;
   appendDiagnosticEvent({ type: "workspace_lock_disabled", level: "info", workspace: activeWorkspacePath() });
   return getWorkspaceLockStatus();
 }
 
 function isWorkspaceLocked() {
-  return Boolean(getWorkspaceLockStatus().locked);
+  initializeWorkspaceLockForActiveWorkspace();
+  return Boolean(workspaceLockEnabled && !workspaceLockUnlocked);
 }
 
 function initializeWorkspaceLockForActiveWorkspace() {
-  if (workspaceLockInitialized) {
+  const workspace = activeWorkspacePath();
+  if (workspaceLockInitialized && workspaceLockWorkspace === workspace) {
     return;
   }
-  workspaceLockUnlocked = !pathAvailable(workspaceLockFilePath());
+  workspaceLockEnabled = pathAvailable(workspaceLockFilePath(workspace));
+  workspaceLockUnlocked = !workspaceLockEnabled;
+  workspaceLockWorkspace = workspace;
   workspaceLockInitialized = true;
 }
 
@@ -1139,10 +1318,20 @@ const ERROR_CODE_META = {
   "E-WORKSPACE-LOCK-SECRET": { category: "privacy", severity: "error", action: "Disable and re-enable Workspace Lock after verifying backups." },
   "E-WORKSPACE-LOCK-UNLOCK": { category: "privacy", severity: "error", action: "Reconnect the OS user account/keychain or choose another app folder." },
   "E-WORKSPACE-LOCK-DISABLE": { category: "privacy", severity: "warn", action: "Unlock the app folder before disabling Workspace Lock." },
+  "E-WORKSPACE-KEY": { category: "privacy", severity: "error", action: "Reconnect the OS keychain or use the workspace recovery passphrase." },
+  "E-WORKSPACE-KEY-UNAVAILABLE": { category: "privacy", severity: "error", action: "Enable the OS credential store before opening this app folder." },
+  "E-WORKSPACE-KEY-UNLOCK": { category: "privacy", severity: "error", action: "Use the workspace recovery passphrase or restore the OS keychain entry." },
+  "E-WORKSPACE-KEY-ROTATION": { category: "privacy", severity: "error", action: "Restart Vintrace so the pending key rotation can be reconciled." },
   "E-CAMERA-FRAME-TYPE": { category: "camera", severity: "warn", action: "Capture a PNG, JPEG, or WebP frame." },
   "E-CAMERA-FRAME-EMPTY": { category: "camera", severity: "warn", action: "Capture a new frame and retry." },
   "E-CAMERA-FRAME-LARGE": { category: "camera", severity: "warn", action: "Capture a smaller frame and retry." },
   "E-FOLDER-WATCH-PATH": { category: "filesystem", severity: "warn", action: "Choose a folder before starting watch mode." },
+  "E-PHOTO-TETHER-PATH": { category: "filesystem", severity: "warn", action: "Choose an accessible capture folder." },
+  "E-PHOTO-TETHER-TEMPLATE": { category: "input", severity: "warn", action: "Use a filename-only capture template with supported tokens." },
+  "E-PHOTO-TETHER-PTP-UNAVAILABLE": { category: "camera", severity: "warn", action: "Install gphoto2 or use watched-folder tethering." },
+  "E-PHOTO-TETHER-CAMERA-NOT-FOUND": { category: "camera", severity: "warn", action: "Reconnect a supported camera or use watched-folder tethering." },
+  "E-PHOTO-TETHER-CAPTURE": { category: "camera", severity: "error", action: "Check the camera connection and retry capture." },
+  "E-PHOTO-TETHER-TIMEOUT": { category: "camera", severity: "error", action: "Reconnect or wake the camera, then retry." },
   "E-BACKEND-NOT-READY": { category: "backend", severity: "error", action: "Restart the app if the engine does not recover." },
   "E-BACKEND-PIPE": { category: "backend", severity: "error", action: "Restart the app; export diagnostics if this repeats." },
   "E-BACKEND-PERMISSION": { category: "privacy", severity: "warn", action: "Confirm permission or unlock the app folder, then retry." },
@@ -1266,35 +1455,52 @@ function redactDiagnosticValue(value, includePaths = false) {
   return value;
 }
 
-function readFileTail(filePath, maxBytes) {
-  const stat = fs.statSync(filePath);
+async function readFileTail(filePath, maxBytes) {
+  const stat = await fs.promises.stat(filePath);
   const bytes = Math.min(maxBytes, stat.size);
   const start = Math.max(0, stat.size - bytes);
   const buffer = Buffer.alloc(bytes);
-  const fd = fs.openSync(filePath, "r");
+  const handle = await fs.promises.open(filePath, "r");
   try {
-    fs.readSync(fd, buffer, 0, bytes, start);
+    await handle.read(buffer, 0, bytes, start);
   } finally {
-    fs.closeSync(fd);
+    await handle.close();
   }
   const text = buffer.toString("utf8");
   return start > 0 ? text.replace(/^[^\n]*(?:\n|$)/, "") : text;
 }
 
-function trimDiagnosticsLog() {
+async function trimDiagnosticsLogAsync() {
   const filePath = diagnosticsLogPath();
   try {
-    if (!fs.existsSync(filePath)) {
-      return;
-    }
-    const stat = fs.statSync(filePath);
-    if (stat.size <= MAX_DIAGNOSTIC_LOG_BYTES * 2) {
-      return;
-    }
-    fs.writeFileSync(filePath, readFileTail(filePath, MAX_DIAGNOSTIC_LOG_BYTES), "utf8");
+    const stat = await fs.promises.stat(filePath);
+    if (stat.size <= MAX_DIAGNOSTIC_LOG_BYTES * 2) return;
+    const bytes = await fs.promises.readFile(filePath);
+    const start = Math.max(0, bytes.length - MAX_DIAGNOSTIC_LOG_BYTES);
+    let tail = bytes.subarray(start).toString("utf8");
+    if (start > 0) tail = tail.replace(/^[^\n]*(?:\n|$)/, "");
+    await fs.promises.writeFile(filePath, tail, "utf8");
   } catch {
-    // Diagnostics must never crash the app.
+    // Diagnostics persistence is best effort.
   }
+}
+
+function scheduleDiagnosticWrites() {
+  if (diagnosticWriteRunning || diagnosticWriteQueue.length === 0) return;
+  diagnosticWriteRunning = true;
+  setImmediate(async () => {
+    const batch = diagnosticWriteQueue.splice(0, diagnosticWriteQueue.length);
+    try {
+      await fs.promises.mkdir(diagnosticsDir(), { recursive: true });
+      await fs.promises.appendFile(diagnosticsLogPath(), `${batch.join("\n")}\n`, "utf8");
+      await trimDiagnosticsLogAsync();
+    } catch {
+      // Diagnostics must never crash or stall the app.
+    } finally {
+      diagnosticWriteRunning = false;
+      scheduleDiagnosticWrites();
+    }
+  });
 }
 
 function diagnosticFingerprint(row) {
@@ -1345,46 +1551,44 @@ function appendDiagnosticEvent(event) {
   if (recentDiagnosticEvents.length > MAX_DIAGNOSTIC_EVENTS) {
     recentDiagnosticEvents.length = MAX_DIAGNOSTIC_EVENTS;
   }
-  try {
-    fs.mkdirSync(diagnosticsDir(), { recursive: true });
-    fs.appendFileSync(diagnosticsLogPath(), `${JSON.stringify(row)}\n`, "utf8");
-    trimDiagnosticsLog();
-  } catch {
-    // Diagnostics must never crash the app.
+  diagnosticWriteQueue.push(JSON.stringify(row));
+  if (diagnosticWriteQueue.length > 1_000) {
+    diagnosticWriteQueue.splice(0, diagnosticWriteQueue.length - 1_000);
   }
+  scheduleDiagnosticWrites();
   sendToRenderer("diagnostics:event", redactDiagnosticValue(row));
 }
 
-function readDiagnosticEvents(limit = MAX_DIAGNOSTIC_EVENTS) {
+async function readDiagnosticEvents(limit = MAX_DIAGNOSTIC_EVENTS) {
   const rows = [...recentDiagnosticEvents];
   try {
-    if (fs.existsSync(diagnosticsLogPath())) {
-      const fileRows = readFileTail(diagnosticsLogPath(), MAX_DIAGNOSTIC_LOG_BYTES)
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .slice(-limit)
-        .reverse()
-        .map((line) => {
-          try {
-            return JSON.parse(line);
-          } catch {
-            return null;
-          }
-        })
-        .filter(Boolean);
-      for (const row of fileRows) {
-        if (!rows.some((item) => item.at === row.at && item.type === row.type)) {
-          rows.push(row);
+    const fileRows = (await readFileTail(diagnosticsLogPath(), MAX_DIAGNOSTIC_LOG_BYTES))
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .slice(-limit)
+      .reverse()
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
         }
+      })
+      .filter(Boolean);
+    for (const row of fileRows) {
+      if (!rows.some((item) => item.at === row.at && item.type === row.type)) {
+        rows.push(row);
       }
     }
-  } catch {
-    rows.unshift({
-      at: new Date().toISOString(),
-      type: "diagnostics_read_failed",
-      level: "warn",
-      message: "Could not read the local diagnostics log."
-    });
+  } catch (error) {
+    if (!error || typeof error !== "object" || error.code !== "ENOENT") {
+      rows.unshift({
+        at: new Date().toISOString(),
+        type: "diagnostics_read_failed",
+        level: "warn",
+        message: "Could not read the local diagnostics log."
+      });
+    }
   }
   return rows
     .sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")))
@@ -1433,10 +1637,10 @@ function summarizeDiagnosticEvents(events) {
   };
 }
 
-function createDiagnosticsReport(options = {}) {
+async function createDiagnosticsReport(options = {}) {
   const includePaths = Boolean(options.includePaths);
   const readyState = backend?.readyState || null;
-  const events = readDiagnosticEvents(Number(options.limit || MAX_DIAGNOSTIC_EVENTS))
+  const events = (await readDiagnosticEvents(Number(options.limit || MAX_DIAGNOSTIC_EVENTS)))
     .map((row) => redactDiagnosticValue(row, includePaths));
   const summary = summarizeDiagnosticEvents(events);
   const workspace = readyState ? {
@@ -1499,7 +1703,7 @@ function createDiagnosticsReport(options = {}) {
 
 async function exportDiagnosticsReport(options = {}) {
   const includePaths = Boolean(options.includePaths);
-  const report = createDiagnosticsReport({ includePaths });
+  const report = await createDiagnosticsReport({ includePaths });
   const defaultPath = path.join(
     safeUserPath("downloads") || safeUserPath("desktop") || appRoot(),
     `vintrace-diagnostics-${new Date().toISOString().replace(/[:.]/g, "-")}.json`
@@ -1517,8 +1721,8 @@ async function exportDiagnosticsReport(options = {}) {
     }
     filePath = result.filePath;
   }
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.promises.writeFile(filePath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   grantUserPath(filePath);
   appendDiagnosticEvent({ type: "diagnostics_exported", level: "info", path: filePath, includePaths });
   return { cancelled: false, path: filePath, report };
@@ -1702,6 +1906,7 @@ function grantExternalEditorPath(filePath) {
 
 function invalidateTrustedMediaPathCache() {
   trustedMediaPathCache = null;
+  trustedPreviewsPathCache = null;
 }
 
 function grantQueryMediaPath(filePath, trustGeneration = pathTrustGeneration) {
@@ -1765,9 +1970,21 @@ function currentTrustedPaths() {
     return trustedMediaPathCache;
   }
   const paths = buildTrustedMediaPathSet(state, queryTrustedMediaPaths);
-  const previewsReal = state?.workspace ? safeRealpath(path.join(state.workspace, "previews")) : "";
+  const previewsReal = currentPreviewsRealPath(state);
   trustedMediaPathCache = { state, paths, previewsReal, queryVersion: queryTrustedMediaPathsVersion };
   return trustedMediaPathCache;
+}
+
+function currentPreviewsRealPath(state = backend?.readyState || null) {
+  if (!state?.workspace) {
+    return "";
+  }
+  if (trustedPreviewsPathCache && trustedPreviewsPathCache.state === state) {
+    return trustedPreviewsPathCache.previewsReal;
+  }
+  const previewsReal = safeRealpath(path.join(state.workspace, "previews"));
+  trustedPreviewsPathCache = { state, previewsReal };
+  return previewsReal;
 }
 
 async function realpathOrEmpty(filePath) {
@@ -1775,15 +1992,6 @@ async function realpathOrEmpty(filePath) {
     return await fs.promises.realpath(path.resolve(String(filePath || "")));
   } catch {
     return "";
-  }
-}
-
-async function pathExistsAsync(filePath) {
-  try {
-    await fs.promises.access(filePath, fs.constants.R_OK);
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -1799,14 +2007,19 @@ async function resolveTrustedMediaPath(filePath) {
   if (!targetReal) {
     return "";
   }
-  const { state, paths, previewsReal } = currentTrustedPaths();
-  if (!state || !paths.size) {
+  const state = backend?.readyState || null;
+  if (!state) {
+    return "";
+  }
+  const previewsReal = currentPreviewsRealPath(state);
+  if (previewsReal && isSubpath(previewsReal, targetReal)) {
+    return targetReal;
+  }
+  const { paths } = currentTrustedPaths();
+  if (!paths.size) {
     return "";
   }
   if (paths.has(pathTrustKeyFromResolved(targetReal))) {
-    return targetReal;
-  }
-  if (previewsReal && isSubpath(previewsReal, targetReal)) {
     return targetReal;
   }
   return "";
@@ -1904,12 +2117,16 @@ function publishUpdateState(patch = {}) {
   return updateState;
 }
 
+function inAppUpdatesEnabled() {
+  return envFlag("VINTRACE_ENABLE_IN_APP_UPDATES") || envFlag("CROSSAGE_ENABLE_UPDATER");
+}
+
 // USC-02: a custom update feed can otherwise be redirected by any local actor
-// who sets VINTRACE_UPDATE_URL, and (because releases are unsigned) electron-
-// updater's only integrity check is the feed's own latest.yml hash. Require
-// https:// and, in packaged builds, an operator-allowlisted host
-// (VINTRACE_UPDATE_HOSTS) before honoring the override; reject anything else and
-// fall back to the default GitHub provider.
+// who sets VINTRACE_UPDATE_URL. The downloaded artifact is still verified
+// against a signed SHA256SUMS.txt before install, but the feed itself must also
+// be HTTPS and, in packaged builds, operator-allowlisted (VINTRACE_UPDATE_HOSTS)
+// before honoring the override; reject anything else and fall back to the
+// default GitHub provider.
 function resolveUpdateFeedUrl() {
   const raw = String(process.env.VINTRACE_UPDATE_URL || process.env.CROSSAGE_UPDATE_URL || "").trim();
   if (!raw) {
@@ -1958,6 +2175,62 @@ function applyUpdateChannelToUpdater(channel) {
   return safeChannel;
 }
 
+async function verifyDownloadedUpdateFromUpdater(info = {}) {
+  const version = info.version || updateState.latestVersion || null;
+  appendDiagnosticEvent({ type: "update_downloaded", level: "info", version });
+  publishUpdateState({
+    checking: false,
+    downloading: false,
+    verifying: true,
+    available: true,
+    downloaded: false,
+    downloadVerified: false,
+    latestVersion: version,
+    verification: null,
+    progress: updateState.progress ? { ...updateState.progress, percent: 100 } : null,
+    error: null,
+    message: "Verifying update signature."
+  });
+  const releaseKey = resolveReleasePublicKey();
+  if (!releaseKey.ok) {
+    throw new Error("Release public key is missing or invalid.");
+  }
+  const verification = await verifyDownloadedUpdate({
+    downloadedFile: info.downloadedFile,
+    updateInfo: info,
+    feedUrl: resolveUpdateFeedUrl(),
+    publish: releasePublishConfig(),
+    publicKeyPem: releaseKey.publicKeyPem,
+  });
+  if (!verification.ok) {
+    throw new Error(`Update verification failed: ${verification.reason || "unknown"}`);
+  }
+  appendDiagnosticEvent({
+    type: "update_verified",
+    level: "info",
+    version,
+    artifact: verification.artifactName || null,
+    sha256: verification.sha256 || null
+  });
+  publishUpdateState({
+    checking: false,
+    downloading: false,
+    verifying: false,
+    available: true,
+    downloaded: true,
+    downloadVerified: true,
+    latestVersion: version,
+    progress: updateState.progress ? { ...updateState.progress, percent: 100 } : null,
+    verification: {
+      artifact: verification.artifactName || "",
+      sha256: verification.sha256 || "",
+      signedChecksumManifest: true
+    },
+    error: null,
+    message: "Update is verified and ready to install."
+  });
+}
+
 function configureAutoUpdater() {
   if (updaterConfigured) {
     return updateState;
@@ -1971,6 +2244,26 @@ function configureAutoUpdater() {
       provider: "none",
       channel: selectedChannel,
       message: "Update service is not bundled in this build."
+    });
+  }
+  if (!inAppUpdatesEnabled()) {
+    return publishUpdateState({
+      supported: true,
+      canCheck: false,
+      provider: "disabled",
+      channel: selectedChannel,
+      message: "In-app updates are disabled by default. Enable them only for verified release channels with a configured release public key."
+    });
+  }
+  const releaseKey = resolveReleasePublicKey();
+  if (!releaseKey.ok) {
+    appendDiagnosticEvent({ type: "update_verification_key_missing", level: "warn", reason: releaseKey.reason || "missing" });
+    return publishUpdateState({
+      supported: true,
+      canCheck: false,
+      provider: "disabled",
+      channel: selectedChannel,
+      message: "In-app updates require VINTRACE_RELEASE_PUBKEY or VINTRACE_RELEASE_PUBLIC_KEY so downloaded updates can be verified before install."
     });
   }
   autoUpdater.autoDownload = false;
@@ -1989,6 +2282,7 @@ function configureAutoUpdater() {
       canCheck: true,
       checking: true,
       downloading: false,
+      verifying: false,
       error: null,
       message: "Checking for updates."
     });
@@ -1999,8 +2293,10 @@ function configureAutoUpdater() {
       checking: false,
       available: true,
       downloaded: false,
+      downloadVerified: false,
       latestVersion: info.version || null,
       progress: null,
+      verification: null,
       error: null,
       message: "An update is available."
     });
@@ -2009,10 +2305,13 @@ function configureAutoUpdater() {
     publishUpdateState({
       checking: false,
       downloading: false,
+      verifying: false,
       available: false,
       downloaded: false,
+      downloadVerified: false,
       latestVersion: info.version || null,
       progress: null,
+      verification: null,
       error: null,
       message: "You are on the newest version."
     });
@@ -2021,6 +2320,7 @@ function configureAutoUpdater() {
     publishUpdateState({
       checking: false,
       downloading: true,
+      verifying: false,
       progress: {
         percent: Math.max(0, Math.min(100, Number(progress.percent || 0))),
         transferred: Number(progress.transferred || 0),
@@ -2031,16 +2331,21 @@ function configureAutoUpdater() {
     });
   });
   autoUpdater.on("update-downloaded", (info = {}) => {
-    appendDiagnosticEvent({ type: "update_downloaded", level: "info", version: info.version || null });
-    publishUpdateState({
-      checking: false,
-      downloading: false,
-      available: true,
-      downloaded: true,
-      latestVersion: info.version || updateState.latestVersion,
-      progress: updateState.progress ? { ...updateState.progress, percent: 100 } : null,
-      error: null,
-      message: "Update is ready to install."
+    verifyDownloadedUpdateFromUpdater(info).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      appendDiagnosticEvent({ type: "update_verification_failed", level: "error", message, stack: diagnosticStack(error) });
+      publishUpdateState({
+        checking: false,
+        downloading: false,
+        verifying: false,
+        available: true,
+        downloaded: false,
+        downloadVerified: false,
+        latestVersion: info.version || updateState.latestVersion,
+        verification: null,
+        error: message,
+        message: "Downloaded update could not be verified."
+      });
     });
   });
   autoUpdater.on("error", (error) => {
@@ -2049,6 +2354,8 @@ function configureAutoUpdater() {
     publishUpdateState({
       checking: false,
       downloading: false,
+      verifying: false,
+      downloadVerified: false,
       error: message,
       message: message.includes("Cannot find latest")
         ? "No update feed is configured for this build."
@@ -2084,10 +2391,13 @@ function setUpdateChannelFromUser(channel) {
     channel: selectedChannel,
     checking: false,
     downloading: false,
+    verifying: false,
     available: false,
     downloaded: false,
+    downloadVerified: false,
     latestVersion: null,
     progress: null,
+    verification: null,
     error: null,
     message: selectedChannel === "stable"
       ? "Stable updates selected."
@@ -2112,6 +2422,8 @@ async function checkForUpdatesFromUser() {
     publishUpdateState({
       checking: false,
       downloading: false,
+      verifying: false,
+      downloadVerified: false,
       error: message,
       message: message.includes("Cannot find latest")
         ? "No update feed is configured for this build."
@@ -2130,20 +2442,28 @@ async function downloadUpdateFromUser() {
   }
   try {
     appendDiagnosticEvent({ type: "update_download_started", level: "info", version: updateState.latestVersion || null });
-    publishUpdateState({ downloading: true, error: null, message: "Downloading update." });
+    publishUpdateState({
+      downloading: true,
+      verifying: false,
+      downloaded: false,
+      downloadVerified: false,
+      verification: null,
+      error: null,
+      message: "Downloading update."
+    });
     await autoUpdater.downloadUpdate();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     appendDiagnosticEvent({ type: "update_download_failed", level: "error", message, stack: diagnosticStack(error) });
-    publishUpdateState({ downloading: false, error: message, message: "Update download failed." });
+    publishUpdateState({ downloading: false, verifying: false, downloadVerified: false, error: message, message: "Update download failed." });
   }
   return updateState;
 }
 
 function installDownloadedUpdate() {
   configureAutoUpdater();
-  if (!autoUpdater || !updateState.downloaded) {
-    return publishUpdateState({ message: "No downloaded update is ready to install." });
+  if (!autoUpdater || !updateState.downloaded || !updateState.downloadVerified) {
+    return publishUpdateState({ message: updateState.verifying ? "Update verification is still running." : "No verified update is ready to install." });
   }
   appendDiagnosticEvent({ type: "update_install_requested", level: "info", version: updateState.latestVersion || null });
   autoUpdater.quitAndInstall(false, true);
@@ -2172,7 +2492,16 @@ function notify(title, body) {
   if (!Notification.isSupported()) {
     return;
   }
-  new Notification({ title: nativeUiText(title), body: nativeUiText(body), icon: appIconPath() }).show();
+  const notification = new Notification({ title: nativeUiText(title), body: nativeUiText(body), icon: appIconPath() });
+  notification.once("failed", (_event, error) => {
+    appendDiagnosticEvent({
+      type: "notification_failed",
+      level: "warn",
+      message: String(error || "The operating system rejected the notification."),
+      electronVersion: process.versions.electron || ""
+    });
+  });
+  notification.show();
 }
 
 function notifyForCommand(command, result) {
@@ -2229,6 +2558,7 @@ function decorateState(value, options = {}) {
     return value;
   }
   const trustGeneration = Number.isInteger(options.trustGeneration) ? options.trustGeneration : pathTrustGeneration;
+  const mutate = Boolean(options.mutate);
   const grantDecoratedMediaPath = (filePath) => {
     grantQueryMediaPath(filePath, trustGeneration);
   };
@@ -2239,17 +2569,44 @@ function decorateState(value, options = {}) {
     }
     return false;
   };
+  const decorateEditMedia = (item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return;
+    }
+    grantDecoratedMediaPath(item.generativePreviewPath);
+    grantDecoratedMediaPath(item.renderedPreviewPath);
+    decoratePath(item, "generativePreviewPath", "generativePreviewUrl");
+    decoratePath(item, "renderedPreviewPath", "renderedPreviewUrl");
+  };
+  decorateEditMedia(value);
+  decorateEditMedia(value.value);
+  decorateEditMedia(value.stack);
+  decorateEditMedia(value.value?.stack);
+  const targetObject = (item) => (mutate ? item : { ...item });
+  const decorateReference = (item) => {
+    const next = targetObject(item);
+    decoratePath(next, "sourcePath", "sourceUrl");
+    decoratePath(next, "mediaSourcePath", "mediaSourceUrl");
+    decoratePath(next, "previewPath", "previewUrl");
+    if (next.sourceUrl) {
+      next.originalSourceUrl = next.sourceUrl;
+    }
+    if (next.previewUrl) {
+      next.sourceUrl = next.previewUrl;
+    }
+    return next;
+  };
   const decorateCandidate = (item) => {
-    const next = { ...item };
+    const next = targetObject(item);
     grantDecoratedMediaPath(next.sourcePath);
     grantDecoratedMediaPath(next.mediaSourcePath);
     grantDecoratedMediaPath(next.previewPath);
     grantDecoratedMediaPath(next.bestRefPath);
     grantDecoratedMediaPath(next.bestRefPreviewPath);
     if (next.assetMetadata && typeof next.assetMetadata === "object" && !Array.isArray(next.assetMetadata)) {
-      const assetMetadata = { ...next.assetMetadata };
+      const assetMetadata = mutate ? next.assetMetadata : { ...next.assetMetadata };
       if (assetMetadata.livePhoto && typeof assetMetadata.livePhoto === "object" && !Array.isArray(assetMetadata.livePhoto)) {
-        const livePhoto = { ...assetMetadata.livePhoto };
+        const livePhoto = mutate ? assetMetadata.livePhoto : { ...assetMetadata.livePhoto };
         grantDecoratedMediaPath(livePhoto.pairedVideoPath);
         grantDecoratedMediaPath(livePhoto.keyPhotoPreviewPath);
         if (livePhoto.pairedVideoPath) {
@@ -2264,9 +2621,10 @@ function decorateState(value, options = {}) {
     }
     if (Array.isArray(next.mediaPairs)) {
       next.mediaPairs = next.mediaPairs.map((pair) => {
-        const mediaPair = pair && typeof pair === "object" && !Array.isArray(pair) ? { ...pair } : pair;
+        const mediaPair = pair && typeof pair === "object" && !Array.isArray(pair) ? targetObject(pair) : pair;
         if (mediaPair && typeof mediaPair === "object") {
           grantDecoratedMediaPath(mediaPair.relatedSourcePath);
+          decoratePath(mediaPair, "relatedSourcePath", "relatedSourceUrl");
         }
         return mediaPair;
       });
@@ -2288,30 +2646,52 @@ function decorateState(value, options = {}) {
   };
   const apply = (state) => {
     if (Array.isArray(state.references)) {
-      state.references = state.references.map((item) => {
-        const next = { ...item };
-        decoratePath(next, "sourcePath", "sourceUrl");
-        decoratePath(next, "mediaSourcePath", "mediaSourceUrl");
-        decoratePath(next, "previewPath", "previewUrl");
-        if (next.sourceUrl) {
-          next.originalSourceUrl = next.sourceUrl;
-        }
-        if (next.previewUrl) {
-          next.sourceUrl = next.previewUrl;
-        }
-        return next;
-      });
+      if (mutate) {
+        state.references.forEach((item, index) => {
+          state.references[index] = decorateReference(item);
+        });
+      } else {
+        state.references = state.references.map(decorateReference);
+      }
     }
     if (Array.isArray(state.candidates)) {
-      state.candidates = state.candidates.map(decorateCandidate);
+      if (mutate) {
+        state.candidates.forEach((item, index) => {
+          state.candidates[index] = decorateCandidate(item);
+        });
+      } else {
+        state.candidates = state.candidates.map(decorateCandidate);
+      }
+    }
+    if (Array.isArray(state.syntheticAgeImageReviews)) {
+      const decorateSyntheticAgeReview = (item) => {
+        const next = targetObject(item);
+        grantDecoratedMediaPath(next.generatedPath);
+        decoratePath(next, "generatedPath", "generatedUrl");
+        return next;
+      };
+      if (mutate) {
+        state.syntheticAgeImageReviews.forEach((item, index) => {
+          state.syntheticAgeImageReviews[index] = decorateSyntheticAgeReview(item);
+        });
+      } else {
+        state.syntheticAgeImageReviews = state.syntheticAgeImageReviews.map(decorateSyntheticAgeReview);
+      }
     }
     if (Array.isArray(state.videoMoments)) {
-      state.videoMoments = state.videoMoments.map((item) => {
-        const next = { ...item };
+      const decorateVideoMoment = (item) => {
+        const next = targetObject(item);
         decoratePath(next, "mediaSourcePath", "mediaSourceUrl");
         decoratePath(next, "previewPath", "previewUrl");
         return next;
-      });
+      };
+      if (mutate) {
+        state.videoMoments.forEach((item, index) => {
+          state.videoMoments[index] = decorateVideoMoment(item);
+        });
+      } else {
+        state.videoMoments = state.videoMoments.map(decorateVideoMoment);
+      }
     }
   };
   if (value.state) {
@@ -2319,37 +2699,65 @@ function decorateState(value, options = {}) {
   } else if (value.counts && value.references && value.candidates) {
     apply(value);
   } else if (Array.isArray(value.items)) {
-    value.items = value.items.map(decorateCandidate);
+    if (mutate) {
+      value.items.forEach((item, index) => {
+        value.items[index] = decorateCandidate(item);
+      });
+    } else {
+      value.items = value.items.map(decorateCandidate);
+    }
   } else if (Array.isArray(value.folders)) {
     // Photos tab rail: grant + decorate each folder's cover thumbnail so it
     // resolves over vintrace-media:// like any other preview.
-    value.folders = value.folders.map((folder) => {
-      const next = { ...folder };
+    const decorateFolder = (folder) => {
+      const next = targetObject(folder);
       grantDecoratedMediaPath(next.coverPreviewPath);
       decoratePath(next, "coverPreviewPath", "coverPreviewUrl");
       return next;
-    });
+    };
+    if (mutate) {
+      value.folders.forEach((folder, index) => {
+        value.folders[index] = decorateFolder(folder);
+      });
+    } else {
+      value.folders = value.folders.map(decorateFolder);
+    }
   } else if (Array.isArray(value.buckets)) {
-    value.buckets = value.buckets.map((bucket) => {
-      const next = { ...bucket };
+    const decorateBucket = (bucket) => {
+      const next = targetObject(bucket);
       grantDecoratedMediaPath(next.coverPreviewPath);
       decoratePath(next, "coverPreviewPath", "coverPreviewUrl");
       return next;
-    });
+    };
+    if (mutate) {
+      value.buckets.forEach((bucket, index) => {
+        value.buckets[index] = decorateBucket(bucket);
+      });
+    } else {
+      value.buckets = value.buckets.map(decorateBucket);
+    }
   } else if (Array.isArray(value.groups)) {
-    value.groups = value.groups.map((group) => ({
-      ...group,
-      items: Array.isArray(group.items)
+    const decorateGroup = (group) => {
+      const nextGroup = targetObject(group);
+      nextGroup.items = Array.isArray(group.items)
         ? group.items.map((item) => {
-          const next = { ...item };
+          const next = targetObject(item);
           grantDecoratedMediaPath(next.previewPath);
           grantDecoratedMediaPath(next.coverPreviewPath);
           decoratePath(next, "previewPath", "previewUrl");
           decoratePath(next, "coverPreviewPath", "coverPreviewUrl");
           return next;
         })
-        : []
-    }));
+        : [];
+      return nextGroup;
+    };
+    if (mutate) {
+      value.groups.forEach((group, index) => {
+        value.groups[index] = decorateGroup(group);
+      });
+    } else {
+      value.groups = value.groups.map(decorateGroup);
+    }
   }
   return value;
 }
@@ -2479,6 +2887,78 @@ function assertPlainObject(value, label = "Payload") {
   }
 }
 
+function requireUnlockedPhotoPortability() {
+  if (isWorkspaceLocked()) {
+    throw createAppError(
+      "E-WORKSPACE-LOCKED",
+      "Unlock this app folder before migrating or transferring a photo catalog."
+    );
+  }
+}
+
+function grantedPhotoPortabilityPath(value, label, { required = false } = {}) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    if (!required) return "";
+    throw createAppError("E-PHOTO-CATALOG-PATH", `Choose ${label} in Vintrace first.`);
+  }
+  const resolved = path.resolve(raw);
+  if (!isUserGrantedPath(resolved)) {
+    throw createAppError("E-PHOTO-CATALOG-PATH", `Choose ${label} in Vintrace first.`);
+  }
+  return resolved;
+}
+
+function damCatalogProvider(value) {
+  const provider = String(value || "").trim().toLowerCase();
+  if (!DAM_CATALOG_PROVIDERS.has(provider)) {
+    throw createAppError("E-DAM-CATALOG-PROVIDER", "Choose Lightroom Classic or Capture One.");
+  }
+  return provider;
+}
+
+function validatedDamCatalogPayload(payload, { requireLibraryPath = false } = {}) {
+  assertPlainObject(payload, "DAM catalog payload");
+  const serialized = JSON.stringify(payload);
+  if (serialized.length > 250_000) {
+    throw createAppError("E-IPC-PARAMS-LARGE", "DAM catalog options are too large.");
+  }
+  const provider = damCatalogProvider(payload.provider);
+  const libraryPath = grantedPhotoPortabilityPath(
+    payload.libraryPath,
+    provider === "lightroom_catalog" ? "a Lightroom catalog" : "a Capture One catalog",
+    { required: requireLibraryPath }
+  );
+  const mediaRoot = grantedPhotoPortabilityPath(payload.mediaRoot, "the relocated media folder");
+  const managedRoot = grantedPhotoPortabilityPath(
+    payload.managedRoot || payload.managedFolder,
+    "the managed library folder"
+  );
+  const rootMappings = Array.isArray(payload.rootMappings)
+    ? payload.rootMappings.slice(0, 64).map((mapping) => {
+      assertPlainObject(mapping, "DAM root mapping");
+      const sourceRoot = String(mapping.sourceRoot || mapping.from || "").trim().slice(0, 4096);
+      const targetRoot = grantedPhotoPortabilityPath(
+        mapping.targetRoot || mapping.to,
+        "each relocated media folder",
+        { required: true }
+      );
+      if (!sourceRoot) {
+        throw createAppError("E-DAM-CATALOG-MAPPING", "Each relocation needs its original catalog root.");
+      }
+      return { sourceRoot, targetRoot };
+    })
+    : [];
+  return {
+    ...payload,
+    provider,
+    ...(libraryPath ? { libraryPath } : {}),
+    ...(mediaRoot ? { mediaRoot } : {}),
+    ...(managedRoot ? { managedRoot } : {}),
+    ...(rootMappings.length ? { rootMappings } : {}),
+  };
+}
+
 function validateBackendPayload(payload = {}) {
   assertPlainObject(payload, "Backend payload");
   const command = String(payload.command || "");
@@ -2507,7 +2987,7 @@ function grantPathsFromBackendRequest(command, params) {
     grantUserPath(params.path);
     grantUserPath(params.target || params.targetFolder);
   }
-  if (["inspect_public_dataset", "run_public_dataset_benchmark", "compare_public_dataset_models"].includes(command)) {
+  if (["inspect_public_dataset", "run_public_dataset_benchmark", "run_cross_age_trajectory_benchmark", "compare_public_dataset_models"].includes(command)) {
     grantUserPath(params.folder);
   }
   if (command === "enroll_age_groups" && Array.isArray(params.groups)) {
@@ -2521,6 +3001,19 @@ function grantPathsFromBackendRequest(command, params) {
     for (const item of params.paths) {
       grantUserPath(item);
     }
+  }
+  if ([
+    "preview_apple_photos_library",
+    "import_apple_photos_library",
+    "sync_apple_photos_library",
+    "export_apple_photos_assets",
+    "preview_windows_photo_folder",
+    "import_windows_photo_folder",
+    "sync_windows_photo_folder",
+  ].includes(command)) {
+    grantUserPath(params.libraryPath || params.rootPath);
+    grantUserPath(params.managedRoot || params.managedFolder);
+    grantUserPath(params.destination || params.folder);
   }
 }
 
@@ -2563,10 +3056,17 @@ function registerMediaProtocol() {
     // (not the original) so a symlink swapped between check and fetch can't
     // redirect us outside the trust boundary.
     const realTarget = target && !isWorkspaceLocked() ? await resolveTrustedMediaPath(target) : "";
-    if (!realTarget || !(await pathExistsAsync(realTarget))) {
+    if (!realTarget) {
       return new Response("Not found", { status: 404 });
     }
-    return net.fetch(pathToFileURL(realTarget).toString());
+    try {
+      return await net.fetch(pathToFileURL(realTarget).toString());
+    } catch {
+      // The file may disappear after canonicalization (for example, an
+      // external drive was disconnected). Avoid a second pre-fetch stat/access
+      // on every thumbnail and handle that narrow race at the fetch boundary.
+      return new Response("Not found", { status: 404 });
+    }
   });
 }
 
@@ -2671,6 +3171,82 @@ function sendWatchEvent(payload) {
   buildTrayMenu();
 }
 
+function publicPhotoTetherCameraStatus(camera) {
+  if (!camera || typeof camera !== "object") return camera;
+  const { executable: _executable, ...publicStatus } = camera;
+  return {
+    ...publicStatus,
+    executableAvailable: Boolean(_executable || camera.available)
+  };
+}
+
+function publicPhotoTetherSession(session) {
+  if (!session || typeof session !== "object") return session;
+  const captures = Array.isArray(session.captures) ? session.captures.map((capture) => {
+    const targetPath = String(capture?.targetPath || capture?.sourcePath || "");
+    if (targetPath) {
+      grantUserPath(targetPath);
+      grantQueryMediaPath(targetPath);
+    }
+    return { ...capture, previewUrl: targetPath ? mediaUrlFor(targetPath) : "" };
+  }) : session.captures;
+  return {
+    ...session,
+    ...(captures ? { captures } : {}),
+    capabilities: publicPhotoTetherCameraStatus(session.capabilities)
+  };
+}
+
+function publicPhotoTetherPayload(payload) {
+  if (!payload || typeof payload !== "object") return payload;
+  const result = { ...payload };
+  if (result.camera) result.camera = publicPhotoTetherCameraStatus(result.camera);
+  if (result.session) result.session = publicPhotoTetherSession(result.session);
+  for (const key of ["recoverable", "recent"]) {
+    if (Array.isArray(result[key])) {
+      result[key] = result[key].map(publicPhotoTetherSession);
+    }
+  }
+  return result;
+}
+
+function ensurePhotoTetherRuntime() {
+  if (photoTetherRuntime) return photoTetherRuntime;
+  if (!backend) backend = new PythonBackend();
+  photoTetherRuntime = createPhotoTetherRuntime({
+    invokeBackend: (command, params) => backend.invoke(command, params),
+    mediaExtensions: new Set([...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS]),
+    environment: process.env,
+    emit: (event) => {
+      const publicEvent = publicPhotoTetherPayload(event);
+      sendToRenderer("photo-tether:event", publicEvent);
+      if (["capture-failed", "import-failed", "resume-failed", "watch-warning", "queue-full"].includes(String(event?.type || ""))) {
+        appendDiagnosticEvent({
+          type: `photo_tether_${String(event?.type || "error").replace(/-/g, "_")}`,
+          level: String(event?.type || "").includes("warning") || event?.type === "queue-full" ? "warn" : "error",
+          code: String(event?.code || ""),
+          message: String(event?.error || event?.message || "Photo tether runtime error.")
+        });
+      }
+    },
+    onImported: async (event) => {
+      const targetPath = String(event?.capture?.targetPath || event?.asset?.sourcePath || "");
+      if (targetPath) {
+        await grantUserPathAsync(targetPath);
+        grantQueryMediaPath(targetPath);
+      }
+      return {
+        ...event,
+        previewUrl: targetPath ? mediaUrlFor(targetPath) : "",
+        asset: event?.asset && typeof event.asset === "object"
+          ? { ...event.asset, previewUrl: targetPath ? mediaUrlFor(targetPath) : "" }
+          : event?.asset
+      };
+    }
+  });
+  return photoTetherRuntime;
+}
+
 function currentFolderWatchStatus(message = "") {
   if (!folderWatch) {
     return { active: false, folder: null, queued: 0, scanning: false, message: message || "Not watching." };
@@ -2700,14 +3276,12 @@ function stopFolderWatch(reason = "Stopped", options = {}) {
     clearTimeout(folderWatch.sweepTimer);
   }
   if (folderWatch.scanning) {
-    try {
-      const workspace = activeWorkspacePath();
-      fs.mkdirSync(workspace, { recursive: true });
-      fs.writeFileSync(path.join(workspace, ".scan-cancel"), new Date().toISOString(), "utf8");
-      appendDiagnosticEvent({ type: "watch_scan_cancel_requested", level: "info", folder: folderWatch.folder });
-    } catch (error) {
-      appendDiagnosticEvent({ type: "watch_scan_cancel_failed", level: "warn", message: error instanceof Error ? error.message : String(error) });
-    }
+    const workspace = activeWorkspacePath();
+    const watchedFolder = folderWatch.folder;
+    void fs.promises.mkdir(workspace, { recursive: true })
+      .then(() => fs.promises.writeFile(path.join(workspace, ".scan-cancel"), new Date().toISOString(), "utf8"))
+      .then(() => appendDiagnosticEvent({ type: "watch_scan_cancel_requested", level: "info", folder: watchedFolder }))
+      .catch((error) => appendDiagnosticEvent({ type: "watch_scan_cancel_failed", level: "warn", message: error instanceof Error ? error.message : String(error) }));
   }
   try {
     folderWatch.watcher.close();
@@ -2790,11 +3364,18 @@ async function runWatchSweep(watch) {
   if (!watch || folderWatch !== watch) {
     return;
   }
+  watch.sweepTimer = null;
+  if (mainWindowIsForegroundActive() && !envFlag("CROSSAGE_WATCH_SWEEP_ALLOW_FOREGROUND")) {
+    // fs.watch continues to queue ordinary changes. The recursive sweep is a
+    // missed-event reconciliation pass and can wait until it will not compete
+    // with foreground thumbnails, search, or navigation.
+    scheduleWatchSweep(watch);
+    return;
+  }
   if (watch.sweeping || watch.scanning) {
     scheduleWatchSweep(watch);
     return;
   }
-  watch.sweepTimer = null;
   watch.sweeping = true;
   let queued = 0;
   let dirsChecked = 0;
@@ -3217,6 +3798,95 @@ function createTray() {
   buildTrayMenu();
 }
 
+function settleBackendJsonParserPending(worker, value = null) {
+  if (backendJsonParserWorker !== worker) return;
+  backendJsonParserWorker = null;
+  for (const pending of backendJsonParserPending.values()) {
+    clearTimeout(pending.timer);
+    pending.resolve(value);
+  }
+  backendJsonParserPending.clear();
+}
+
+function getBackendJsonParserWorker() {
+  if (backendJsonParserWorker) return backendJsonParserWorker;
+  const worker = new Worker(`
+    const { parentPort } = require("worker_threads");
+    parentPort.on("message", ({ id, value }) => {
+      try {
+        parentPort.postMessage({ id, ok: true, value: JSON.parse(value) });
+      } catch {
+        parentPort.postMessage({ id, ok: false });
+      }
+    });
+  `, { eval: true });
+  backendJsonParserWorker = worker;
+  worker.unref();
+  worker.on("message", (message) => {
+    const pending = backendJsonParserPending.get(message?.id);
+    if (!pending) return;
+    backendJsonParserPending.delete(message.id);
+    clearTimeout(pending.timer);
+    pending.resolve(message.ok ? message.value : null);
+  });
+  worker.once("error", () => settleBackendJsonParserPending(worker));
+  worker.once("exit", () => settleBackendJsonParserPending(worker));
+  return worker;
+}
+
+function stopBackendJsonParserWorker() {
+  const worker = backendJsonParserWorker;
+  if (!worker) return;
+  settleBackendJsonParserPending(worker);
+  void worker.terminate();
+}
+
+function parseBackendLineInWorker(line) {
+  return new Promise((resolve) => {
+    const worker = getBackendJsonParserWorker();
+    const id = backendJsonParserNextId++;
+    const timer = setTimeout(() => {
+      if (!backendJsonParserPending.has(id)) return;
+      backendJsonParserPending.delete(id);
+      resolve(null);
+      settleBackendJsonParserPending(worker);
+      void worker.terminate();
+    }, 60_000);
+    backendJsonParserPending.set(id, { resolve, timer });
+    worker.postMessage({ id, value: String(line || "") });
+  });
+}
+
+function parseBackendLine(line) {
+  const text = String(line || "");
+  if (text.length > BACKEND_MAIN_THREAD_PARSE_LIMIT) {
+    return parseBackendLineInWorker(text);
+  }
+  try {
+    return Promise.resolve(JSON.parse(text));
+  } catch {
+    return Promise.resolve(null);
+  }
+}
+
+function backendPayloadLooksLarge(value) {
+  const state = value?.state && typeof value.state === "object" ? value.state : value;
+  return (
+    Array.isArray(state?.candidates) && state.candidates.length > 1000
+    || Array.isArray(state?.references) && state.references.length > 1000
+    || Array.isArray(value?.items) && value.items.length > 1000
+    || Array.isArray(value?.groups) && value.groups.some((group) => Array.isArray(group?.items) && group.items.length > 1000)
+  );
+}
+
+async function decorateBackendPayload(value, options = {}) {
+  const largePayload = backendPayloadLooksLarge(value);
+  if (largePayload) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  return decorateState(value, { ...options, mutate: largePayload });
+}
+
 class PythonBackend {
   constructor() {
     this.readyState = null;
@@ -3235,6 +3905,10 @@ class PythonBackend {
     // Set while intentionally tearing the backend down (app quit), so a
     // deliberate kill is not counted as a crash toward the backoff.
     this.stopping = false;
+    this.stdoutQueue = Promise.resolve();
+    this.spawnGeneration = 0;
+    this.workspaceOverride = "";
+    this.workspaceKeyMaterial = null;
   }
 
   start() {
@@ -3249,27 +3923,68 @@ class PythonBackend {
       this.readyPromise = new Promise((resolve) => setTimeout(resolve, backoffMs)).then(() => this._spawn());
       return this.readyPromise;
     }
-    return this._spawn();
+    this.readyPromise = this._spawn();
+    return this.readyPromise;
   }
 
   _spawn() {
-    this.readyPromise = null;
     const root = appRoot();
     const executable = findPythonExecutable();
     const isFrozenBackend = path.basename(executable).startsWith("crossage-backend");
     const userModelRoot = path.join(app.getPath("userData"), "models");
     const safetyExplainDir = path.join(userModelRoot, "safety-explain");
+    const workspace = path.resolve(
+      this.workspaceOverride
+      || process.env.VINTRACE_WORKSPACE
+      || process.env.CROSSAGE_WORKSPACE
+      || path.join(app.getPath("userData"), "workspace")
+    );
+    let keyEnv = process.env;
+    if (
+      process.env.CROSSAGE_ALLOW_MULTI_INSTANCE === "1"
+      && !process.env.VINTRACE_WORKSPACE_DB_KEY
+      && !workspaceLockSupported()
+    ) {
+      // Linux CI often has no Secret Service. Keep the e2e-only database stable
+      // across process restarts without weakening production startup policy.
+      const testKey = crypto.createHash("sha256")
+        .update(`vintrace-e2e-workspace-key-v1\0${workspace}\0${app.getPath("userData")}`)
+        .digest("base64url");
+      keyEnv = { ...process.env, VINTRACE_WORKSPACE_DB_KEY: testKey };
+    }
+    let workspaceKeys;
+    try {
+      workspaceKeys = resolveDesktopWorkspaceKeys({ workspace, safeStorage, env: keyEnv });
+    } catch (error) {
+      const code = String(error?.code || "E-WORKSPACE-KEY");
+      return Promise.reject(createAppError(code, error instanceof Error ? error.message : String(error)));
+    }
+    this.workspaceKeyMaterial = {
+      keyId: workspaceKeys.keyId,
+      previousKeyId: workspaceKeys.previousKeyId,
+      source: workspaceKeys.source,
+      pending: workspaceKeys.pending,
+      workspace,
+    };
     this.stderrTail = "";
     const args = isFrozenBackend ? [] : ["-m", "crossage_fr.api_server"];
     const env = {
       ...process.env,
       PYTHONPATH: root,
-      VINTRACE_WORKSPACE: process.env.VINTRACE_WORKSPACE || process.env.CROSSAGE_WORKSPACE || path.join(app.getPath("userData"), "workspace"),
-      CROSSAGE_WORKSPACE: process.env.CROSSAGE_WORKSPACE || process.env.VINTRACE_WORKSPACE || path.join(app.getPath("userData"), "workspace"),
+      VINTRACE_WORKSPACE: workspace,
+      CROSSAGE_WORKSPACE: workspace,
+      VINTRACE_WORKSPACE_DB_KEY: workspaceKeys.primaryEncoded,
+      VINTRACE_WORKSPACE_DB_PREVIOUS_KEY: workspaceKeys.previousEncoded,
+      [WORKSPACE_REQUIRE_ENCRYPTION_ENV]: "1",
       CROSSAGE_USER_MODEL_DIR: isFrozenBackend ? userModelRoot : (process.env.CROSSAGE_USER_MODEL_DIR || userModelRoot),
       CROSSAGE_SAFETY_EXPLAIN_INSTALL_DIR: isFrozenBackend ? safetyExplainDir : (process.env.CROSSAGE_SAFETY_EXPLAIN_INSTALL_DIR || safetyExplainDir),
       CROSSAGE_SAFETY_EXPLAIN_DIR: isFrozenBackend ? safetyExplainDir : (process.env.CROSSAGE_SAFETY_EXPLAIN_DIR || safetyExplainDir)
     };
+    // The desktop has already unwrapped the key. Do not propagate its recovery
+    // passphrase to the long-lived image-processing process.
+    delete env[WORKSPACE_RECOVERY_PASSPHRASE_ENV];
+    workspaceKeys.primaryKey.fill(0);
+    workspaceKeys.previousKey?.fill(0);
     // MISS-01: scrub dynamic-loader injection variables before spawning the
     // backend so a local attacker who sets DYLD_*/LD_* can't load a malicious
     // library into the (hardened-runtime, camera-capable) backend process.
@@ -3278,6 +3993,7 @@ class PythonBackend {
         delete env[key];
       }
     }
+    const generation = ++this.spawnGeneration;
     this.child = spawn(executable, args, {
       cwd: root,
       env,
@@ -3286,8 +4002,13 @@ class PythonBackend {
 
     const child = this.child;
     const lines = readline.createInterface({ input: child.stdout });
+    let stdoutQueue = Promise.resolve();
+    this.stdoutQueue = stdoutQueue;
     this.readyPromise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
+        if (this.child !== child) {
+          return;
+        }
         this.readyPromise = null;
         this.readyState = null;
         if (this.child === child && !child.killed) {
@@ -3298,84 +4019,93 @@ class PythonBackend {
       }, 180000);
       lines.on("line", (line) => {
         this.lastActivityAt = Date.now();
-        let message;
-        try {
-          message = JSON.parse(line);
-        } catch (error) {
-          return;
-        }
-        if (this.child !== child) {
-          return;
-        }
-        if (message.ready) {
-          clearTimeout(timer);
-          this.readyState = decorateState(message.state);
-          this.consecutiveFailures = 0; // EIPC-05: healthy start clears the backoff.
-          resolve(this.readyState);
-          return;
-        }
-        if (message.ready === false) {
-          // ER-01: the backend reported a structured startup failure (e.g. the
-          // workspace lives on a detached/read-only drive). Reject with the
-          // actionable code/message instead of letting start() time out and
-          // surface only a generic E-BACKEND-EXIT.
-          clearTimeout(timer);
-          this.readyPromise = null;
-          this.readyState = null;
-          const backendError = message.error || {};
-          const startupError = createAppError(
-            backendError.code || "E-BACKEND-START",
-            backendError.message || "The local engine could not start."
-          );
-          startupError.backend = backendError;
-          if (this.child === child && !child.killed) {
-            child.kill();
+        stdoutQueue = stdoutQueue.then(async () => {
+          const message = await parseBackendLine(line);
+          if (!message || this.child !== child) {
+            return;
           }
-          reject(startupError);
-          return;
-        }
-        if (message.event === "startup") {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send("backend:startup", message.payload || {});
-          }
-          return;
-        }
-        if (message.event === "progress") {
-          const progressPending = this.pending.get(message.id);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send("backend:progress", {
-              id: message.id,
-              name: message.name,
-              payload: decorateState(message.payload || {}, {
-                trustGeneration: progressPending ? progressPending.trustGeneration : -1
-              })
-            });
-          }
-          return;
-        }
-        const pending = this.pending.get(message.id);
-        if (!pending) {
-          return;
-        }
-        this.pending.delete(message.id);
-        clearTimeout(pending.timer);
-        if (message.ok) {
-          const result = decorateState(message.result, { trustGeneration: pending.trustGeneration });
-          if (pending.trustGeneration === pathTrustGeneration) {
-            if (result?.state) {
-              this.readyState = result.state;
-            } else if (result?.counts && result?.references && result?.candidates) {
-              this.readyState = result;
+          if (message.ready) {
+            clearTimeout(timer);
+            this.readyState = await decorateBackendPayload(message.state);
+            this.consecutiveFailures = 0; // EIPC-05: healthy start clears the backoff.
+            resolve(this.readyState);
+            if (this.workspaceKeyMaterial?.pending) {
+              setImmediate(() => void this.reconcilePendingWorkspaceKey());
             }
+            return;
           }
-          notifyForCommand(pending.command, result);
-          pending.resolve(result);
-        } else {
-          const err = createAppError(codeFromBackendError(message.error) || "E-BACKEND-COMMAND", message.error?.message || "Backend command failed.");
-          err.backend = message.error;
-          err.category = codeMeta(err.code)?.category || "backend";
-          err.severity = codeMeta(err.code)?.severity || "error";
-          pending.reject(err);
+          if (message.ready === false) {
+            // ER-01: the backend reported a structured startup failure (e.g. the
+            // workspace lives on a detached/read-only drive). Reject with the
+            // actionable code/message instead of letting start() time out and
+            // surface only a generic E-BACKEND-EXIT.
+            clearTimeout(timer);
+            this.readyPromise = null;
+            this.readyState = null;
+            const backendError = message.error || {};
+            const startupError = createAppError(
+              backendError.code || "E-BACKEND-START",
+              backendError.message || "The local engine could not start."
+            );
+            startupError.backend = backendError;
+            if (this.child === child && !child.killed) {
+              child.kill();
+            }
+            reject(startupError);
+            return;
+          }
+          if (message.event === "startup") {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send("backend:startup", message.payload || {});
+            }
+            return;
+          }
+          if (message.event === "progress") {
+            const progressPending = this.pending.get(message.id);
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send("backend:progress", {
+                id: message.id,
+                name: message.name,
+                payload: await decorateBackendPayload(message.payload || {}, {
+                  trustGeneration: progressPending ? progressPending.trustGeneration : -1
+                })
+              });
+            }
+            return;
+          }
+          const pending = this.pending.get(message.id);
+          if (!pending) {
+            return;
+          }
+          this.pending.delete(message.id);
+          clearTimeout(pending.timer);
+          if (message.ok) {
+            const result = await decorateBackendPayload(message.result, { trustGeneration: pending.trustGeneration });
+            if (pending.trustGeneration === pathTrustGeneration) {
+              if (result?.state) {
+                this.readyState = result.state;
+              } else if (result?.counts && result?.references && result?.candidates) {
+                this.readyState = result;
+              }
+            }
+            notifyForCommand(pending.command, result);
+            pending.resolve(result);
+          } else {
+            const err = createAppError(codeFromBackendError(message.error) || "E-BACKEND-COMMAND", message.error?.message || "Backend command failed.");
+            err.backend = message.error;
+            err.category = codeMeta(err.code)?.category || "backend";
+            err.severity = codeMeta(err.code)?.severity || "error";
+            pending.reject(err);
+          }
+        }).catch((error) => {
+          appendDiagnosticEvent({
+            type: "backend_stdout_parse_failed",
+            level: "warn",
+            message: error instanceof Error ? error.message : String(error)
+          });
+        });
+        if (this.child === child) {
+          this.stdoutQueue = stdoutQueue;
         }
       });
       child.on("error", (error) => {
@@ -3408,15 +4138,11 @@ class PythonBackend {
           stderrTail: this.stderrTail,
           stale: !activeChild
         });
+        this.rejectPendingForChild(child, generation, pipeError);
         if (!activeChild) {
           return;
         }
         clearTimeout(timer);
-        for (const pending of this.pending.values()) {
-          clearTimeout(pending.timer);
-          pending.reject(pipeError);
-        }
-        this.pending.clear();
         this.readyPromise = null;
         this.readyState = null;
         this.child = null;
@@ -3436,12 +4162,8 @@ class PythonBackend {
           this.consecutiveFailures += 1;
         }
         const error = createAppError("E-BACKEND-EXIT", `Python backend exited with code ${code}.`, { exitCode: code });
+        this.rejectPendingForChild(child, generation, error);
         if (activeChild) {
-          for (const pending of this.pending.values()) {
-            clearTimeout(pending.timer);
-            pending.reject(error);
-          }
-          this.pending.clear();
           this.readyPromise = null;
           this.readyState = null;
           this.child = null;
@@ -3466,9 +4188,104 @@ class PythonBackend {
     return this.readyPromise;
   }
 
+  async reconcilePendingWorkspaceKey() {
+    const material = this.workspaceKeyMaterial;
+    if (!material?.pending || material.source === "environment") return { pending: false, action: "none" };
+    try {
+      const status = await this.invoke("workspace_encryption_status", {});
+      const activeKeyId = String(status?.database?.keyId || status?.keyId || "");
+      const result = reconcileWorkspaceKeyRotation({ workspace: material.workspace, activeKeyId });
+      this.workspaceKeyMaterial = { ...material, keyId: activeKeyId, previousKeyId: "", pending: false };
+      appendDiagnosticEvent({
+        type: "workspace_key_rotation_reconciled",
+        level: "info",
+        action: result.action,
+        keyId: activeKeyId,
+      });
+      return result;
+    } catch (error) {
+      appendDiagnosticEvent({
+        type: "workspace_key_rotation_reconcile_failed",
+        level: "error",
+        code: String(error?.code || "E-WORKSPACE-KEY-ROTATION"),
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }
+
+  async rotateWorkspaceDatabaseKey() {
+    await this.start();
+    const workspace = path.resolve(this.readyState?.workspace || this.workspaceKeyMaterial?.workspace || "");
+    const staged = stageWorkspaceKeyRotation({ workspace, safeStorage, env: process.env });
+    try {
+      const status = await this.invoke("rotate_workspace_database_key", {
+        newKey: staged.newKeyEncoded,
+        source: "desktop-os-keychain",
+      });
+      const activeKeyId = String(status?.database?.keyId || status?.keyId || "");
+      commitWorkspaceKeyRotation({ workspace, activeKeyId });
+      this.workspaceKeyMaterial = {
+        keyId: activeKeyId,
+        previousKeyId: "",
+        source: "os-keychain",
+        pending: false,
+        workspace,
+      };
+      return { ...status, rotation: { oldKeyId: staged.oldKeyId, newKeyId: activeKeyId, pending: false } };
+    } finally {
+      staged.newKey.fill(0);
+    }
+  }
+
+  async restartForWorkspace(workspacePath) {
+    const nextWorkspace = path.resolve(String(workspacePath || ""));
+    if (!nextWorkspace) throw createAppError("E-BACKEND-VALIDATION", "Choose an app folder.");
+    const child = this.child;
+    this.stopping = true;
+    if (child && child.exitCode === null && !child.signalCode) {
+      await new Promise((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        child.once("exit", finish);
+        try { child.kill("SIGTERM"); } catch { finish(); }
+        setTimeout(() => {
+          if (child.exitCode === null && !child.signalCode) {
+            try { child.kill("SIGKILL"); } catch { /* already exited */ }
+          }
+          setTimeout(finish, 250);
+        }, 1500);
+      });
+    }
+    if (this.child === child) this.child = null;
+    this.readyPromise = null;
+    this.readyState = null;
+    this.workspaceOverride = nextWorkspace;
+    this.workspaceKeyMaterial = null;
+    this.stopping = false;
+    return this.start();
+  }
+
+  rejectPendingForChild(child, generation, error) {
+    for (const [id, pending] of this.pending.entries()) {
+      if (pending.child !== child || pending.generation !== generation) {
+        continue;
+      }
+      clearTimeout(pending.timer);
+      pending.reject(error);
+      this.pending.delete(id);
+    }
+  }
+
   async invoke(command, params = {}) {
     await this.start();
-    if (!this.child || !this.child.stdin.writable) {
+    const child = this.child;
+    const generation = this.spawnGeneration;
+    if (!child || !child.stdin.writable) {
       throw createAppError("E-BACKEND-NOT-READY", "Python backend is not accepting commands.");
     }
     const id = this.nextId++;
@@ -3485,7 +4302,10 @@ class PythonBackend {
         }
         const now = Date.now();
         const silentFor = now - this.lastActivityAt;
-        if (silentFor < BACKEND_STALL_TIMEOUT_MS && now - startedAt < BACKEND_COMMAND_TIMEOUT_MS) {
+        const absoluteTimeout = BACKEND_GENERATIVE_COMMANDS.has(command)
+          ? BACKEND_GENERATIVE_COMMAND_TIMEOUT_MS
+          : BACKEND_COMMAND_TIMEOUT_MS;
+        if (silentFor < BACKEND_STALL_TIMEOUT_MS && now - startedAt < absoluteTimeout) {
           const entry = this.pending.get(id);
           if (entry) {
             entry.timer = setTimeout(fireWatchdog, Math.max(1_000, BACKEND_STALL_TIMEOUT_MS - silentFor));
@@ -3499,8 +4319,8 @@ class PythonBackend {
       };
       const timer = setTimeout(fireWatchdog, BACKEND_STALL_TIMEOUT_MS);
       const trustGeneration = pathTrustGeneration;
-      this.pending.set(id, { resolve, reject, command, timer, trustGeneration });
-      this.child.stdin.write(payload, "utf8", (error) => {
+      this.pending.set(id, { resolve, reject, command, timer, trustGeneration, child, generation });
+      child.stdin.write(payload, "utf8", (error) => {
         if (error) {
           const pending = this.pending.get(id);
           if (pending) {
@@ -3522,13 +4342,10 @@ class PythonBackend {
       stderrTail: this.stderrTail
     });
     if (["scan", "scan_paths"].includes(String(command))) {
-      try {
-        const workspace = activeWorkspacePath();
-        fs.mkdirSync(workspace, { recursive: true });
-        fs.writeFileSync(path.join(workspace, ".scan-cancel"), new Date().toISOString(), "utf8");
-      } catch {
-        // Timeout recovery is best effort.
-      }
+      const workspace = activeWorkspacePath();
+      void fs.promises.mkdir(workspace, { recursive: true })
+        .then(() => fs.promises.writeFile(path.join(workspace, ".scan-cancel"), new Date().toISOString(), "utf8"))
+        .catch(() => undefined);
     }
     const child = this.child;
     if (!child || child.killed) {
@@ -3558,9 +4375,25 @@ class PythonBackend {
 
   stop() {
     this.stopping = true;
-    if (this.child && !this.child.killed) {
-      this.child.kill();
+    const child = this.child;
+    if (!child || child.exitCode !== null || child.signalCode) {
+      return;
     }
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // Process may already be gone.
+    }
+    setTimeout(() => {
+      if (this.child !== child || child.exitCode !== null || child.signalCode) {
+        return;
+      }
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // SIGKILL is not available on every platform.
+      }
+    }, 1500);
   }
 }
 
@@ -3574,16 +4407,44 @@ function unwrapBackendValue(result) {
     : result;
 }
 
-function normalizePhotoIndexingPowerMode(value) {
-  const mode = String(value || "balanced").trim().toLowerCase();
-  return mode === "low" || mode === "performance" || mode === "balanced" ? mode : "balanced";
+function cachePhotoIndexingHeadlessSettings(result) {
+  const value = unwrapBackendValue(result);
+  const localSettings = value && typeof value === "object" && value.localSettings && typeof value.localSettings === "object"
+    ? value.localSettings
+    : null;
+  if (!localSettings) return null;
+  photoIndexingHeadlessSettingsCache = { ...localSettings };
+  photoIndexingHeadlessSettingsCachedAt = Date.now();
+  photoIndexingHeadlessSettingsWorkspace = activeWorkspacePath();
+  return photoIndexingHeadlessSettingsCache;
+}
+
+function clearPhotoIndexingHeadlessSettingsCache() {
+  photoIndexingHeadlessSettingsCache = null;
+  photoIndexingHeadlessSettingsCachedAt = 0;
+  photoIndexingHeadlessSettingsWorkspace = "";
+}
+
+function mainWindowIsForegroundActive() {
+  return Boolean(
+    mainWindow
+    && !mainWindow.isDestroyed()
+    && mainWindow.isVisible()
+    && mainWindow.isFocused()
+  );
 }
 
 function photoIndexingHeadlessPowerState() {
   const forcedBattery = String(process.env.CROSSAGE_PHOTO_INDEXING_FORCE_BATTERY || "").trim();
   const forcedIdleState = String(process.env.CROSSAGE_PHOTO_INDEXING_FORCE_IDLE_STATE || "").trim().toLowerCase();
+  const forcedThermalState = String(process.env.CROSSAGE_PHOTO_INDEXING_FORCE_THERMAL_STATE || "").trim().toLowerCase();
+  const forcedSpeedLimit = Number(process.env.CROSSAGE_PHOTO_INDEXING_FORCE_SPEED_LIMIT || "");
+  const forcedFreeMemoryMb = Number(process.env.CROSSAGE_PHOTO_INDEXING_FORCE_FREE_MEMORY_MB || "");
+  const forcedTotalMemoryMb = Number(process.env.CROSSAGE_PHOTO_INDEXING_FORCE_TOTAL_MEMORY_MB || "");
   let onBattery = false;
   let idleState = "unknown";
+  let thermalState = "unknown";
+  const foregroundActive = mainWindowIsForegroundActive();
   if (forcedBattery) {
     onBattery = envFlag("CROSSAGE_PHOTO_INDEXING_FORCE_BATTERY");
   } else if (powerMonitor && typeof powerMonitor.isOnBatteryPower === "function") {
@@ -3602,36 +4463,60 @@ function photoIndexingHeadlessPowerState() {
       idleState = "unknown";
     }
   }
-  return { onBattery, idleState };
+  if (["unknown", "nominal", "fair", "serious", "critical"].includes(forcedThermalState)) {
+    thermalState = forcedThermalState;
+  } else if (powerMonitor && typeof powerMonitor.getCurrentThermalState === "function") {
+    try {
+      const current = String(powerMonitor.getCurrentThermalState() || "unknown").toLowerCase();
+      thermalState = ["unknown", "nominal", "fair", "serious", "critical"].includes(current) ? current : "unknown";
+      photoIndexingHeadlessThermalState = thermalState;
+    } catch {
+      thermalState = photoIndexingHeadlessThermalState;
+    }
+  } else {
+    thermalState = photoIndexingHeadlessThermalState;
+  }
+  const speedLimit = Number.isFinite(forcedSpeedLimit) && forcedSpeedLimit > 0
+    ? Math.max(1, Math.min(100, Math.round(forcedSpeedLimit)))
+    : Math.max(1, Math.min(100, Math.round(Number(photoIndexingHeadlessSpeedLimit || 100))));
+  const totalMemoryBytes = Number.isFinite(forcedTotalMemoryMb) && forcedTotalMemoryMb > 0
+    ? Math.round(forcedTotalMemoryMb * 1024 * 1024)
+    : Math.max(1, Number(os.totalmem()) || 1);
+  const freeMemoryBytes = Number.isFinite(forcedFreeMemoryMb) && forcedFreeMemoryMb >= 0
+    ? Math.round(forcedFreeMemoryMb * 1024 * 1024)
+    : Math.max(0, Number(os.freemem()) || 0);
+  const memoryAvailableFraction = Math.max(0, Math.min(1, freeMemoryBytes / totalMemoryBytes));
+  const memoryPressure = freeMemoryBytes < 512 * 1024 * 1024 || memoryAvailableFraction < 0.03
+    ? "critical"
+    : freeMemoryBytes < 1024 * 1024 * 1024 || memoryAvailableFraction < 0.07
+      ? "pressured"
+      : "normal";
+  return {
+    onBattery,
+    idleState,
+    foregroundActive,
+    thermalState,
+    speedLimit,
+    freeMemoryBytes,
+    totalMemoryBytes,
+    memoryAvailableFraction,
+    memoryPressure
+  };
 }
 
 function photoIndexingHeadlessRuntimePolicy(localSettings) {
-  const settings = localSettings && typeof localSettings === "object" ? localSettings : {};
-  const powerMode = normalizePhotoIndexingPowerMode(settings.indexingPowerMode);
   const power = photoIndexingHeadlessPowerState();
-  if (!settings.localIntelligenceEnabled) {
-    return { allowed: false, reason: "local-intelligence-disabled", powerMode, ...power };
-  }
-  if (settings.backgroundIndexingAutoRun === false) {
-    return { allowed: false, reason: "auto-run-off", powerMode, ...power };
-  }
-  if (settings.backgroundIndexingPaused) {
-    return { allowed: false, reason: "paused", powerMode, ...power };
-  }
-  if (envFlag("CROSSAGE_PHOTO_INDEXING_IGNORE_RUNTIME_POLICY")) {
-    return { allowed: true, reason: "runtime-policy-ignored", powerMode, ...power };
-  }
-  if (power.onBattery && powerMode !== "performance" && !envFlag("CROSSAGE_PHOTO_INDEXING_ALLOW_BATTERY")) {
-    return { allowed: false, reason: "battery", powerMode, ...power };
-  }
-  if (powerMode === "low" && power.idleState !== "idle" && power.idleState !== "locked" && !envFlag("CROSSAGE_PHOTO_INDEXING_ALLOW_ACTIVE_LOW_POWER")) {
-    return { allowed: false, reason: "active-low-power", powerMode, ...power };
-  }
-  return { allowed: true, reason: "allowed", powerMode, ...power };
+  return derivePhotoIndexingRuntimePolicy(localSettings, power, {
+    ignoreRuntimePolicy: envFlag("CROSSAGE_PHOTO_INDEXING_IGNORE_RUNTIME_POLICY"),
+    allowBattery: envFlag("CROSSAGE_PHOTO_INDEXING_ALLOW_BATTERY"),
+    allowActiveLowPower: envFlag("CROSSAGE_PHOTO_INDEXING_ALLOW_ACTIVE_LOW_POWER"),
+    allowActiveBalanced: envFlag("CROSSAGE_PHOTO_INDEXING_ALLOW_ACTIVE_BALANCED"),
+    allowHeavyOnBattery: envFlag("CROSSAGE_PHOTO_INDEXING_ALLOW_HEAVY_ON_BATTERY"),
+  });
 }
 
 function appendPhotoIndexingHeadlessRuntimeSkip(reason, policy) {
-  const key = `${reason}:${policy.reason}:${policy.powerMode}:${policy.onBattery}:${policy.idleState}`;
+  const key = `${reason}:${policy.reason}:${policy.powerMode}:${policy.onBattery}:${policy.idleState}:${policy.foregroundActive}:${policy.thermalState}:${policy.speedLimit}:${policy.memoryPressure}`;
   if (photoIndexingHeadlessLastRuntimeSkipKey === key) {
     return;
   }
@@ -3643,7 +4528,11 @@ function appendPhotoIndexingHeadlessRuntimeSkip(reason, policy) {
     runtimeReason: policy.reason,
     powerMode: policy.powerMode,
     onBattery: Boolean(policy.onBattery),
-    idleState: String(policy.idleState || "unknown")
+    idleState: String(policy.idleState || "unknown"),
+    foregroundActive: Boolean(policy.foregroundActive),
+    thermalState: String(policy.thermalState || "unknown"),
+    speedLimit: Number(policy.speedLimit || 100),
+    memoryPressure: String(policy.memoryPressure || "unknown")
   });
 }
 
@@ -3657,11 +4546,24 @@ async function runPhotoIndexingHeadlessSchedulerTick(reason = "interval") {
   }
   photoIndexingHeadlessRunning = true;
   try {
-    const settingsResult = await backend.invoke("photo_library_settings", {});
-    const settings = unwrapBackendValue(settingsResult);
-    const localSettings = settings && typeof settings === "object" && settings.localSettings && typeof settings.localSettings === "object"
-      ? settings.localSettings
-      : {};
+    const workspace = activeWorkspacePath();
+    const foregroundActive = mainWindowIsForegroundActive();
+    const cacheMatchesWorkspace = photoIndexingHeadlessSettingsWorkspace === workspace;
+    const cacheFresh = cacheMatchesWorkspace && Date.now() - photoIndexingHeadlessSettingsCachedAt < 5 * 60_000;
+    let localSettings = cacheMatchesWorkspace ? photoIndexingHeadlessSettingsCache : null;
+    if (!localSettings && foregroundActive && !envFlag("CROSSAGE_PHOTO_INDEXING_IGNORE_RUNTIME_POLICY")) {
+      appendPhotoIndexingHeadlessRuntimeSkip(reason, {
+        allowed: false,
+        reason: "settings-deferred-while-foreground",
+        powerMode: "balanced",
+        ...photoIndexingHeadlessPowerState()
+      });
+      return;
+    }
+    if (!localSettings || (!cacheFresh && !foregroundActive)) {
+      const settingsResult = await backend.invoke("photo_library_settings", {});
+      localSettings = cachePhotoIndexingHeadlessSettings(settingsResult) || {};
+    }
     const policy = photoIndexingHeadlessRuntimePolicy(localSettings);
     if (!policy.allowed) {
       appendPhotoIndexingHeadlessRuntimeSkip(reason, policy);
@@ -3671,7 +4573,9 @@ async function runPhotoIndexingHeadlessSchedulerTick(reason = "interval") {
       limit: 8,
       maxJobs: PHOTO_INDEXING_HEADLESS_BATCH_SIZE,
       automatic: true,
-      headless: true
+      headless: true,
+      maxCostClass: policy.maxCostClass,
+      runtimeState: policy
     });
     const value = unwrapBackendValue(result);
     const progress = value && typeof value === "object" && value.progress && typeof value.progress === "object"
@@ -3679,20 +4583,28 @@ async function runPhotoIndexingHeadlessSchedulerTick(reason = "interval") {
       : {};
     const ran = Number(value?.ran || 0) || 0;
     const failed = Number(progress.failed || 0) || 0;
-    if (ran > 0 || failed > 0) {
+    const stoppedReason = String(value?.stoppedReason || value?.message || "");
+    if (ran > 0 || failed > 0 || stoppedReason === "cost-limit") {
       appendDiagnosticEvent({
         type: "photo_indexing_headless_scheduler",
         level: failed > 0 ? "warn" : "info",
         reason,
         ran,
-        stoppedReason: String(value?.stoppedReason || value?.message || ""),
+        stoppedReason,
         processed: Number(progress.processed || 0) || 0,
         updated: Number(progress.updated || 0) || 0,
         failed,
         deferred: Number(progress.deferred || 0) || 0,
         powerMode: policy.powerMode,
         onBattery: Boolean(policy.onBattery),
-        idleState: String(policy.idleState || "unknown")
+        idleState: String(policy.idleState || "unknown"),
+        foregroundActive: Boolean(policy.foregroundActive),
+        thermalState: String(policy.thermalState || "unknown"),
+        speedLimit: Number(policy.speedLimit || 100),
+        memoryPressure: String(policy.memoryPressure || "unknown"),
+        freeMemoryBytes: Number(policy.freeMemoryBytes || 0),
+        maxCostClass: String(policy.maxCostClass || "heavy"),
+        constraints: Array.isArray(policy.constraints) ? policy.constraints : []
       });
     }
     photoIndexingHeadlessLastRuntimeSkipKey = "";
@@ -3719,6 +4631,7 @@ function startPhotoIndexingHeadlessScheduler() {
   if (!backend) {
     backend = new PythonBackend();
   }
+  registerPhotoIndexingHeadlessPowerListeners();
   photoIndexingHeadlessInitialTimer = setTimeout(() => {
     photoIndexingHeadlessInitialTimer = null;
     void runPhotoIndexingHeadlessSchedulerTick("initial");
@@ -3728,6 +4641,40 @@ function startPhotoIndexingHeadlessScheduler() {
       }, PHOTO_INDEXING_HEADLESS_INTERVAL_MS);
     }
   }, PHOTO_INDEXING_HEADLESS_INITIAL_MS);
+}
+
+function registerPhotoIndexingHeadlessPowerListeners() {
+  if (photoIndexingHeadlessPowerListenersRegistered || !powerMonitor || typeof powerMonitor.on !== "function") {
+    return;
+  }
+  photoIndexingHeadlessPowerListenersRegistered = true;
+  try {
+    if (typeof powerMonitor.getCurrentThermalState === "function") {
+      const current = String(powerMonitor.getCurrentThermalState() || "unknown").toLowerCase();
+      if (["unknown", "nominal", "fair", "serious", "critical"].includes(current)) {
+        photoIndexingHeadlessThermalState = current;
+      }
+    }
+  } catch {
+    photoIndexingHeadlessThermalState = "unknown";
+  }
+  powerMonitor.on("thermal-state-change", (_event, state) => {
+    const next = String(state || "unknown").toLowerCase();
+    photoIndexingHeadlessThermalState = ["unknown", "nominal", "fair", "serious", "critical"].includes(next) ? next : "unknown";
+    void runPhotoIndexingHeadlessSchedulerTick("thermal-state-change");
+  });
+  powerMonitor.on("speed-limit-change", (_event, limit) => {
+    const next = Number(limit);
+    if (Number.isFinite(next) && next > 0) {
+      photoIndexingHeadlessSpeedLimit = Math.max(1, Math.min(100, Math.round(next)));
+    }
+    void runPhotoIndexingHeadlessSchedulerTick("speed-limit-change");
+  });
+  for (const eventName of ["on-ac", "on-battery", "resume", "unlock-screen"]) {
+    powerMonitor.on(eventName, () => {
+      void runPhotoIndexingHeadlessSchedulerTick(eventName);
+    });
+  }
 }
 
 function stopPhotoIndexingHeadlessScheduler() {
@@ -3760,8 +4707,12 @@ async function createWindow() {
     const window = new BrowserWindow({
       width: 1240,
       height: 820,
-      minWidth: 1040,
-      minHeight: 700,
+      // Keep the full workspace usable on compact laptop layouts and in
+      // split-screen. The renderer switches to its icon-first navigation rail
+      // below 820px, so the native window should not prevent that responsive
+      // mode from ever being reached.
+      minWidth: 760,
+      minHeight: 600,
       title: "Vintrace",
       show: false,
       // M14: match the OS theme so dark-mode users don't see a light flash
@@ -3791,6 +4742,11 @@ async function createWindow() {
     }
     mainWindow = window;
     hardenWebContents(window);
+    window.on("blur", () => {
+      if (folderWatch && !folderWatch.scanning) {
+        scheduleWatchSweep(folderWatch, 5_000);
+      }
+    });
     let fallbackLoaded = false;
     const revealTimer = setTimeout(() => {
       if (!hiddenTestWindow && !window.isDestroyed() && !window.isVisible()) {
@@ -3923,17 +4879,29 @@ ipcMain.handle("backend:invoke", async (event, payload) => {
     }
   }
   if (request.command === "set_workspace") {
+    if (photoTetherRuntime) {
+      await photoTetherRuntime.stop("Workspace changed.", { preserveSession: true });
+    }
     // EIPC-02: forget the previous workspace's media/shell trust before the new
     // workspace's state is granted (decorateState re-grants inside invoke), so
     // prior-case access can't leak across a switch.
     clearPathTrust();
+    clearPhotoIndexingHeadlessSettingsCache();
   }
   grantPathsFromBackendRequest(request.command, request.params);
   try {
-    const result = await backend.invoke(request.command, request.params);
+    if (request.command === "set_workspace") stopMcpHttpServer();
+    const result = request.command === "set_workspace"
+      ? await backend.restartForWorkspace(request.params.path)
+      : await backend.invoke(request.command, request.params);
+    if (["photo_library_settings", "save_photo_library_settings"].includes(request.command)) {
+      cachePhotoIndexingHeadlessSettings(result);
+    }
     if (request.command === "set_workspace") {
       stopFolderWatch("Workspace changed.");
-      workspaceLockUnlocked = !pathAvailable(workspaceLockFilePath(result?.workspace));
+      workspaceLockEnabled = pathAvailable(workspaceLockFilePath(result?.workspace));
+      workspaceLockUnlocked = !workspaceLockEnabled;
+      workspaceLockWorkspace = path.resolve(result?.workspace || activeWorkspacePath());
       workspaceLockInitialized = true;
       if (result?.workspace) {
         app.addRecentDocument(result.workspace);
@@ -3941,6 +4909,7 @@ ipcMain.handle("backend:invoke", async (event, payload) => {
       if (isWorkspaceLocked()) {
         return redactLockedState(result);
       }
+      void ensurePhotoTetherRuntime().resumePersisted();
     }
     return result;
   } catch (error) {
@@ -4034,10 +5003,227 @@ ipcMain.handle("diagnostics:record-event", async (event, payload = {}) => {
   return true;
 });
 
+ipcMain.handle("photo-indexing-runtime:get-status", async (event) => {
+  assertTrustedSender(event);
+  let settings = photoIndexingHeadlessSettingsCache;
+  if (!settings && backend && !isWorkspaceLocked()) {
+    try {
+      settings = cachePhotoIndexingHeadlessSettings(await backend.invoke("photo_library_settings", {}));
+    } catch {
+      settings = null;
+    }
+  }
+  return {
+    ...photoIndexingHeadlessRuntimePolicy(settings || {}),
+    schedulerEnabled: process.env.CROSSAGE_DISABLE_PHOTO_INDEXING_HEADLESS !== "1",
+    running: photoIndexingHeadlessRunning,
+    checkedAt: new Date().toISOString()
+  };
+});
+
 ipcMain.handle("photos:get-sources", async (event) => {
   assertTrustedSender(event);
   return await systemPhotoSources();
 });
+
+ipcMain.handle("connectors:list", async (event) => {
+  assertTrustedSender(event);
+  if (isWorkspaceLocked()) {
+    throw createAppError("E-WORKSPACE-LOCKED", "Unlock this app folder before reading connector configuration.");
+  }
+  const backendCatalog = await backend.invoke("inbound_connector_catalog", {});
+  return {
+    encryptionAvailable: inboundConnectorVault.encryptionAvailable(),
+    credentials: inboundConnectorVault.list(),
+    catalog: backendCatalog?.value || backendCatalog || {},
+  };
+});
+
+ipcMain.handle("connectors:save", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "Inbound connector payload");
+  assertPlainObject(payload.config || {}, "Inbound connector config");
+  if (isWorkspaceLocked()) {
+    throw createAppError("E-WORKSPACE-LOCKED", "Unlock this app folder before configuring a connector.");
+  }
+  const saved = inboundConnectorVault.save(payload);
+  const config = inboundConnectorVault.load(saved.provider, saved.connectionId);
+  const configured = await backend.invoke("configure_inbound_connector", config);
+  auditDesktopAction({
+    action: "inbound_connector_saved",
+    provider: saved.provider,
+    connectionIdHash: crypto.createHash("sha256").update(saved.connectionId).digest("hex").slice(0, 16),
+  });
+  return { ...saved, configured: configured?.value || configured || {} };
+});
+
+ipcMain.handle("connectors:remove", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "Inbound connector removal payload");
+  if (isWorkspaceLocked()) {
+    throw createAppError("E-WORKSPACE-LOCKED", "Unlock this app folder before removing a connector.");
+  }
+  const provider = String(payload.provider || "").trim();
+  const connectionId = String(payload.connectionId || "").trim();
+  await backend.invoke("forget_inbound_connector", { provider, connectionId });
+  const removed = inboundConnectorVault.remove(provider, connectionId);
+  auditDesktopAction({
+    action: "inbound_connector_removed",
+    provider: removed.provider,
+    connectionIdHash: crypto.createHash("sha256").update(removed.connectionId).digest("hex").slice(0, 16),
+  });
+  return removed;
+});
+
+ipcMain.handle("connectors:invoke", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "Inbound connector invocation payload");
+  assertPlainObject(payload.params || {}, "Inbound connector invocation params");
+  if (isWorkspaceLocked()) {
+    throw createAppError("E-WORKSPACE-LOCKED", "Unlock this app folder before using a connector.");
+  }
+  const action = String(payload.action || "").trim().toLowerCase();
+  const commands = {
+    preview: "preview_inbound_connector",
+    import: "import_inbound_connector",
+    sync: "sync_inbound_connector",
+  };
+  const command = commands[action];
+  if (!command) {
+    throw createAppError("E-CONNECTOR-ACTION", "Connector action must be preview, import, or sync.");
+  }
+  const config = inboundConnectorVault.load(payload.provider, payload.connectionId);
+  const configuredResult = await backend.invoke("configure_inbound_connector", config);
+  const configured = configuredResult?.value || configuredResult || {};
+  const libraryPath = configured?.library?.path || configured?.source?.rootPath || "";
+  const params = {
+    ...payload.params,
+    provider: config.provider,
+    connectionId: config.connectionId,
+    libraryPath,
+  };
+  return backend.invoke(command, params);
+});
+
+function photoCatalogCancelMarkerPath() {
+  return path.join(activeWorkspacePath(), ".photo-catalog-cancel");
+}
+
+async function invokeCancellablePhotoCatalog(command, params) {
+  if (activePhotoCatalogCancelToken) {
+    throw createAppError("E-PHOTO-CATALOG-BUSY", "Another catalog transfer is still running.");
+  }
+  const token = crypto.randomBytes(24).toString("hex");
+  const marker = photoCatalogCancelMarkerPath();
+  activePhotoCatalogCancelToken = token;
+  try {
+    await fs.promises.unlink(marker).catch(() => {});
+    return await backend.invoke(command, { ...params, cancelToken: token });
+  } finally {
+    if (activePhotoCatalogCancelToken === token) activePhotoCatalogCancelToken = "";
+    await fs.promises.unlink(marker).catch(() => {});
+  }
+}
+
+ipcMain.handle("photo-catalog:status", async (event) => {
+  assertTrustedSender(event);
+  requireUnlockedPhotoPortability();
+  return backend.invoke("photo_catalog_status", {});
+});
+
+ipcMain.handle("photo-catalog:inspect", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "Open catalog inspection payload");
+  requireUnlockedPhotoPortability();
+  const catalogPath = grantedPhotoPortabilityPath(payload.catalogPath, "a Vintrace open catalog", { required: true });
+  return invokeCancellablePhotoCatalog("inspect_open_photo_catalog", {
+    catalogPath,
+    verifyMedia: payload.verifyMedia !== false,
+  });
+});
+
+ipcMain.handle("photo-catalog:export", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "Open catalog export payload");
+  requireUnlockedPhotoPortability();
+  const destination = grantedPhotoPortabilityPath(payload.destination, "an export folder", { required: true });
+  const result = await invokeCancellablePhotoCatalog("export_open_photo_catalog", {
+    destination,
+    includeOriginals: !Boolean(payload.metadataOnly),
+    includeSidecars: payload.includeSidecars !== false,
+    name: String(payload.name || "").trim().slice(0, 120),
+  });
+  auditDesktopAction({ action: "open_photo_catalog_exported", metadataOnly: Boolean(payload.metadataOnly) });
+  return result;
+});
+
+ipcMain.handle("photo-catalog:import", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "Open catalog import payload");
+  requireUnlockedPhotoPortability();
+  const catalogPath = grantedPhotoPortabilityPath(payload.catalogPath, "a Vintrace open catalog", { required: true });
+  const managedRoot = grantedPhotoPortabilityPath(payload.managedRoot, "the managed library folder");
+  const result = await invokeCancellablePhotoCatalog("import_open_photo_catalog", {
+    catalogPath,
+    ...(managedRoot ? { managedRoot } : {}),
+    mergeByHash: payload.mergeByHash !== false,
+    verifyMedia: payload.verifyMedia !== false,
+  });
+  auditDesktopAction({ action: "open_photo_catalog_imported", mergeByHash: payload.mergeByHash !== false });
+  return result;
+});
+
+ipcMain.handle("photo-catalog:cancel", async (event) => {
+  assertTrustedSender(event);
+  requireUnlockedPhotoPortability();
+  const token = activePhotoCatalogCancelToken;
+  if (!token) return { cancelRequested: false };
+  const marker = photoCatalogCancelMarkerPath();
+  const temporary = `${marker}.partial-${token}`;
+  await fs.promises.mkdir(path.dirname(marker), { recursive: true });
+  try {
+    await fs.promises.writeFile(temporary, token, { encoding: "ascii", mode: 0o600, flag: "wx" });
+    await fs.promises.rename(temporary, marker);
+  } finally {
+    await fs.promises.unlink(temporary).catch(() => {});
+  }
+  auditDesktopAction({ action: "open_photo_catalog_cancel_requested" });
+  return { cancelRequested: true };
+});
+
+ipcMain.handle("photo-dam:status", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "DAM catalog status payload");
+  requireUnlockedPhotoPortability();
+  const provider = damCatalogProvider(payload.provider);
+  return backend.invoke("dam_catalog_status", { provider });
+});
+
+ipcMain.handle("photo-dam:list", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "DAM catalog discovery payload");
+  requireUnlockedPhotoPortability();
+  const provider = damCatalogProvider(payload.provider);
+  return backend.invoke("list_dam_catalogs", { provider });
+});
+
+for (const [channel, command] of [
+  ["photo-dam:preview", "preview_dam_catalog"],
+  ["photo-dam:import", "import_dam_catalog"],
+  ["photo-dam:sync", "sync_dam_catalog"],
+]) {
+  ipcMain.handle(channel, async (event, payload = {}) => {
+    assertTrustedSender(event);
+    requireUnlockedPhotoPortability();
+    const params = validatedDamCatalogPayload(payload, { requireLibraryPath: true });
+    const result = await backend.invoke(command, params);
+    auditDesktopAction({
+      action: `dam_catalog_${command === "preview_dam_catalog" ? "previewed" : command === "import_dam_catalog" ? "imported" : "synced"}`,
+      provider: params.provider,
+    });
+    return result;
+  });
+}
 
 ipcMain.handle("photos:sensitive-auth-status", async (event) => {
   assertTrustedSender(event);
@@ -4076,6 +5262,50 @@ ipcMain.handle("workspace-lock:disable", async (event) => {
   return disableWorkspaceLock();
 });
 
+ipcMain.handle("workspace-encryption:get-status", async (event) => {
+  assertTrustedSender(event);
+  if (isWorkspaceLocked()) {
+    throw createAppError("E-WORKSPACE-LOCKED", "Unlock this app folder before reading encryption status.");
+  }
+  const status = await backend.invoke("workspace_encryption_status", {});
+  let recovery = { configured: false, pendingCovered: true };
+  try { recovery = workspaceRecoveryStatus({ workspace: activeWorkspacePath() }); } catch { /* environment-managed key */ }
+  return { ...status, recoveryConfigured: recovery.configured, recoveryPendingCovered: recovery.pendingCovered };
+});
+
+ipcMain.handle("workspace-encryption:create-recovery-code", async (event) => {
+  assertTrustedSender(event);
+  if (isWorkspaceLocked()) {
+    throw createAppError("E-WORKSPACE-LOCKED", "Unlock this app folder before creating a recovery code.");
+  }
+  const workspace = activeWorkspacePath();
+  const status = await backend.invoke("workspace_encryption_status", {});
+  const recoveryCode = crypto.randomBytes(32).toString("base64url");
+  configureWorkspaceRecoveryPassphrase({ workspace, passphrase: recoveryCode, safeStorage, env: process.env });
+  auditDesktopAction({ action: "workspace_recovery_code_replaced", keyId: status?.database?.keyId || status?.keyId || "" });
+  return {
+    recoveryCode,
+    status: { ...status, recoveryConfigured: true, recoveryPendingCovered: true },
+  };
+});
+
+ipcMain.handle("workspace-encryption:rotate-key", async (event) => {
+  assertTrustedSender(event);
+  if (isWorkspaceLocked()) {
+    throw createAppError("E-WORKSPACE-LOCKED", "Unlock this app folder before rotating its encryption key.");
+  }
+  stopMcpHttpServer();
+  const result = await backend.rotateWorkspaceDatabaseKey();
+  auditDesktopAction({
+    action: "workspace_database_key_rotated",
+    oldKeyId: result?.rotation?.oldKeyId || "",
+    newKeyId: result?.rotation?.newKeyId || "",
+  });
+  let recovery = { configured: false, pendingCovered: true };
+  try { recovery = workspaceRecoveryStatus({ workspace: activeWorkspacePath() }); } catch { /* environment-managed key */ }
+  return { ...result, recoveryConfigured: recovery.configured, recoveryPendingCovered: recovery.pendingCovered };
+});
+
 // ---------------------------------------------------------------------------
 // AI Agents (MCP) — powers Settings > AI Agents. Generates auto-filled connect
 // configs (from the app's own resolved paths), can add the server to Codex, can
@@ -4084,6 +5314,57 @@ ipcMain.handle("workspace-lock:disable", async (event) => {
 // ---------------------------------------------------------------------------
 let mcpHttpChild = null;
 let mcpHttpStatus = { running: false, url: "", host: MCP_HTTP_HOST, port: MCP_HTTP_PORT, token: "", error: "" };
+
+function mobileCompanionConfigPath() {
+  return path.join(app.getPath("userData"), "mobile-companion.json");
+}
+
+function configuredMobilePublicUrl() {
+  const environmentUrl = String(
+    process.env.VINTRACE_MOBILE_PUBLIC_URL
+    || process.env.CROSSAGE_MOBILE_PUBLIC_URL
+    || "",
+  ).trim();
+  const persistedUrl = String(readJsonObject(mobileCompanionConfigPath()).publicUrl || "").trim();
+  const value = environmentUrl || persistedUrl || `http://${MCP_HTTP_HOST}:${MCP_HTTP_PORT}`;
+  const endpoint = normalizeMobilePublicUrl(value);
+  return {
+    ...endpoint,
+    source: environmentUrl ? "environment" : persistedUrl ? "saved" : "default",
+  };
+}
+
+function mobileCompanionStatus() {
+  const endpoint = configuredMobilePublicUrl();
+  const workspace = activeWorkspacePath();
+  const devices = listMobileCompanions({ workspace });
+  const localDevelopment = endpoint.loopback && (
+    isDev
+    || process.env.VINTRACE_MOBILE_ALLOW_INSECURE_LOOPBACK === "1"
+    || process.env.CROSSAGE_MOBILE_ALLOW_INSECURE_LOOPBACK === "1"
+  );
+  return {
+    publicUrl: endpoint.origin,
+    appUrl: `${endpoint.origin}/mobile/`,
+    secure: endpoint.secure,
+    loopback: endpoint.loopback,
+    source: endpoint.source,
+    canEditEndpoint: endpoint.source !== "environment",
+    readyForPairing: endpoint.secure || localDevelopment,
+    serverRunning: Boolean(mcpHttpStatus.running),
+    devices,
+  };
+}
+
+function saveMobileCompanionPublicUrl(value) {
+  const endpoint = normalizeMobilePublicUrl(value);
+  writeJsonAtomic(mobileCompanionConfigPath(), {
+    version: 1,
+    publicUrl: endpoint.origin,
+    updatedAt: new Date().toISOString(),
+  });
+  return mobileCompanionStatus();
+}
 
 function broadcastMcpHttpStatus() {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -4118,7 +5399,42 @@ function runNodeScript(scriptPath) {
   });
 }
 
-function startMcpHttpServer() {
+function probeMcpHttpServer({ host, port, token }) {
+  return new Promise((resolve) => {
+    const request = nodeHttp.request({
+      host,
+      port,
+      path: "/v1/health",
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 600,
+    }, (response) => {
+      response.resume();
+      resolve(response.statusCode === 200);
+    });
+    request.on("error", () => resolve(false));
+    request.on("timeout", () => {
+      request.destroy();
+      resolve(false);
+    });
+    request.end();
+  });
+}
+
+function mcpHttpExitMessage(stderrTail, code, port, becameReady = false) {
+  if (/address already in use|eaddrinuse/i.test(stderrTail)) {
+    return `Local agent server could not start because port ${port} is already in use. Stop the other service and try again.`;
+  }
+  if (becameReady) {
+    return `Local agent server stopped unexpectedly${code ? ` (code ${code})` : ""}. Try starting it again.`;
+  }
+  if (code) {
+    return `Local agent server exited before it became ready (code ${code}). Try starting it again.`;
+  }
+  return "Local agent server could not start. Try starting it again.";
+}
+
+async function startMcpHttpServer() {
   if (mcpHttpChild && !mcpHttpChild.killed) {
     return { ...mcpHttpStatus };
   }
@@ -4132,11 +5448,51 @@ function startMcpHttpServer() {
     host,
     port,
   });
+  let keyEnv = process.env;
+  if (
+    process.env.CROSSAGE_ALLOW_MULTI_INSTANCE === "1"
+    && !process.env.VINTRACE_WORKSPACE_DB_KEY
+    && !workspaceLockSupported()
+  ) {
+    const testKey = crypto.createHash("sha256")
+      .update(`vintrace-e2e-workspace-key-v1\0${invocation.workspace}\0${app.getPath("userData")}`)
+      .digest("base64url");
+    keyEnv = { ...process.env, VINTRACE_WORKSPACE_DB_KEY: testKey };
+  }
+  let workspaceKeys;
+  try {
+    workspaceKeys = resolveDesktopWorkspaceKeys({ workspace: invocation.workspace, safeStorage, env: keyEnv });
+  } catch (error) {
+    throw createAppError(String(error?.code || "E-WORKSPACE-KEY"), error instanceof Error ? error.message : String(error));
+  }
   // MCP-01: the streamable-HTTP transport fails closed unless an auth token is
   // present; clients must present it as a Bearer token. Generate a fresh
   // per-session token and surface it to the operator.
   const token = crypto.randomBytes(24).toString("hex");
-  const env = { ...process.env, ...invocation.env, VINTRACE_MCP_TOKEN: token };
+  const mobileAccountsPath = ensureMobileCredentialFile({ workspace: invocation.workspace });
+  const mobileEndpoint = configuredMobilePublicUrl();
+  const env = {
+    ...process.env,
+    ...invocation.env,
+    VINTRACE_MCP_TOKEN: token,
+    VINTRACE_MOBILE_ACCOUNTS_FILE: mobileAccountsPath,
+    VINTRACE_WORKSPACE_DB_KEY: workspaceKeys.primaryEncoded,
+    VINTRACE_WORKSPACE_DB_PREVIOUS_KEY: workspaceKeys.previousEncoded,
+    [WORKSPACE_REQUIRE_ENCRYPTION_ENV]: "1",
+  };
+  if (mobileEndpoint.loopback && (
+    isDev
+    || process.env.VINTRACE_MOBILE_ALLOW_INSECURE_LOOPBACK === "1"
+    || process.env.CROSSAGE_MOBILE_ALLOW_INSECURE_LOOPBACK === "1"
+  )) {
+    env.VINTRACE_MOBILE_ALLOW_INSECURE_LOOPBACK = "1";
+  } else {
+    delete env.VINTRACE_MOBILE_ALLOW_INSECURE_LOOPBACK;
+    delete env.CROSSAGE_MOBILE_ALLOW_INSECURE_LOOPBACK;
+  }
+  delete env[WORKSPACE_RECOVERY_PASSPHRASE_ENV];
+  workspaceKeys.primaryKey.fill(0);
+  workspaceKeys.previousKey?.fill(0);
   // MISS-01 parity: never let a local attacker's dynamic-loader vars into the
   // (camera-capable) backend process.
   for (const key of Object.keys(env)) {
@@ -4147,16 +5503,30 @@ function startMcpHttpServer() {
   try {
     const child = spawn(invocation.command, invocation.args, { cwd: invocation.cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     mcpHttpChild = child;
-    mcpHttpStatus = { running: true, url: `http://${host}:${port}/mcp`, host, port, token, error: "" };
+    mcpHttpStatus = { running: false, url: "", host, port, token: "", error: "" };
     let stderrTail = "";
+    let exited = false;
+    let becameReady = false;
     child.stderr.on("data", (chunk) => { stderrTail = `${stderrTail}${chunk}`.slice(-4000); });
     child.on("error", (error) => {
+      exited = true;
       if (mcpHttpChild === child) mcpHttpChild = null;
-      mcpHttpStatus = { running: false, url: "", host, port, token: "", error: error.message || "MCP HTTP server failed to start." };
+      mcpHttpStatus = {
+        running: false,
+        url: "",
+        host,
+        port,
+        token: "",
+        error: /eaddrinuse/i.test(String(error?.message || ""))
+          ? `Local agent server could not start because port ${port} is already in use. Stop the other service and try again.`
+          : "Local agent server could not start. Try starting it again.",
+      };
       broadcastMcpHttpStatus();
     });
     child.on("exit", (code) => {
-      if (mcpHttpChild === child) mcpHttpChild = null;
+      exited = true;
+      if (mcpHttpChild !== child) return;
+      mcpHttpChild = null;
       const failed = Boolean(code && code !== 0);
       mcpHttpStatus = {
         running: false,
@@ -4164,14 +5534,37 @@ function startMcpHttpServer() {
         host,
         port,
         token: "",
-        error: failed ? (stderrTail.trim().slice(-400) || `MCP HTTP server exited with code ${code}.`) : "",
+        error: failed ? mcpHttpExitMessage(stderrTail, code, port, becameReady) : "",
       };
       broadcastMcpHttpStatus();
     });
-    broadcastMcpHttpStatus();
+    const deadline = Date.now() + 15_000;
+    while (!exited && mcpHttpChild === child && Date.now() < deadline) {
+      if (await probeMcpHttpServer({ host, port, token })) {
+        if (exited || mcpHttpChild !== child) break;
+        becameReady = true;
+        mcpHttpStatus = { running: true, url: `http://${host}:${port}/mcp`, host, port, token, error: "" };
+        broadcastMcpHttpStatus();
+        return { ...mcpHttpStatus };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!exited && mcpHttpChild === child) {
+      try { child.kill(); } catch { /* already gone */ }
+      mcpHttpChild = null;
+      mcpHttpStatus = {
+        running: false,
+        url: "",
+        host,
+        port,
+        token: "",
+        error: "Local agent server did not become ready within 15 seconds. Try starting it again.",
+      };
+      broadcastMcpHttpStatus();
+    }
   } catch (error) {
     mcpHttpChild = null;
-    mcpHttpStatus = { running: false, url: "", host, port, token: "", error: error.message || String(error) };
+    mcpHttpStatus = { running: false, url: "", host, port, token: "", error: "Local agent server could not start. Try starting it again." };
     broadcastMcpHttpStatus();
   }
   return { ...mcpHttpStatus };
@@ -4301,6 +5694,76 @@ ipcMain.handle("mcp:http-status", async (event) => {
   return { ...mcpHttpStatus };
 });
 
+ipcMain.handle("mobile-companion:status", async (event) => {
+  assertTrustedSender(event);
+  return mobileCompanionStatus();
+});
+
+ipcMain.handle("mobile-companion:configure", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  if (isWorkspaceLocked()) {
+    throw createAppError("E-WORKSPACE-LOCKED", "Unlock this app folder before configuring mobile access.");
+  }
+  return saveMobileCompanionPublicUrl(String(payload?.publicUrl || ""));
+});
+
+ipcMain.handle("mobile-companion:create", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  if (isWorkspaceLocked()) {
+    throw createAppError("E-WORKSPACE-LOCKED", "Unlock this app folder before pairing a mobile device.");
+  }
+  const current = mobileCompanionStatus();
+  if (!current.readyForPairing) {
+    throw createAppError(
+      "E-MOBILE-HTTPS",
+      "Configure a trusted HTTPS mobile endpoint before creating a real-device pairing link.",
+    );
+  }
+  if (!mcpHttpStatus.running) {
+    const started = await startMcpHttpServer();
+    if (!started.running) {
+      throw createAppError("E-MOBILE-SERVER", started.error || "The mobile companion server could not start.");
+    }
+  }
+  const created = createMobileCompanion({
+    workspace: activeWorkspacePath(),
+    publicUrl: current.publicUrl,
+    label: String(payload?.label || ""),
+    expiresInDays: Number(payload?.expiresInDays || 7),
+    allowPreviews: payload?.allowPreviews !== false,
+  });
+  auditDesktopAction({
+    action: "mobile_companion_pairing_created",
+    principalId: created.device.accountId,
+    readOnly: true,
+    pixelDisclosureAllowed: created.device.allowPreviews,
+    expiresAt: created.device.expiresAt,
+  });
+  return {
+    ok: true,
+    device: created.device,
+    pairingUrl: created.pairingUrl,
+    status: mobileCompanionStatus(),
+  };
+});
+
+ipcMain.handle("mobile-companion:revoke", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  if (isWorkspaceLocked()) {
+    throw createAppError("E-WORKSPACE-LOCKED", "Unlock this app folder before revoking mobile access.");
+  }
+  const device = revokeMobileCompanion({
+    workspace: activeWorkspacePath(),
+    accountId: String(payload?.accountId || ""),
+  });
+  auditDesktopAction({
+    action: "mobile_companion_revoked",
+    principalId: device.accountId,
+    readOnly: true,
+  });
+  return { ok: true, device, status: mobileCompanionStatus() };
+});
+
 ipcMain.handle("system:get-integration", async (event) => {
   assertTrustedSender(event);
   return {
@@ -4357,6 +5820,24 @@ ipcMain.handle("shell:open-path", async (event, payload = {}) => {
     auditDesktopAction({ action: "shell_open", path: target });
   }
   return { ok: !error, error };
+});
+
+ipcMain.handle("shell:open-photo-privacy-settings", async (event) => {
+  assertTrustedSender(event);
+  const target = photoPrivacySettingsUrl(process.platform);
+  if (!target) {
+    return { ok: false, platform: process.platform, error: "Photo privacy settings are not available on this platform." };
+  }
+  if (suppressNativeShellOpen) {
+    return { ok: true, platform: process.platform, suppressed: true };
+  }
+  try {
+    await shell.openExternal(target);
+    auditDesktopAction({ action: "open_photo_privacy_settings", platform: process.platform });
+    return { ok: true, platform: process.platform };
+  } catch (error) {
+    return { ok: false, platform: process.platform, error: String(error?.message || error || "Could not open privacy settings.") };
+  }
 });
 
 ipcMain.handle("shell:open-path-with", async (event, payload = {}) => {
@@ -4626,6 +6107,7 @@ ipcMain.handle("dialog:choose-folder", async (event) => {
     return process.env.CROSSAGE_TEST_DIALOG_PATH;
   }
   const result = await dialog.showOpenDialog(mainWindow, {
+    defaultPath: app.getPath("pictures"),
     properties: ["openDirectory", "createDirectory"]
   });
   if (result.canceled || !result.filePaths.length) {
@@ -4633,6 +6115,69 @@ ipcMain.handle("dialog:choose-folder", async (event) => {
   }
   grantUserPath(result.filePaths[0]);
   return result.filePaths[0];
+});
+
+ipcMain.handle("dialog:choose-dam-catalog", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "DAM catalog picker payload");
+  const provider = damCatalogProvider(payload.provider);
+  const grantPickedCatalog = (filePath) => {
+    if (!filePath) return null;
+    grantUserPath(filePath);
+    let isDir = false;
+    try { isDir = fs.statSync(filePath).isDirectory(); } catch { /* backend reports missing catalogs */ }
+    return { path: filePath, isDir };
+  };
+  if (process.env.CROSSAGE_TEST_DIALOG_PATHS) {
+    const paths = process.env.CROSSAGE_TEST_DIALOG_PATHS.split(path.delimiter).filter(Boolean);
+    const selected = paths.shift() || "";
+    process.env.CROSSAGE_TEST_DIALOG_PATHS = paths.join(path.delimiter);
+    return grantPickedCatalog(selected);
+  }
+  if (process.env.CROSSAGE_TEST_DIALOG_PATH) {
+    return grantPickedCatalog(process.env.CROSSAGE_TEST_DIALOG_PATH);
+  }
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: provider === "lightroom_catalog" ? "Choose Lightroom Classic catalog" : "Choose Capture One catalog",
+    defaultPath: app.getPath("pictures"),
+    properties: ["openFile", "openDirectory"],
+    filters: provider === "lightroom_catalog"
+      ? [
+        { name: "Lightroom catalogs", extensions: ["lrcat"] },
+        { name: "All files", extensions: ["*"] },
+      ]
+      : [
+        { name: "Capture One catalogs", extensions: ["cocatalogdb", "db"] },
+        { name: "All files", extensions: ["*"] },
+      ],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return grantPickedCatalog(result.filePaths[0]);
+});
+
+ipcMain.handle("dialog:choose-open-photo-catalog", async (event) => {
+  assertTrustedSender(event);
+  const grantPickedCatalog = (catalogPath) => {
+    if (!catalogPath) return null;
+    grantUserPath(catalogPath);
+    return { path: catalogPath, isDir: true };
+  };
+  if (process.env.CROSSAGE_TEST_DIALOG_PATHS) {
+    const paths = process.env.CROSSAGE_TEST_DIALOG_PATHS.split(path.delimiter).filter(Boolean);
+    const selected = paths.shift() || "";
+    process.env.CROSSAGE_TEST_DIALOG_PATHS = paths.join(path.delimiter);
+    return grantPickedCatalog(selected);
+  }
+  if (process.env.CROSSAGE_TEST_DIALOG_PATH) {
+    return grantPickedCatalog(process.env.CROSSAGE_TEST_DIALOG_PATH);
+  }
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Choose Vintrace open catalog",
+    defaultPath: app.getPath("documents"),
+    properties: ["openDirectory"],
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return grantPickedCatalog(result.filePaths[0]);
 });
 
 // Multi-select image picker for the "Add a person" flow. Grants each picked file
@@ -4650,6 +6195,7 @@ ipcMain.handle("dialog:choose-images", async (event) => {
     return paths.map(toMedia);
   }
   const result = await dialog.showOpenDialog(mainWindow, {
+    defaultPath: app.getPath("pictures"),
     properties: ["openFile", "multiSelections"],
     filters: [
       { name: "Images", extensions: [...IMAGE_EXTENSIONS].map((ext) => ext.replace(/^\./, "")) },
@@ -4675,6 +6221,7 @@ ipcMain.handle("dialog:choose-audio", async (event) => {
     return selected ? toMedia(selected) : null;
   }
   const result = await dialog.showOpenDialog(mainWindow, {
+    defaultPath: app.getPath("music"),
     properties: ["openFile"],
     filters: [
       { name: "Audio", extensions: ["aac", "aif", "aiff", "caf", "flac", "m4a", "mp3", "ogg", "opus", "wav"] },
@@ -4700,6 +6247,7 @@ ipcMain.handle("dialog:choose-json", async (event) => {
     return selected ? toFile(selected) : null;
   }
   const result = await dialog.showOpenDialog(mainWindow, {
+    defaultPath: app.getPath("documents"),
     properties: ["openFile"],
     filters: [
       { name: "JSON", extensions: ["json"] },
@@ -4725,6 +6273,7 @@ ipcMain.handle("dialog:choose-model", async (event) => {
     return selected ? toFile(selected) : null;
   }
   const result = await dialog.showOpenDialog(mainWindow, {
+    defaultPath: app.getPath("documents"),
     properties: ["openFile"],
     filters: [
       { name: "ONNX model", extensions: ["onnx"] },
@@ -4750,6 +6299,7 @@ ipcMain.handle("dialog:choose-color-profile", async (event) => {
     return selected ? toFile(selected) : null;
   }
   const result = await dialog.showOpenDialog(mainWindow, {
+    defaultPath: app.getPath("documents"),
     properties: ["openFile"],
     filters: [
       { name: "ICC profiles", extensions: ["icc", "icm"] },
@@ -5081,8 +6631,8 @@ ipcMain.handle("camera:save-frame", async (event, payload = {}) => {
   const folder = path.join(workspace, "camera-captures", timestampSlug());
   const { buffer, extension } = decodeImageDataUrl(payload.dataUrl);
   const filePath = path.join(folder, `face-capture${extension}`);
-  fs.mkdirSync(folder, { recursive: true });
-  fs.writeFileSync(filePath, buffer);
+  await fs.promises.mkdir(folder, { recursive: true });
+  await fs.promises.writeFile(filePath, buffer);
   grantUserPath(folder);
   auditDesktopAction({ action: "camera_save_frame", path: filePath });
   return { folder, filePath };
@@ -5093,8 +6643,8 @@ ipcMain.handle("scan:cancel", async (event) => {
   await backend.start();
   const workspace = backend.readyState?.workspace || path.join(app.getPath("userData"), "workspace");
   const marker = path.join(workspace, ".scan-cancel");
-  fs.mkdirSync(workspace, { recursive: true });
-  fs.writeFileSync(marker, new Date().toISOString(), "utf8");
+  await fs.promises.mkdir(workspace, { recursive: true });
+  await fs.promises.writeFile(marker, new Date().toISOString(), "utf8");
   auditDesktopAction({ action: "scan_cancel_requested", path: marker });
   return { cancelled: true, path: marker };
 });
@@ -5104,8 +6654,8 @@ ipcMain.handle("media-action:cancel", async (event) => {
   await backend.start();
   const workspace = backend.readyState?.workspace || path.join(app.getPath("userData"), "workspace");
   const marker = path.join(workspace, ".media-action-cancel");
-  fs.mkdirSync(workspace, { recursive: true });
-  fs.writeFileSync(marker, new Date().toISOString(), "utf8");
+  await fs.promises.mkdir(workspace, { recursive: true });
+  await fs.promises.writeFile(marker, new Date().toISOString(), "utf8");
   auditDesktopAction({ action: "media_action_cancel_requested", path: marker });
   return { cancelled: true, path: marker };
 });
@@ -5115,8 +6665,8 @@ ipcMain.handle("scan:pause", async (event) => {
   await backend.start();
   const workspace = backend.readyState?.workspace || path.join(app.getPath("userData"), "workspace");
   const marker = path.join(workspace, ".scan-pause");
-  fs.mkdirSync(workspace, { recursive: true });
-  fs.writeFileSync(marker, new Date().toISOString(), "utf8");
+  await fs.promises.mkdir(workspace, { recursive: true });
+  await fs.promises.writeFile(marker, new Date().toISOString(), "utf8");
   auditDesktopAction({ action: "scan_pause_requested", path: marker });
   return { paused: true, path: marker };
 });
@@ -5127,7 +6677,7 @@ ipcMain.handle("scan:resume", async (event) => {
   const workspace = backend.readyState?.workspace || path.join(app.getPath("userData"), "workspace");
   const marker = path.join(workspace, ".scan-pause");
   try {
-    fs.unlinkSync(marker);
+    await fs.promises.unlink(marker);
   } catch {
     // Already resumed.
   }
@@ -5141,10 +6691,14 @@ ipcMain.handle("scan:marker-status", async (event) => {
   const workspace = backend.readyState?.workspace || path.join(app.getPath("userData"), "workspace");
   const cancelPath = path.join(workspace, ".scan-cancel");
   const pausePath = path.join(workspace, ".scan-pause");
+  const [cancelRequested, paused] = await Promise.all([
+    fs.promises.access(cancelPath).then(() => true).catch(() => false),
+    fs.promises.access(pausePath).then(() => true).catch(() => false),
+  ]);
   return {
     workspace,
-    cancelRequested: fs.existsSync(cancelPath),
-    paused: fs.existsSync(pausePath),
+    cancelRequested,
+    paused,
     cancelPath,
     pausePath
   };
@@ -5160,6 +6714,77 @@ ipcMain.handle("folder-watch:start", async (event, payload = {}) => {
 ipcMain.handle("folder-watch:stop", async (event) => {
   assertTrustedSender(event);
   return stopFolderWatch();
+});
+
+ipcMain.handle("photo-tether:status", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "Photo tether status payload");
+  if (isWorkspaceLocked()) {
+    throw createAppError("E-WORKSPACE-LOCKED", "Unlock this app folder before reading capture-session data.");
+  }
+  const runtime = ensurePhotoTetherRuntime();
+  await backend.start();
+  const result = await runtime.status(Boolean(payload.refreshCamera));
+  return publicPhotoTetherPayload(result);
+});
+
+ipcMain.handle("photo-tether:start", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "Photo tether start payload");
+  if (isWorkspaceLocked()) {
+    throw createAppError("E-WORKSPACE-LOCKED", "Unlock this app folder before starting a capture session.");
+  }
+  const sourcePath = path.resolve(String(payload.sourcePath || payload.destinationPath || ""));
+  const destinationPath = path.resolve(String(payload.destinationPath || sourcePath));
+  if (!String(payload.sourcePath || payload.destinationPath || "").trim() || !isUserGrantedPath(sourcePath)) {
+    throw createAppError("E-PHOTO-TETHER-PATH", "Choose the capture folder in Vintrace before starting tethering.");
+  }
+  if (!isUserGrantedPath(destinationPath)) {
+    throw createAppError("E-PHOTO-TETHER-PATH", "Choose the download folder in Vintrace before starting tethering.");
+  }
+  if (String(payload.managedRoot || "").trim() && !isUserGrantedPath(path.resolve(String(payload.managedRoot)))) {
+    throw createAppError("E-PHOTO-TETHER-PATH", "Choose the managed library folder in Vintrace before starting tethering.");
+  }
+  const runtime = ensurePhotoTetherRuntime();
+  await backend.start();
+  const result = await runtime.start(payload);
+  appendDiagnosticEvent({
+    type: "photo_tether_started",
+    level: "info",
+    mode: String(result?.mode || payload.mode || "watch"),
+    sessionId: String(result?.session?.sessionId || "")
+  });
+  return publicPhotoTetherPayload(result);
+});
+
+ipcMain.handle("photo-tether:stop", async (event) => {
+  assertTrustedSender(event);
+  const result = await ensurePhotoTetherRuntime().stop();
+  appendDiagnosticEvent({ type: "photo_tether_stopped", level: "info", sessionId: String(result?.session?.sessionId || "") });
+  return publicPhotoTetherPayload(result);
+});
+
+ipcMain.handle("photo-tether:resume", async (event, payload = {}) => {
+  assertTrustedSender(event);
+  assertPlainObject(payload, "Photo tether resume payload");
+  if (isWorkspaceLocked()) {
+    throw createAppError("E-WORKSPACE-LOCKED", "Unlock this app folder before resuming a capture session.");
+  }
+  const sessionId = String(payload.sessionId || "").trim();
+  if (!sessionId) throw createAppError("E-BACKEND-VALIDATION", "Choose a capture session to resume.");
+  const runtime = ensurePhotoTetherRuntime();
+  await backend.start();
+  const result = await runtime.resume(sessionId);
+  return publicPhotoTetherPayload(result);
+});
+
+ipcMain.handle("photo-tether:capture", async (event) => {
+  assertTrustedSender(event);
+  if (isWorkspaceLocked()) {
+    throw createAppError("E-WORKSPACE-LOCKED", "Unlock this app folder before capturing from a camera.");
+  }
+  const result = await ensurePhotoTetherRuntime().capture();
+  return publicPhotoTetherPayload(result);
 });
 
 const allowMultiInstance = process.env.CROSSAGE_ALLOW_MULTI_INSTANCE === "1";
@@ -5212,6 +6837,7 @@ if (!singleInstanceLock) {
     await createWindow();
     startPhotoIndexingHeadlessScheduler();
     await resumePersistedFolderWatch();
+    await ensurePhotoTetherRuntime().resumePersisted();
     handleExternalInputs(process.argv.slice(1));
   });
 }
@@ -5232,8 +6858,12 @@ app.on("activate", () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  stopBackendJsonParserWorker();
   stopPhotoIndexingHeadlessScheduler();
   stopFolderWatch("App quitting.", { persist: false });
+  if (photoTetherRuntime) {
+    void photoTetherRuntime.stop("App quitting.", { preserveSession: true });
+  }
   stopMcpHttpServer();
   if (backend) {
     backend.stop();

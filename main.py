@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mcp-transport", choices=["stdio", "streamable-http"], default="stdio")
     parser.add_argument("--mcp-host", default="127.0.0.1")
     parser.add_argument("--mcp-port", type=int, default=8765)
+    parser.add_argument("--mcp-tool-profile", choices=["full", "images"], default="full")
     parser.add_argument("--allow-remote-mcp-http", action="store_true", help="Allow MCP HTTP to bind beyond localhost")
     return parser.parse_args()
 
@@ -44,6 +45,7 @@ def main() -> None:
             host=args.mcp_host,
             port=args.mcp_port,
             allow_remote_http=args.allow_remote_mcp_http,
+            tool_profile=args.mcp_tool_profile,
         )
         return
     if args.check:

@@ -1,4 +1,6 @@
-import type { PhotoDuplicateGroup, PhotoItem } from "../types";
+import type { DuplicatePersonSuggestion, PhotoDuplicateGroup, PhotoItem } from "../types";
+
+export type CandidateFileAction = "copy" | "move" | "trash";
 
 export interface PhotoDuplicateComparisonRow {
   assetId: string;
@@ -35,8 +37,83 @@ export interface PhotoDuplicateBrowserReviewGroup {
   selectedCount: number;
 }
 
+export interface PhotoDuplicatePersonSuggestionRow {
+  key: string;
+  activeName: string;
+  otherName: string;
+  summaryText: string;
+  scorePercent: number;
+  countA: number;
+  countB: number;
+  suggestion: DuplicatePersonSuggestion;
+}
+
+export interface PhotoDuplicatePersonSuggestionFormatters {
+  formatCount?: (value: number) => string;
+  uiText?: (source: string) => string;
+}
+
 function fallbackFileName(sourcePath: string): string {
   return String(sourcePath || "").split(/[\\/]/).filter(Boolean).pop() || sourcePath || "Photo";
+}
+
+function cleanPersonName(value: unknown): string {
+  return String(value || "").trim();
+}
+
+function personKey(value: unknown): string {
+  return cleanPersonName(value).toLowerCase();
+}
+
+function formatNumber(formatters: PhotoDuplicatePersonSuggestionFormatters, value: unknown): string {
+  const number = Number(value) || 0;
+  return formatters.formatCount?.(number) || String(number);
+}
+
+function duplicatePersonText(formatters: PhotoDuplicatePersonSuggestionFormatters, value: string): string {
+  return formatters.uiText?.(value) || value;
+}
+
+export function photoDuplicatePersonSuggestionRows(
+  suggestions: readonly DuplicatePersonSuggestion[] | null | undefined,
+  activePersonName: unknown,
+  formatters: PhotoDuplicatePersonSuggestionFormatters = {},
+): PhotoDuplicatePersonSuggestionRow[] {
+  const activeName = String(activePersonName || "");
+  const activeKey = personKey(activeName);
+  if (!activeKey) return [];
+  return [...(suggestions || [])]
+    .filter((suggestion) => personKey(suggestion.personA) === activeKey || personKey(suggestion.personB) === activeKey)
+    .sort((a, b) => b.score - a.score)
+    .map((suggestion) => {
+      const otherName = personKey(suggestion.personA) === activeKey ? suggestion.personB : suggestion.personA;
+      const scorePercent = Math.round(Number(suggestion.score || 0) * 100);
+      const countA = Number(suggestion.countA) || 0;
+      const countB = Number(suggestion.countB) || 0;
+      return {
+        key: `${suggestion.personA}-${suggestion.personB}-${suggestion.score}`,
+        activeName,
+        otherName,
+        summaryText: `${scorePercent}% ${duplicatePersonText(formatters, "similar across saved face photos")} · ${formatNumber(formatters, countA)} / ${formatNumber(formatters, countB)}`,
+        scorePercent,
+        countA,
+        countB,
+        suggestion,
+      };
+	    });
+}
+
+export function photoDuplicateSuggestionCountsByPerson(
+  suggestions: readonly DuplicatePersonSuggestion[] | null | undefined,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  (suggestions || []).forEach((suggestion) => {
+    const left = personKey(suggestion.personA);
+    const right = personKey(suggestion.personB);
+    if (left) counts.set(left, (counts.get(left) || 0) + 1);
+    if (right) counts.set(right, (counts.get(right) || 0) + 1);
+  });
+  return counts;
 }
 
 export function buildPhotoDuplicateComparisonRows(
@@ -73,6 +150,27 @@ export function photoDuplicateRecommendationReasons(group: PhotoDuplicateGroup |
     .map((reason) => String(reason || "").trim())
     .filter(Boolean)
     .slice(0, 4);
+}
+
+export function photoDuplicateGroupLabel(group: PhotoDuplicateGroup | null | undefined, uiText: (source: string) => string): string {
+  if (!group) return uiText("None");
+  if (group.algorithm === "exact_hash") return uiText("Exact duplicate");
+  if (group.algorithm === "perceptual_dhash") return uiText("Near duplicate");
+  return uiText("Duplicate group");
+}
+
+export function photoDuplicateRecommendationText(
+  group: PhotoDuplicateGroup | null | undefined,
+  currentAssetId: string,
+  fileName: (sourcePath: string) => string,
+  uiText: (source: string) => string,
+): string {
+  if (!group?.recommendedAssetId) return uiText("None");
+  const target = group.recommendedAssetId === currentAssetId
+    ? uiText("This photo")
+    : fileName(group.recommendedSourcePath || group.recommendedAssetId);
+  const reasons = (group.recommendationReasons || []).map((reason) => uiText(reason)).filter(Boolean).slice(0, 3);
+  return reasons.length ? `${target} · ${reasons.join(", ")}` : target;
 }
 
 export function buildPhotoDuplicateBrowserReviewGroups(

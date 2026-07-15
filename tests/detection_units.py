@@ -6,8 +6,11 @@ Run: PYTHONPATH=. .venv/bin/python tests/detection_units.py
 from __future__ import annotations
 
 import os
+import tempfile
+import types
 
 import numpy as np
+from PIL import Image
 
 from pathlib import Path
 
@@ -16,8 +19,10 @@ from crossage_fr.config import RuntimeConfig
 from crossage_fr.model_manager import model_status
 from crossage_fr.embed.engine import (
     ARCFACE_DST,
+    AlignmentRecognitionAttempt,
     InsightFaceEmbeddingEngine,
     alignment_error,
+    alignment_recovery_hypotheses,
     apply_recognizer_preference,
     detect_cache_tag,
     flip_average,
@@ -25,8 +30,12 @@ from crossage_fr.embed.engine import (
     inter_eye_distance,
     nms_boxes,
     plan_detect_sizes,
+    plan_tiled_detect,
     plan_tiles,
+    select_alignment_recovery,
 )
+from crossage_fr.enroll.manager import ProjectState
+from crossage_fr.models import EmbeddingResult, ReferenceFace
 
 
 class _FakeDetector:
@@ -100,6 +109,74 @@ def test_engine_fallback_preserves_redacted_load_error_detail(tmp_path: Path | N
     assert "ONNX provider failed" in status["engineDetail"]
 
 
+def test_runtime_provider_failure_reloads_once_on_cpu() -> None:
+    engine = InsightFaceEmbeddingEngine.__new__(InsightFaceEmbeddingEngine)
+    engine._active_provider_names = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+    engine._runtime_provider_fallback_attempted = False
+    engine._runtime_provider_fallback_lock = engine_module.threading.Lock()
+    engine._model_zoo = object()
+    engine._model_dir = "/verified/model"
+    engine.detector_size = 640
+    loaded: list[tuple[str, tuple[str, ...]]] = []
+
+    class PreparedModel:
+        def __init__(self, role: str) -> None:
+            self.role = role
+            self.prepared: tuple[tuple[object, ...], dict[str, object]] | None = None
+
+        def prepare(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            self.prepared = (args, kwargs)
+
+    models: dict[str, PreparedModel] = {}
+
+    def fake_load(_self, _zoo, _root, role, providers, _options):  # type: ignore[no-untyped-def]
+        loaded.append((role, tuple(providers)))
+        model = PreparedModel(role)
+        models[role] = model
+        return model
+
+    calls: list[tuple[str, ...]] = []
+
+    def fake_active(_self, _image, path=None, *, rescue):  # type: ignore[no-untyped-def]
+        calls.append(tuple(engine._active_provider_names))
+        if engine._active_provider_names[0] == "CoreMLExecutionProvider":
+            raise RuntimeError("dynamic CoreML output shape")
+        return [EmbeddingResult([1.0] + [0.0] * 511, 0.9, (0, 0, 10, 10), "test")]
+
+    engine._load_model = types.MethodType(fake_load, engine)  # type: ignore[method-assign]
+    engine._embed_with_active_provider = types.MethodType(fake_active, engine)  # type: ignore[method-assign]
+    result = engine._embed_with_detector(Image.new("RGB", (16, 16)), rescue=False)
+    assert len(result) == 1
+    assert calls == [
+        ("CoreMLExecutionProvider", "CPUExecutionProvider"),
+        ("CPUExecutionProvider",),
+    ]
+    assert loaded == [
+        ("detection", ("CPUExecutionProvider",)),
+        ("recognition", ("CPUExecutionProvider",)),
+    ]
+    assert models["detection"].prepared == ((-1,), {"input_size": (640, 640), "det_thresh": 0.5})
+    assert models["recognition"].prepared == ((-1,), {})
+    assert engine._runtime_provider_fallback_attempted is True
+    assert engine.engine_detail.endswith("CPUExecutionProvider")
+
+    def fail_if_reloaded(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("CPU runtime failures must not trigger another provider reload")
+
+    engine._load_model = fail_if_reloaded  # type: ignore[method-assign]
+
+    def cpu_failure(_self, _image, path=None, *, rescue):  # type: ignore[no-untyped-def]
+        raise RuntimeError("cpu inference failure")
+
+    engine._embed_with_active_provider = types.MethodType(cpu_failure, engine)  # type: ignore[method-assign]
+    try:
+        engine._embed_with_detector(Image.new("RGB", (16, 16)), rescue=False)
+    except RuntimeError as exc:
+        assert str(exc) == "cpu inference failure"
+    else:
+        raise AssertionError("CPU inference failure should propagate")
+
+
 def test_plan_detect_sizes_dedupes_when_equal() -> None:
     # high-detail 768 collapses to a single scale (no benefit, no wasted pass)
     assert plan_detect_sizes(768, 768, multi_scale=True, dynamic=True) == [(768, 768)]
@@ -118,6 +195,22 @@ def test_detect_cache_tag() -> None:
     assert detect_cache_tag([(512, 512), (768, 768)]) == "ms512-768"
     assert detect_cache_tag([(512, 512)]) == ""
     assert detect_cache_tag([]) == ""
+    assert detect_cache_tag([(512, 512)], tiled=True, tile_size=512) == "tile512"
+    assert detect_cache_tag([(512, 512), (768, 768)], tiled=True, tile_size=512) == "ms512-768-tile512"
+
+
+def test_plan_tiled_detect_is_quality_only() -> None:
+    config = RuntimeConfig()
+    config.multi_scale_detect = True
+    for mode in ("auto", "fast", "balanced"):
+        config.performance_mode = mode
+        assert plan_tiled_detect(config, detector_dynamic=True) is False
+    config.performance_mode = "quality"
+    assert plan_tiled_detect(config, detector_dynamic=True) is True
+    config.multi_scale_detect = False
+    assert plan_tiled_detect(config, detector_dynamic=True) is False
+    config.multi_scale_detect = True
+    assert plan_tiled_detect(config, detector_dynamic=False) is False
 
 
 def test_inter_eye_distance() -> None:
@@ -224,6 +317,260 @@ def test_alignment_error_flags_distorted_geometry() -> None:
     assert alignment_error(np.array([[1.0, 2.0]], dtype="float64")) == 0.0
 
 
+def _recognition_attempt(
+    *,
+    strategy: str,
+    landmarks: np.ndarray,
+    vector: np.ndarray,
+    fiqa_score: float | None,
+) -> AlignmentRecognitionAttempt:
+    normalized = np.asarray(vector, dtype="float32")
+    normalized /= max(float(np.linalg.norm(normalized)), 1e-12)
+    return AlignmentRecognitionAttempt(
+        strategy=strategy,
+        landmarks=np.asarray(landmarks, dtype="float32"),
+        align_error=alignment_error(landmarks),
+        aligned_bgr=np.zeros((112, 112, 3), dtype="uint8"),
+        raw_embedding=normalized * 20.0,
+        vector=normalized,
+        norm_quality=0.5,
+        fiqa_score=fiqa_score,
+    )
+
+
+def test_alignment_recovery_skips_child_scale_frontal_control() -> None:
+    # Small child faces still use exactly one recognizer pass when their geometry
+    # is sound; scale alone must not trigger expensive or destabilizing recovery.
+    child_scale = (ARCFACE_DST * 0.28) + np.asarray([4.0, 7.0])
+    assert alignment_error(child_scale) < 1e-4
+    assert alignment_recovery_hypotheses(child_scale, (2, 4, 28, 36)) == []
+
+
+def test_alignment_recovery_generates_profile_and_failed_landmark_hypotheses() -> None:
+    profile = ARCFACE_DST.copy()
+    profile[1, 0] = profile[0, 0] + 12.0
+    profile[2, 0] = profile[0, 0] + 8.4
+    profile[4, 0] = profile[3, 0] + 13.2
+    profile_hypotheses = alignment_recovery_hypotheses(profile, (20, 20, 95, 112))
+    assert profile_hypotheses
+    assert min(row.align_error for row in profile_hypotheses) < alignment_error(profile) - 0.03
+
+    swapped = ARCFACE_DST[[1, 0, 2, 4, 3]]
+    failed_hypotheses = alignment_recovery_hypotheses(swapped, (20, 20, 95, 112))
+    pair_fix = next(row for row in failed_hypotheses if row.strategy == "swap-eye-mouth-pairs")
+    assert pair_fix.align_error < 1e-4
+
+    outlier = ARCFACE_DST.copy()
+    outlier[2] += np.asarray([35.0, -20.0])
+    outlier_hypotheses = alignment_recovery_hypotheses(outlier, (20, 20, 95, 112))
+    repaired = next(row for row in outlier_hypotheses if row.strategy == "repair-landmark-2")
+    assert repaired.align_error < alignment_error(outlier) - 0.03
+
+
+def test_alignment_recovery_ab_gate_accepts_only_consistent_quality_win() -> None:
+    bad = ARCFACE_DST.copy()
+    bad[2] += np.asarray([35.0, -20.0])
+    original_vector = np.asarray([1.0, 0.0, 0.0], dtype="float32")
+    original = _recognition_attempt(
+        strategy="original-5pt",
+        landmarks=bad,
+        vector=original_vector,
+        fiqa_score=0.30,
+    )
+    consistent = _recognition_attempt(
+        strategy="repair-landmark-2",
+        landmarks=ARCFACE_DST,
+        vector=np.asarray([0.95, 0.31, 0.0], dtype="float32"),
+        fiqa_score=0.62,
+    )
+    selected, gain = select_alignment_recovery(original, [consistent])
+    assert selected is consistent
+    assert gain > 0.30
+
+    identity_drift = _recognition_attempt(
+        strategy="bbox-canonical-warp",
+        landmarks=ARCFACE_DST,
+        vector=np.asarray([0.0, 1.0, 0.0], dtype="float32"),
+        fiqa_score=0.95,
+    )
+    selected, gain = select_alignment_recovery(original, [identity_drift])
+    assert selected is original and gain == 0.0
+
+    no_quality_gain = _recognition_attempt(
+        strategy="repair-landmark-2",
+        landmarks=ARCFACE_DST,
+        vector=original_vector,
+        fiqa_score=0.33,
+    )
+    selected, gain = select_alignment_recovery(original, [no_quality_gain])
+    assert selected is original and gain == 0.0
+
+    mixed_quality_source = _recognition_attempt(
+        strategy="repair-landmark-2",
+        landmarks=ARCFACE_DST,
+        vector=original_vector,
+        fiqa_score=None,
+    )
+    mixed_quality_source.norm_quality = 1.0
+    selected, gain = select_alignment_recovery(original, [mixed_quality_source])
+    assert selected is original and gain == 0.0
+
+
+def test_recognize_selects_recovery_and_preserves_control_on_rejection() -> None:
+    bad = ARCFACE_DST.copy()
+    bad[2] += np.asarray([35.0, -20.0])
+
+    class FakeFace:
+        bbox = np.asarray([20.0, 20.0, 95.0, 112.0], dtype="float32")
+        embedding: np.ndarray
+
+    def run(*, allow_recovery: bool) -> tuple[np.ndarray, FakeFace, list[str]]:
+        engine = InsightFaceEmbeddingEngine.__new__(InsightFaceEmbeddingEngine)
+        engine.flip_tta = False
+        calls: list[str] = []
+
+        def fake_attempt(
+            _self: InsightFaceEmbeddingEngine,
+            _source: np.ndarray,
+            landmarks: np.ndarray,
+            *,
+            strategy: str,
+        ) -> AlignmentRecognitionAttempt:
+            calls.append(strategy)
+            if strategy == "original-5pt":
+                vector = np.asarray([1.0, 0.0, 0.0], dtype="float32")
+                score = 0.30
+            elif strategy == "repair-landmark-2" and allow_recovery:
+                vector = np.asarray([0.97, 0.24, 0.0], dtype="float32")
+                score = 0.70
+            else:
+                vector = np.asarray([0.0, 1.0, 0.0], dtype="float32")
+                score = 0.90
+            return _recognition_attempt(
+                strategy=strategy,
+                landmarks=landmarks,
+                vector=vector,
+                fiqa_score=score,
+            )
+
+        engine._recognition_attempt = types.MethodType(fake_attempt, engine)  # type: ignore[method-assign]
+        face = FakeFace()
+        vector = engine._recognize(np.zeros((128, 128, 3), dtype="uint8"), face, bad)
+        return vector, face, calls
+
+    rescued_vector, rescued_face, rescued_calls = run(allow_recovery=True)
+    assert "original-5pt" in rescued_calls and len(rescued_calls) > 1
+    assert rescued_face._vintrace_alignment["rescued"] is True
+    assert rescued_face._vintrace_alignment["strategy"] == "repair-landmark-2"
+    assert rescued_vector[0] > 0.9
+
+    control_vector, control_face, control_calls = run(allow_recovery=False)
+    assert len(control_calls) > 1
+    assert control_face._vintrace_alignment["rescued"] is False
+    assert np.allclose(control_vector, np.asarray([1.0, 0.0, 0.0], dtype="float32"))
+
+
+def test_alignment_recovery_cache_and_scan_telemetry() -> None:
+    class RecoveryEngine:
+        model_name = "alignment-recovery-test"
+        detect_cache_tag = "detector-test"
+        alignment_recovery_version = "align-recovery-v1"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def embed_loaded_image(self, _image: Image.Image, path: Path | None = None) -> list[EmbeddingResult]:
+            self.calls += 1
+            rescued = bool(path and "rescued" in path.name)
+            return [
+                EmbeddingResult(
+                    vector=[1.0] + [0.0] * 511,
+                    quality=0.82,
+                    bbox=(0, 0, 32, 32),
+                    model_name=self.model_name,
+                    pose_bucket="profile",
+                    fiqa_score=0.82,
+                    align_error=0.02 if rescued else 0.31,
+                    alignment_rescued=rescued,
+                    alignment_strategy="repair-landmark-2" if rescued else "",
+                    alignment_original_error=0.38,
+                    alignment_quality_gain=0.27 if rescued else 0.0,
+                    alignment_attempts=3,
+                )
+            ]
+
+    with tempfile.TemporaryDirectory(prefix="vintrace-alignment-recovery-") as temp:
+        root = Path(temp)
+        registry = root / "registry"
+        old_registry = os.environ.get("VINTRACE_REGISTRY_HOME")
+        old_crossage_registry = os.environ.get("CROSSAGE_REGISTRY_HOME")
+        os.environ["VINTRACE_REGISTRY_HOME"] = str(registry)
+        os.environ["CROSSAGE_REGISTRY_HOME"] = str(registry)
+        try:
+            rescued_path = root / "rescued.jpg"
+            rejected_path = root / "rejected.jpg"
+            reference_path = root / "reference.jpg"
+            Image.new("RGB", (48, 48), color=(90, 120, 150)).save(rescued_path)
+            Image.new("RGB", (48, 48), color=(120, 90, 150)).save(rejected_path)
+            Image.new("RGB", (48, 48), color=(150, 120, 90)).save(reference_path)
+            project = ProjectState(root / "workspace")
+            project.config.safe_mode = False
+            reference = ReferenceFace(
+                ref_id="ref_alignment",
+                person_name="Alignment Person",
+                age_bucket="adult",
+                source_path=str(reference_path),
+                capture_date=None,
+                quality=1.0,
+                model_name=RecoveryEngine.model_name,
+                vector=[1.0] + [0.0] * 511,
+            )
+            project.references[reference.ref_id] = reference
+            project.vector_store.add(reference.ref_id, reference.vector)
+
+            engine = RecoveryEngine()
+            added, errors, metrics = project.scan_paths(
+                [rescued_path, rejected_path],
+                engine,
+                total=2,
+                source="alignment-first",
+                label="alignment-first",
+            )
+            assert errors == [] and added == 2
+            assert engine.calls == 2
+            assert metrics["alignmentRecoveryAttempted"] == 2
+            assert metrics["alignmentRecoverySucceeded"] == 1
+            assert metrics["alignmentRecoveryRejected"] == 1
+            rescued_candidate = next(
+                row for row in project.candidates.values() if Path(row.source_path).name == rescued_path.name
+            )
+            assert "alignment-recovered" in rescued_candidate.risk_flags
+            assert "repair-landmark-2" in rescued_candidate.note
+
+            cached_engine = RecoveryEngine()
+            _added, cached_errors, cached_metrics = project.scan_paths(
+                [rescued_path, rejected_path],
+                cached_engine,
+                total=2,
+                source="alignment-cached",
+                label="alignment-cached",
+            )
+            assert cached_errors == [] and cached_engine.calls == 0
+            assert cached_metrics["embeddingCacheHits"] == 2
+            assert cached_metrics["alignmentRecoverySucceeded"] == 1
+            assert cached_metrics["alignmentRecoveryRejected"] == 1
+            assert project._embedding_cache_version(cached_engine).endswith("align-recovery-v1")
+        finally:
+            if old_registry is None:
+                os.environ.pop("VINTRACE_REGISTRY_HOME", None)
+            else:
+                os.environ["VINTRACE_REGISTRY_HOME"] = old_registry
+            if old_crossage_registry is None:
+                os.environ.pop("CROSSAGE_REGISTRY_HOME", None)
+            else:
+                os.environ["CROSSAGE_REGISTRY_HOME"] = old_crossage_registry
+
+
 def test_flip_average_is_unit_norm_and_idempotent() -> None:
     # Averaging an embedding with itself is a no-op (still the normalized direction).
     same = flip_average([3.0, 4.0] + [0.0] * 510, [3.0, 4.0] + [0.0] * 510)
@@ -246,9 +593,15 @@ def test_apply_recognizer_preference_moves_drop_in_to_front() -> None:
 
 def main() -> None:
     test_engine_fallback_preserves_redacted_load_error_detail()
+    test_runtime_provider_failure_reloads_once_on_cpu()
     test_apply_recognizer_preference_moves_drop_in_to_front()
     test_alignment_error_is_zero_for_canonical_and_similarity_invariant()
     test_alignment_error_flags_distorted_geometry()
+    test_alignment_recovery_skips_child_scale_frontal_control()
+    test_alignment_recovery_generates_profile_and_failed_landmark_hypotheses()
+    test_alignment_recovery_ab_gate_accepts_only_consistent_quality_win()
+    test_recognize_selects_recovery_and_preserves_control_on_rejection()
+    test_alignment_recovery_cache_and_scan_telemetry()
     test_flip_average_is_unit_norm_and_idempotent()
     test_tiled_detect_translates_boxes_to_global_coords()
     test_tiled_detect_skips_small_images()
@@ -260,6 +613,7 @@ def main() -> None:
     test_plan_detect_sizes_dedupes_when_equal()
     test_plan_detect_sizes_respects_flag_and_static_model()
     test_detect_cache_tag()
+    test_plan_tiled_detect_is_quality_only()
     test_inter_eye_distance()
     print("detection units ok")
 

@@ -26,7 +26,10 @@ function classifyDistFiles(distFiles) {
     exeFiles: distFiles.filter((file) => /\.exe$/i.test(file)),
     dmgFiles: distFiles.filter((file) => /\.dmg$/i.test(file)),
     zipFiles: distFiles.filter((file) => /\.zip$/i.test(file)),
-    linuxFiles: distFiles.filter((file) => /\.(AppImage|deb|rpm|snap)$/i.test(file)),
+    appImageFiles: distFiles.filter((file) => /\.AppImage$/i.test(file)),
+    debFiles: distFiles.filter((file) => /\.deb$/i.test(file)),
+    rpmFiles: distFiles.filter((file) => /\.rpm$/i.test(file)),
+    linuxFiles: distFiles.filter((file) => /\.(AppImage|deb|rpm)$/i.test(file)),
     blockmapFiles: distFiles.filter((file) => /\.blockmap$/i.test(file)),
     metadataFiles: distFiles.filter((file) => /^(latest|beta|internal)(-(mac|linux))?\.ya?ml$/i.test(file)),
   };
@@ -80,6 +83,11 @@ function buildUpdateFeedCheckResult({
     platform,
     found: installerFiles
   });
+  if (platform === "linux") {
+    add(checks, "local AppImage artifact", !installerDistPresent || classified.appImageFiles.length === 1, classified.appImageFiles.join(", ") || "not built yet");
+    add(checks, "local deb artifact", !installerDistPresent || classified.debFiles.length === 1, classified.debFiles.join(", ") || "not built yet");
+    add(checks, "local rpm artifact", !installerDistPresent || classified.rpmFiles.length === 1, classified.rpmFiles.join(", ") || "not built yet");
+  }
 
   const ok = checks.every((check) => check.ok);
   return {

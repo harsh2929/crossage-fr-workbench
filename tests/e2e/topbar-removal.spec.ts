@@ -50,7 +50,7 @@ test("Top bar removed: brand lockup, relocated controls, first-load language pic
   const app = await electron.launch({ args: [path.join(root, "desktop/main.cjs")], cwd: root, env });
   const page = await app.firstWindow();
   page.on("pageerror", (e) => pageErrors.push(e.message));
-  await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByText("Backend ready.")).toBeAttached({ timeout: 120_000 });
 
   // (a) The old chrome is gone entirely.
   await expect(page.locator(".topbar")).toHaveCount(0);

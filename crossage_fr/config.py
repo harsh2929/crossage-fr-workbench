@@ -90,6 +90,9 @@ class RuntimeConfig:
     per_subject_consent: bool = False
     jurisdiction_preset: str = "standard"
     retention_reviewed_days: int = 90
+    retention_pending_days: int = 365
+    retention_audit_days: int = 365
+    retention_enforcement_enabled: bool = False
     safe_mode: bool = True
     safe_mode_threshold: float = 0.58
     # "custom" by default so an existing/explicit safe_mode_threshold is preserved
@@ -98,6 +101,10 @@ class RuntimeConfig:
     # Stage 1b: per-user temperature-scaling calibration for the ML gate. 1.0 = raw
     # model; >1 softens over-confident scores. Fit from local labeled images.
     safe_mode_temperature: float = 1.0
+    # Use the validated quality vision-language pack as the category-aware primary
+    # guardrail when installed and explicitly enabled. The ONNX/heuristic detector
+    # remains a protective compatibility fallback for faster bulk scans.
+    safe_mode_multimodal: bool = False
     safe_mode_zero_admittance: bool = False
     face_detector_size: int = 512
     multi_scale_detect: bool = True
@@ -122,6 +129,9 @@ class RuntimeConfig:
     calibration_platt: list[float] = field(default_factory=list)
     # Per-identity Platt calibrators {person: [a, b]} (§5.6 personalization); empty = none.
     calibration_platt_by_person: dict[str, list[float]] = field(default_factory=dict)
+    # Region-aware AC-Linear payload. Empty means the validated global/per-person
+    # Platt fallback remains authoritative.
+    calibration_adaptive: dict[str, object] = field(default_factory=dict)
     # Recognizer the calibrator was fit on; a model switch makes the calibrator stale.
     calibration_model: str = ""
     thresholds: Thresholds = field(default_factory=Thresholds)
@@ -129,6 +139,10 @@ class RuntimeConfig:
 
 RUNTIME_CONFIG_FIELD_NAMES = {item.name for item in dataclass_fields(RuntimeConfig)}
 THRESHOLD_FIELD_NAMES = {item.name for item in dataclass_fields(Thresholds)}
+
+
+class ConfigReadError(OSError):
+    """Raised when a config file exists but cannot be read safely."""
 
 
 def archive_corrupt_file(path: Path) -> None:
@@ -238,6 +252,49 @@ def _require_platt_map(value: object) -> dict[str, list[float]]:
     return result
 
 
+def _require_adaptive_calibrator(value: object) -> dict[str, object]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("calibration_adaptive must be a mapping.")
+    if not value:
+        return {}
+    if value.get("version") != "adaptive-linear-v1":
+        raise ValueError("calibration_adaptive has an unsupported version.")
+    weights_raw = value.get("weights")
+    if not isinstance(weights_raw, list) or len(weights_raw) != 513:
+        raise ValueError("calibration_adaptive must contain 513 weights.")
+    weights: list[float] = []
+    for item in weights_raw:
+        if isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(float(item)):
+            raise ValueError("calibration_adaptive weights must be finite numbers.")
+        weights.append(float(item))
+    if weights[-1] <= 0.0:
+        raise ValueError("calibration_adaptive must remain monotonic in cosine similarity.")
+    bias_raw = value.get("bias")
+    if isinstance(bias_raw, bool) or not isinstance(bias_raw, (int, float)) or not math.isfinite(float(bias_raw)):
+        raise ValueError("calibration_adaptive bias must be finite.")
+    if value.get("dimension") != 512:
+        raise ValueError("calibration_adaptive must use 512-dimensional pair centers.")
+
+    def _count(key: str) -> int:
+        raw = value.get(key, 0)
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            raise ValueError(f"calibration_adaptive {key} must be a non-negative integer.")
+        return int(raw)
+
+    return {
+        "version": "adaptive-linear-v1",
+        "weights": weights,
+        "bias": float(bias_raw),
+        "dimension": 512,
+        "modelName": str(value.get("modelName", "") or "")[:200],
+        "inputCount": _count("inputCount"),
+        "positiveCount": _count("positiveCount"),
+        "negativeCount": _count("negativeCount"),
+    }
+
+
 def _require_performance_mode(value: object) -> str:
     mode = str(value or "auto").strip().lower()
     if mode not in PERFORMANCE_MODES:
@@ -262,7 +319,14 @@ def _validate_config(config: RuntimeConfig) -> RuntimeConfig:
     config.per_subject_consent = _require_bool(config.per_subject_consent, "per_subject_consent")
     config.jurisdiction_preset = str(config.jurisdiction_preset or "standard").strip().lower()[:40] or "standard"
     config.retention_reviewed_days = _require_int(config.retention_reviewed_days, "retention_reviewed_days", minimum=1)
+    config.retention_pending_days = _require_int(config.retention_pending_days, "retention_pending_days", minimum=1)
+    config.retention_audit_days = _require_int(config.retention_audit_days, "retention_audit_days", minimum=1)
+    config.retention_enforcement_enabled = _require_bool(
+        config.retention_enforcement_enabled,
+        "retention_enforcement_enabled",
+    )
     config.safe_mode = _require_bool(config.safe_mode, "safe_mode")
+    config.safe_mode_multimodal = _require_bool(config.safe_mode_multimodal, "safe_mode_multimodal")
     config.safe_mode_zero_admittance = _require_bool(config.safe_mode_zero_admittance, "safe_mode_zero_admittance")
     config.safe_mode_threshold = _require_unit_float(config.safe_mode_threshold, "safe_mode_threshold")
     # A named profile is authoritative for the effective threshold; "custom"
@@ -301,6 +365,7 @@ def _validate_config(config: RuntimeConfig) -> RuntimeConfig:
     config.excluded_file_paths = _require_string_list(config.excluded_file_paths, "excluded_file_paths", limit=400)
     config.calibration_platt = _require_platt(config.calibration_platt)
     config.calibration_platt_by_person = _require_platt_map(config.calibration_platt_by_person)
+    config.calibration_adaptive = _require_adaptive_calibrator(config.calibration_adaptive)
     config.calibration_model = str(config.calibration_model or "")[:200]
     config.thresholds.confident = _require_unit_float(config.thresholds.confident, "thresholds.confident")
     config.thresholds.likely = _require_unit_float(config.thresholds.likely, "thresholds.likely")
@@ -311,12 +376,14 @@ def _validate_config(config: RuntimeConfig) -> RuntimeConfig:
     return config
 
 
-def load_config(path: Path) -> RuntimeConfig:
+def load_config(path: Path, *, strict_read: bool = False) -> RuntimeConfig:
     if not path.exists():
         return RuntimeConfig()
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError as exc:
+        if strict_read:
+            raise ConfigReadError(str(exc)) from exc
         return RuntimeConfig()
     try:
         data = json.loads(raw)

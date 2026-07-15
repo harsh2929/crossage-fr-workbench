@@ -12,6 +12,7 @@ export type SettingsDraft = {
   verificationDetectorSize: number;
   learningMode: LearningMode;
   safeMode: boolean;
+  safeModeMultimodal?: boolean;
   safeModeZeroAdmittance?: boolean;
   safeModeThreshold: number;
   safeModeProfile?: string;
@@ -43,7 +44,23 @@ export type SettingsPreset = {
 };
 
 export const defaultScanExclusions = {
-  dirNames: [".git", ".hg", ".svn", ".cache", ".venv", "__pycache__", "node_modules", "venv"],
+  // Keep this list in lockstep with crossage_fr.config.DEFAULT_EXCLUDED_DIR_NAMES.
+  // Preset inference compares values structurally; a shortened renderer copy made
+  // a brand-new workspace appear "Custom" even though it was untouched.
+  dirNames: [
+    ".git",
+    ".hg",
+    ".svn",
+    ".cache",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".venv",
+    "__pycache__",
+    "$RECYCLE.BIN",
+    "System Volume Information",
+    "node_modules",
+    "venv",
+  ],
   pathKeywords: [],
   extensions: [],
   filePaths: []
@@ -68,6 +85,7 @@ export const settingsPresets: SettingsPreset[] = [
       verificationDetectorSize: 640,
       learningMode: "manual",
       safeMode: true,
+      safeModeMultimodal: false,
       safeModeThreshold: 0.58,
       storageBudgetBytes: 0,
       maxMediaFileBytes: 0,
@@ -89,6 +107,7 @@ export const settingsPresets: SettingsPreset[] = [
       verificationDetectorSize: 640,
       learningMode: "manual",
       safeMode: true,
+      safeModeMultimodal: true,
       safeModeThreshold: 0.45,
       storageBudgetBytes: 0,
       maxMediaFileBytes: 0,
@@ -110,6 +129,7 @@ export const settingsPresets: SettingsPreset[] = [
       verificationDetectorSize: 640,
       learningMode: "manual",
       safeMode: true,
+      safeModeMultimodal: false,
       safeModeThreshold: 0.58,
       storageBudgetBytes: 0,
       maxMediaFileBytes: 0,
@@ -131,6 +151,7 @@ export const settingsPresets: SettingsPreset[] = [
       verificationDetectorSize: 640,
       learningMode: "manual",
       safeMode: true,
+      safeModeMultimodal: false,
       safeModeThreshold: 0.62,
       storageBudgetBytes: 0,
       maxMediaFileBytes: 0,
@@ -268,6 +289,7 @@ export function settingsValuesEqual(left: SettingsValues, right: SettingsValues)
     left.verificationDetectorSize === right.verificationDetectorSize &&
     left.learningMode === right.learningMode &&
     left.safeMode === right.safeMode &&
+    (left.safeModeMultimodal ?? false) === (right.safeModeMultimodal ?? false) &&
     (left.safeModeZeroAdmittance ?? false) === (right.safeModeZeroAdmittance ?? false) &&
     sameSettingValue(left.safeModeThreshold, right.safeModeThreshold) &&
     (left.safeModeProfile ?? "custom") === (right.safeModeProfile ?? "custom") &&

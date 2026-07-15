@@ -15,6 +15,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from crossage_fr.api_server import DesktopApi
 from crossage_fr.enroll.manager import ProjectState
 from crossage_fr.ingest.safety_calibration import (
     CALIBRATION_T_MAX,
@@ -190,5 +191,42 @@ with tempfile.TemporaryDirectory() as tmp:
     project.config.safe_mode_temperature = 2.0
     calibrated_version = project._safety_cache_version()
     check("safe-mode cache key includes temperature", raw_version != calibrated_version and "temperature:2" in calibrated_version)
+
+with tempfile.TemporaryDirectory() as tmp:
+    registry = str(Path(tmp) / "registry")
+    os.environ["VINTRACE_REGISTRY_HOME"] = registry
+    os.environ["CROSSAGE_REGISTRY_HOME"] = registry
+    api = DesktopApi(Path(tmp) / "workspace", actor="safe-mode-calibration-job-test")
+    api.project.config.safe_mode_temperature = 2.0
+    api.project.save()
+
+    original_load_safety_model = safety_module._load_safety_model
+    original_load_image = safety_module.load_image
+    try:
+        safety_module._load_safety_model = lambda: FakeCalibrationModel()
+        safety_module.load_image = fake_load_image
+        queued = api.handle(
+            "calibrate_safe_mode",
+            {
+                "examples": [
+                    {"path": "safe-a.jpg", "sensitive": False},
+                    {"path": "safe-b.jpg", "sensitive": False},
+                    {"path": "sensitive-a.jpg", "sensitive": True},
+                    {"path": "sensitive-b.jpg", "sensitive": True},
+                ]
+            },
+        )
+        check("calibrate_safe_mode queues by default", queued.get("queued") is True and queued.get("jobId"))
+        check("queued calibration does not mutate config inline", approx(api.project.config.safe_mode_temperature, 2.0))
+        ran = api.handle("run_photo_indexing_job", {"jobId": queued["jobId"], "ignoreSettings": True})["value"]
+    finally:
+        safety_module._load_safety_model = original_load_safety_model
+        safety_module.load_image = original_load_image
+
+    job = ran["job"]
+    result = job["result"]
+    check("safe-mode calibration job completes", job["status"] == "completed" and result["ok"] is True)
+    check("safe-mode calibration job stores progress", result["progress"]["processed"] == 4 and result["progress"]["updated"] == 1)
+    check("safe-mode calibration job applies fitted temperature", approx(api.project.config.safe_mode_temperature, float(result["temperature"])))
 
 print("\nall safe-mode-calibration tests passed")

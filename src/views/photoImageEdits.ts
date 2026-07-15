@@ -31,6 +31,13 @@ export interface PhotoManualCropPoint {
   y: number;
 }
 
+export type ImageManualCropDragState = {
+  pointerId: number;
+  mode: PhotoManualCropDragMode;
+  start: PhotoManualCropPoint;
+  box: PhotoManualCropBox;
+};
+
 export type PhotoManualCropDragMode =
   | "create"
   | "move"
@@ -44,6 +51,20 @@ export type PhotoManualCropDragMode =
   | "sw";
 
 export type PhotoImageMarkupDragMode = Exclude<PhotoManualCropDragMode, "create">;
+
+export type ImageMarkupDragState = {
+  pointerId: number;
+  mode: PhotoImageMarkupDragMode;
+  start: PhotoManualCropPoint;
+  annotation: PhotoImageMarkupAnnotation;
+  index: number;
+};
+
+export type ImageMarkupStrokeState = {
+  pointerId: number;
+  points: PhotoManualCropPoint[];
+  index: number;
+};
 
 export interface PhotoImageAdjustmentDraft {
   exposure: number;
@@ -79,6 +100,16 @@ export interface PhotoImageAdjustmentDraft {
   noiseReduction: number;
 }
 
+export type PhotoImageAdjustmentControl = {
+  key: keyof PhotoImageAdjustmentDraft;
+  label: string;
+  ariaLabel: string;
+  min: number;
+  max: number;
+  step: number;
+  precision?: number;
+};
+
 export interface PhotoImageAutoEnhanceStats {
   pixelCount: number;
   lumaStdDev: number;
@@ -98,6 +129,24 @@ export interface PhotoImageAutoEnhanceStats {
   redAverage: number;
   greenAverage: number;
   blueAverage: number;
+}
+
+export interface PhotoImageRgbSample {
+  red: number;
+  green: number;
+  blue: number;
+}
+
+export interface PhotoImageSampleSize {
+  width: number;
+  height: number;
+}
+
+export interface PhotoImageSampleRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 }
 
 export type PhotoImageFilterPreset =
@@ -145,6 +194,13 @@ export interface PhotoImageRetouchSpot {
   sourceTop?: number;
 }
 
+export type ImageRetouchBrushState = {
+  pointerId: number;
+  lastPoint: PhotoManualCropPoint;
+  spacing: number;
+  template: PhotoImageRetouchSpot;
+};
+
 export interface PhotoImageSignaturePreset {
   id: string;
   name: string;
@@ -173,12 +229,136 @@ export interface PhotoImageEditOperation {
   retouch?: PhotoImageRetouchSpot[];
 }
 
+export interface PhotoImageEditOperationDraftInput {
+  rotateDegrees?: unknown;
+  straightenDegrees?: unknown;
+  manualCropActive?: boolean;
+  manualCropBox?: Partial<PhotoManualCropBox> | null;
+  cropAspect?: unknown;
+  adjustmentsActive?: boolean;
+  adjustments?: Partial<PhotoImageAdjustmentDraft> | null;
+  filterActive?: boolean;
+  filterPreset?: unknown;
+  filterIntensity?: unknown;
+  markupActive?: boolean;
+  markup?: unknown;
+  retouchActive?: boolean;
+  retouch?: unknown;
+  flipHorizontal?: unknown;
+  flipVertical?: unknown;
+  source?: unknown;
+}
+
+export interface PhotoImageEditDraftState {
+  operation: PhotoImageEditOperation;
+  rotateDegrees: PhotoImageRotateDegrees;
+  straightenDegrees: number;
+  cropAspect: PhotoImageCropAspect;
+  manualCropEnabled: boolean;
+  manualCropBox: PhotoManualCropBox;
+  adjustmentsOpen: boolean;
+  adjustments: PhotoImageAdjustmentDraft;
+  filterPreset: PhotoImageFilterPreset;
+  filterIntensity: number;
+  markupOpen: boolean;
+  markupAnnotations: PhotoImageMarkupAnnotation[];
+  markupSelectedIndex: number;
+  retouchOpen: boolean;
+  retouchSpots: PhotoImageRetouchSpot[];
+  retouchSelectedIndex: number;
+  flipHorizontal: boolean;
+  flipVertical: boolean;
+}
+
+export type PhotoImageEditDefaultDraftState = Omit<PhotoImageEditDraftState, "operation">;
+
 export interface PhotoImageEditClipboardEntry {
   id: string;
   label: string;
   copiedAt: string;
   operation: PhotoImageEditOperation;
 }
+
+export interface PhotoImageEditClipboardSelectionDraft {
+  entry: PhotoImageEditClipboardEntry | null;
+  selectedId: string;
+  operation: PhotoImageEditOperation | null;
+  label: string;
+}
+
+export interface PhotoImageEditClipboardHistoryDraft extends PhotoImageEditClipboardSelectionDraft {
+  history: PhotoImageEditClipboardEntry[];
+}
+
+export type PhotoImagePasteKind = "edits" | "adjustments";
+export type PhotoImagePasteProgressPhase = "checking" | "pasting";
+export type PhotoImagePasteConflictMode = "edit" | "adjustments";
+export type PhotoEditStackVersionProgressAction = "snapshot" | "restore" | "delete";
+export type PhotoEditStackVersionConfirmAction = "restore" | "delete";
+export type PhotoEditStackVersionSingleConfirmAction = "restore" | "delete";
+export type PhotoEditStackVersionSingleResultAction = "duplicate" | "restore" | "delete";
+export type PhotoAssetVersionDuplicateResultKind = "photo" | "rendered";
+
+export interface PhotoImagePasteTextOptions {
+  uiText?: (value: string) => string;
+  formatCount?: (value: number) => string;
+}
+
+export interface PhotoImagePasteResultOptions extends PhotoImagePasteTextOptions {
+  skipped?: unknown;
+}
+
+export interface PhotoImagePasteConflictDialogDraft {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  preview: string;
+}
+
+export interface PhotoEditStackVersionConfirmDialogDraft {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  danger: boolean;
+}
+
+export interface PhotoEditStackVersionSingleConfirmDialogDraft {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  danger: boolean;
+}
+
+export interface PhotoEditStackRevertConfirmDialogDraft {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  danger: boolean;
+}
+
+export interface PhotoEditStackTargetPayload extends Record<string, unknown> {
+  sourcePath: string;
+  assetId: string;
+}
+
+export interface PhotoEditStackSavePayload extends PhotoEditStackTargetPayload {
+  operations: unknown[];
+}
+
+export interface PhotoEditStackVersionListPayload extends PhotoEditStackTargetPayload {
+  limit?: number;
+}
+
+export interface PhotoEditStackVersionPayload extends PhotoEditStackTargetPayload {
+  versionId: string;
+}
+
+export const PHOTO_IMAGE_EDIT_CLIPBOARD_KEY = "vintrace.photos.imageEditClipboardHistory";
+export const PHOTO_IMAGE_SIGNATURE_PRESETS_KEY = "vintrace.photos.imageSignaturePresets";
 
 export const DEFAULT_PHOTO_MANUAL_CROP_BOX: PhotoManualCropBox = {
   left: 0,
@@ -220,6 +400,45 @@ export const DEFAULT_PHOTO_IMAGE_ADJUSTMENTS: PhotoImageAdjustmentDraft = {
   vignette: 0,
   noiseReduction: 0,
 };
+
+export const PHOTO_IMAGE_ADJUSTMENT_CONTROLS: PhotoImageAdjustmentControl[] = [
+  { key: "exposure", label: "Exposure", ariaLabel: "Image exposure", min: -2, max: 2, step: 0.1, precision: 1 },
+  { key: "contrast", label: "Contrast", ariaLabel: "Image contrast", min: -100, max: 100, step: 5 },
+  { key: "highlights", label: "Highlights", ariaLabel: "Image highlights", min: -100, max: 100, step: 5 },
+  { key: "shadows", label: "Shadows", ariaLabel: "Image shadows", min: -100, max: 100, step: 5 },
+  { key: "brilliance", label: "Brilliance", ariaLabel: "Image brilliance", min: -100, max: 100, step: 5 },
+  { key: "blackPoint", label: "Black point", ariaLabel: "Image black point", min: 0, max: 100, step: 5 },
+  { key: "midtones", label: "Midtones", ariaLabel: "Image midtones", min: -100, max: 100, step: 5 },
+  { key: "whitePoint", label: "White point", ariaLabel: "Image white point", min: 0, max: 100, step: 5 },
+  { key: "curveShadows", label: "Curve shadows", ariaLabel: "Image curve shadows", min: -100, max: 100, step: 5 },
+  { key: "curveMidtones", label: "Curve midtones", ariaLabel: "Image curve midtones", min: -100, max: 100, step: 5 },
+  { key: "curveHighlights", label: "Curve highlights", ariaLabel: "Image curve highlights", min: -100, max: 100, step: 5 },
+  { key: "curveRedShadows", label: "Red curve shadows", ariaLabel: "Image red curve shadows", min: -100, max: 100, step: 5 },
+  { key: "curveRedMidtones", label: "Red curve midtones", ariaLabel: "Image red curve midtones", min: -100, max: 100, step: 5 },
+  { key: "curveRedHighlights", label: "Red curve highlights", ariaLabel: "Image red curve highlights", min: -100, max: 100, step: 5 },
+  { key: "curveGreenShadows", label: "Green curve shadows", ariaLabel: "Image green curve shadows", min: -100, max: 100, step: 5 },
+  { key: "curveGreenMidtones", label: "Green curve midtones", ariaLabel: "Image green curve midtones", min: -100, max: 100, step: 5 },
+  { key: "curveGreenHighlights", label: "Green curve highlights", ariaLabel: "Image green curve highlights", min: -100, max: 100, step: 5 },
+  { key: "curveBlueShadows", label: "Blue curve shadows", ariaLabel: "Image blue curve shadows", min: -100, max: 100, step: 5 },
+  { key: "curveBlueMidtones", label: "Blue curve midtones", ariaLabel: "Image blue curve midtones", min: -100, max: 100, step: 5 },
+  { key: "curveBlueHighlights", label: "Blue curve highlights", ariaLabel: "Image blue curve highlights", min: -100, max: 100, step: 5 },
+  { key: "manualCurveBlack", label: "Manual curve black", ariaLabel: "Image manual curve black point", min: -100, max: 100, step: 5 },
+  { key: "manualCurveQuarter", label: "Manual curve 25%", ariaLabel: "Image manual curve quarter point", min: -100, max: 100, step: 5 },
+  { key: "manualCurveMid", label: "Manual curve 50%", ariaLabel: "Image manual curve midpoint", min: -100, max: 100, step: 5 },
+  { key: "manualCurveThreeQuarter", label: "Manual curve 75%", ariaLabel: "Image manual curve three-quarter point", min: -100, max: 100, step: 5 },
+  { key: "manualCurveWhite", label: "Manual curve white", ariaLabel: "Image manual curve white point", min: -100, max: 100, step: 5 },
+  { key: "saturation", label: "Saturation", ariaLabel: "Image saturation", min: -100, max: 100, step: 5 },
+  { key: "warmth", label: "Warmth", ariaLabel: "Image warmth", min: -100, max: 100, step: 5 },
+  { key: "tint", label: "Tint", ariaLabel: "Image tint", min: -100, max: 100, step: 5 },
+  { key: "sharpness", label: "Sharpness", ariaLabel: "Image sharpness", min: -100, max: 100, step: 5 },
+  { key: "vignette", label: "Vignette", ariaLabel: "Image vignette", min: 0, max: 100, step: 5 },
+  { key: "noiseReduction", label: "Noise", ariaLabel: "Image noise reduction", min: 0, max: 100, step: 5 },
+];
+
+export function photoImageAdjustmentDisplayValue(value: number, precision = 0): string {
+  const formatted = precision > 0 ? value.toFixed(precision) : String(Math.round(value));
+  return `${value > 0 ? "+" : ""}${formatted}`;
+}
 
 export const PHOTO_IMAGE_AUTO_ENHANCE_PRESET: Partial<PhotoImageAdjustmentDraft> = {
   exposure: 0.2,
@@ -312,6 +531,59 @@ const PHOTO_IMAGE_FILTER_VALUES = new Set<PhotoImageFilterPreset>(
   PHOTO_IMAGE_FILTER_OPTIONS.map((option) => option.value)
 );
 
+function photoEditStackText(value: unknown): string {
+  return String(value || "").trim();
+}
+
+function photoEditStackLimitNumber(value: unknown): number | undefined {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return undefined;
+  return Math.max(1, Math.min(1000, Math.round(parsed)));
+}
+
+export function photoEditStackTargetPayload(input: {
+  sourcePath?: unknown;
+  assetId?: unknown;
+} = {}): PhotoEditStackTargetPayload {
+  return {
+    sourcePath: photoEditStackText(input.sourcePath),
+    assetId: photoEditStackText(input.assetId),
+  };
+}
+
+export function photoEditStackSavePayload(input: {
+  sourcePath?: unknown;
+  assetId?: unknown;
+  operations?: unknown;
+} = {}): PhotoEditStackSavePayload {
+  return {
+    ...photoEditStackTargetPayload(input),
+    operations: Array.isArray(input.operations) ? input.operations : [],
+  };
+}
+
+export function photoEditStackVersionListPayload(input: {
+  sourcePath?: unknown;
+  assetId?: unknown;
+  limit?: unknown;
+} = {}): PhotoEditStackVersionListPayload {
+  const payload: PhotoEditStackVersionListPayload = photoEditStackTargetPayload(input);
+  const limit = photoEditStackLimitNumber(input.limit);
+  if (limit !== undefined) payload.limit = limit;
+  return payload;
+}
+
+export function photoEditStackVersionPayload(input: {
+  sourcePath?: unknown;
+  assetId?: unknown;
+  versionId?: unknown;
+} = {}): PhotoEditStackVersionPayload {
+  return {
+    ...photoEditStackTargetPayload(input),
+    versionId: photoEditStackText(input.versionId),
+  };
+}
+
 export function normalizePhotoImageCropAspect(value: unknown): PhotoImageCropAspect {
   const raw = String(value || "none").trim().toLowerCase().replace(/\s+/g, "").replace(/[x×]/g, ":");
   if (raw === "" || raw === "original" || raw === "source" || raw === "freeform") return "none";
@@ -377,6 +649,23 @@ export function photoManualCropBoxLabel(value: Partial<PhotoManualCropBox> | nul
 function cropPointPercent(value: unknown): number {
   const number = numericValue(value, 0);
   return Math.round(Math.max(0, Math.min(100, number)) * 10) / 10;
+}
+
+export function photoManualCropPointFromImageSample(
+  pointValue: Partial<PhotoManualCropPoint> | null | undefined,
+  mediaWidthValue: unknown,
+  mediaHeightValue: unknown
+): PhotoManualCropPoint | null {
+  if (!pointValue) return null;
+  const mediaWidth = numericValue(mediaWidthValue, 0);
+  const mediaHeight = numericValue(mediaHeightValue, 0);
+  const x = numericValue(pointValue.x, NaN);
+  const y = numericValue(pointValue.y, NaN);
+  if (mediaWidth <= 0 || mediaHeight <= 0 || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return {
+    x: Math.round((x / Math.max(1, mediaWidth - 1)) * 1000) / 10,
+    y: Math.round((y / Math.max(1, mediaHeight - 1)) * 1000) / 10,
+  };
 }
 
 function hexColor(value: unknown, fallback: string): string {
@@ -482,6 +771,95 @@ export function normalizePhotoImageMarkupAnnotations(values: unknown): PhotoImag
   return annotations;
 }
 
+export interface PhotoImageMarkupAddAnnotationDraft {
+  annotations: PhotoImageMarkupAnnotation[];
+  selectedIndex: number;
+}
+
+export function photoImageMarkupAddAnnotationDraft(
+  values: readonly Partial<PhotoImageMarkupAnnotation>[] | null | undefined
+): PhotoImageMarkupAddAnnotationDraft {
+  const rows = Array.isArray(values) && values.length
+    ? values.map((annotation) => normalizePhotoImageMarkupDraftAnnotation(annotation) || DEFAULT_PHOTO_IMAGE_MARKUP_ANNOTATION)
+    : [DEFAULT_PHOTO_IMAGE_MARKUP_ANNOTATION];
+  const offset = Math.min(36, rows.length * 6);
+  const next = normalizePhotoImageMarkupDraftAnnotation({
+    ...DEFAULT_PHOTO_IMAGE_MARKUP_ANNOTATION,
+    left: Math.min(90, DEFAULT_PHOTO_IMAGE_MARKUP_ANNOTATION.left + offset),
+    top: Math.min(90, DEFAULT_PHOTO_IMAGE_MARKUP_ANNOTATION.top + offset),
+  }) || DEFAULT_PHOTO_IMAGE_MARKUP_ANNOTATION;
+  return {
+    annotations: [...rows, next],
+    selectedIndex: rows.length,
+  };
+}
+
+export interface PhotoImageMarkupDeleteAnnotationDraft {
+  annotations: PhotoImageMarkupAnnotation[];
+  selectedIndex: number;
+  closePanel: boolean;
+}
+
+export function photoImageMarkupDeleteAnnotationDraft(
+  values: readonly Partial<PhotoImageMarkupAnnotation>[] | null | undefined,
+  selectedIndexValue: unknown
+): PhotoImageMarkupDeleteAnnotationDraft {
+  const rows = Array.isArray(values) && values.length
+    ? values.map((annotation) => normalizePhotoImageMarkupDraftAnnotation(annotation) || DEFAULT_PHOTO_IMAGE_MARKUP_ANNOTATION)
+    : [DEFAULT_PHOTO_IMAGE_MARKUP_ANNOTATION];
+  if (rows.length <= 1) {
+    return {
+      annotations: [DEFAULT_PHOTO_IMAGE_MARKUP_ANNOTATION],
+      selectedIndex: 0,
+      closePanel: true,
+    };
+  }
+  const index = Math.min(Math.max(Math.floor(numericValue(selectedIndexValue, 0)), 0), rows.length - 1);
+  const nextRows = rows.filter((_, rowIndex) => rowIndex !== index);
+  return {
+    annotations: nextRows,
+    selectedIndex: Math.min(index, nextRows.length - 1),
+    closePanel: false,
+  };
+}
+
+export function photoImageMarkupUpdateAnnotationDraft(
+  values: readonly Partial<PhotoImageMarkupAnnotation>[] | null | undefined,
+  selectedIndexValue: unknown,
+  patch: Partial<PhotoImageMarkupAnnotation> | null | undefined
+): PhotoImageMarkupAnnotation[] {
+  const rows = Array.isArray(values) && values.length
+    ? values.map((annotation) => normalizePhotoImageMarkupDraftAnnotation(annotation) || DEFAULT_PHOTO_IMAGE_MARKUP_ANNOTATION)
+    : [DEFAULT_PHOTO_IMAGE_MARKUP_ANNOTATION];
+  const index = Math.min(Math.max(Math.floor(numericValue(selectedIndexValue, 0)), 0), rows.length - 1);
+  return rows.map((annotation, rowIndex) => (
+    rowIndex === index
+      ? normalizePhotoImageMarkupDraftAnnotation({ ...annotation, ...patch }) || annotation
+      : annotation
+  ));
+}
+
+export interface PhotoImageMarkupInsertAnnotationDraft {
+  annotations: PhotoImageMarkupAnnotation[];
+  selectedIndex: number;
+}
+
+export function photoImageMarkupInsertAnnotationDraft(
+  values: readonly Partial<PhotoImageMarkupAnnotation>[] | null | undefined,
+  annotationValue: Partial<PhotoImageMarkupAnnotation> | Record<string, unknown> | null | undefined
+): PhotoImageMarkupInsertAnnotationDraft | null {
+  const annotation = normalizePhotoImageMarkupDraftAnnotation(annotationValue);
+  if (!annotation) return null;
+  const rows = Array.isArray(values) && values.length
+    ? values.map((row) => normalizePhotoImageMarkupDraftAnnotation(row) || DEFAULT_PHOTO_IMAGE_MARKUP_ANNOTATION)
+    : [DEFAULT_PHOTO_IMAGE_MARKUP_ANNOTATION];
+  const annotations = photoImageMarkupActive(rows) ? [...rows, annotation] : [annotation];
+  return {
+    annotations,
+    selectedIndex: annotations.length - 1,
+  };
+}
+
 export function normalizePhotoImageSignaturePreset(value: Record<string, unknown> | null | undefined): PhotoImageSignaturePreset | null {
   if (!value || typeof value !== "object") return null;
   const points = normalizePhotoImageMarkupPoints(value.points ?? value.pathPoints ?? value.strokePoints ?? value.path);
@@ -514,6 +892,25 @@ export function normalizePhotoImageSignaturePresets(values: unknown): PhotoImage
   return presets;
 }
 
+export function readStoredPhotoImageSignaturePresets(key: string): PhotoImageSignaturePreset[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(key);
+    return normalizePhotoImageSignaturePresets(raw ? JSON.parse(raw) : []);
+  } catch {
+    return [];
+  }
+}
+
+export function storePhotoImageSignaturePresets(key: string, values: PhotoImageSignaturePreset[]) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(normalizePhotoImageSignaturePresets(values)));
+  } catch {
+    // Local storage can be unavailable in hardened browser contexts.
+  }
+}
+
 export function photoImageSignaturePresetFromAnnotation(
   annotationValue: Partial<PhotoImageMarkupAnnotation> | Record<string, unknown> | null | undefined,
   options: { id?: string; name?: string; createdAt?: string } = {}
@@ -537,6 +934,35 @@ export function photoImageSignaturePresetFromAnnotation(
     aspectRatio: Math.round((width / height) * 100) / 100,
     createdAt: options.createdAt || "",
   });
+}
+
+export interface PhotoImageSignaturePresetSaveDraft {
+  preset: PhotoImageSignaturePreset;
+  presets: PhotoImageSignaturePreset[];
+}
+
+export function photoImageSignaturePresetSaveDraft(
+  annotationValue: Partial<PhotoImageMarkupAnnotation> | Record<string, unknown> | null | undefined,
+  existingValues: readonly PhotoImageSignaturePreset[] | null | undefined,
+  options: { id?: string; name?: string; createdAt?: string } = {}
+): PhotoImageSignaturePresetSaveDraft | null {
+  const preset = photoImageSignaturePresetFromAnnotation(annotationValue, options);
+  if (!preset) return null;
+  const existing = normalizePhotoImageSignaturePresets(existingValues);
+  return {
+    preset,
+    presets: [
+      preset,
+      ...existing.filter((item) => item.id !== preset.id),
+    ],
+  };
+}
+
+export function photoImageSignaturePresetDeleteDraft(
+  existingValues: readonly PhotoImageSignaturePreset[] | null | undefined,
+  presetId: string
+): PhotoImageSignaturePreset[] {
+  return normalizePhotoImageSignaturePresets(existingValues).filter((item) => item.id !== presetId);
 }
 
 export function photoImageMarkupSignatureAnnotationFromPreset(
@@ -720,15 +1146,139 @@ export function normalizePhotoImageRetouchSpots(values: unknown): PhotoImageReto
   return spots;
 }
 
+export function photoImageRetouchSpotMatchesDefault(value: Partial<PhotoImageRetouchSpot> | null | undefined): boolean {
+  const normalized = normalizePhotoImageRetouchSpot(value);
+  if (!normalized) return false;
+  return normalized.left === DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT.left
+    && normalized.top === DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT.top
+    && normalized.sourceLeft === DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT.sourceLeft
+    && normalized.sourceTop === DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT.sourceTop;
+}
+
+export interface PhotoImageRetouchAddSpotDraft {
+  spots: PhotoImageRetouchSpot[];
+  selectedIndex: number;
+}
+
+export function photoImageRetouchAddSpotDraft(
+  values: readonly Partial<PhotoImageRetouchSpot>[] | null | undefined,
+  kindValue: unknown
+): PhotoImageRetouchAddSpotDraft {
+  const rows = Array.isArray(values) && values.length
+    ? values.map((spot) => normalizePhotoImageRetouchSpot(spot) || DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT)
+    : [DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT];
+  const kind = normalizePhotoImageRetouchKind(kindValue);
+  const offset = Math.min(30, rows.length * 5);
+  const next = normalizePhotoImageRetouchSpot({
+    ...DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT,
+    kind,
+    left: Math.min(92, DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT.left + offset),
+    top: Math.min(92, DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT.top + offset),
+    ...(kind === "clone" ? {
+      sourceLeft: Math.max(0, DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT.left + offset - 14),
+      sourceTop: Math.max(0, DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT.top + offset),
+    } : {}),
+  }) || DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT;
+  return {
+    spots: [...rows, next],
+    selectedIndex: rows.length,
+  };
+}
+
+export interface PhotoImageRetouchDeleteSpotDraft {
+  spots: PhotoImageRetouchSpot[];
+  selectedIndex: number;
+  closePanel: boolean;
+}
+
+export function photoImageRetouchDeleteSpotDraft(
+  values: readonly Partial<PhotoImageRetouchSpot>[] | null | undefined,
+  selectedIndexValue: unknown
+): PhotoImageRetouchDeleteSpotDraft {
+  const rows = Array.isArray(values) && values.length
+    ? values.map((spot) => normalizePhotoImageRetouchSpot(spot) || DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT)
+    : [DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT];
+  if (rows.length <= 1) {
+    return {
+      spots: [DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT],
+      selectedIndex: 0,
+      closePanel: true,
+    };
+  }
+  const index = Math.min(Math.max(Math.floor(numericValue(selectedIndexValue, 0)), 0), rows.length - 1);
+  const nextRows = rows.filter((_, rowIndex) => rowIndex !== index);
+  return {
+    spots: nextRows,
+    selectedIndex: Math.min(index, nextRows.length - 1),
+    closePanel: false,
+  };
+}
+
+export function photoImageRetouchUpdateSpotDraft(
+  values: readonly Partial<PhotoImageRetouchSpot>[] | null | undefined,
+  selectedIndexValue: unknown,
+  patch: Partial<PhotoImageRetouchSpot> | null | undefined
+): PhotoImageRetouchSpot[] {
+  const rows = Array.isArray(values) && values.length
+    ? values.map((spot) => normalizePhotoImageRetouchSpot(spot) || DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT)
+    : [DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT];
+  const index = Math.min(Math.max(Math.floor(numericValue(selectedIndexValue, 0)), 0), rows.length - 1);
+  return rows.map((spot, rowIndex) => (
+    rowIndex === index
+      ? normalizePhotoImageRetouchSpot({ ...spot, ...patch }) || spot
+      : spot
+  ));
+}
+
 export type PhotoImageRetouchBrushOptions = Partial<PhotoImageRetouchSpot> & {
   existingCount?: number;
   spacing?: number;
   limit?: number;
 };
 
-function retouchBoxStartFromCenter(center: number, size: number): number {
+export function photoImageRetouchBoxStartFromCenter(centerValue: unknown, sizeValue: unknown): number {
+  const center = numericValue(centerValue, 0);
+  const size = numericValue(sizeValue, 0);
   const max = Math.max(0, 100 - size);
   return Math.round(Math.max(0, Math.min(max, center - size / 2)) * 10) / 10;
+}
+
+export function photoImageRetouchCloneSourcePatch(
+  pointValue: Partial<PhotoManualCropPoint> | null | undefined,
+  spotValue: Partial<PhotoImageRetouchSpot> | null | undefined
+): (Partial<PhotoImageRetouchSpot> & { kind: "clone"; sourceLeft: number; sourceTop: number }) | null {
+  const x = numericValue(pointValue?.x, NaN);
+  const y = numericValue(pointValue?.y, NaN);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const spot = normalizePhotoImageRetouchSpot({
+    ...DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT,
+    ...spotValue,
+    kind: "clone",
+  }) || { ...DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT, kind: "clone" as const };
+  return {
+    kind: "clone",
+    sourceLeft: photoImageRetouchBoxStartFromCenter(x, spot.width),
+    sourceTop: photoImageRetouchBoxStartFromCenter(y, spot.height),
+  };
+}
+
+export function photoImageRetouchKindPatch(
+  kindValue: unknown,
+  spotValue: Partial<PhotoImageRetouchSpot> | null | undefined
+): Partial<PhotoImageRetouchSpot> & { kind: PhotoImageRetouchKind } {
+  const kind = normalizePhotoImageRetouchKind(kindValue);
+  const patch: Partial<PhotoImageRetouchSpot> & { kind: PhotoImageRetouchKind } = { kind };
+  if (kind !== "clone" || spotValue?.sourceLeft !== undefined) return patch;
+  const spot = normalizePhotoImageRetouchSpot({
+    ...DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT,
+    ...spotValue,
+    kind,
+  }) || { ...DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT, kind };
+  return {
+    ...patch,
+    sourceLeft: Math.max(0, spot.left - 14),
+    sourceTop: spot.top,
+  };
 }
 
 export function photoImageRetouchBrushSpotsFromPoints(
@@ -767,8 +1317,8 @@ export function photoImageRetouchBrushSpotsFromPoints(
       y: Math.max(0, Math.min(100, rawY)),
     };
     if (lastPoint && Math.hypot(lastPoint.x - point.x, lastPoint.y - point.y) < spacing) continue;
-    const left = retouchBoxStartFromCenter(point.x, width);
-    const top = retouchBoxStartFromCenter(point.y, height);
+    const left = photoImageRetouchBoxStartFromCenter(point.x, width);
+    const top = photoImageRetouchBoxStartFromCenter(point.y, height);
     const spot = normalizePhotoImageRetouchSpot({
       kind,
       left,
@@ -787,6 +1337,71 @@ export function photoImageRetouchBrushSpotsFromPoints(
     if (spots.length >= remaining) break;
   }
   return spots;
+}
+
+export function photoImageRetouchBrushStateFromPoint(
+  pointerIdValue: unknown,
+  pointValue: Partial<PhotoManualCropPoint> | null | undefined,
+  spotValue: Partial<PhotoImageRetouchSpot> | null | undefined
+): ImageRetouchBrushState | null {
+  const pointerId = Math.floor(numericValue(pointerIdValue, NaN));
+  const x = numericValue(pointValue?.x, NaN);
+  const y = numericValue(pointValue?.y, NaN);
+  if (!Number.isFinite(pointerId) || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const kind = normalizePhotoImageRetouchKind(spotValue?.kind ?? "blemish");
+  const template = normalizePhotoImageRetouchSpot({
+    ...spotValue,
+    kind,
+    ...(kind === "clone" && spotValue?.sourceLeft === undefined ? { sourceLeft: Math.max(0, numericValue(spotValue?.left, DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT.left) - 14) } : {}),
+    ...(kind === "clone" && spotValue?.sourceTop === undefined ? { sourceTop: numericValue(spotValue?.top, DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT.top) } : {}),
+  }) || { ...DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT, kind };
+  return {
+    pointerId,
+    lastPoint: {
+      x: cropPointPercent(x),
+      y: cropPointPercent(y),
+    },
+    spacing: Math.max(0.75, Math.max(template.width, template.height) * 0.6),
+    template,
+  };
+}
+
+export interface PhotoImageRetouchAppendBrushPointDraft {
+  spots: PhotoImageRetouchSpot[];
+  selectedIndex: number | null;
+  limitReached: boolean;
+}
+
+export function photoImageRetouchAppendBrushPointDraft(
+  values: readonly Partial<PhotoImageRetouchSpot>[] | null | undefined,
+  point: Partial<PhotoManualCropPoint> | null | undefined,
+  brush: Pick<ImageRetouchBrushState, "spacing" | "template"> | null | undefined,
+  replaceDefaultOnly = false
+): PhotoImageRetouchAppendBrushPointDraft {
+  const rows = normalizePhotoImageRetouchSpots(
+    Array.isArray(values) && values.length ? values : [DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT]
+  );
+  const baseRows = replaceDefaultOnly && rows.length === 1 && photoImageRetouchSpotMatchesDefault(rows[0])
+    ? []
+    : rows;
+  const brushSpots = photoImageRetouchBrushSpotsFromPoints([point || {}], {
+    ...(brush?.template || DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT),
+    existingCount: baseRows.length,
+    spacing: brush?.spacing,
+  });
+  if (!brushSpots.length) {
+    return {
+      spots: baseRows.length ? baseRows : [DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT],
+      selectedIndex: null,
+      limitReached: baseRows.length >= PHOTO_IMAGE_RETOUCH_SPOT_LIMIT,
+    };
+  }
+  const spots = [...baseRows, ...brushSpots];
+  return {
+    spots,
+    selectedIndex: spots.length - 1,
+    limitReached: false,
+  };
 }
 
 export function photoImageRetouchActive(values: unknown): boolean {
@@ -945,6 +1560,77 @@ function photoImageAutoEnhanceNumber(value: unknown, fallback: number, min: numb
 
 function photoImageAutoEnhanceStep(value: number, min: number, max: number, step = 5): number {
   return adjustmentValue(value, min, max, step);
+}
+
+export function photoImageWhiteBalanceAdjustments(
+  value: Partial<PhotoImageAdjustmentDraft> | null | undefined,
+  sampleValue: Partial<PhotoImageRgbSample> | null | undefined
+): PhotoImageAdjustmentDraft {
+  const current = normalizePhotoImageAdjustments(value);
+  if (!sampleValue) return current;
+  const red = photoImageAutoEnhanceNumber(sampleValue.red, 0, 0, 255);
+  const green = photoImageAutoEnhanceNumber(sampleValue.green, 0, 0, 255);
+  const blue = photoImageAutoEnhanceNumber(sampleValue.blue, 0, 0, 255);
+  const warmthDelta = ((blue - red) / 255) * 120;
+  const tintDelta = ((green - ((red + blue) / 2)) / 255) * 140;
+  return normalizePhotoImageAdjustments({
+    ...current,
+    warmth: current.warmth + warmthDelta,
+    tint: current.tint + tintDelta,
+  });
+}
+
+export function photoImageRgbSampleFromPixels(pixels: ArrayLike<number> | null | undefined): PhotoImageRgbSample | null {
+  const length = pixels?.length || 0;
+  if (!pixels || length < 4) return null;
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  const count = Math.max(1, length / 4);
+  for (let index = 0; index < length; index += 4) {
+    red += pixels[index] || 0;
+    green += pixels[index + 1] || 0;
+    blue += pixels[index + 2] || 0;
+  }
+  return { red: red / count, green: green / count, blue: blue / count };
+}
+
+export function photoImageSampleRectAroundPoint(
+  pointValue: Partial<PhotoManualCropPoint> | null | undefined,
+  mediaWidthValue: unknown,
+  mediaHeightValue: unknown,
+  sampleSizeValue = 5
+): PhotoImageSampleRect | null {
+  if (!pointValue) return null;
+  const mediaWidth = numericValue(mediaWidthValue, 0);
+  const mediaHeight = numericValue(mediaHeightValue, 0);
+  const sampleSize = Math.max(1, Math.round(numericValue(sampleSizeValue, 5)));
+  const x = numericValue(pointValue.x, NaN);
+  const y = numericValue(pointValue.y, NaN);
+  if (mediaWidth <= 0 || mediaHeight <= 0 || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const radius = Math.floor(sampleSize / 2);
+  const left = Math.max(0, x - radius);
+  const top = Math.max(0, y - radius);
+  const width = Math.min(mediaWidth - left, sampleSize);
+  const height = Math.min(mediaHeight - top, sampleSize);
+  if (width <= 0 || height <= 0) return null;
+  return { left, top, width, height };
+}
+
+export function photoImageAutoEnhanceSampleSize(
+  mediaWidthValue: unknown,
+  mediaHeightValue: unknown,
+  maxDimensionValue = 128
+): PhotoImageSampleSize | null {
+  const mediaWidth = numericValue(mediaWidthValue, 0);
+  const mediaHeight = numericValue(mediaHeightValue, 0);
+  const maxDimension = Math.max(1, Math.round(numericValue(maxDimensionValue, 128)));
+  if (mediaWidth <= 0 || mediaHeight <= 0) return null;
+  const scale = Math.min(1, maxDimension / Math.max(mediaWidth, mediaHeight));
+  return {
+    width: Math.max(1, Math.round(mediaWidth * scale)),
+    height: Math.max(1, Math.round(mediaHeight * scale)),
+  };
 }
 
 function photoImageAutoEnhancePercentile(sortedValues: number[], ratio: number): number {
@@ -1264,6 +1950,75 @@ export function normalizePhotoImageEditOperation(value: Record<string, unknown> 
     ...(retouchActive ? { retouch } : {}),
   };
   return photoImageEditOperationActive(operation) ? operation : null;
+}
+
+export function photoImageEditOperationDraft(input: PhotoImageEditOperationDraftInput = {}): PhotoImageEditOperation | null {
+  const source = String(input.source || "photos-lightbox").trim() || "photos-lightbox";
+  return normalizePhotoImageEditOperation({
+    kind: "image_crop_rotate",
+    rotateDegrees: input.rotateDegrees,
+    straightenDegrees: input.straightenDegrees,
+    ...(input.manualCropActive ? { cropRect: input.manualCropBox } : {}),
+    cropAspect: input.cropAspect,
+    ...(input.adjustmentsActive ? { adjustments: input.adjustments } : {}),
+    ...(input.filterActive ? { filterPreset: input.filterPreset, filterIntensity: input.filterIntensity } : {}),
+    ...(input.markupActive ? { markup: input.markup } : {}),
+    ...(input.retouchActive ? { retouch: input.retouch } : {}),
+    flipHorizontal: input.flipHorizontal,
+    flipVertical: input.flipVertical,
+    renderQuality: 88,
+    renderMaxDimension: 1600,
+    source,
+  });
+}
+
+export function photoImageEditDefaultDraftState(): PhotoImageEditDefaultDraftState {
+  return {
+    rotateDegrees: 0,
+    straightenDegrees: 0,
+    cropAspect: "none",
+    manualCropEnabled: false,
+    manualCropBox: DEFAULT_PHOTO_MANUAL_CROP_BOX,
+    adjustmentsOpen: false,
+    adjustments: DEFAULT_PHOTO_IMAGE_ADJUSTMENTS,
+    filterPreset: "none",
+    filterIntensity: 100,
+    markupOpen: false,
+    markupAnnotations: [DEFAULT_PHOTO_IMAGE_MARKUP_ANNOTATION],
+    markupSelectedIndex: 0,
+    retouchOpen: false,
+    retouchSpots: [DEFAULT_PHOTO_IMAGE_RETOUCH_SPOT],
+    retouchSelectedIndex: 0,
+    flipHorizontal: false,
+    flipVertical: false,
+  };
+}
+
+export function photoImageEditDraftStateFromOperation(
+  operationValue: Partial<PhotoImageEditOperation> | Record<string, unknown> | null | undefined
+): PhotoImageEditDraftState | null {
+  const operation = normalizePhotoImageEditOperation(operationValue as Record<string, unknown> | null | undefined);
+  if (!operation) return null;
+  const defaults = photoImageEditDefaultDraftState();
+  return {
+    ...defaults,
+    operation,
+    rotateDegrees: operation.rotateDegrees,
+    straightenDegrees: operation.straightenDegrees,
+    cropAspect: operation.cropAspect,
+    manualCropEnabled: Boolean(operation.cropRect),
+    manualCropBox: operation.cropRect || defaults.manualCropBox,
+    adjustmentsOpen: Boolean(operation.adjustments),
+    adjustments: operation.adjustments || defaults.adjustments,
+    filterPreset: operation.filterPreset || defaults.filterPreset,
+    filterIntensity: operation.filterIntensity ?? defaults.filterIntensity,
+    markupOpen: Boolean(operation.markup?.length),
+    markupAnnotations: operation.markup?.length ? operation.markup : defaults.markupAnnotations,
+    retouchOpen: Boolean(operation.retouch?.length),
+    retouchSpots: operation.retouch?.length ? operation.retouch : defaults.retouchSpots,
+    flipHorizontal: Boolean(operation.flipHorizontal),
+    flipVertical: Boolean(operation.flipVertical),
+  };
 }
 
 export function photoImageEditOperationActive(value: Partial<PhotoImageEditOperation> | Record<string, unknown> | null | undefined): boolean {
@@ -1629,6 +2384,185 @@ export function photoEditStackVersionHistoryRows(
     .filter((row): row is PhotoEditStackVersionHistoryRow => Boolean(row));
 }
 
+export function photoEditStackRevertConfirmDialogDraft(
+  totalValue: unknown,
+  options: PhotoImagePasteTextOptions = {},
+): PhotoEditStackRevertConfirmDialogDraft {
+  const { uiText, formatCount } = photoImagePasteTextOptions(options);
+  const total = Math.max(0, Math.floor(numericValue(totalValue, 0)));
+  const selectedPhotos = total === 1 ? uiText("selected photo") : uiText("selected photos");
+  return {
+    title: uiText("Revert selected edits?"),
+    message: `${uiText("Remove saved edit stacks from")} ${formatCount(total)} ${selectedPhotos}. ${uiText("Original files stay unchanged.")}`,
+    confirmLabel: uiText("Revert edits"),
+    cancelLabel: uiText("Cancel"),
+    danger: true,
+  };
+}
+
+export function photoEditStackRevertProgressMessage(
+  indexValue: unknown,
+  totalValue: unknown,
+  options: PhotoImagePasteTextOptions = {},
+): string {
+  const { uiText, formatCount } = photoImagePasteTextOptions(options);
+  const total = Math.max(0, Math.floor(numericValue(totalValue, 0)));
+  const index = Math.max(0, Math.min(total, Math.floor(numericValue(indexValue, 0))));
+  return `${uiText("Reverting edits")} ${index <= 0 ? "0" : formatCount(index)} / ${formatCount(total)}`;
+}
+
+export function photoEditStackRevertResultMessage(
+  revertedValue: unknown,
+  failedValue: unknown,
+  options: PhotoImagePasteTextOptions = {},
+): string {
+  const { uiText, formatCount } = photoImagePasteTextOptions(options);
+  const reverted = Math.max(0, Math.floor(numericValue(revertedValue, 0)));
+  const failed = Math.max(0, Math.floor(numericValue(failedValue, 0)));
+  const failedLabel = failed ? ` ${uiText("Failed")} ${formatCount(failed)}.` : "";
+  return `${uiText("Reverted edits")} ${formatCount(reverted)} ${reverted === 1 ? uiText("photo") : uiText("photos")}.${failedLabel}`;
+}
+
+export function photoAssetVersionDuplicateResultMessage(
+  kind: PhotoAssetVersionDuplicateResultKind,
+  labelValue: unknown,
+  options: PhotoImagePasteTextOptions = {},
+): string {
+  const { uiText } = photoImagePasteTextOptions(options);
+  const actionLabel = kind === "rendered" ? uiText("Created rendered copy") : uiText("Duplicated photo version");
+  return `${actionLabel}: ${String(labelValue || "").trim()}`;
+}
+
+export function photoEditStackVersionProgressMessage(
+  action: PhotoEditStackVersionProgressAction,
+  indexValue: unknown,
+  totalValue: unknown,
+  options: PhotoImagePasteTextOptions = {},
+): string {
+  const { uiText, formatCount } = photoImagePasteTextOptions(options);
+  const total = Math.max(0, Math.floor(numericValue(totalValue, 0)));
+  const index = Math.max(0, Math.min(total, Math.floor(numericValue(indexValue, 0))));
+  const actionLabel = action === "snapshot"
+    ? uiText("Snapshotting edit versions")
+    : action === "restore"
+      ? uiText("Restoring edit versions")
+      : uiText("Deleting edit versions");
+  return `${actionLabel} ${index <= 0 ? "0" : formatCount(index)} / ${formatCount(total)}`;
+}
+
+export function photoEditStackVersionConfirmDialogDraft(
+  action: PhotoEditStackVersionConfirmAction,
+  totalValue: unknown,
+  options: PhotoImagePasteTextOptions = {},
+): PhotoEditStackVersionConfirmDialogDraft {
+  const { uiText, formatCount } = photoImagePasteTextOptions(options);
+  const total = Math.max(0, Math.floor(numericValue(totalValue, 0)));
+  const selectedPhotos = total === 1 ? uiText("selected photo") : uiText("selected photos");
+  if (action === "restore") {
+    return {
+      title: uiText("Restore latest saved versions?"),
+      message: `${uiText("Replace current edit stacks on")} ${formatCount(total)} ${selectedPhotos} ${uiText("with their latest saved versions.")}`,
+      confirmLabel: uiText("Restore versions"),
+      cancelLabel: uiText("Cancel"),
+      danger: true,
+    };
+  }
+  return {
+    title: uiText("Delete saved edit versions?"),
+    message: `${uiText("Delete saved edit-version snapshots from")} ${formatCount(total)} ${selectedPhotos}. ${uiText("Current edit stacks are not changed.")}`,
+    confirmLabel: uiText("Delete versions"),
+    cancelLabel: uiText("Cancel"),
+    danger: true,
+  };
+}
+
+function photoEditStackVersionLabel(value: unknown, fallback: string): string {
+  return String(value || "").trim() || fallback;
+}
+
+export function photoEditStackVersionSingleConfirmDialogDraft(
+  action: PhotoEditStackVersionSingleConfirmAction,
+  labelValue: unknown,
+  options: PhotoImagePasteTextOptions = {},
+): PhotoEditStackVersionSingleConfirmDialogDraft {
+  const { uiText } = photoImagePasteTextOptions(options);
+  if (action === "restore") {
+    const label = photoEditStackVersionLabel(labelValue, uiText("the selected version"));
+    return {
+      title: uiText("Restore edit version?"),
+      message: `${uiText("This replaces the current edit stack with")} ${label}.`,
+      confirmLabel: uiText("Restore version"),
+      cancelLabel: uiText("Cancel"),
+      danger: true,
+    };
+  }
+  const label = photoEditStackVersionLabel(labelValue, uiText("this edit version"));
+  return {
+    title: uiText("Delete edit version?"),
+    message: `${uiText("Delete")} ${label}? ${uiText("The current edit stack is not changed.")}`,
+    confirmLabel: uiText("Delete version"),
+    cancelLabel: uiText("Cancel"),
+    danger: true,
+  };
+}
+
+export function photoEditStackVersionSingleResultMessage(
+  action: PhotoEditStackVersionSingleResultAction,
+  labelValue: unknown,
+  options: PhotoImagePasteTextOptions = {},
+): string {
+  const { uiText } = photoImagePasteTextOptions(options);
+  const label = photoEditStackVersionLabel(labelValue, uiText("Version"));
+  const actionLabel = action === "duplicate"
+    ? uiText("Duplicated edit version")
+    : action === "restore"
+      ? uiText("Restored edit version")
+      : uiText("Deleted edit version");
+  return `${actionLabel}: ${label}`;
+}
+
+export function photoEditStackVersionSnapshotResultMessage(
+  snapshottedValue: unknown,
+  failedValue: unknown,
+  options: PhotoImagePasteTextOptions = {},
+): string {
+  const { uiText, formatCount } = photoImagePasteTextOptions(options);
+  const snapshotted = Math.max(0, Math.floor(numericValue(snapshottedValue, 0)));
+  const failed = Math.max(0, Math.floor(numericValue(failedValue, 0)));
+  const failedLabel = failed ? ` ${uiText("Failed")} ${formatCount(failed)}.` : "";
+  return `${uiText("Snapshotted edit versions")} ${formatCount(snapshotted)} ${snapshotted === 1 ? uiText("photo") : uiText("photos")}.${failedLabel}`;
+}
+
+export function photoEditStackVersionRestoreResultMessage(
+  restoredValue: unknown,
+  skippedValue: unknown,
+  failedValue: unknown,
+  options: PhotoImagePasteTextOptions = {},
+): string {
+  const { uiText, formatCount } = photoImagePasteTextOptions(options);
+  const restored = Math.max(0, Math.floor(numericValue(restoredValue, 0)));
+  const skipped = Math.max(0, Math.floor(numericValue(skippedValue, 0)));
+  const failed = Math.max(0, Math.floor(numericValue(failedValue, 0)));
+  const skippedLabel = skipped ? ` ${uiText("Skipped")} ${formatCount(skipped)}.` : "";
+  const failedLabel = failed ? ` ${uiText("Failed")} ${formatCount(failed)}.` : "";
+  return `${uiText("Restored edit versions")} ${formatCount(restored)} ${restored === 1 ? uiText("photo") : uiText("photos")}.${skippedLabel}${failedLabel}`;
+}
+
+export function photoEditStackVersionDeleteResultMessage(
+  deletedValue: unknown,
+  skippedValue: unknown,
+  failedValue: unknown,
+  options: PhotoImagePasteTextOptions = {},
+): string {
+  const { uiText, formatCount } = photoImagePasteTextOptions(options);
+  const deleted = Math.max(0, Math.floor(numericValue(deletedValue, 0)));
+  const skipped = Math.max(0, Math.floor(numericValue(skippedValue, 0)));
+  const failed = Math.max(0, Math.floor(numericValue(failedValue, 0)));
+  const skippedLabel = skipped ? ` ${uiText("Skipped")} ${formatCount(skipped)} photos.` : "";
+  const failedLabel = failed ? ` ${uiText("Failed")} ${formatCount(failed)} photos.` : "";
+  return `${uiText("Deleted edit versions")} ${formatCount(deleted)}.${skippedLabel}${failedLabel}`;
+}
+
 export function photoEditStackOperationHistoryRows(stackValue: unknown): PhotoEditStackOperationHistoryRow[] {
   return photoEditStackOperations(stackValue).map((operation, index) => {
     const kindLabel = photoEditStackHumanOperationKind(
@@ -1664,6 +2598,111 @@ export function photoImageEditOperationsEquivalent(
   const leftOperation = normalizePhotoImageEditOperation(left as Record<string, unknown> | null | undefined);
   const rightOperation = normalizePhotoImageEditOperation(right as Record<string, unknown> | null | undefined);
   return Boolean(leftOperation && rightOperation && photoImageEditClipboardFingerprint(leftOperation) === photoImageEditClipboardFingerprint(rightOperation));
+}
+
+export function photoImageEditPasteHasConflict(
+  existingValue: Partial<PhotoImageEditOperation> | Record<string, unknown> | null | undefined,
+  nextValue: Partial<PhotoImageEditOperation> | Record<string, unknown> | null | undefined
+): boolean {
+  const existing = normalizePhotoImageEditOperation(existingValue as Record<string, unknown> | null | undefined);
+  const next = normalizePhotoImageEditOperation(nextValue as Record<string, unknown> | null | undefined);
+  return Boolean(existing && next && !photoImageEditOperationsEquivalent(existing, next));
+}
+
+export function photoImageAdjustmentPasteHasConflict(
+  existingValue: Partial<PhotoImageEditOperation> | Record<string, unknown> | null | undefined,
+  nextValue: Partial<PhotoImageEditOperation> | Record<string, unknown> | null | undefined
+): boolean {
+  const existing = normalizePhotoImageEditOperation(existingValue as Record<string, unknown> | null | undefined);
+  const next = normalizePhotoImageEditOperation(nextValue as Record<string, unknown> | null | undefined);
+  return Boolean(
+    existing?.adjustments
+    && next?.adjustments
+    && photoImageAdjustmentsActive(existing.adjustments)
+    && photoImageAdjustmentsLabel(existing.adjustments) !== photoImageAdjustmentsLabel(next.adjustments)
+  );
+}
+
+function photoImagePasteTextOptions(options: PhotoImagePasteTextOptions = {}): Required<PhotoImagePasteTextOptions> {
+  return {
+    uiText: options.uiText || ((value: string) => value),
+    formatCount: options.formatCount || ((value: number) => String(value)),
+  };
+}
+
+export function photoImagePasteProgressMessage(
+  kind: PhotoImagePasteKind,
+  phase: PhotoImagePasteProgressPhase,
+  index: number,
+  total: number,
+  options: PhotoImagePasteTextOptions = {}
+): string {
+  const { uiText, formatCount } = photoImagePasteTextOptions(options);
+  const count = Math.max(0, Math.min(index, total));
+  const photos = total === 1 ? uiText("photo") : uiText("photos");
+  if (phase === "checking") {
+    return `${uiText("Checking paste conflicts for")} ${kind}: ${formatCount(count)}/${formatCount(total)} ${photos}.`;
+  }
+  return `${uiText("Pasting")} ${kind}: ${formatCount(count)}/${formatCount(total)} ${photos}.`;
+}
+
+export function photoImagePasteResultMessage(
+  kind: PhotoImagePasteKind,
+  pasted: number,
+  replaced: number,
+  failed: number,
+  options: PhotoImagePasteResultOptions = {}
+): string {
+  const { uiText, formatCount } = photoImagePasteTextOptions(options);
+  const skipped = Math.max(0, Math.floor(numericValue(options.skipped, 0)));
+  const action = kind === "adjustments" ? uiText("Pasted adjustments to") : uiText("Pasted edits to");
+  const replacedSubject = kind === "adjustments" ? uiText("adjustments on") : uiText("edits on");
+  const parts = [
+    `${action} ${formatCount(pasted)} ${pasted === 1 ? uiText("photo") : uiText("photos")}.`,
+    replaced ? `${uiText("Replaced existing")} ${replacedSubject} ${formatCount(replaced)} ${replaced === 1 ? uiText("photo") : uiText("photos")}.` : "",
+    failed ? `${uiText("Failed")} ${formatCount(failed)} ${failed === 1 ? uiText("photo") : uiText("photos")}.` : "",
+    skipped ? `${uiText("Skipped")} ${formatCount(skipped)}.` : "",
+  ].filter(Boolean);
+  return parts.join(" ");
+}
+
+export function photoImagePasteConflictPreviewText(
+  mode: PhotoImagePasteConflictMode,
+  operationValue: Partial<PhotoImageEditOperation> | Record<string, unknown> | null | undefined,
+  options: PhotoImagePasteTextOptions = {}
+): string {
+  const { uiText } = photoImagePasteTextOptions(options);
+  const operation = normalizePhotoImageEditOperation(operationValue as Record<string, unknown> | null | undefined);
+  if (!operation) return "";
+  if (mode === "adjustments") {
+    const label = operation.adjustments ? photoImageAdjustmentsLabel(operation.adjustments) : "";
+    return label ? `${uiText("Copied adjustments")}: ${label}.` : "";
+  }
+  const label = photoImageEditOperationLabel(operation);
+  return label ? `${uiText("Copied edit")}: ${label}.` : "";
+}
+
+export function photoImagePasteConflictDialogDraft(
+  conflictCountValue: unknown,
+  mode: PhotoImagePasteConflictMode,
+  operationValue: Partial<PhotoImageEditOperation> | Record<string, unknown> | null | undefined,
+  options: PhotoImagePasteTextOptions = {}
+): PhotoImagePasteConflictDialogDraft | null {
+  const { uiText, formatCount } = photoImagePasteTextOptions(options);
+  const conflictCount = Math.max(0, Math.floor(numericValue(conflictCountValue, 0)));
+  if (conflictCount <= 0) return null;
+  const multiple = conflictCount !== 1;
+  const preview = photoImagePasteConflictPreviewText(mode, operationValue, options);
+  const message = mode === "adjustments"
+    ? `${formatCount(conflictCount)} ${multiple ? uiText("photos already have saved adjustments.") : uiText("photo already has saved adjustments.")} ${uiText("Pasting adjustments will replace those sliders while preserving crop, rotation, filters, and flips.")}`
+    : `${formatCount(conflictCount)} ${multiple ? uiText("photos already have saved edits.") : uiText("photo already has saved edits.")} ${uiText("Pasting copied edits will replace the existing edit stack.")}`;
+  return {
+    title: mode === "adjustments" ? uiText("Replace existing adjustments?") : uiText("Replace existing edits?"),
+    message: [message, preview].filter(Boolean).join(" "),
+    confirmLabel: mode === "adjustments" ? uiText("Replace adjustments") : uiText("Replace edits"),
+    cancelLabel: uiText("Cancel"),
+    preview,
+  };
 }
 
 function photoImageEditClipboardId(copiedAt: string, operation: PhotoImageEditOperation): string {
@@ -1708,6 +2747,25 @@ export function normalizePhotoImageEditClipboardHistory(values: unknown, limit =
   return entries;
 }
 
+export function readStoredPhotoImageEditClipboardHistory(key: string): PhotoImageEditClipboardEntry[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(key);
+    return normalizePhotoImageEditClipboardHistory(raw ? JSON.parse(raw) : []);
+  } catch {
+    return [];
+  }
+}
+
+export function storePhotoImageEditClipboardHistory(key: string, values: PhotoImageEditClipboardEntry[]) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(normalizePhotoImageEditClipboardHistory(values)));
+  } catch {
+    // Local storage can be unavailable in hardened browser contexts.
+  }
+}
+
 export function upsertPhotoImageEditClipboardHistory(
   history: unknown,
   operationValue: Partial<PhotoImageEditOperation> | Record<string, unknown> | null | undefined,
@@ -1732,4 +2790,67 @@ export function upsertPhotoImageEditClipboardHistory(
 export function deletePhotoImageEditClipboardHistoryEntry(history: unknown, entryId: string, limit = 12): PhotoImageEditClipboardEntry[] {
   const id = String(entryId || "").trim();
   return normalizePhotoImageEditClipboardHistory(history, limit).filter((entry) => entry.id !== id);
+}
+
+export function photoImageEditClipboardSelectionDraft(
+  history: unknown,
+  entryId: string,
+  limit = 12
+): PhotoImageEditClipboardSelectionDraft {
+  const id = String(entryId || "").trim();
+  const entry = normalizePhotoImageEditClipboardHistory(history, limit).find((item) => item.id === id) || null;
+  return {
+    entry,
+    selectedId: entry?.id || "",
+    operation: entry?.operation || null,
+    label: entry?.label || "",
+  };
+}
+
+export function photoImageEditClipboardDeleteDraft(
+  history: unknown,
+  entryId: string,
+  limit = 12
+): PhotoImageEditClipboardHistoryDraft {
+  const nextHistory = deletePhotoImageEditClipboardHistoryEntry(history, entryId, limit);
+  const entry = nextHistory[0] || null;
+  return {
+    history: nextHistory,
+    entry,
+    selectedId: entry?.id || "",
+    operation: entry?.operation || null,
+    label: entry?.label || "",
+  };
+}
+
+export function photoImageEditClipboardCopyDraft(
+  operationValue: Partial<PhotoImageEditOperation> | Record<string, unknown> | null | undefined,
+  history: unknown,
+  options: { source?: string; copiedAt?: string; id?: string; limit?: number } = {}
+): PhotoImageEditClipboardHistoryDraft | null {
+  const normalized = normalizePhotoImageEditOperation(operationValue as Record<string, unknown> | null | undefined);
+  if (!normalized || !photoImageEditOperationActive(normalized)) return null;
+  const source = String(options.source || "photos-lightbox-copy").trim() || "photos-lightbox-copy";
+  const operation = normalizePhotoImageEditOperation({ ...normalized, source }) || { ...normalized, source };
+  const nextHistory = upsertPhotoImageEditClipboardHistory(history, operation, options);
+  const entry = nextHistory[0] || null;
+  return {
+    history: nextHistory,
+    entry,
+    selectedId: entry?.id || "",
+    operation,
+    label: photoImageEditOperationLabel(operation),
+  };
+}
+
+export function photoImageEditClipboardPasteOperation(
+  clipboardValue: Partial<PhotoImageEditOperation> | Record<string, unknown> | null | undefined,
+  source = "photos-lightbox-paste"
+): PhotoImageEditOperation | null {
+  if (!clipboardValue || typeof clipboardValue !== "object") return null;
+  const sourceLabel = String(source || "photos-lightbox-paste").trim() || "photos-lightbox-paste";
+  return normalizePhotoImageEditOperation({
+    ...(clipboardValue as Record<string, unknown>),
+    source: sourceLabel,
+  });
 }

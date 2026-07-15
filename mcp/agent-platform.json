@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 1,
+  "counts": {
+    "imageActions": 200,
+    "mcpTools": 130,
+    "prompts": 6,
+    "apiOperations": 31,
+    "builtInRecipes": 8
+  },
+  "capabilityGroups": [
+    {
+      "id": "inbound",
+      "title": "Find and import externally",
+      "description": "Discover bounded metadata in authorized Slack, web, cloud-drive, Dropbox, and WebDAV sources, then copy reviewed media into safe managed storage with stable IDs.",
+      "examples": ["Find launch images in Slack", "Import a reviewed Drive folder", "Sync approved web gallery media"]
+    },
+    {
+      "id": "discover",
+      "title": "Search and understand",
+      "description": "Ask for images by meaning, text, people, places, dates, quality, media type, or exact metadata without browsing folders.",
+      "examples": ["Find the clearest prototype photos", "Locate a serial number from OCR", "Compare originals and rendered versions"]
+    },
+    {
+      "id": "curate",
+      "title": "Curate and organize",
+      "description": "Turn reviewed stable IDs into albums, memories, favorites, metadata updates, and reusable collections without exposing source paths.",
+      "examples": ["Build a portfolio shortlist", "Create a reviewed trip album", "Normalize titles and keywords"]
+    },
+    {
+      "id": "create",
+      "title": "Edit and create",
+      "description": "Plan non-destructive edits, contact sheets, slideshows, memory movies, cutouts, and alternate versions while keeping originals intact.",
+      "examples": ["Create a color-managed contact sheet", "Prepare a memory movie", "Render approved edit versions"]
+    },
+    {
+      "id": "deliver",
+      "title": "Export and deliver",
+      "description": "Produce traceable artifacts with manifests, bounded output resources, color and metadata controls, and retry-safe execution.",
+      "examples": ["Export client selects", "Package a media bundle", "Inspect generated output manifests"]
+    },
+    {
+      "id": "scale",
+      "title": "Operate at library scale",
+      "description": "Run indexing, archive health, backup, repair, deduplication, and export jobs over large libraries without repeating timed-out work.",
+      "examples": ["Index missing OCR only", "Audit archive health", "Monitor long-running operations"]
+    },
+    {
+      "id": "review",
+      "title": "Review people safely",
+      "description": "Use consent-gated face workflows, bounded previews, explicit identity decisions, Safe Mode, and a tamper-evident activity trail.",
+      "examples": ["Review cross-age matches", "Keep identity decisions human", "Trace every pixel disclosure"]
+    }
+  ],
+  "platformFeatures": [
+    {
+      "id": "reach",
+      "title": "MCP and OpenAPI reach",
+      "description": "Use local stdio, authenticated Streamable HTTP, or 28 direct API operations from Codex, Claude, SDKs, and private services."
+    },
+    {
+      "id": "inbound-connectors",
+      "title": "Safety-controlled inbound reach",
+      "description": "Authorize connectors in the desktop, share credentials across local agent processes through the OS vault, discover metadata first, and require explicit confirmation before managed downloads."
+    },
+    {
+      "id": "visual-review",
+      "title": "Interactive visual review",
+      "description": "Compatible MCP hosts can show a path-free result canvas, persist stable-ID selections, and request separately approved previews."
+    },
+    {
+      "id": "operations",
+      "title": "Observable operations",
+      "description": "Follow imports, indexing, exports, repairs, and agent writes through one timeline, resumable events, manifests, and bounded outputs."
+    },
+    {
+      "id": "identity",
+      "title": "Scoped enterprise access",
+      "description": "Use a local operator token, hash-only service accounts, or OAuth JWTs with six scopes, exact per-tool grants, expiry, and identity attribution."
+    }
+  ],
+  "recipes": [
+    {
+      "id": "builtin.portfolio-curation",
+      "name": "Portfolio curation",
+      "description": "Search, analyze, preview finalists, and stop at an approved album or export plan.",
+      "approval": "Preview + write"
+    },
+    {
+      "id": "builtin.ocr-to-reviewed-album",
+      "name": "OCR to reviewed album",
+      "description": "Find detected text and create one reviewed, retry-safe manual album.",
+      "approval": "Write"
+    },
+    {
+      "id": "builtin.trip-memory-movie",
+      "name": "Trip memory movie",
+      "description": "Select favorite trip assets, save a memory, and monitor its movie export.",
+      "approval": "Write"
+    },
+    {
+      "id": "builtin.batch-metadata-normalization",
+      "name": "Batch metadata normalization",
+      "description": "Resolve a saved query and stop at a bounded batch metadata update.",
+      "approval": "Write"
+    },
+    {
+      "id": "builtin.duplicate-review-and-undo",
+      "name": "Duplicate review and undo",
+      "description": "Preview the keeper, merge only after approval, and retain the undo resource.",
+      "approval": "Destructive"
+    },
+    {
+      "id": "builtin.missing-intelligence-index",
+      "name": "Missing intelligence index",
+      "description": "Queue only missing OCR, object, or barcode intelligence and monitor progress.",
+      "approval": "Write"
+    },
+    {
+      "id": "builtin.semantic-contact-sheet",
+      "name": "Semantic contact sheet",
+      "description": "Curate by meaning and plan a color-managed contact sheet without source paths.",
+      "approval": "Write"
+    },
+    {
+      "id": "builtin.archive-health-and-repair",
+      "name": "Archive health and repair",
+      "description": "Inspect backup and catalog integrity, then stop before corrective work.",
+      "approval": "Plan only"
+    }
+  ]
+}

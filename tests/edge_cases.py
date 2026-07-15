@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 import hashlib
 import math
@@ -19,6 +20,7 @@ from crossage_fr.api_server import DesktopApi, structured_error
 from crossage_fr.config import MAX_CLUSTER_MIN_SIZE, RuntimeConfig, Thresholds, load_config, save_config
 from crossage_fr.enroll import manager as manager_module
 from crossage_fr.enroll import ProjectState
+from crossage_fr.enroll.synthetic_screen import SyntheticScreenResult
 from crossage_fr.ingest import safety as safety_module
 from crossage_fr.ingest.image_io import ImageLoadError, capture_date_with_provenance, load_image, sha256_file
 from crossage_fr.ingest.safety import SafetyAssessment
@@ -176,6 +178,32 @@ def assert_config_round_trip_and_invalid_shape() -> None:
     assert transient_path.exists()
     assert not (root / "transient-config.corrupt.json").exists()
 
+    workspace = root / "workspace"
+    project_config_path = workspace / "config.json"
+    save_config(RuntimeConfig(safe_mode=False, cluster_min_size=5), project_config_path)
+    project = ProjectState(workspace)
+    external = RuntimeConfig(safe_mode=True, cluster_min_size=7, retention_reviewed_days=123)
+    save_config(external, project_config_path)
+
+    original_read_text = Path.read_text
+
+    def fail_project_config_read(self: Path, *args, **kwargs):
+        if self == project_config_path:
+            raise OSError("temporary read failure")
+        return original_read_text(self, *args, **kwargs)
+
+    try:
+        Path.read_text = fail_project_config_read
+        project.consent["note"] = "save still writes non-config state"
+        project.save()
+    finally:
+        Path.read_text = original_read_text
+    preserved = load_config(project_config_path)
+    assert preserved.safe_mode is True
+    assert preserved.cluster_min_size == 7
+    assert preserved.retention_reviewed_days == 123
+    assert json.loads((workspace / "consent.json").read_text(encoding="utf-8"))["note"] == "save still writes non-config state"
+
 
 def assert_safe_mode_override_schema_migrates_and_private_delete_clears() -> None:
     root = Path(tempfile.mkdtemp(prefix="crossage-edge-safe-mode-overrides-"))
@@ -316,7 +344,11 @@ def assert_safe_mode_calibration_caps_examples_and_forwards_progress() -> None:
     examples = [{"path": f"/tmp/calibration-{index}.jpg", "sensitive": False} for index in range(4005)]
     safety_module.calibrate_safety_temperature = fake_calibrate
     try:
-        result = api._cmd_calibrate_safe_mode({"examples": examples}, progress=progress_events.append)
+        queued = api._cmd_calibrate_safe_mode({"examples": examples}, progress=progress_events.append)
+        assert queued["queued"] is True
+        assert captured == {}
+        assert progress_events == []
+        result = api._cmd_calibrate_safe_mode({"examples": examples, "runInline": True}, progress=progress_events.append)
     finally:
         safety_module.calibrate_safety_temperature = original_calibrate
     assert result["sampleCount"] == 4000
@@ -353,7 +385,8 @@ def assert_safe_mode_calibration_caps_examples_and_forwards_progress() -> None:
                 "folders": [
                     {"path": "/tmp/sensitive", "sensitive": True},
                     {"path": "/tmp/safe", "sensitive": False},
-                ]
+                ],
+                "runInline": True,
             }
         )
     finally:
@@ -496,6 +529,8 @@ def assert_command_validation_and_empty_inputs() -> None:
     assert missing["metrics"]["errors"] == 1
     assert missing["metrics"]["pathErrors"] == 1
     assert missing["state"]["scanHistory"][0]["status"] == "error"
+    assert missing["state"]["scanJob"]["canResume"] is False
+    assert "still exists and is readable" in missing["state"]["scanJob"]["recommendedAction"]
 
 
 def assert_consent_workspace_registry_and_audit_pagination() -> None:
@@ -595,7 +630,7 @@ def assert_static_app_contracts() -> None:
     assert "buildTrustedMediaPathSet(state, queryTrustedMediaPaths)" in desktop_main
     assert "paths.has(pathTrustKeyFromResolved(targetReal))" in desktop_main
     assert "paths.has(target))" not in desktop_main
-    assert "await pathExistsAsync(realTarget)" in desktop_main
+    assert "pathExistsAsync(realTarget)" not in desktop_main
     media_protocol_block = desktop_main[desktop_main.index("function registerMediaProtocol"):desktop_main.index("function hardenWebContents")]
     assert "fs.existsSync" not in media_protocol_block
     assert "pathToFileURL(realTarget)" in desktop_main
@@ -603,29 +638,47 @@ def assert_static_app_contracts() -> None:
     assert "unmatched_paths: set[Path]" in enroll_manager
     assert "image_path in unmatched_paths" in enroll_manager
     assert "any(row[0] == image_path for row in unmatched)" not in enroll_manager
-    assert "encrypt_file(backup_path, encrypted_temp, passphrase)" in enroll_manager
+    assert "archive_path = backup_path if not encrypted else" in enroll_manager
+    assert "encrypt_file(archive_path, encrypted_temp, passphrase)" in enroll_manager
     assert "os.replace(encrypted_temp, backup_path)" in enroll_manager
     assert "write_bytes(encrypt_bytes(backup_path.read_bytes()" not in enroll_manager
+    assert "decrypt_file(path, decrypted_path, passphrase)" in enroll_manager
+    assert "decrypt_bytes(path.read_bytes()" not in enroll_manager
+    assert "io.BytesIO" not in enroll_manager
+    assert "ZipFile(self._backup_archive_source(path))" not in enroll_manager
     assert "for row in self._iter_audit_rows_reverse()" in enroll_manager
     assert "recent: deque[dict[str, Any]] = deque(maxlen=offset + limit)" not in enroll_manager
 
-    release_workflow = (root / ".github" / "workflows" / "windows-release.yml").read_text(encoding="utf-8")
-    assert "release_tag" in release_workflow
-    assert "softprops/action-gh-release@v2" in release_workflow
-    assert "dist/latest*.yml" in release_workflow
-    assert "contents: write" in release_workflow
-    assert "npm run release:verify" in release_workflow
-    assert "Stage installer in draft GitHub Release" in release_workflow
-    assert "--allow-draft" in release_workflow
-    assert "Publish verified GitHub Release" in release_workflow
+    windows_workflow = (root / ".github" / "workflows" / "windows-release.yml").read_text(encoding="utf-8")
+    release_workflow = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    assert "workflow_call:" in windows_workflow
+    assert "dist/latest*.yml" in windows_workflow
+    assert "contents: read" in windows_workflow
+    assert "softprops/action-gh-release" not in windows_workflow
+    assert "id-token: write" in windows_workflow
+    assert "azure/login@" in windows_workflow
+    assert "azureSignOptions" in windows_workflow
+    assert "Get-AuthenticodeSignature" in windows_workflow
+    assert "TimeStamperCertificate" in windows_workflow
+    assert "Build unsigned" not in windows_workflow
+    assert "WINDOWS_CERTIFICATE" not in windows_workflow
     mac_workflow = (root / ".github" / "workflows" / "macos-release.yml").read_text(encoding="utf-8")
-    assert "macOS Unsigned Release" in mac_workflow
-    assert "npm run dist:mac:unsigned" in mac_workflow
-    assert "Vintrace-macOS-Unsigned" in mac_workflow
-    assert "npm run release:verify" in mac_workflow
-    assert "Stage unsigned macOS installer in draft GitHub Release" in mac_workflow
-    assert "--allow-draft" in mac_workflow
-    assert "Publish verified GitHub Release" in mac_workflow
+    assert "Build signed and notarized macOS installer" in mac_workflow
+    assert "codesign --verify --deep --strict" in mac_workflow
+    assert "xcrun stapler validate" in mac_workflow
+    assert "Vintrace-macOS-Signed-Notarized" in mac_workflow
+    assert "Build unsigned" not in mac_workflow
+    assert "npm run dist:mac:unsigned" not in mac_workflow
+    assert "workflow_call:" in mac_workflow
+    assert "softprops/action-gh-release" not in mac_workflow
+    assert "release_tag" in release_workflow
+    assert "softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65" in release_workflow
+    assert "contents: write" in release_workflow
+    assert "npm run release:assemble" in release_workflow
+    assert "npm run release:verify-platform-evidence" in release_workflow
+    assert "--platform all" in release_workflow
+    assert "--allow-draft" in release_workflow
+    assert "Publish the verified release once" in release_workflow
 
     i18n = (root / "src" / "i18n.ts").read_text(encoding="utf-8")
     locale_sources = "\n".join(
@@ -657,9 +710,13 @@ def assert_static_app_contracts() -> None:
     assert 'localizeAttribute(element, "alt", language)' in i18n
     assert "isLocalizableAttributeElement" in i18n
     app_tsx = (root / "src" / "App.tsx").read_text(encoding="utf-8")
-    assert "languageStorageKey" in app_tsx
+    app_preferences_state = (root / "src" / "appPreferencesState.ts").read_text(encoding="utf-8")
+    assert "languageStorageKey" in app_preferences_state
+    assert "readInitialLanguage" in app_tsx
     assert 'document.getElementById("root") || document.body' in app_tsx
-    assert 'if (language === "en") return;' in app_tsx
+    assert 'if (language === "en") {' in app_tsx
+    assert "localizeDom(root, language);" in app_tsx
+    assert 'if (language === "en") return;' not in app_tsx
     assert "const addPendingRoot = (target: ParentNode)" in app_tsx
     assert "validTargets.some" not in app_tsx
     assert "localizeDom(targetRoot, language)" in app_tsx
@@ -669,6 +726,8 @@ def assert_static_app_contracts() -> None:
     assert 'document.documentElement.dir = language === "ar" ? "rtl" : "ltr"' in app_tsx
     assert "setImperativeLanguage(language)" in app_tsx
     assert "window.crossAge.setAppLanguage" in app_tsx
+    assert "readInitialLanguage" in app_tsx
+    assert "readPhotoImportFlag" in app_tsx
     assert "function PromptHost()" in app_tsx
     assert "<PromptHost />" in app_tsx
     assert 'if (window.crossAge) {\n    return defaultValue;' not in app_tsx
@@ -682,7 +741,7 @@ def assert_static_app_contracts() -> None:
     assert "Native share is not available here, so I opened the folder containing" in app_tsx
     assert "reviewFocus" in app_tsx
     assert "Show all Review" in app_tsx
-    assert "reviewFocusHistoryStorageKey" in app_tsx
+    assert "useReviewFocusHistoryState" in app_tsx
     assert "openReviewFocusHistoryItem" in app_tsx
     assert "Recent Review More" in app_tsx
     assert "reviewCandidate={(status, candidate) => review(status, candidate, true)}" in app_tsx
@@ -798,6 +857,7 @@ def assert_static_app_contracts() -> None:
         "duplicate_people",
         "apply_review_rules",
         "query_candidates",
+        "ordered_review_candidates",
         "suggest_photo_review_more_candidates",
         "list_photo_folders",
         "list_photo_folder_items",
@@ -1167,29 +1227,127 @@ def assert_static_app_contracts() -> None:
     photos_view = (root / "src" / "views" / "PhotosView.tsx").read_text(encoding="utf-8")
     photos_e2e = (root / "tests" / "e2e" / "photos-album-folders.spec.ts").read_text(encoding="utf-8")
     photo_tests = (root / "tests" / "photos_view.test.mjs").read_text(encoding="utf-8")
+    photo_curation_preferences = (root / "src" / "views" / "photoCurationPreferences.ts").read_text(encoding="utf-8")
+    photo_active_filter_chips = (root / "src" / "views" / "photoActiveFilterChips.tsx").read_text(encoding="utf-8")
+    photo_date_bucket_panel = (root / "src" / "views" / "photoDateBucketPanel.tsx").read_text(encoding="utf-8")
+    photo_duplicate_review = (root / "src" / "views" / "photoDuplicateReview.ts").read_text(encoding="utf-8")
+    photo_duplicate_review_panel = (root / "src" / "views" / "photoDuplicateReviewPanel.tsx").read_text(encoding="utf-8")
+    photo_empty_library_state = (root / "src" / "views" / "photoEmptyLibraryState.tsx").read_text(encoding="utf-8")
+    photo_group_review = (root / "src" / "views" / "photoGroupReview.ts").read_text(encoding="utf-8")
+    photo_image_edit_display = (root / "src" / "views" / "photoImageEditDisplay.ts").read_text(encoding="utf-8")
     photo_image_edits = (root / "src" / "views" / "photoImageEdits.ts").read_text(encoding="utf-8")
+    photo_import_album_target = (root / "src" / "views" / "photoImportAlbumTarget.ts").read_text(encoding="utf-8")
+    photo_lightbox_stage = (root / "src" / "views" / "photoLightboxStage.tsx").read_text(encoding="utf-8")
+    photo_lightbox_edit_stack_history = (root / "src" / "views" / "photoLightboxEditStackHistory.tsx").read_text(encoding="utf-8")
+    photo_lightbox_video_action_bar = (root / "src" / "views" / "photoLightboxVideoActionBar.tsx").read_text(encoding="utf-8")
+    photo_lightbox_session = (root / "src" / "views" / "photoLightboxSession.ts").read_text(encoding="utf-8")
+    photo_selection_export_results = (root / "src" / "views" / "photoSelectionExportResults.ts").read_text(encoding="utf-8")
+    photo_selection_primary_actions = (root / "src" / "views" / "photoSelectionPrimaryActions.tsx").read_text(encoding="utf-8")
+    photo_selection_original_actions = (root / "src" / "views" / "photoSelectionOriginalActions.tsx").read_text(encoding="utf-8")
+    photo_selection_review_actions = (root / "src" / "views" / "photoSelectionReviewActions.tsx").read_text(encoding="utf-8")
+    photo_selection_summary_controls = (root / "src" / "views" / "photoSelectionSummaryControls.tsx").read_text(encoding="utf-8")
+    photo_selection_edit_controls = (root / "src" / "views" / "photoSelectionEditControls.tsx").read_text(encoding="utf-8")
+    photo_selection_bulk_metadata_controls = (root / "src" / "views" / "photoSelectionBulkMetadataControls.tsx").read_text(encoding="utf-8")
+    photo_selection_order_controls = (root / "src" / "views" / "photoSelectionOrderControls.tsx").read_text(encoding="utf-8")
+    photo_selection_visibility_controls = (root / "src" / "views" / "photoSelectionVisibilityControls.tsx").read_text(encoding="utf-8")
+    photo_slideshow_project_basics_controls = (root / "src" / "views" / "photoSlideshowProjectBasicsControls.tsx").read_text(encoding="utf-8")
+    photo_slideshow_project_framing_controls = (root / "src" / "views" / "photoSlideshowProjectFramingControls.tsx").read_text(encoding="utf-8")
+    photo_slideshow_project_caption_controls = (root / "src" / "views" / "photoSlideshowProjectCaptionControls.tsx").read_text(encoding="utf-8")
+    photo_slideshow_project_caption_action_controls = (root / "src" / "views" / "photoSlideshowProjectCaptionActionControls.tsx").read_text(encoding="utf-8")
+    photo_slideshow_project_keyframe_controls = (root / "src" / "views" / "photoSlideshowProjectKeyframeControls.tsx").read_text(encoding="utf-8")
+    photo_slideshow_project_playback_controls = (root / "src" / "views" / "photoSlideshowProjectPlaybackControls.tsx").read_text(encoding="utf-8")
+    photo_slideshow_project_template_controls = (root / "src" / "views" / "photoSlideshowProjectTemplateControls.tsx").read_text(encoding="utf-8")
+    photo_slideshow_project_timeline_controls = (root / "src" / "views" / "photoSlideshowProjectTimelineControls.tsx").read_text(encoding="utf-8")
+    photo_slideshow_overlay = (root / "src" / "views" / "photoSlideshowOverlay.tsx").read_text(encoding="utf-8")
+    photo_thumbnail_controls = (root / "src" / "views" / "photoThumbnailControls.ts").read_text(encoding="utf-8")
+    photo_grid_tile = (root / "src" / "views" / "photoGridTile.tsx").read_text(encoding="utf-8")
+    photo_virtual_grid_panel = (root / "src" / "views" / "photoVirtualGridPanel.tsx").read_text(encoding="utf-8")
+    photo_burst_stack_panel = (root / "src" / "views" / "photoBurstStackPanel.tsx").read_text(encoding="utf-8")
+    photo_lightbox_burst_strip = (root / "src" / "views" / "photoLightboxBurstStrip.tsx").read_text(encoding="utf-8")
+    photo_info_draft = (root / "src" / "views" / "photoInfoDraft.ts").read_text(encoding="utf-8")
+    photo_lightbox_zoom_controls = (root / "src" / "views" / "photoLightboxZoomControls.tsx").read_text(encoding="utf-8")
+    photo_lightbox_file_actions = (root / "src" / "views" / "photoLightboxFileActions.tsx").read_text(encoding="utf-8")
+    photo_lightbox_primary_actions = (root / "src" / "views" / "photoLightboxPrimaryActions.tsx").read_text(encoding="utf-8")
+    photo_lightbox_curation_actions = (root / "src" / "views" / "photoLightboxCurationActions.tsx").read_text(encoding="utf-8")
+    photo_lightbox_safety_actions = (root / "src" / "views" / "photoLightboxSafetyActions.tsx").read_text(encoding="utf-8")
+    photo_display_text = (root / "src" / "views" / "photoDisplayText.ts").read_text(encoding="utf-8")
+    photo_utility_classifier_review = (root / "src" / "views" / "photoUtilityClassifierReview.ts").read_text(encoding="utf-8")
+    photo_people_match_selection = (root / "src" / "views" / "photoPeopleMatchSelection.ts").read_text(encoding="utf-8")
     keyboard_shortcuts = (root / "src" / "views" / "photoKeyboardShortcuts.ts").read_text(encoding="utf-8")
     assert "suppressGenerated" in photos_view
     assert "RAW preview proxy" in photos_view
-    assert "rendered_raw_proxy" in photos_view
+    assert "rendered_raw_proxy" in photo_selection_export_results
     assert "collapseBursts" in photos_view
-    assert "photo-burst-badge" in photos_view
-    assert "photos-lightbox-burst-strip" in photos_view
+    assert "photo-burst-badge" in photo_grid_tile
+    assert "PhotoBurstStackPanel" in photos_view
+    assert "photo-burst-stack-panel" not in photos_view
+    assert "photo-burst-stack-panel" in photo_burst_stack_panel
+    assert "Loading burst stacks..." in photo_burst_stack_panel
+    assert "Select stack" in photo_burst_stack_panel
+    assert "PhotoLightboxBurstStrip" in photos_view
+    assert "photos-lightbox-burst-strip" not in photos_view
+    assert "photos-lightbox-burst-strip" in photo_lightbox_burst_strip
     assert "stepLightboxSelection" in photos_view
-    assert "Set keeper" in photos_view
+    assert "Set keeper" not in photos_view
+    assert "Set keeper" in photo_lightbox_burst_strip
     search_suggestions = (root / "src" / "views" / "photoSearchSuggestions.ts").read_text(encoding="utf-8")
     search_highlights = (root / "src" / "views" / "photoSearchHighlights.ts").read_text(encoding="utf-8")
     rail_visibility = (root / "src" / "views" / "photoRailVisibility.ts").read_text(encoding="utf-8")
     filter_chips = (root / "src" / "views" / "photoFilterChips.ts").read_text(encoding="utf-8")
     keyword_filters = (root / "src" / "views" / "photoKeywordFilters.ts").read_text(encoding="utf-8")
+    photo_keyword_manager_panel = (root / "src" / "views" / "photoKeywordManagerPanel.tsx").read_text(encoding="utf-8")
+    photo_pet_review_kind_chips = (root / "src" / "views" / "photoPetReviewKindChips.tsx").read_text(encoding="utf-8")
+    photo_library_search_panel = (root / "src" / "views" / "photoLibrarySearchPanel.tsx").read_text(encoding="utf-8")
+    photo_semantic_search_panel = (root / "src" / "views" / "photoSemanticSearchPanel.tsx").read_text(encoding="utf-8")
     saved_search = (root / "src" / "views" / "photoSavedSearch.ts").read_text(encoding="utf-8")
     date_adjustments = (root / "src" / "views" / "photoDateAdjustments.ts").read_text(encoding="utf-8")
     date_views = (root / "src" / "views" / "photoDateViews.ts").read_text(encoding="utf-8")
     virtual_grid = (root / "src" / "views" / "photoVirtualGrid.ts").read_text(encoding="utf-8")
     location_picker = (root / "src" / "views" / "photoLocationPicker.ts").read_text(encoding="utf-8")
     places_map = (root / "src" / "views" / "photoPlacesMap.ts").read_text(encoding="utf-8")
+    place_map_panel = (root / "src" / "views" / "photoPlaceMapPanel.tsx").read_text(encoding="utf-8")
+    photo_album_folder_editor = (root / "src" / "views" / "photoAlbumFolderEditor.tsx").read_text(encoding="utf-8")
+    photo_album_editor_panel = (root / "src" / "views" / "photoAlbumEditorPanel.tsx").read_text(encoding="utf-8")
+    photo_albums_gallery = (root / "src" / "views" / "photoAlbumsGallery.tsx").read_text(encoding="utf-8")
+    photo_memories_feed = (root / "src" / "views" / "photoMemoriesFeed.tsx").read_text(encoding="utf-8")
+    photo_consolidation_panels = (root / "src" / "views" / "photoConsolidationPanels.tsx").read_text(encoding="utf-8")
+    photo_shortcuts_panel = (root / "src" / "views" / "photoShortcutsPanel.tsx").read_text(encoding="utf-8")
+    photo_curation_preferences_panel = (root / "src" / "views" / "photoCurationPreferencesPanel.tsx").read_text(encoding="utf-8")
+    photo_managed_roots_panel = (root / "src" / "views" / "photoManagedRootsPanel.tsx").read_text(encoding="utf-8")
+    photo_local_indexing_status_panel = (root / "src" / "views" / "photoLocalIndexingStatusPanel.tsx").read_text(encoding="utf-8")
+    photo_indexing_queue_panel = (root / "src" / "views" / "photoIndexingQueuePanel.tsx").read_text(encoding="utf-8")
+    photo_indexing_notice_panel = (root / "src" / "views" / "photoIndexingNoticePanel.tsx").read_text(encoding="utf-8")
+    photo_load_status_alerts_panel = (root / "src" / "views" / "photoLoadStatusAlertsPanel.tsx").read_text(encoding="utf-8")
+    photo_library_media_defaults_panel = (root / "src" / "views" / "photoLibraryMediaDefaultsPanel.tsx").read_text(encoding="utf-8")
+    photo_media_playback_settings_panel = (root / "src" / "views" / "photoMediaPlaybackSettingsPanel.tsx").read_text(encoding="utf-8")
+    photo_operation_undo_panel = (root / "src" / "views" / "photoOperationUndoPanel.tsx").read_text(encoding="utf-8")
+    photo_intelligence_settings_panel = (root / "src" / "views" / "photoIntelligenceSettingsPanel.tsx").read_text(encoding="utf-8")
+    photo_privacy_settings_panel = (root / "src" / "views" / "photoPrivacySettingsPanel.tsx").read_text(encoding="utf-8")
+    photo_sensitive_lock_panel = (root / "src" / "views" / "photoSensitiveLockPanel.tsx").read_text(encoding="utf-8")
+    photo_people_gallery = (root / "src" / "views" / "photoPeopleGallery.tsx").read_text(encoding="utf-8")
+    photo_backup_policy_panel = (root / "src" / "views" / "photoBackupPolicyPanel.tsx").read_text(encoding="utf-8")
+    photo_backup_check_panel = (root / "src" / "views" / "photoBackupCheckPanel.tsx").read_text(encoding="utf-8")
+    photo_catalog_cleanup_preview_panel = (root / "src" / "views" / "photoCatalogCleanupPreviewPanel.tsx").read_text(encoding="utf-8")
     photo_import_access = (root / "src" / "views" / "photoImportAccess.ts").read_text(encoding="utf-8")
+    photo_import_status_alerts = (root / "src" / "views" / "photoImportStatusAlerts.tsx").read_text(encoding="utf-8")
     photo_export_presets = (root / "src" / "views" / "photoExportPresets.ts").read_text(encoding="utf-8")
+    photo_index_everything_dialog = (root / "src" / "views" / "photoIndexEverythingDialog.tsx").read_text(encoding="utf-8")
+    photo_rail_display_controls = (root / "src" / "views" / "photoRailDisplayControls.tsx").read_text(encoding="utf-8")
+    photo_rail_import_controls = (root / "src" / "views" / "photoRailImportControls.tsx").read_text(encoding="utf-8")
+    photo_rail_load_errors = (root / "src" / "views" / "photoRailLoadErrors.tsx").read_text(encoding="utf-8")
+    photo_repair_center_panel = (root / "src" / "views" / "photoRepairCenterPanel.tsx").read_text(encoding="utf-8")
+    photo_repair_center_section = (root / "src" / "views" / "photoRepairCenterSection.tsx").read_text(encoding="utf-8")
+    photo_repair_history_list = (root / "src" / "views" / "photoRepairHistoryList.tsx").read_text(encoding="utf-8")
+    photo_repair_issue_list = (root / "src" / "views" / "photoRepairIssueList.tsx").read_text(encoding="utf-8")
+    photo_restore_rehearsal_panels = (root / "src" / "views" / "photoRestoreRehearsalPanels.tsx").read_text(encoding="utf-8")
+    photo_saved_filters_rail_section = (root / "src" / "views" / "photoSavedFiltersRailSection.tsx").read_text(encoding="utf-8")
+    photo_export_contact_sheet_controls = (root / "src" / "views" / "photoExportContactSheetControls.tsx").read_text(encoding="utf-8")
+    photo_export_destination_controls = (root / "src" / "views" / "photoExportDestinationControls.tsx").read_text(encoding="utf-8")
+    photo_export_packaging_controls = (root / "src" / "views" / "photoExportPackagingControls.tsx").read_text(encoding="utf-8")
+    photo_export_preset_controls = (root / "src" / "views" / "photoExportPresetControls.tsx").read_text(encoding="utf-8")
+    photo_export_render_controls = (root / "src" / "views" / "photoExportRenderControls.tsx").read_text(encoding="utf-8")
+    photo_export_result_panel = (root / "src" / "views" / "photoExportResultPanel.tsx").read_text(encoding="utf-8")
+    photo_export_video_controls = (root / "src" / "views" / "photoExportVideoControls.tsx").read_text(encoding="utf-8")
     api_server = (root / "crossage_fr" / "api_server.py").read_text(encoding="utf-8")
     workspace_db = (root / "crossage_fr" / "store" / "workspace_db.py").read_text(encoding="utf-8")
     styles_css = (root / "src" / "styles.css").read_text(encoding="utf-8")
@@ -1201,10 +1359,16 @@ def assert_static_app_contracts() -> None:
     photo_sources_tests = (root / "tests" / "photo_sources.test.cjs").read_text(encoding="utf-8")
     photo_folders = (root / "tests" / "photo_folders_units.py").read_text(encoding="utf-8")
     assert "async function buildSystemPhotoSources" in photo_sources_cjs
+    assert "DEFAULT_SOURCE_FS_TIMEOUT_MS" in photo_sources_cjs
+    assert "withFsTimeout" in photo_sources_cjs
+    assert "fsTimeoutMs" in photo_sources_cjs
     assert "fs.promises.readdir" in photo_sources_cjs
+    assert "fs.promises.realpath" in photo_sources_cjs
     assert "fs.readdirSync" not in photo_sources_cjs
     assert "fs.statSync" not in photo_sources_cjs
     assert "fs.existsSync" not in photo_sources_cjs
+    assert "testSlowMountedRootDoesNotBlockCameraDiscovery" in photo_sources_tests
+    assert "testSlowMountedDriveRealpathFallsBackPromptly" in photo_sources_tests
     assert '"export_photo_keywords": "_cmd_export_photo_keywords"' in api_server
     assert '"import_photo_keywords": "_cmd_import_photo_keywords"' in api_server
     assert "COVER_PREVIEW_BUDGET" in photos_view
@@ -1233,16 +1397,26 @@ def assert_static_app_contracts() -> None:
     assert "New album" in photos_view
     assert "New manual album" in photos_view
     assert "New folder" in photos_view
-    assert "Import files" in photos_view
-    assert "Import folder" in photos_view
-    assert "Import review" in photos_view
-    assert "Import to album" in photos_view
-    assert "New import album name" in photos_view
-    assert "Confirm import" in photos_view
-    assert "Cancel import" in photos_view
+    assert "PhotoEmptyLibraryState" in photos_view
+    assert "Import files" not in photos_view
+    assert "Import folder" not in photos_view
+    assert "Import photos" in photo_empty_library_state
+    assert "Import folder" in photo_empty_library_state
+    assert "PhotoIndexEverythingDialog" in photos_view
+    assert "index-everything-sheet" not in photos_view
+    assert "index-everything-sheet" in photo_index_everything_dialog
+    assert "Index my photos" in photo_index_everything_dialog
+    assert "Add folder or drive" in photo_index_everything_dialog
+    photo_pending_import_review_panel = (root / "src" / "views" / "photoPendingImportReviewPanel.tsx").read_text(encoding="utf-8")
+    assert "PhotoPendingImportReviewPanel" in photos_view
+    assert "Import review" in photo_pending_import_review_panel
+    assert "Import to album" in photo_pending_import_review_panel
+    assert "New import album name" in photo_pending_import_review_panel
+    assert "Confirm import" in photo_pending_import_review_panel
+    assert "Cancel import" in photo_pending_import_review_panel
     assert "pendingImportEntries" in photos_view
     assert "pendingImportAlbumTargetId" in photos_view
-    assert "photoImportResultFinalSourcePaths" in photos_view
+    assert "photoImportResultFinalSourcePaths" in photo_import_album_target
     assert "photos-import" in external_open_cjs
     assert "parseProtocolUrl" in external_open_cjs
     assert "getAll(\"file\")" in external_open_cjs
@@ -1263,7 +1437,7 @@ def assert_static_app_contracts() -> None:
     assert "externalImportRequest" in photos_view
     assert "normalizeExternalPhotoImportSourceKind" in photos_view
     assert "pendingImportSourceLabelExplicit" in photos_view
-    assert "photoImportReviewSourceLabel" in photos_view
+    assert "photoImportReviewSourceLabel" in photo_pending_import_review_panel
     assert "stagePendingImport(paths, request.sourceLabel || \"External import\"" in photos_view
     assert "Photos external import handoff preserves app attribution after confirm" in photos_e2e
     assert "Spark Mail" in photos_e2e
@@ -1271,33 +1445,37 @@ def assert_static_app_contracts() -> None:
     assert "Saved from" in photos_e2e
     assert "mail-message-42" in photos_e2e
     assert "taylor@example.test" in photos_e2e
-    assert "Source detail" in photos_view
-    assert "Import source detail" in photos_view
+    assert "Source detail" in photo_rail_import_controls
+    assert "Import source detail" in photo_rail_import_controls
     assert "importSourceDetail" in photos_view
     assert "importSource:" in api_server
     assert "_photo_import_source_group_summaries" in api_server
     assert "importSourceKind" in types_ts
     assert "CROSSAGE_E2E_FILE_DROP_PATH_FALLBACK" in photos_e2e
     assert "gallery drop stages dropped files for import review" in photos_e2e
-    assert "Import details" in photos_view
-    assert "Open import" in photos_view
-    assert "Open Recovered" in photos_view
+    photo_import_session_panel = (root / "src" / "views" / "photoImportSessionPanel.tsx").read_text(encoding="utf-8")
+    assert "PhotoImportSessionPanel" in photos_view
+    assert "Import details" in photo_import_session_panel
+    assert "Open import" in photo_import_session_panel
+    assert "Open Recovered" in photo_import_session_panel
     assert "buildPhotoImportSessionSummary" in photos_view
     assert "pendingImportAccessGuidance" in photos_view
-    assert "Access note" in photos_view
+    assert "Access note" in photo_pending_import_review_panel
     assert "shareSelectedOriginals" in photos_view
-    assert "native_share" in photos_view
-    assert "native_share_strip_location" in photos_view
-    assert "photoSelectionExportRowIsStripLocationShareable" in photos_view
-    assert "allowRenderFallback: false" in photos_view
-    assert "revealAfterExport: false" in photos_view
+    assert "native_share" in photo_selection_export_results
+    assert "native_share_strip_location" in photo_selection_export_results
+    assert "photoSelectionExportRowIsStripLocationShareable" in photo_selection_export_results
+    assert "allowRenderFallback: false" in photo_export_presets
+    assert "revealAfterExport: false" in photo_export_presets
     assert "render_skipped_strip_location" in api_server
     assert "allowRenderFallback" in api_server
-    assert "Share after export" in photos_view
+    assert "PhotoExportPackagingControls" in photos_view
+    assert "Share after export" in photo_export_packaging_controls
     assert "exportShareAfterExport" in photos_view
     assert "Share" in photos_view
     assert "sharePhotoPaths" in app_tsx
-    assert "Project bundle" in photos_view
+    assert "PhotoExportPresetControls" in photos_view
+    assert "Project bundle" in photo_export_preset_controls
     assert "applyPhotoProjectBundlePreset" in photos_view
     assert "photoProjectBundlePresetSettings" in photo_export_presets
     assert "includeExistingSidecars: true" in photo_export_presets
@@ -1315,10 +1493,12 @@ def assert_static_app_contracts() -> None:
     assert "os-protected-folder" in workspace_db
     assert "Drop photos or folders to import" in photos_view
     assert "Drop photos to import" in photos_view
-    assert "Import storage" in photos_view
-    assert "Reference originals" in photos_view
-    assert "Copy into library" in photos_view
-    assert "Suggested sources" in photos_view
+    assert "PhotoRailImportControls" in photos_view
+    assert "photo-album-toolbar" not in photos_view
+    assert "Import storage" in photo_rail_import_controls
+    assert "Reference originals" in photo_rail_import_controls
+    assert "Copy into library" in photo_rail_import_controls
+    assert "Suggested sources" in photo_rail_import_controls
     assert "photoImportSourceKindForSystemSource" in photos_view
     assert "photoSources={photoSources}" in app_tsx
     assert "buildSystemPhotoSources" in desktop_main
@@ -1331,12 +1511,73 @@ def assert_static_app_contracts() -> None:
     assert "PRIVATE" in photo_sources_cjs
     assert "Internal shared storage" in photo_sources_tests
     assert "testMountedPhoneNestedDcimSources" in photo_sources_tests
-    assert "Import history" in photos_view
-    assert "buildPhotoImportSessionSummaries" in photos_view
-    assert "filterPhotoImportSessionSummaries" in photos_view
-    assert "Search import history" in photos_view
-    assert "Import history filters" in photos_view
-    assert "active?.importSessions" in photos_view
+    photo_import_session_details = (root / "src" / "views" / "photoImportSessionDetails.ts").read_text(encoding="utf-8")
+    photo_import_history_toolbar = (root / "src" / "views" / "photoImportHistoryToolbar.tsx").read_text(encoding="utf-8")
+    photo_import_provenance_editor = (root / "src" / "views" / "photoImportProvenanceEditor.tsx").read_text(encoding="utf-8")
+    assert "buildPhotoImportHistoryState" in photos_view
+    assert "photoActiveImportSessionRecord" in photos_view
+    assert "photoImportHistoryCountLabel" in photos_view
+    assert "photoImportHistoryProvenancePayload" in photos_view
+    assert "photoImportHistoryArchivePayload" in photos_view
+    photo_import_history_panel = (root / "src" / "views" / "photoImportHistoryPanel.tsx").read_text(encoding="utf-8")
+    photo_import_history_list = (root / "src" / "views" / "photoImportHistoryList.tsx").read_text(encoding="utf-8")
+    photo_recovered_import_issues_panel = (root / "src" / "views" / "photoRecoveredImportIssuesPanel.tsx").read_text(encoding="utf-8")
+    assert "PhotoImportSessionPanel" in photos_view
+    assert "PhotoImportHistoryPanel" in photos_view
+    assert "PhotoRecoveredImportIssuesPanel" in photos_view
+    assert "renderImportHistoryProvenanceEditor" not in photos_view
+    assert "PhotoImportHistoryProvenanceEditor" not in photos_view
+    assert "PhotoImportHistoryList" not in photos_view
+    assert "PhotoImportHistoryToolbar" not in photos_view
+    assert "PhotoImportHistoryBulkProvenanceEditor" not in photos_view
+    assert "photo-import-session-panel" not in photos_view
+    assert "photo-import-history-panel" not in photos_view
+    assert "photo-import-history-list" not in photos_view
+    assert "photo-recovered-panel" not in photos_view
+    assert "buildPhotoImportSessionSummaries" in photo_import_session_details
+    assert "filterPhotoImportSessionSummaries" in photo_import_session_details
+    assert "buildPhotoImportHistoryState" in photo_import_session_details
+    assert "photoActiveImportSessionRecord" in photo_import_session_details
+    assert "photoImportHistoryCountLabel" in photo_import_session_details
+    assert "photoImportHistoryProvenanceEditDraft" in photo_import_session_details
+    assert "photoImportHistoryProvenancePayload" in photo_import_session_details
+    assert "photoImportHistoryBulkProvenancePayload" in photo_import_session_details
+    assert "photoImportHistoryArchivePayload" in photo_import_session_details
+    assert "Search import history" in photo_import_history_toolbar
+    assert "Import history filters" in photo_import_history_toolbar
+    assert "activeFolder?.importSessions" in photo_import_session_details
+    assert 'activeId.startsWith("import:")' in photo_import_session_details
+    assert "Source label is required." in photo_import_session_details
+    assert "Archived from import history" in photo_import_session_details
+    assert "export function PhotoImportSessionPanel" in photo_import_session_panel
+    assert "photo-import-session-panel" in photo_import_session_panel
+    assert "PhotoImportHistoryProvenanceEditor" in photo_import_session_panel
+    assert "Restore import" in photo_import_session_panel
+    assert "export function PhotoImportHistoryPanel" in photo_import_history_panel
+    assert "Import history" in photo_import_history_panel
+    assert "PhotoImportHistoryList" in photo_import_history_panel
+    assert "PhotoImportHistoryToolbar" in photo_import_history_panel
+    assert "PhotoImportHistoryBulkProvenanceEditor" in photo_import_history_panel
+    assert "photo-import-history-panel" in photo_import_history_panel
+    assert "export function PhotoImportHistoryList" in photo_import_history_list
+    assert "photo-import-history-list" in photo_import_history_list
+    assert "photo-import-history-empty" in photo_import_history_list
+    assert "No matching imports" in photo_import_history_list
+    assert "PhotoImportHistoryProvenanceEditor" in photo_import_history_list
+    assert "export function PhotoRecoveredImportIssuesPanel" in photo_recovered_import_issues_panel
+    assert "photo-recovered-panel" in photo_recovered_import_issues_panel
+    assert "photo-recovered-list" in photo_recovered_import_issues_panel
+    assert "Recovered import issues" in photo_recovered_import_issues_panel
+    assert "buildPhotoImportSessionSummary(session" in photo_recovered_import_issues_panel
+    assert "photo-import-history-controls" in photo_import_history_toolbar
+    assert "Import history filters" in photo_import_history_toolbar
+    assert "Archive matches" in photo_import_history_toolbar
+    assert "Set source for matches" in photo_import_history_toolbar
+    assert "props.sourceOptions.map" in photo_import_history_toolbar
+    assert "photo-import-provenance-editor" in photo_import_provenance_editor
+    assert "PHOTO_IMPORT_SOURCE_OPTIONS.map" in photo_import_provenance_editor
+    assert "Edit import source kind" in photo_import_provenance_editor
+    assert "Bulk import source kind" in photo_import_provenance_editor
     assert "importSessions" in types_ts
     assert "Photos settings" in photos_view
     assert "PHOTO_LOCAL_SETTINGS_KEY" in photos_view
@@ -1347,30 +1588,51 @@ def assert_static_app_contracts() -> None:
     assert "storeLegacyPhotoRailPreferences" in photos_view
     assert "normalizePhotoLocalSettingsWithLegacyRail" in photos_view
     assert "_clean_photo_rail_preferences" in workspace_db
-    assert "Referenced-file warnings" in photos_view
-    assert "Strip location by default" in photos_view
-    assert "Lock sensitive collections" in photos_view
-    assert "Sensitive session lock" in photos_view
+    assert "PhotoPrivacySettingsPanel" in photos_view
+    assert "Referenced-file warnings" not in photos_view
+    assert "Referenced-file warnings" in photo_privacy_settings_panel
+    assert "Strip location by default" not in photos_view
+    assert "Strip location by default" in photo_privacy_settings_panel
+    assert "Lock sensitive collections" not in photos_view
+    assert "Lock sensitive collections" in photo_privacy_settings_panel
+    assert "Sensitive session lock" not in photos_view
+    assert "Sensitive session lock" in photo_privacy_settings_panel
     assert "sensitiveSessionTimerRef" in photos_view
     assert "sensitiveSessionLockMinutes" in photos_view
-    assert "Use device authentication" in photos_view
-    assert "Unlock with" in photos_view
+    assert "Use device authentication" not in photos_view
+    assert "Use device authentication" in photo_privacy_settings_panel
+    assert "PhotoSensitiveLockPanel" in photos_view
+    assert "photo-sensitive-lock" not in photos_view
+    assert "photo-sensitive-lock" in photo_sensitive_lock_panel
+    assert "Unlock with" in photo_sensitive_lock_panel
+    assert "Hide sensitive" in photo_sensitive_lock_panel
     assert "Sensitive passcode" in photos_view
+    assert "Sensitive passcode" in photo_privacy_settings_panel
     assert "Creator / credit" in photos_view
     assert "IPTC location" in photos_view
-    assert "Pet model recognition" in photos_view
+    assert "Pet model recognition" not in photos_view
+    assert "Pet model recognition" in photo_intelligence_settings_panel
     assert "petRecognitionStatus" in types_ts
-    assert "Set passcode" in photos_view
+    assert "Set passcode" not in photos_view
+    assert "Set passcode" in photo_privacy_settings_panel
     assert "Passcode did not match" in photos_view
-    assert "Video autoplay" in photos_view
-    assert "Pause video when backgrounded" in photos_view
+    assert "PhotoMediaPlaybackSettingsPanel" in photos_view
+    assert "Video autoplay" not in photos_view
+    assert "Video autoplay" in photo_media_playback_settings_panel
+    assert "Pause video when backgrounded" not in photos_view
+    assert "Pause video when backgrounded" in photo_media_playback_settings_panel
     assert "pauseVideoWhenBackgrounded" in photos_view
-    assert "HDR viewing" in photos_view
-    assert "No-network intelligence" in photos_view
+    assert "HDR viewing" not in photos_view
+    assert "HDR viewing" in photo_media_playback_settings_panel
+    assert "PhotoIntelligenceSettingsPanel" in photos_view
+    assert "No-network intelligence" in photo_intelligence_settings_panel
+    assert "Model/source disclosure" in photo_intelligence_settings_panel
     assert "photoCurationPreferences" in photos_view
     assert "savePhotoCurationPreferences" in photos_view
-    assert "Feature less" in photos_view
-    assert "Reset Memory feedback" in photos_view
+    assert "Feature less" in photo_curation_preferences_panel
+    assert "Feature less" in photo_lightbox_curation_actions
+    assert "Reset Memory feedback" not in photos_view
+    assert "Reset Memory feedback" in photo_curation_preferences_panel
     assert "resetPhotoMemoryFeedbackPreferences" in photos_view
     assert "clearPhotoMemoryPreferences" in photos_view
     assert "photoMemoryFeedbackTotal" in photos_view
@@ -1390,7 +1652,9 @@ def assert_static_app_contracts() -> None:
     assert "Save memory details" in photos_view
     assert "saveActiveUserMemoryDetails" in photos_view
     assert "buildPhotoLiveTextRegions" in photos_view
-    assert "photos-live-text-region-layer" in photos_view
+    assert "PhotoLightboxStage" in photos_view
+    assert "photos-live-text-region-layer" not in photos_view
+    assert "photos-live-text-region-layer" in photo_lightbox_stage
     assert "photoLiveTextRegionStageBox" in photos_view
     assert "Create memory" in photos_view
     assert "Delete memory" in photos_view
@@ -1406,13 +1670,17 @@ def assert_static_app_contracts() -> None:
     assert "savePhotoUserMemory" in photos_view
     assert "deletePhotoUserMemory" in photos_view
     assert "photoUserMemories" in photos_view
-    assert "photo-curation-preferences" in photos_view
+    assert "PhotoCurationPreferencesPanel" in photos_view
+    assert "photo-curation-preferences" not in photos_view
+    assert "photo-curation-preferences" in photo_curation_preferences_panel
+    assert "Favorite memories" in photo_curation_preferences_panel
+    assert "Removed from memories" in photo_curation_preferences_panel
     assert "photo-memory-actions" in photos_view
     assert "buildPhotoFeatureLessSuggestions" in photos_view
     assert "buildPhotoMemoryFeatureLessSuggestions" in photos_view
     assert "toggleMemoryFeatureLessSuggestion" in photos_view
     assert "Feature Birthday less" in photos_view or "suggestion.actionLabel" in photos_view
-    assert "addPhotoMemoryRemovedItems" in photos_view
+    assert "addPhotoMemoryRemovedItems" in photo_curation_preferences
     assert "photo_curation_preferences" in api_server
     assert "save_photo_curation_preferences" in api_server
     assert "photo_user_memories" in api_server
@@ -1449,7 +1717,8 @@ def assert_static_app_contracts() -> None:
     assert "keyPhotoPreviewPath" in api_server
     assert "pairedVideoUrl" in desktop_main
     assert "visibleImportWarnings" in photos_view
-    assert "data-hdr-viewing" in photos_view
+    assert "data-hdr-viewing" not in photos_view
+    assert "data-hdr-viewing" in photo_lightbox_stage
     assert "shouldAutoplayPhotoVideo" in photos_view
     photo_settings = (root / "src" / "views" / "photoSettings.ts").read_text(encoding="utf-8")
     assert "normalizePhotoLocalSettings" in photo_settings
@@ -1467,65 +1736,94 @@ def assert_static_app_contracts() -> None:
     styles_css = (root / "src" / "styles.css").read_text(encoding="utf-8")
     assert "photo-settings-panel" in styles_css
     assert "photo-settings-library-media" in styles_css
-    assert "Library media defaults" in photos_view
+    assert "PhotoLibraryMediaDefaultsPanel" in photos_view
+    assert "photo-settings-library-media" not in photos_view
+    assert "photo-settings-library-media" in photo_library_media_defaults_panel
+    assert "Library media defaults" in photo_library_media_defaults_panel
+    assert "Reset media defaults" in photo_library_media_defaults_panel
     assert "resetPhotoLibraryMediaSettings" in photos_view
     assert "managedRootRenameDrafts" in photos_view
     assert "renameManagedPhotoRootProfile" in photos_view
     assert "importFailureDetails" in photos_view
-    assert "Import issues" in photos_view
+    assert "Import issues" in photo_import_status_alerts
     assert "retryPhotoImportFailure" in photos_view
-    assert "Retry import" in photos_view
+    assert "Retry import" in photo_recovered_import_issues_panel
     assert "scanPhotoRecoveredOrphans" in photos_view
     assert "photoRecoveredCleanup" in photos_view
     assert "libraryRoot" in photos_view
-    assert "Managed root health" in photos_view
-    assert "Check root" in photos_view
-    assert "Preview cleanup" in photos_view
-    assert "Clean stale" in photos_view
-    assert "Purge old files" in photos_view
+    assert "PhotoManagedRootsPanel" in photos_view
+    assert "Managed root health" not in photos_view
+    assert "Check root" not in photos_view
+    assert "Managed root health" in photo_managed_roots_panel
+    assert "Check root" in photo_managed_roots_panel
+    assert "Preview cleanup" in photo_recovered_import_issues_panel
+    assert "Clean stale" in photo_recovered_import_issues_panel
+    assert "Purge old files" in photo_recovered_import_issues_panel
     assert "deleteRecoveredFiles" in photos_view
-    assert "Recovered source" in photos_view
-    assert "buildPhotoImportSessionSummary(session" in photos_view
-    assert "Scan orphans" in photos_view
-    assert "Preview orphans" in photos_view
+    assert "Recovered source" in photo_recovered_import_issues_panel
+    assert "Scan orphans" in photo_recovered_import_issues_panel
+    assert "Preview orphans" in photo_recovered_import_issues_panel
     assert "Preview found" in photos_view
     assert "dryRun" in photos_view
     assert "Mail from qa@example.test" in photos_e2e
     assert "Photos Recovered previews scans and saves managed-root orphans" in photos_e2e
     assert "rebuildPhotoPreviews" in photos_view
-    assert "Rebuild previews" in photos_view
+    assert "Rebuild previews" in photo_load_status_alerts_panel
     assert "photoLibraryBackupCheck" in photos_view
-    assert "Backup readiness" in photos_view
-    assert "Backup check" in photos_view
+    assert "PhotoBackupCheckPanel" in photos_view
+    assert "photo-backup-check-panel" not in photos_view
+    assert "Backup readiness" in photo_backup_check_panel
+    assert "Backup check" in photo_backup_check_panel
+    assert "No backup check run yet." in photo_backup_check_panel
     assert "Managed root profiles" in (root / "src" / "views" / "photoRepairCenter.ts").read_text(encoding="utf-8")
     assert "buildPhotoManagedRootProfileRows" in photos_view
     assert "photo-managed-root-profile-details" in styles_css
     assert "managedRootProfileIssues" in api_server
     assert "managedAssetsOutsideProfiles" in api_server
-    assert "Needs repair" in photos_view
+    assert "Needs repair" in photo_repair_center_panel
     assert "buildPhotoRepairIssues" in photos_view
-    assert "Repair center" in photos_view
-    assert "Repair scan" in photos_view
-    assert "photoReviewMoreCandidateReasons" in photos_view
+    assert "PhotoRepairCenterSection" in photos_view
+    assert "PhotoRepairCenterActions" in photo_repair_center_section
+    assert "PhotoRepairCenterSummary" in photo_repair_center_section
+    assert "Repair center" in photo_repair_center_panel
+    assert "Repair scan" in photo_repair_center_panel
+    assert "No repair scan run yet." in photo_repair_center_panel
+    assert "photoReviewMoreCandidateReasons" in photo_group_review
     assert "Review More minimum score" in photos_view
     assert "photos-review-more-threshold" in styles_css
     assert "handlePhotoRepairIssueAction" in photos_view
     assert "rebuildMissingPhotoPreviews" in photos_view
+    assert "PhotoRepairIssueList" in photo_repair_center_section
+    assert "photo-repair-issue-scope" in photo_repair_issue_list
+    assert "photoRepairIssueActionLabel" in photo_repair_issue_list
+    assert "PhotoCatalogCleanupPreviewPanel" in photo_repair_center_section
+    assert "Catalog cleanup preview" in photo_catalog_cleanup_preview_panel
+    assert "Apply cleanup" in photo_catalog_cleanup_preview_panel
     assert "photoRepairHistory" in photos_view
-    assert "Recent repair history" in photos_view
-    assert "photoRepairHistoryEventDetails" in photos_view
+    assert "PhotoRepairHistoryList" in photo_repair_center_section
+    assert "Recent repair history" in photo_repair_history_list
+    assert "photoRepairHistoryEventDetails" in photo_repair_history_list
     assert "buildPhotoConsolidationHistoryRows" in photos_view
-    assert "Recent consolidations" in photos_view
+    assert "PhotoConsolidationHistoryPanel" in photos_view
+    assert "Recent consolidations" not in photos_view
+    assert "Recent consolidations" in photo_consolidation_panels
     assert "photo-consolidation-history" in styles_css
     assert "photo-repair-history-details" in (root / "src" / "styles.css").read_text(encoding="utf-8")
     assert "managedRootLabel" in api_server
     assert "photo-repair-center" in (root / "src" / "styles.css").read_text(encoding="utf-8")
     assert "photo-repair-history-row" in (root / "src" / "styles.css").read_text(encoding="utf-8")
-    assert "photo-import-failures" in photos_view
+    assert "PhotoImportStatusAlerts" in photos_view
+    assert "photo-import-failures" not in photos_view
+    assert "photo-import-failures" in photo_import_status_alerts
     assert "Not in Album" in photos_view
-    assert "photo-import-warning" in photos_view
-    assert "Album folder" in photos_view
-    assert "Parent folder" in photos_view
+    assert "photo-import-warning" not in photos_view
+    assert "photo-import-warning" in photo_import_status_alerts
+    assert "Album folder name" in photo_album_folder_editor
+    assert "PhotoAlbumFolderEditor" in photos_view
+    assert "Parent folder" in photo_album_folder_editor
+    assert "Save folder" in photo_album_folder_editor
+    assert "PhotoRailLoadErrors" in photos_view
+    assert "props.errors.map" in photo_rail_load_errors
     assert "Merge into album" in photos_view
     assert "Delete folder" in photos_view
     assert "Collapse folder" in photos_view
@@ -1533,12 +1831,33 @@ def assert_static_app_contracts() -> None:
     assert "Move collection down" in photos_view
     assert "onDragStart" in photos_view
     assert "planPhotoRailAlbumTreeDrop" in photos_view
-    assert "Album type" in photos_view
+    assert "PhotoAlbumsGallery" in photos_view
+    assert "albums-gallery" not in photos_view
+    assert "albums-gallery" in photo_albums_gallery
+    assert "album-folder-card" not in photos_view
+    assert "album-folder-card" in photo_albums_gallery
+    assert "Album folder path" not in photos_view
+    assert "Album folder path" in photo_albums_gallery
+    assert "Create your first album" not in photos_view
+    assert "Create your first album" in photo_albums_gallery
+    assert "PhotoMemoriesFeed" in photos_view
+    assert "memories-feed" not in photos_view
+    assert "memories-feed" in photo_memories_feed
+    assert "Memories appear here" not in photos_view
+    assert "Memories appear here" in photo_memories_feed
+    assert "Featured memory" not in photos_view
+    assert "Featured memory" in photo_memories_feed
+    assert "PhotoAlbumEditorPanel" in photos_view
+    assert "Album type" not in photos_view
+    assert "Album type" in photo_album_editor_panel
+    assert "Visual query" in photo_album_editor_panel
+    assert "renderSmartQueryGroup" in photo_album_editor_panel
     assert "Could not load folders" in photos_view
-    assert "Could not load photos" in photos_view
-    assert "Could not generate every preview" in photos_view
-    assert "Retry photos" in photos_view
-    assert "Add to album" in photos_view
+    assert "PhotoLoadStatusAlertsPanel" in photos_view
+    assert "Could not load photos" in photo_load_status_alerts_panel
+    assert "Could not generate every preview" in photo_load_status_alerts_panel
+    assert "Retry photos" in photo_load_status_alerts_panel
+    assert "Add to album" in photo_selection_bulk_metadata_controls
     assert "Remove from album" in photos_view
     assert "Album membership" in photos_view
     assert "Album membership filter" in photos_view
@@ -1569,25 +1888,36 @@ def assert_static_app_contracts() -> None:
     assert "Custom order" in photos_view
     assert "Title" in photos_view
     assert "Media kind" in photos_view
-    assert "Search text" in photos_view
-    assert "Keyword rule" in photos_view
-    assert "Title, caption, person, path" in photos_view
-    assert "Exact keyword" in photos_view
-    assert "Favorites only" in photos_view
-    assert "Edited only" in photos_view
-    assert "Move earlier" in photos_view
-    assert "Move later" in photos_view
+    assert "Search text" not in photos_view
+    assert "Keyword rule" not in photos_view
+    assert "Title, caption, person, path" not in photos_view
+    assert "Exact keyword" not in photos_view
+    assert "Favorites only" not in photos_view
+    assert "Edited only" not in photos_view
+    assert "Search text" in photo_album_editor_panel
+    assert "Keyword rule" in photo_album_editor_panel
+    assert "Title, caption, person, path" in photo_album_editor_panel
+    assert "Exact keyword" in photo_album_editor_panel
+    assert "Favorites only" in photo_album_editor_panel
+    assert "Edited only" in photo_album_editor_panel
+    assert "PhotoSelectionOrderControls" in photos_view
+    assert "Move earlier" in photo_selection_order_controls
+    assert "Move later" in photo_selection_order_controls
     assert "manualAlbumCanDragReorder" in photos_view
-    assert "MANUAL_ALBUM_ORDER_PAGE_LIMIT" in photos_view
+    assert "photoAlbumSourceOrder" in photos_view
+    assert "photoUserMemorySourceOrder" in photos_view
+    assert "SORTED_SOURCE_ORDER_PAGE_LIMIT" in photos_view
     assert "loadManualAlbumSourceOrder" in photos_view
     assert "Could not load the full album order" in photos_view
     assert "photoTileDropPlacement" in photos_view
     assert "reorderDraggedManualAlbum" in photos_view
     assert "customCollectionCanDragReorder" in photos_view
     assert "canDragReorder={customCollectionCanDragReorder}" in photos_view
-    assert "draggable={props.canDragReorder}" in photos_view
-    assert "dropPlacement={dropPlacement}" in photos_view
-    assert "drop-${props.dropPlacement}" in photos_view
+    assert "draggable={props.canDragReorder}" in photo_grid_tile
+    assert "PhotoVirtualGridPanel" in photos_view
+    assert "dropPlacement={dropPlacement}" not in photos_view
+    assert "dropPlacement={dropPlacement}" in photo_virtual_grid_panel
+    assert "drop-${props.dropPlacement}" in photo_grid_tile
     assert "Adjusted date" in photos_view
     assert "Hide location" in photos_view
     assert "Keyword filter" in photos_view
@@ -1596,21 +1926,24 @@ def assert_static_app_contracts() -> None:
     assert "photo-keyword-filter-strip" in styles_css
     assert "Media filter" in photos_view
     assert "Clear filters" in photos_view
-    assert "Active filters" in photos_view
-    assert "Remove filter" in photos_view
-    assert "Clear all" in photos_view
-    assert "Save filter" in photos_view
-    assert "Save search" in photos_view
-    assert "Saved Filters" in photos_view
-    assert "Delete saved filter" in photos_view
-    assert "Pin saved filter" in photos_view
-    assert "Unpin saved filter" in photos_view
-    assert "Move saved filter up" in photos_view
-    assert "Move saved filter down" in photos_view
-    assert "photo-saved-filter-actions" in photos_view
-    assert "photo-saved-filter-snippet" in photos_view
-    assert "previewSamples" in photos_view
-    assert "ruleSummary" in photos_view
+    assert "PhotoActiveFilterChips" in photos_view
+    assert "photo-active-filter-chips" not in photos_view
+    assert "Active filters" in photo_active_filter_chips
+    assert "Remove filter" in photo_active_filter_chips
+    assert "Clear all" in photo_active_filter_chips
+    assert "Save filter" in photo_active_filter_chips
+    assert "Save search" in photo_active_filter_chips
+    assert "PhotoSavedFiltersRailSection" in photos_view
+    assert "Saved Filters" in photo_saved_filters_rail_section
+    assert "Delete saved filter" in photo_saved_filters_rail_section
+    assert "Pin saved filter" in photo_saved_filters_rail_section
+    assert "Unpin saved filter" in photo_saved_filters_rail_section
+    assert "Move saved filter up" in photo_saved_filters_rail_section
+    assert "Move saved filter down" in photo_saved_filters_rail_section
+    assert "photo-saved-filter-actions" in photo_saved_filters_rail_section
+    assert "photo-saved-filter-snippet" in photo_saved_filters_rail_section
+    assert "previewSamples" in photo_saved_filters_rail_section
+    assert "ruleSummary" in photo_saved_filters_rail_section
     assert "Could not sync saved filters" in photos_view
     assert "listPhotoSavedFilters" in photos_view
     assert "savePhotoSavedFilter" in photos_view
@@ -1620,6 +1953,12 @@ def assert_static_app_contracts() -> None:
     assert "normalizePhotoSavedFilterList" in photos_view
     assert "normalizePhotoSavedFilterRecord" in photos_view
     assert "Delete permanently" in photos_view
+    assert "PhotoSelectionVisibilityControls" in photos_view
+    assert "photo-retention-control" in photo_selection_visibility_controls
+    assert "Retention days" in photo_selection_visibility_controls
+    assert "Delete older" in photo_selection_visibility_controls
+    assert "Restore" in photo_selection_visibility_controls
+    assert "Hide" in photo_selection_visibility_controls
     assert "confirmPhotoAction" in photos_view
     assert "photos-confirm-backdrop" in photos_view
     assert "Delete older photos" in photos_view
@@ -1630,63 +1969,104 @@ def assert_static_app_contracts() -> None:
     assert "photo-context-menu" in photos_view
     assert "handlePhotoGridTileContextMenu" in photos_view
     assert 'setPhotoContextMenu({ kind: "photo"' in photos_view
-    assert "Photo actions" in photos_view
+    assert "Photo actions" in photo_virtual_grid_panel
     assert "Collection actions" in photos_view
-    assert "Saved filter actions" in photos_view
-    assert "Zoom photos" in photos_view
-    assert "Reset zoom" in photos_view
+    assert "Saved filter actions" in photo_saved_filters_rail_section
+    assert "PhotoLightboxZoomControls" in photos_view
+    assert "Zoom photos" not in photos_view
+    assert "Zoom photos" in photo_lightbox_zoom_controls
+    assert "Reset zoom" not in photos_view
+    assert "Reset zoom" in photo_lightbox_zoom_controls
+    assert "PhotoLightboxPrimaryActions" in photos_view
+    assert "photos-subject-cutout-actions" not in photos_view
+    assert "photos-subject-cutout-actions" in photo_lightbox_primary_actions
+    assert "Export subject cutout PNG" not in photos_view
+    assert "Export subject cutout PNG" in photo_lightbox_primary_actions
+    assert "Copy subject cutout PNG" not in photos_view
+    assert "Copy subject cutout PNG" in photo_lightbox_primary_actions
+    assert "PhotoLightboxFileActions" in photos_view
+    assert "photos-lightbox-file-actions" not in photos_view
+    assert "photos-lightbox-file-actions" in photo_lightbox_file_actions
+    assert "PhotoLightboxCurationActions" in photos_view
+    assert "photos-lightbox-curation-actions" not in photos_view
+    assert "photos-lightbox-curation-actions" in photo_lightbox_curation_actions
+    assert "PhotoLightboxSafetyActions" in photos_view
+    assert "photos-lightbox-safety-actions" not in photos_view
+    assert "photos-lightbox-safety-actions" in photo_lightbox_safety_actions
     assert "lightboxPinchRef" in photos_view
     assert "beginLightboxPinch" in photos_view
-    assert "session.lightboxZoom" in photos_view
+    assert "session.lightboxZoom" in photo_lightbox_session
     assert "toggleLightboxFullscreen" in photos_view
-    assert "photos-lightbox-video" in photos_view
-    assert "Fullscreen" in photos_view
+    assert "photos-lightbox-video fill" not in photos_view
+    assert "photos-lightbox-video fill" in photo_lightbox_stage
+    assert 'uiText("Fullscreen")' not in photos_view
+    assert 'uiText("Fullscreen")' in photo_lightbox_zoom_controls
     assert "Revert date" in photos_view
-    assert "restoredPhotoCaptureDate" in photos_view
-    assert "Keyword manager" in photos_view
-    assert "Create keyword" in photos_view
-    assert "Add keywords" in photos_view
-    assert "Remove keywords" in photos_view
-    assert "Export keywords" in photos_view
-    assert "Import keywords" in photos_view
-    assert "Keyword import JSON" in photos_view
+    assert "restoredPhotoCaptureDate" in photo_info_draft
+    assert "PhotoKeywordManagerPanel" in photos_view
+    assert "photos-keyword-panel" not in photos_view
+    assert "Keyword manager" in photo_keyword_manager_panel
+    assert "photos-keyword-panel" in photo_keyword_manager_panel
+    assert "Keyword import JSON" in photo_keyword_manager_panel
+    assert "PhotoPetReviewKindChips" in photos_view
+    assert "photo-pet-review-kind-chips" not in photos_view
+    assert "photo-pet-review-kind-chips" in photo_pet_review_kind_chips
+    assert "Pet Review kind filters" in photo_pet_review_kind_chips
+    assert "All pets" in photo_pet_review_kind_chips
+    assert "Create keyword" in photo_keyword_manager_panel
+    assert "Add keywords" in photo_selection_bulk_metadata_controls
+    assert "Remove keywords" in photo_selection_bulk_metadata_controls
+    assert "Export keywords" in photo_keyword_manager_panel
+    assert "Import keywords" in photo_keyword_manager_panel
+    assert "Keyword import JSON" in photo_keyword_manager_panel
+    assert "PhotoSelectionReviewActions" in photos_view
     assert "Merge groups" in photos_view
+    assert "Merge groups" in photo_selection_review_actions
+    assert "Dismiss groups" in photo_selection_review_actions
     assert "Keep this" in photos_view
     assert "Recommended keep" in photos_view
     assert "Duplicate group" in photos_view
-    assert "Places map" in photos_view
-    assert "Nearby places" in photos_view
+    assert "PhotoPlaceMapPanel" in photos_view
+    assert "Places map" in place_map_panel
+    assert "Nearby places" in place_map_panel
     assert "buildPhotoPlaceMapPoints" in photos_view
     assert "buildPhotoPlaceMapClusters" in photos_view
     assert "buildPhotoPlaceMapDensityCells" in photos_view
-    assert "photo-place-map-mode-control" in photos_view
-    assert "photo-place-map-density" in photos_view
-    assert "photo-place-map-areas" in photos_view
-    assert "Map areas" in photos_view
-    assert "photo-place-map-radius-places" in photos_view
-    assert "Places in radius" in photos_view
+    assert "photo-place-map-panel" not in photos_view
+    assert "photo-place-map-mode-control" in place_map_panel
+    assert "photo-place-map-density" in place_map_panel
+    assert "photo-place-map-areas" in place_map_panel
+    assert "Map areas" in place_map_panel
+    assert "photo-place-map-radius-places" in place_map_panel
+    assert "Places in radius" in place_map_panel
     assert "nearbyPhotoPlacesWithinRadius" in places_map
     assert "photo places map radius results sort by distance and obey radius" in photo_tests
     assert "Places map supports modes zoom and nearby navigation" in photos_e2e
     assert "Photos compact Places map supports modes radius results and density areas" in photos_e2e
-    assert "Density" in photos_view
+    assert "Density" in place_map_panel
     assert "PHOTO_NEARBY_RADIUS_OPTIONS" in photos_view
     assert "setNearbyRadius" in photos_view
     assert "photoNearbyFilterFromSavedFilterState" in photos_view
-    assert "Nearby radius" in photos_view
-    assert "photo-nearby-radius-control" in photos_view
-    assert "has-cover" in photos_view
-    assert "clustered" in photos_view
-    assert "photo-place-map-controls" in photos_view
-    assert "photo-place-map-zoom" in photos_view
-    assert "Open clustered places near" in photos_view
-    assert "Export options" in photos_view
-    assert "Export preset" in photos_view
-    assert "Custom export" in photos_view
-    assert "Preset name" in photos_view
-    assert "Save preset" in photos_view
-    assert "Apply preset" in photos_view
-    assert "Delete preset" in photos_view
+    assert "Nearby radius" in photo_active_filter_chips
+    assert "photo-nearby-radius-control" in photo_active_filter_chips
+    assert "has-cover" in place_map_panel
+    assert "clustered" in place_map_panel
+    assert "photo-place-map-controls" in place_map_panel
+    assert "photo-place-map-zoom" in place_map_panel
+    assert "Open clustered places near" in place_map_panel
+    assert "Export options" in photo_selection_primary_actions
+    assert "PhotoExportPresetControls" in photos_view
+    assert "Export preset" in photo_export_preset_controls
+    assert "Custom export" in photo_export_preset_controls
+    assert "Preset name" in photo_export_preset_controls
+    assert "Save preset" in photo_export_preset_controls
+    assert "Apply preset" in photo_export_preset_controls
+    assert "Project bundle" in photo_export_preset_controls
+    assert "Creation presets" in photo_export_preset_controls
+    assert "Creation suggestions" in photo_export_preset_controls
+    assert "Full view suggestions" in photo_export_preset_controls
+    assert "Library suggestions" in photo_export_preset_controls
+    assert "Delete preset" in photo_export_preset_controls
     assert "photoExportPresets" in photos_view
     assert "PHOTO_EXPORT_PRESETS_KEY" in photos_view
     assert "photo-export-presets" in (root / "src" / "styles.css").read_text(encoding="utf-8")
@@ -1694,36 +2074,52 @@ def assert_static_app_contracts() -> None:
     assert "normalizePhotoExportPresetSettings" in photo_export_presets
     assert "upsertPhotoExportPreset" in photo_export_presets
     assert "deletePhotoExportPreset" in photo_export_presets
-    assert "Contact sheet" in photos_view
-    assert "Print sheet" in photos_view
+    assert "PhotoSelectionPrimaryActions" in photos_view
+    assert "PhotoSelectionSummaryControls" in photos_view
+    assert "Clear page" in photo_selection_summary_controls
+    assert "Select page" in photo_selection_summary_controls
+    assert "count-roll" in photo_selection_summary_controls
+    assert "Contact sheet" in photo_selection_primary_actions
+    assert "Print sheet" in photo_selection_primary_actions
+    assert "Export options" in photo_selection_primary_actions
+    assert "Remove from memory" in photo_selection_primary_actions
+    assert "PhotoSelectionOriginalActions" in photos_view
     assert "Print original" in photos_view
+    assert "Print original" in photo_selection_original_actions
     assert "printSelectedOriginal" in photos_view
     assert "printPath(item.sourcePath)" in photos_view
     assert "contactSheetPrintTarget" in photos_view
-    assert "Contact format" in photos_view
-    assert "Contact title" in photos_view
-    assert "Print layout" in photos_view
+    assert "PhotoExportContactSheetControls" in photos_view
+    assert "Contact format" in photo_export_contact_sheet_controls
+    assert "Contact title" in photo_export_contact_sheet_controls
+    assert "Page size" in photo_export_contact_sheet_controls
+    assert "Print layout" in photo_export_contact_sheet_controls
     assert "contactSheetLayout" in photos_view
     assert "layoutPreset: contactSheetLayout" in photos_view
-    assert "Caption details" in photos_view
-    assert "Contact sheet columns" in photos_view
+    assert "Contact captions" in photo_export_contact_sheet_controls
+    assert "Caption details" in photo_export_contact_sheet_controls
+    assert "Contact sheet columns" in photo_export_contact_sheet_controls
+    assert "Contact sheet thumbnail size" in photo_export_contact_sheet_controls
     assert "PhotoContactSheetLayoutPreset" in photo_export_presets
-    assert "Export kind" in photos_view
-    assert "Rendered file" in photos_view
-    assert "Render format" in photos_view
-    assert "Render quality" in photos_view
-    assert "Render max edge" in photos_view
-    assert "Target profile" in photos_view
-    assert '<option value="display-p3">' in photos_view
-    assert '<option value="adobe-rgb">' in photos_view
-    assert '<option value="custom-icc">' in photos_view
-    assert "Choose ICC" in photos_view
-    assert "Profile ready" in photos_view
-    assert "Profile check failed" in photos_view
-    assert "Profile availability check failed" in photos_view
-    assert "Profile available" in photos_view
-    assert "Profile unavailable" in photos_view
-    assert "photo-export-profile-preflight" in photos_view
+    assert "PhotoExportRenderControls" in photos_view
+    assert "Export kind" in photo_export_render_controls
+    assert "Rendered file" in photo_export_render_controls
+    assert "Render format" in photo_export_render_controls
+    assert "Render quality" in photo_export_render_controls
+    assert "Render max edge" in photo_export_render_controls
+    assert "Target profile" in photo_export_render_controls
+    assert '<option value="display-p3">' in photo_export_render_controls
+    assert '<option value="adobe-rgb">' in photo_export_render_controls
+    assert '<option value="custom-icc">' in photo_export_render_controls
+    assert "Choose ICC" in photo_export_render_controls
+    assert "photoExportColorProfileValidationStatus" in photos_view
+    assert "photoExportColorProfileStatusState" in photos_view
+    assert "Profile ready" in photo_export_presets
+    assert "Profile check failed" in photo_export_presets
+    assert "Profile availability check failed" in photo_export_presets
+    assert "Profile available" in photo_export_presets
+    assert "Profile unavailable" in photo_export_presets
+    assert "photo-export-profile-preflight" in photo_export_render_controls
     assert "photo_color_profile_status" in api_server
     assert "_cmd_photo_color_profile_status" in api_server
     assert '"display-p3", "adobe-rgb", "custom-icc"' in photo_export_presets
@@ -1735,11 +2131,12 @@ def assert_static_app_contracts() -> None:
     assert "VINTRACE_PHOTO_COLOR_PROFILE_ROOTS" in api_server
     assert "_photo_export_named_profile_candidates" in api_server
     assert "validate_photo_color_profile" in api_server
-    assert "Video format" in photos_view
+    assert "PhotoExportVideoControls" in photos_view
+    assert "Video format" in photo_export_video_controls
     assert "videoRenderFormat" in photos_view
-    assert '<option value="webm">' in photos_view
-    assert '<option value="hevc">' in photos_view
-    assert '<option value="prores">' in photos_view
+    assert '<option value="webm">' in photo_export_video_controls
+    assert '<option value="hevc">' in photo_export_video_controls
+    assert '<option value="prores">' in photo_export_video_controls
     assert '"mp4" | "mov" | "m4v" | "webm" | "hevc" | "prores"' in photo_export_presets
     assert '["mp4", "mov", "m4v", "webm", "hevc", "prores"]' in photo_export_presets
     assert '"webm"' in types_ts
@@ -1770,21 +2167,27 @@ def assert_static_app_contracts() -> None:
     assert '"video: hevc"' in photo_folders
     assert '"video: prores"' in photo_folders
     assert "exportPhotoVideoFrame" in photos_view
-    assert "Export frame" in photos_view
-    assert "Export poster" in photos_view
-    assert "Export saved video poster frame" in photos_view
+    assert "PhotoLightboxVideoActionBar" in photos_view
+    assert "Export frame" not in photos_view
+    assert "Export frame" in photo_lightbox_video_action_bar
+    assert "Export poster" not in photos_view
+    assert "Export poster" in photo_lightbox_video_action_bar
+    assert "Export saved video poster frame" not in photos_view
+    assert "Export saved video poster frame" in photo_lightbox_video_action_bar
     assert "exportPhotoVideoTrim" in photos_view
-    assert "Export trim" in photos_view
-    assert "Mark start" in photos_view
-    assert "Mark end" in photos_view
-    assert "Rotate video export" in photos_view
-    assert "Video crop aspect" in photos_view
+    assert "Export trim" in photo_lightbox_video_action_bar
+    assert "Mark start" in photo_lightbox_video_action_bar
+    assert "Mark end" in photo_lightbox_video_action_bar
+    assert "Rotate video export" not in photos_view
+    assert "Rotate video export" in photo_lightbox_video_action_bar
+    assert "Video crop aspect" not in photos_view
+    assert "Video crop aspect" in photo_lightbox_video_action_bar
     assert "videoRotateDegrees" in photos_view
     assert "videoCropAspect" in photos_view
-    assert "rendered_video_edit" in photos_view
-    assert '"rendered_video", "rendered_video_edit"' in photos_view
-    assert "Video trim" in photos_view
-    assert "Video transform" in photos_view
+    assert "rendered_video_edit" in photo_selection_export_results
+    assert '"rendered_video", "rendered_video_edit"' in photo_selection_export_results
+    assert "Video trim" in photo_lightbox_video_action_bar
+    assert "Video transform" in photo_selection_export_results
     assert "videoRotateDegrees" in types_ts
     assert "videoCropAspect" in types_ts
     assert "videoTrimStartMs" in types_ts
@@ -1810,37 +2213,39 @@ def assert_static_app_contracts() -> None:
     assert "photoManualCropHitTest" in photos_view
     assert "photoManualCropBoxFromDrag" in photos_view
     assert "beginImageManualCropOverlayDrag" in photos_view
-    assert "photos-edit-crop-overlay" in photos_view
-    assert "photos-edit-crop-overlay-layer" in photos_view
+    assert "photos-edit-crop-overlay" not in photos_view
+    assert "photos-edit-crop-overlay" in photo_lightbox_stage
+    assert "photos-edit-crop-overlay-layer" not in photos_view
+    assert "photos-edit-crop-overlay-layer" in photo_lightbox_stage
     assert "crop-overlay-active" in styles_css
     assert "photos-edit-crop-handle" in styles_css
-    assert "cropRect" in photos_view
+    assert "cropRect" in photo_image_edits
     assert "Adjust image" in photos_view
-    assert "Image exposure" in photos_view
-    assert "Image contrast" in photos_view
-    assert "Image highlights" in photos_view
-    assert "Image shadows" in photos_view
-    assert "Image brilliance" in photos_view
-    assert "Image black point" in photos_view
-    assert "Image midtones" in photos_view
-    assert "Image white point" in photos_view
-    assert "Image curve shadows" in photos_view
-    assert "Image curve midtones" in photos_view
-    assert "Image curve highlights" in photos_view
-    assert "Image red curve shadows" in photos_view
-    assert "Image red curve midtones" in photos_view
-    assert "Image red curve highlights" in photos_view
-    assert "Image green curve shadows" in photos_view
-    assert "Image green curve midtones" in photos_view
-    assert "Image green curve highlights" in photos_view
-    assert "Image blue curve shadows" in photos_view
-    assert "Image blue curve midtones" in photos_view
-    assert "Image blue curve highlights" in photos_view
-    assert "Image manual curve black point" in photos_view
-    assert "Image manual curve quarter point" in photos_view
-    assert "Image manual curve midpoint" in photos_view
-    assert "Image manual curve three-quarter point" in photos_view
-    assert "Image manual curve white point" in photos_view
+    assert "Image exposure" in photo_image_edits
+    assert "Image contrast" in photo_image_edits
+    assert "Image highlights" in photo_image_edits
+    assert "Image shadows" in photo_image_edits
+    assert "Image brilliance" in photo_image_edits
+    assert "Image black point" in photo_image_edits
+    assert "Image midtones" in photo_image_edits
+    assert "Image white point" in photo_image_edits
+    assert "Image curve shadows" in photo_image_edits
+    assert "Image curve midtones" in photo_image_edits
+    assert "Image curve highlights" in photo_image_edits
+    assert "Image red curve shadows" in photo_image_edits
+    assert "Image red curve midtones" in photo_image_edits
+    assert "Image red curve highlights" in photo_image_edits
+    assert "Image green curve shadows" in photo_image_edits
+    assert "Image green curve midtones" in photo_image_edits
+    assert "Image green curve highlights" in photo_image_edits
+    assert "Image blue curve shadows" in photo_image_edits
+    assert "Image blue curve midtones" in photo_image_edits
+    assert "Image blue curve highlights" in photo_image_edits
+    assert "Image manual curve black point" in photo_image_edits
+    assert "Image manual curve quarter point" in photo_image_edits
+    assert "Image manual curve midpoint" in photo_image_edits
+    assert "Image manual curve three-quarter point" in photo_image_edits
+    assert "Image manual curve white point" in photo_image_edits
     assert "Manual curve graph" in photos_view
     assert "Draw manual tone curve" in photos_view
     assert "beginImageManualCurveGraphDrag" in photos_view
@@ -1856,12 +2261,12 @@ def assert_static_app_contracts() -> None:
     assert "lightboxImagePointFromClient" in photos_view
     assert "getImageData" in photos_view
     assert "white-balance-picking" in styles_css
-    assert "Image saturation" in photos_view
-    assert "Image warmth" in photos_view
-    assert "Image tint" in photos_view
-    assert "Image sharpness" in photos_view
-    assert "Image vignette" in photos_view
-    assert "Image noise reduction" in photos_view
+    assert "Image saturation" in photo_image_edits
+    assert "Image warmth" in photo_image_edits
+    assert "Image tint" in photo_image_edits
+    assert "Image sharpness" in photo_image_edits
+    assert "Image vignette" in photo_image_edits
+    assert "Image noise reduction" in photo_image_edits
     assert "Auto enhance image" in photos_view
     assert "Auto enhance applied." in photos_view
     assert "photoImageAutoEnhanceAdjustments" in photos_view
@@ -1886,42 +2291,43 @@ def assert_static_app_contracts() -> None:
     assert "Copy image edits" in photos_view
     assert "Paste image edits" in photos_view
     assert "Paste image adjustments" in photos_view
-    assert "Paste copied adjustments to selected photos" in photos_view
+    assert "PhotoSelectionEditControls" in photos_view
+    assert "Paste copied adjustments to selected photos" in photo_selection_edit_controls
     assert "Image edit clipboard history" in photos_view
     assert "Remove copied edit from history" in photos_view
     assert "PHOTO_IMAGE_EDIT_CLIPBOARD_KEY" in photos_view
     assert "readStoredPhotoImageEditClipboardHistory" in photos_view
     assert "storePhotoImageEditClipboardHistory" in photos_view
-    assert "Replace existing edits?" in photos_view
-    assert "Replace existing adjustments?" in photos_view
-    assert "Checking paste conflicts" in photos_view
-    assert "photoImageEditOperationsEquivalent" in photos_view
-    assert "photoPasteConflictPreviewText" in photos_view
-    assert "photoPasteProgressMessage" in photos_view
-    assert "photoPasteResultMessage" in photos_view
-    assert "Checking paste conflicts for" in photos_view
-    assert "Pasting adjustments" in photos_view
-    assert "Copied adjustments" in photos_view
-    assert "Paste copied edits to selected photos" in photos_view
+    assert "Replace existing edits?" in photo_image_edits
+    assert "Replace existing adjustments?" in photo_image_edits
+    assert "Checking paste conflicts" in photo_image_edits
+    assert "photoImageEditOperationsEquivalent" in photo_image_edits
+    assert "photoImagePasteConflictDialogDraft" in photo_image_edits
+    assert "photoImagePasteProgressMessage" in photo_image_edits
+    assert "photoImagePasteResultMessage" in photo_image_edits
+    assert "Checking paste conflicts for" in photo_image_edits
+    assert "Pasting adjustments" in photo_image_edits
+    assert "Copied adjustments" in photo_image_edits
+    assert "Paste copied edits to selected photos" in photo_selection_edit_controls
     assert "imageEditClipboard" in photos_view
     assert "imageEditClipboardHistory" in photos_view
     assert "imageEditClipboardHasAdjustments" in photos_view
     assert "mergePhotoImageAdjustmentPasteOperation" in photos_view
-    assert "upsertPhotoImageEditClipboardHistory" in photos_view
+    assert "upsertPhotoImageEditClipboardHistory" in photo_image_edits
     assert "selectedEditStackItems" in photos_view
     assert "selectedEditStackVersionItems" in photos_view
     assert "snapshotSelectedPhotoEditStackVersions" in photos_view
     assert "restoreLatestSelectedPhotoEditStackVersions" in photos_view
     assert "deleteSelectedPhotoEditStackVersions" in photos_view
-    assert "Snapshot edit versions for selected photos" in photos_view
-    assert "Restore latest edit versions for selected photos" in photos_view
-    assert "Delete saved edit versions for selected photos" in photos_view
-    assert "Restore latest saved versions?" in photos_view
-    assert "Delete saved edit versions?" in photos_view
-    assert "Snapshotting edit versions" in photos_view
+    assert "Snapshot edit versions for selected photos" in photo_selection_edit_controls
+    assert "Restore latest edit versions for selected photos" in photo_selection_edit_controls
+    assert "Delete saved edit versions for selected photos" in photo_selection_edit_controls
+    assert "Restore latest saved versions?" in photo_image_edits
+    assert "Delete saved edit versions?" in photo_image_edits
+    assert "Snapshotting edit versions" in photo_image_edits
     assert "revertSelectedPhotoEditStacks" in photos_view
-    assert "Revert edits for selected photos" in photos_view
-    assert "Revert selected edits?" in photos_view
+    assert "Revert edits for selected photos" in photo_selection_edit_controls
+    assert "Revert selected edits?" in photo_image_edits
     assert "hasEditStack" in api_server
     assert "hasEditStack" in types_ts
     assert "editStackVersionCount" in api_server
@@ -1971,10 +2377,10 @@ def assert_static_app_contracts() -> None:
     assert 'window.addEventListener("blur", pauseLightboxVideoForBackground)' in photos_view
     assert 'window.addEventListener("pagehide", pauseLightboxVideoForBackground)' in photos_view
     assert 'document.addEventListener("visibilitychange", onVisibilityChange)' in photos_view
-    assert "photos-video-trim-timeline" in photos_view
-    assert "Video trim timeline" in photos_view
-    assert "Video trim start handle" in photos_view
-    assert "Video trim end handle" in photos_view
+    assert "photos-video-trim-timeline" in photo_lightbox_video_action_bar
+    assert "Video trim timeline" in photo_lightbox_video_action_bar
+    assert "Video trim start handle" in photo_lightbox_video_action_bar
+    assert "Video trim end handle" in photo_lightbox_video_action_bar
     assert "updateVideoTrimStartHandle" in photos_view
     assert "updateVideoTrimEndHandle" in photos_view
     assert "photos-video-trim-selection" in styles_css
@@ -1983,17 +2389,24 @@ def assert_static_app_contracts() -> None:
     assert '"flipHorizontal"' in keyboard_shortcuts
     assert '"flipVertical"' in keyboard_shortcuts
     assert '"save"' in keyboard_shortcuts
-    assert "image_crop_rotate" in photos_view
+    assert "image_crop_rotate" in photo_image_edits
     assert "straightenDegrees" in photos_view
     assert "Revert photo edit stack" in photos_view
     assert "Duplicate edit version" in photos_view
-    assert "Edit stack versions" in photos_view
-    assert "Edit version preview" in photos_view
-    assert "photoEditStackVersionOperationLabel" in photos_view
-    assert "compactPhotoEditStackId" in photos_view
-    assert "Source edit" in photos_view
-    assert "Restore edit version" in photos_view
-    assert "Delete edit version" in photos_view
+    assert "PhotoLightboxEditStackHistory" in photos_view
+    assert "Edit stack versions" not in photos_view
+    assert "Edit stack versions" in photo_lightbox_edit_stack_history
+    assert "Edit version preview" not in photos_view
+    assert "Edit version preview" in photo_lightbox_edit_stack_history
+    assert "photoEditStackVersionOperationLabel" in photo_image_edit_display
+    assert "compactPhotoEditStackId" not in photos_view
+    assert "compactPhotoEditStackId" in photo_lightbox_edit_stack_history
+    assert "Source edit" not in photos_view
+    assert "Source edit" in photo_lightbox_edit_stack_history
+    assert "Restore edit version" not in photos_view
+    assert "Restore edit version" in photo_lightbox_edit_stack_history
+    assert "Delete edit version" not in photos_view
+    assert "Delete edit version" in photo_lightbox_edit_stack_history
     assert "Duplicate photo version" in photos_view
     assert "Duplicate rendered photo" in photos_view
     assert "Add markup annotation" in photos_view
@@ -2026,10 +2439,12 @@ def assert_static_app_contracts() -> None:
     assert "Pick clone source" in photos_view
     assert "beginImageRetouchBrushDraw" in photos_view
     assert "pickImageRetouchCloneSource" in photos_view
-    assert "photoImageRetouchBrushSpotsFromPoints" in photos_view
+    assert "photoImageRetouchBrushSpotsFromPoints" in photo_image_edits
     assert "Retouch strength" in photos_view
     assert "Clone source left" in photos_view
-    assert "{ retouch: imageRetouchSpots }" in photos_view
+    assert "photoImageEditOperationDraft({" in photos_view
+    assert "retouchActive: imageRetouchActive" in photos_view
+    assert "retouch: imageRetouchSpots" in photos_view
     assert "imageRetouchOpen" in photos_view
     assert "imageRetouchOverlayActive" in photos_view
     assert "retouch-brush-active" in photos_view
@@ -2122,15 +2537,19 @@ def assert_static_app_contracts() -> None:
     assert "imageMarkupSelectedIndex" in photos_view
     assert "addImageMarkupAnnotation" in photos_view
     assert "deleteSelectedImageMarkupAnnotation" in photos_view
-    assert "{ markup: imageMarkupAnnotations }" in photos_view
+    assert "markupActive: imageMarkupActive" in photos_view
+    assert "markup: imageMarkupAnnotations" in photos_view
     assert "imageMarkupOverlayActive" in photos_view
     assert "imageMarkupDragging" in photos_view
     assert "beginImageMarkupOverlayDrag" in photos_view
     assert "photoImageMarkupHitTest" in photos_view
     assert "photoImageMarkupAnnotationFromDrag" in photos_view
-    assert "photos-edit-markup-overlay" in photos_view
-    assert "photos-edit-markup-handle" in photos_view
-    assert "photos-edit-markup-stroke-preview" in photos_view
+    assert "photos-edit-markup-overlay" not in photos_view
+    assert "photos-edit-markup-overlay" in photo_lightbox_stage
+    assert "photos-edit-markup-handle" not in photos_view
+    assert "photos-edit-markup-handle" in photo_lightbox_stage
+    assert "photos-edit-markup-stroke-preview" not in photos_view
+    assert "photos-edit-markup-stroke-preview" in photo_lightbox_stage
     assert "photos-edit-signature-library" in photos_view
     assert "photos-edit-signature-preview" in photos_view
     assert "photos-edit-markup-overlay" in styles_css
@@ -2166,48 +2585,66 @@ def assert_static_app_contracts() -> None:
     assert "videoTrimStartMs" in api_server
     assert "videoTrimDurationMs" in api_server
     assert "videoEditSummary" in api_server
-    assert "videoEditTimeline" in photos_view
+    assert "videoEditTimeline" in photo_selection_export_results
     assert "detailLabels" in (root / "src" / "views" / "photoImageEdits.ts").read_text(encoding="utf-8")
     assert "usePosterFrame" in api_server
     assert "posterFrameReused" in api_server
     assert "exportPhotoLiveMotion" in photos_view
     assert "exportPhotoSubjectCutout" in photos_view
-    assert "Cutout PNG" in photos_view
-    assert "Sticker PNG" in photos_view
-    assert "Copy cutout" in photos_view
-    assert "Copy sticker" in photos_view
+    assert "Cutout PNG" not in photos_view
+    assert "Cutout PNG" in photo_lightbox_primary_actions
+    assert "Sticker PNG" not in photos_view
+    assert "Sticker PNG" in photo_lightbox_primary_actions
+    assert "Copy cutout" not in photos_view
+    assert "Copy cutout" in photo_lightbox_primary_actions
+    assert "Copy sticker" not in photos_view
+    assert "Copy sticker" in photo_lightbox_primary_actions
     assert "copyToClipboard" in photos_view
-    assert "Drag PNG" in photos_view
+    assert "Drag PNG" not in photos_view
+    assert "Drag PNG" in photo_lightbox_primary_actions
     assert "startSubjectCutoutFileDrag" in photos_view
     assert "startFileDrag" in photos_view
     assert "Open with..." in photos_view
     assert "Open with last" in photos_view
-    assert "External editors" in photos_view
+    assert "Open with..." in photo_selection_original_actions
+    assert "Open with last" in photo_selection_original_actions
+    assert "External editors" not in photos_view
+    assert "External editors" in photo_curation_preferences_panel
     assert "forgetExternalEditor" in photos_view
     assert "open_with_external_editor" in photos_view
     assert "open_with_last_external_editor" in photos_view
     assert "lastExternalEditorPath" in photos_view
     assert "lastPhotoExternalEditorPath" in app_tsx
     assert "writeClipboardImagePath" in app_tsx
-    assert "Export motion" in photos_view
-    assert "Export GIF" in photos_view
-    assert "Bounce GIF" in photos_view
+    assert "Export motion" not in photos_view
+    assert "Export motion" in photo_lightbox_video_action_bar
+    assert "Export GIF" not in photos_view
+    assert "Export GIF" in photo_lightbox_video_action_bar
+    assert "Bounce GIF" not in photos_view
+    assert "Bounce GIF" in photo_lightbox_video_action_bar
     assert "setPhotoLiveKeyPhoto" in photos_view
-    assert "Set key photo" in photos_view
+    assert "Set key photo" not in photos_view
+    assert "Set key photo" in photo_lightbox_video_action_bar
     assert "resetPhotoLiveKeyPhoto" in photos_view
-    assert "Reset key photo" in photos_view
-    assert "Live Photo motion preview" in photos_view
+    assert "Reset key photo" not in photos_view
+    assert "Reset key photo" in photo_lightbox_video_action_bar
+    assert "Live Photo motion preview" not in photos_view
+    assert "Live Photo motion preview" in photo_lightbox_stage
     assert "setPhotoVideoPoster" in photos_view
-    assert "Set poster" in photos_view
-    assert "Video poster policy" in photos_view
-    assert "Auto poster" in photos_view
+    assert "Set poster" not in photos_view
+    assert "Set poster" in photo_lightbox_video_action_bar
+    assert "Video poster policy" not in photos_view
+    assert "Video poster policy" in photo_lightbox_video_action_bar
+    assert "Auto poster" not in photos_view
+    assert "Auto poster" in photo_lightbox_video_action_bar
     assert "setLightboxVideoPosterPolicy" in photos_view
     assert "resetPhotoVideoPoster" in photos_view
-    assert "Reset poster" in photos_view
+    assert "Reset poster" not in photos_view
+    assert "Reset poster" in photo_lightbox_video_action_bar
     assert '"policy": policy' in api_server
     assert 'policy: "auto"' in photos_view
-    assert "Metadata JSON" in photos_view
-    assert "XMP sidecars" in photos_view
+    assert "Metadata JSON" in photo_export_packaging_controls
+    assert "XMP sidecars" in photo_export_packaging_controls
     assert "_photo_export_accessibility_fields" in api_server
     assert "Iptc4xmpCore:AltTextAccessibility" in api_server
     assert "Iptc4xmpCore:ExtDescrAccessibility" in api_server
@@ -2226,7 +2663,7 @@ def assert_static_app_contracts() -> None:
     assert "Region 1: Rendered focal region" in photo_folders_units
     assert "Album: Vacation Picks" in photo_folders_units
     assert "Unit Lens 35mm" in photo_folders_units
-    assert "Original filenames" in photos_view
+    assert "Original filenames" in photo_export_packaging_controls
     assert "Favorite person" in photos_view
     assert "Hide person" in photos_view
     assert "Use as key photo" in photos_view
@@ -2240,87 +2677,122 @@ def assert_static_app_contracts() -> None:
     assert "Recent Days" in photos_view
     assert "dateBucketMode" in photos_view
     assert "dateBucketKey" in photos_view
-    assert "Could not load date buckets" in photos_view
-    assert "Loading date buckets..." in photos_view
-    assert "No dated photos in this view" in photos_view
+    assert "PhotoDateBucketPanel" in photos_view
+    assert "Could not load date buckets" not in photos_view
+    assert "Loading date buckets..." not in photos_view
+    assert "No dated photos in this view" not in photos_view
+    assert "Could not load date buckets" in photo_date_bucket_panel
+    assert "Loading date buckets..." in photo_date_bucket_panel
+    assert "No dated photos in this view" in photo_date_bucket_panel
     assert "buildPhotoDateBuckets" in photos_view
     assert "buildPhotoDateBucketSummaryBadges" in photos_view
     assert "photoDateBucketCoverReason" in photos_view
-    assert "photo-date-bucket-cover-reason" in photos_view
-    assert "photo-date-bucket-badges" in photos_view
+    assert "photo-date-bucket-cover-reason" not in photos_view
+    assert "photo-date-bucket-badges" not in photos_view
+    assert "photo-date-bucket-cover-reason" in photo_date_bucket_panel
+    assert "photo-date-bucket-badges" in photo_date_bucket_panel
     assert "slice(0, 7)" in photos_view
     assert "photoShortcutForKeyboardEvent" in photos_view
     assert "isPhotoShortcutTypingTarget" in photos_view
-    assert "photoThumbnailAspectRatio" in photos_view
+    assert "photoThumbnailAspectRatio" in photo_thumbnail_controls
     assert "buildPhotoVirtualGridLayout" in photos_view
     assert "windowPhotoVirtualGridLayout" in photos_view
-    assert "photos-grid virtualized" in photos_view
+    assert "photos-grid virtualized" not in photos_view
+    assert "photos-grid virtualized" in photo_virtual_grid_panel
     assert "buildPhotoSlideshowQueue" in photos_view
     assert "startPhotoSlideshow" in photos_view
-    assert "photos-slideshow" in photos_view
-    assert "Start slideshow" in photos_view
-    assert "Slideshow selected" in photos_view
+    assert "PhotoSlideshowOverlay" in photos_view
+    assert "photos-slideshow" not in photos_view
+    assert "photos-slideshow" in photo_slideshow_overlay
+    assert "Close slideshow" in photo_slideshow_overlay
+    assert "Previous slide" in photo_slideshow_overlay
+    assert "Next slide" in photo_slideshow_overlay
+    assert "Memory chapters" in photo_slideshow_overlay
+    assert "Start slideshow" not in photos_view
+    assert "Start slideshow" in photo_lightbox_primary_actions
+    assert "Slideshow selected" in photo_selection_primary_actions
     assert "photoSlideshowProjects" in photos_view
     assert "PHOTO_SLIDESHOW_PROJECTS_KEY" in photos_view
     assert "loadPhotoSlideshowProjects" in photos_view
     assert "savePhotoSlideshowProjectFnRef" in photos_view
     assert "deletePhotoSlideshowProjectFnRef" in photos_view
-    assert "Save slideshow" in photos_view
-    assert "Play project" in photos_view
-    assert "Export slideshow" in photos_view
-    assert "Export movie" in photos_view
+    assert "PhotoSlideshowProjectTimelineControls" in photos_view
+    assert "Save slideshow" in photo_slideshow_project_timeline_controls
+    assert "Play project" in photo_slideshow_project_timeline_controls
+    assert "Export slideshow" in photo_slideshow_project_timeline_controls
+    assert "Export movie" in photo_slideshow_project_timeline_controls
+    assert "Delete project" in photo_slideshow_project_timeline_controls
+    assert "Slideshow timeline" in photo_slideshow_project_timeline_controls
+    assert "Audio starts" in photo_slideshow_project_timeline_controls
+    assert "Audio ends" in photo_slideshow_project_timeline_controls
     assert "outputMode" in photos_view
     assert "slideshowAudioMuted" in photos_view
     assert "PHOTO_SLIDESHOW_MUSIC_FREQUENCIES" in photos_view
     assert "AudioContext" in photos_view
-    assert "Mute music" in photos_view
-    assert "Unmute music" in photos_view
-    assert "Custom file" in photos_view
-    assert "Audio file" in photos_view
-    assert "Audio volume" in photos_view
-    assert "Audio fade" in photos_view
-    assert "Audio start" in photos_view
-    assert "Audio end" in photos_view
-    assert "Title-card title" in photos_view
-    assert "Title-card palette" in photos_view
-    assert "Title-card layout" in photos_view
-    assert "Title-card footer" in photos_view
-    assert "Selected slide duration" in photos_view
-    assert "Selected slide motion" in photos_view
-    assert "Apply motion" in photos_view
-    assert "Selected slide caption" in photos_view
-    assert "Selected caption layer" in photos_view
-    assert "Selected caption placement" in photos_view
-    assert "Selected caption typography" in photos_view
-    assert "Selected caption wrap" in photos_view
-    assert "Caption region X" in photos_view
+    assert "Mute music" not in photos_view
+    assert "Unmute music" not in photos_view
+    assert "Mute music" in photo_slideshow_overlay
+    assert "Unmute music" in photo_slideshow_overlay
+    assert "PhotoSlideshowProjectPlaybackControls" in photos_view
+    assert "Custom file" in photo_slideshow_project_playback_controls
+    assert "Audio file" in photo_slideshow_project_playback_controls
+    assert "Audio volume" in photo_slideshow_project_playback_controls
+    assert "Audio fade" in photo_slideshow_project_playback_controls
+    assert "Audio start" in photo_slideshow_project_playback_controls
+    assert "Audio end" in photo_slideshow_project_playback_controls
+    assert "PhotoSlideshowProjectBasicsControls" in photos_view
+    assert "Slideshow project" in photo_slideshow_project_basics_controls
+    assert "Slideshow title" in photo_slideshow_project_basics_controls
+    assert "Title-card title" in photo_slideshow_project_basics_controls
+    assert "Title-card palette" in photo_slideshow_project_basics_controls
+    assert "Title-card layout" in photo_slideshow_project_basics_controls
+    assert "Title-card footer" in photo_slideshow_project_basics_controls
+    assert "Selected slide duration" in photo_slideshow_project_basics_controls
+    assert "Selected slide motion" in photo_slideshow_project_basics_controls
+    assert "PhotoSlideshowProjectFramingControls" in photos_view
+    assert "Apply motion" in photo_slideshow_project_framing_controls
+    assert "Focal X" in photo_slideshow_project_framing_controls
+    assert "Focal Y" in photo_slideshow_project_framing_controls
+    assert "Crop zoom" in photo_slideshow_project_framing_controls
+    assert "PhotoSlideshowProjectCaptionControls" in photos_view
+    assert "Selected slide caption" in photo_slideshow_project_caption_controls
+    assert "Selected caption layer" in photo_slideshow_project_caption_controls
+    assert "Selected caption placement" in photo_slideshow_project_caption_controls
+    assert "Selected caption typography" in photo_slideshow_project_caption_controls
+    assert "Selected caption wrap" in photo_slideshow_project_caption_controls
+    assert "Caption region X" in photo_slideshow_project_caption_controls
     assert "Caption region editor" in photos_view
     assert "Caption region canvas" in photos_view
     assert "Move caption region" in photos_view
     assert "Resize caption region" in photos_view
     assert "resize-southeast" in photos_view
-    assert "Apply caption" in photos_view
-    assert "Clear caption" in photos_view
-    assert "photos-slideshow-caption" in photos_view
-    assert "PHOTO_SLIDESHOW_CAPTION_LIMIT" in photos_view
+    assert "PhotoSlideshowProjectCaptionActionControls" in photos_view
+    assert "Apply caption" in photo_slideshow_project_caption_action_controls
+    assert "Apply caption preset" in photo_slideshow_project_caption_action_controls
+    assert "Clear caption" in photo_slideshow_project_caption_action_controls
+    assert "photos-slideshow-caption" not in photos_view
+    assert "photos-slideshow-caption" in photo_slideshow_overlay
+    assert "PHOTO_SLIDESHOW_CAPTION_LIMIT" in photo_slideshow_project_caption_controls
     assert "captions" in photos_view
-    assert "Path start X" in photos_view
+    assert "PhotoSlideshowProjectKeyframeControls" in photos_view
+    assert "Path start X" in photo_slideshow_project_keyframe_controls
     assert "Path curve" in photos_view
     assert "Path editor" in photos_view
     assert "Draw path" in photos_view
     assert "Slideshow path canvas" in photos_view
-    assert "Path mid X" in photos_view
-    assert "Mid zoom" in photos_view
-    assert "Apply keyframes" in photos_view
-    assert "Clear keyframes" in photos_view
-    assert "Apply selected" in photos_view
-    assert "Transition" in photos_view
-    assert "Transition duration" in photos_view
+    assert "Path mid X" in photo_slideshow_project_keyframe_controls
+    assert "Mid zoom" in photo_slideshow_project_keyframe_controls
+    assert "Apply keyframes" in photo_slideshow_project_keyframe_controls
+    assert "Clear keyframes" in photo_slideshow_project_keyframe_controls
+    assert "Apply selected" in photo_slideshow_project_basics_controls
+    assert "Transition" in photo_slideshow_project_playback_controls
+    assert "Transition duration" in photo_slideshow_project_playback_controls
     assert "photoSlideshowProjectTransitionEffect" in photos_view
     assert "chooseSlideshowAudioFile" in photos_view
-    assert "Slideshow title" in photos_view
-    assert "Theme" in photos_view
-    assert "Music" in photos_view
+    assert "Slideshow title" in photo_slideshow_project_basics_controls
+    assert "PhotoSlideshowProjectTemplateControls" in photos_view
+    assert "Theme" in photo_slideshow_project_template_controls
+    assert "Music" in photo_slideshow_project_playback_controls
     assert "photo-slideshow-projects" in photos_view
     assert "sourcePaths" in api_server
     assert "source_paths_filter" in api_server
@@ -2470,8 +2942,8 @@ def assert_static_app_contracts() -> None:
     assert '"split"' in workspace_db
     assert '"immersive"' in workspace_db
     assert "clean_motion_keyframe_curve" in workspace_db
-    assert "Export templates" in photos_view
-    assert "Import templates" in photos_view
+    assert "Export templates" in photo_slideshow_project_template_controls
+    assert "Import templates" in photo_slideshow_project_template_controls
     assert "chooseSlideshowTemplateLibraryFile" in photos_view
     photo_slideshow_projects = (root / "src" / "views" / "photoSlideshowProjects.ts").read_text(encoding="utf-8")
     assert "PhotoSlideshowThemeTemplate" in photo_slideshow_projects
@@ -2540,23 +3012,24 @@ def assert_static_app_contracts() -> None:
     assert '"immersive"' in photo_slideshow_projects
     assert "transitionOut" in photo_slideshow_projects
     assert "transitionDurationMs" in photo_slideshow_projects
-    assert "Selected transition" in photos_view
-    assert "Apply transition" in photos_view
-    assert "Clear transition" in photos_view
+    assert "Selected transition" in photo_slideshow_project_caption_action_controls
+    assert "Selected transition duration" in photo_slideshow_project_caption_action_controls
+    assert "Apply transition" in photo_slideshow_project_caption_action_controls
+    assert "Clear transition" in photo_slideshow_project_caption_action_controls
     assert "currentPhotoMemoryMovieSettingsPayload" in photos_view
     assert "applyPhotoMemoryMovieSettings" in photos_view
     assert "Memory movie style" in photos_view
     assert "Save movie style" in photos_view
     assert "Apply movie style" in photos_view
     assert "Clear movie style" in photos_view
-    assert "Use face focal" in photos_view
-    assert "Apply crop" in photos_view
+    assert "Use face focal" in photo_slideshow_project_framing_controls
+    assert "Apply crop" in photo_slideshow_project_framing_controls
     assert "photoSlideshowCropStyle" in photos_view
-    assert "Timeline style" in photos_view
-    assert "Template preset" in photos_view
-    assert "Template name" in photos_view
+    assert "Timeline style" in photo_slideshow_project_template_controls
+    assert "Template preset" in photo_slideshow_project_template_controls
+    assert "Template name" in photo_slideshow_project_template_controls
     assert "Bezier handles" in photos_view
-    assert "Bezier control 1 X" in photos_view
+    assert "Bezier control 1 X" in photo_slideshow_project_keyframe_controls
     assert "clean_motion_path_mode" in workspace_db
     assert "clean_bezier_controls" in workspace_db
     assert "bezierControl1X" in workspace_db
@@ -2565,26 +3038,26 @@ def assert_static_app_contracts() -> None:
     assert "clean_bezier_controls" in api_server
     assert "bezierControl1X" in api_server
     assert "cropFocusRendered" in api_server
-    assert "Template palette" in photos_view
-    assert "Template typography" in photos_view
-    assert "Template backdrop" in photos_view
-    assert "Template backdrop intensity" in photos_view
-    assert "Template stage width" in photos_view
-    assert "Template region slot" in photos_view
-    assert "Template region X" in photos_view
-    assert "Clear region" in photos_view
-    assert "Reset regions" in photos_view
-    assert "Blur" in photos_view
-    assert "Spotlight" in photos_view
-    assert "Film" in photos_view
-    assert "Template layout" in photos_view
-    assert "Poster" in photos_view
-    assert "Split" in photos_view
-    assert "Immersive" in photos_view
-    assert "Save template" in photos_view
-    assert "Delete template" in photos_view
-    assert "Path 25% X" in photos_view
-    assert "Path 75% X" in photos_view
+    assert "Template palette" in photo_slideshow_project_template_controls
+    assert "Template typography" in photo_slideshow_project_template_controls
+    assert "Template backdrop" in photo_slideshow_project_template_controls
+    assert "Template backdrop intensity" in photo_slideshow_project_template_controls
+    assert "Template stage width" in photo_slideshow_project_template_controls
+    assert "Template region slot" in photo_slideshow_project_template_controls
+    assert "Template region X" in photo_slideshow_project_template_controls
+    assert "Clear region" in photo_slideshow_project_template_controls
+    assert "Reset regions" in photo_slideshow_project_template_controls
+    assert "Blur" in photo_slideshow_project_template_controls
+    assert "Spotlight" in photo_slideshow_project_template_controls
+    assert "Film" in photo_slideshow_project_template_controls
+    assert "Template layout" in photo_slideshow_project_template_controls
+    assert "Poster" in photo_slideshow_project_template_controls
+    assert "Split" in photo_slideshow_project_template_controls
+    assert "Immersive" in photo_slideshow_project_template_controls
+    assert "Save template" in photo_slideshow_project_template_controls
+    assert "Delete template" in photo_slideshow_project_template_controls
+    assert "Path 25% X" in photo_slideshow_project_keyframe_controls
+    assert "Path 75% X" in photo_slideshow_project_keyframe_controls
     styles_css = (root / "src" / "styles.css").read_text(encoding="utf-8")
     assert "photo-slideshow-projects" in styles_css
     assert "transition-dissolve" in styles_css
@@ -2616,15 +3089,20 @@ def assert_static_app_contracts() -> None:
     assert "typography-cinematic" in styles_css
     assert "wrap-two-line" in styles_css
     assert "theme-ken-burns" in styles_css
-    assert "Managed library roots" in photos_view
-    assert "Use managed root profile" in photos_view
-    assert "Forget managed root profile" in photos_view
+    assert "Managed library roots" not in photos_view
+    assert "Use managed root profile" not in photos_view
+    assert "Forget managed root profile" not in photos_view
+    assert "Managed library roots" in photo_managed_roots_panel
+    assert "Use managed root profile" in photo_managed_roots_panel
+    assert "Forget managed root profile" in photo_managed_roots_panel
     assert "PHOTO_ACTIVE_LIBRARY_ROOT_KEY" in photos_view
-    assert "Library view" in photos_view
+    assert "Library view" in photo_rail_import_controls
     assert "All libraries" in photos_view
-    assert "View only managed root profile" in photos_view
+    assert "View only managed root profile" not in photos_view
+    assert "View only managed root profile" in photo_managed_roots_panel
     assert "updateManagedPhotoRootPolicy" in photos_view
     assert "External backup" in photos_view
+    assert "External backup" in photo_managed_roots_panel
     assert "managedRootPolicy" in photos_view
     assert "setPhotoLibraryScope" in photos_view
     assert "libraryRoot: activeLibraryRootRef.current" in photos_view
@@ -2644,19 +3122,23 @@ def assert_static_app_contracts() -> None:
     assert "Photos settings manage managed-root profile history" in photos_e2e
     assert "resolvePhotoKeywordShortcut" in photos_view
     assert "applyKeywordShortcut" in photos_view
-    assert "Date offset days" in photos_view
-    assert "Shift dates" in photos_view
+    assert "Date offset days" in photo_selection_bulk_metadata_controls
+    assert "Shift dates" in photo_selection_bulk_metadata_controls
     assert "offsetSelectedDates" in photos_view
     assert "Adjusted time" in photos_view
     assert "Timezone offset" in photos_view
-    assert "Bulk timezone offset" in photos_view
-    assert "Set timezone" in photos_view
+    assert "Bulk timezone offset" in photo_selection_bulk_metadata_controls
+    assert "Set timezone" in photo_selection_bulk_metadata_controls
     assert "correctSelectedTimezones" in photos_view
     assert "Photos bulk date and timezone controls update selected photos" in photos_e2e
     assert "PHOTO_EXPORT_DESTINATIONS_KEY" in photos_view
-    assert "Export destinations" in photos_view
-    assert "Export to destination" in photos_view
-    assert "Forget destination" in photos_view
+    assert "PhotoExportDestinationControls" in photos_view
+    assert "Export destinations" in photo_export_destination_controls
+    assert "Export destination" in photo_export_destination_controls
+    assert "Choose on export" in photo_export_destination_controls
+    assert "Export to destination" in photo_export_destination_controls
+    assert "Copy to destination" in photo_export_destination_controls
+    assert "Forget destination" in photo_export_destination_controls
     assert "Photos export options reuse recent destinations" in photos_e2e
     assert "Thumbnail size" in photos_view
     assert "Thumbnail presentation" in photos_view
@@ -2678,16 +3160,16 @@ def assert_static_app_contracts() -> None:
     assert "Location map picker" in photos_view
     assert "pickLocationFromPointer" in photos_view
     assert "nudgeLocationPicker" in photos_view
-    assert "Strip location" in photos_view
-    assert "Existing sidecars" in photos_view
+    assert "Strip location" in photo_export_packaging_controls
+    assert "Existing sidecars" in photo_export_packaging_controls
     assert '".dop"' in api_server
     assert '".pp3"' in api_server
     assert '".on1"' in api_server
     assert '".cos"' in api_server
     assert "hasPhotoLocationOverride" in photos_view
-    assert "Template filenames" in photos_view
-    assert "Filename template" in photos_view
-    assert "Subfolder template" in photos_view
+    assert "Template filenames" in photo_export_packaging_controls
+    assert "Filename template" in photo_export_packaging_controls
+    assert "Subfolder template" in photo_export_packaging_controls
     assert "Person name" in photos_view
     assert "Rename person" in photos_view
     assert "Merge person" in photos_view
@@ -2697,6 +3179,15 @@ def assert_static_app_contracts() -> None:
     assert "photo-person-merge-preview" in styles_css
     assert "People sort" in photos_view
     assert "People & Pets" in photos_view
+    assert "PhotoPeopleGallery" in photos_view
+    assert "photos-people-gallery" not in photos_view
+    assert "photos-people-gallery" in photo_people_gallery
+    assert "people-circle-card" not in photos_view
+    assert "people-circle-card" in photo_people_gallery
+    assert "People & Pets" in photo_people_gallery
+    assert "Review matches" in photo_people_gallery
+    assert "More people to name" in photo_people_gallery
+    assert "People Together" in photo_people_gallery
     assert "Pet profile" in photos_view
     assert "petKindLabel" in photos_view
     assert "savePhotoPetProfile" in photos_view
@@ -2705,9 +3196,10 @@ def assert_static_app_contracts() -> None:
     assert "dismissPhotoPetReview" in photos_view
     assert "Assign pet name" in photos_view
     assert "Assign pet" in photos_view
-    assert "Bulk pet name" in photos_view
-    assert "Assign selected pets" in photos_view
-    assert "Dismiss selected Pet Review items" in photos_view
+    assert "PhotoSelectionBulkMetadataControls" in photos_view
+    assert "Bulk pet name" in photo_selection_bulk_metadata_controls
+    assert "Assign selected pets" in photo_selection_bulk_metadata_controls
+    assert "Dismiss selected Pet Review items" in photo_selection_bulk_metadata_controls
     assert "Name this pet" in photos_view
     assert "petReview" in photos_view
     assert "Pet name" in photos_view
@@ -2740,27 +3232,43 @@ def assert_static_app_contracts() -> None:
     review_focus_history = (root / "src" / "views" / "reviewFocusHistory.ts").read_text(encoding="utf-8")
     assert "upsertReviewFocusHistory" in review_focus_history
     assert "removeReviewFocusHistoryItem" in review_focus_history
+    review_focus_history_state = (root / "src" / "appReviewFocusHistoryState.ts").read_text(encoding="utf-8")
+    assert "reviewFocusHistoryStorageKey" in review_focus_history_state
+    assert "useReviewFocusHistoryState" in review_focus_history_state
+    app_preferences_state = (root / "src" / "appPreferencesState.ts").read_text(encoding="utf-8")
+    assert "photoImportFlagStorageKey" in app_preferences_state
+    assert "readOnboardingDismissed" in app_preferences_state
+    app_media_destinations_state = (root / "src" / "appMediaDestinationsState.ts").read_text(encoding="utf-8")
+    assert "mediaActionDestinationsStorageKey" in app_media_destinations_state
+    assert "upsertMediaActionDestination" in app_media_destinations_state
+    app_review_session_state = (root / "src" / "appReviewSessionState.ts").read_text(encoding="utf-8")
+    assert "reviewPrefStorageKey" in app_review_session_state
+    assert "writeReviewPref" in app_review_session_state
     assert "Inline Review More" in photos_view
     assert "reviewInlineCandidate" in photos_view
     assert "reviewCandidate: (status: CandidateStatus, candidate: ReviewCandidate)" in photos_view
     assert "reassignSelectedMatches" in photos_view
     assert "removeSelectedMatches" in photos_view
-    assert "Move selected matches to person" in photos_view
-    assert "Remove matches" in photos_view
+    assert "Move selected matches to person" in photo_selection_bulk_metadata_controls
+    assert "Remove matches" in photo_selection_bulk_metadata_controls
     assert "await loadPhotoOperations();" in photos_view
     assert "reviewMoreForActiveGroup" in photos_view
     assert "activeGroupReviewCandidates" in photos_view
     assert "Find duplicates" in photos_view
+    assert "Find duplicates" in photo_people_gallery
     assert "Duplicate people suggestions" in photos_view
-    assert "Near duplicate" in photos_view
-    assert "perceptual_dhash" in photos_view
+    assert "Near duplicate" in photo_duplicate_review
+    assert "perceptual_dhash" in photo_duplicate_review
     assert "Dismiss duplicate group" in photos_view
     assert "dismissPhotoDuplicateGroup" in photos_view
     assert "Duplicate comparison" in photos_view
     assert "Visual duplicate comparison" in photos_view
-    assert "Duplicate review" in photos_view
-    assert "Keep recommended" in photos_view
-    assert "Keep this" in photos_view
+    assert "PhotoDuplicateReviewPanel" in photos_view
+    assert "photos-duplicate-review-panel" not in photos_view
+    assert "Duplicate review" in photo_duplicate_review_panel
+    assert "Keep recommended" in photo_duplicate_review_panel
+    assert "Keep this" in photo_duplicate_review_panel
+    assert "photos-duplicate-review-panel" in photo_duplicate_review_panel
     assert "buildPhotoDuplicateComparisonRows" in photos_view
     assert "buildPhotoDuplicateBrowserReviewGroups" in photos_view
     assert "photos-duplicate-comparison-panel" in (root / "src" / "styles.css").read_text(encoding="utf-8")
@@ -2793,37 +3301,44 @@ def assert_static_app_contracts() -> None:
     assert "_photo_people_group_members_from_id" in api_server
     assert "photo_people_groups" in (root / "crossage_fr" / "store" / "workspace_db.py").read_text(encoding="utf-8")
     assert "_photo_entry_matches_people_group" in api_server
-    assert "Library search results" in photos_view
-    assert "Library search" in photos_view
-    assert "Searching library..." in photos_view
-    assert "No library matches" in photos_view
-    assert "photos-search-suggestions" in photos_view
+    assert "PhotoLibrarySearchPanel" in photos_view
+    assert "Library search results" in photo_library_search_panel
+    assert "Library search" in photo_library_search_panel
+    assert "Searching library..." in photo_library_search_panel
+    assert "No library matches" in photo_library_search_panel
+    assert "searchSuggestions" in photos_view
     assert "buildPhotoSearchSuggestions" in photos_view
     assert "buildPhotoSearchHighlightParts" in search_highlights
     assert "renderSearchHighlight" in photos_view
     assert "photo-search-highlight" in styles_css
-    assert "Collection display" in photos_view
-    assert "Utilities" in photos_view
-    assert "Sensitive" in photos_view
-    assert "Screenshots" in photos_view
-    assert "Shared" in photos_view
-    assert "Low-value" in photos_view
+    assert "PhotoRailDisplayControls" in photos_view
+    assert "photo-rail-display-controls" in photo_rail_display_controls
+    assert "Collection display" in photo_rail_display_controls
+    assert "Utilities" in photo_rail_display_controls
+    assert "Sensitive" in photo_rail_display_controls
+    assert "Screenshots" in photo_rail_display_controls
+    assert "Shared" in photo_rail_display_controls
+    assert "Low-value" in photo_rail_display_controls
     assert "showScreenshotCollections" in photos_view
     assert "showSharedCollections" in photos_view
     assert "showLowValueCollections" in photos_view
     assert "screen_recording" in photos_view
     assert "detectMissingOriginals" in photos_view
-    assert "Missing originals" in photos_view
+    assert "Missing originals" in photo_load_status_alerts_panel
     assert "relinkPhotoLibraryPaths" in photos_view
     assert "Relink folder" in photos_view
     assert "consolidatePhotoLibraryAssets" in photos_view
     assert "Consolidate" in photos_view
+    assert "Consolidate" in photo_selection_original_actions
     assert "buildPhotoConsolidationSummary" in photos_view
-    assert "photo-consolidation-result" in photos_view
-    assert "Managed folder" in photos_view
+    assert "PhotoConsolidationResultPanel" in photos_view
+    assert "photo-consolidation-result" not in photos_view
+    assert "photo-consolidation-result" in photo_consolidation_panels
+    assert "Managed folder" in photo_consolidation_panels
     assert "Originals copied" in (root / "src" / "views" / "photoConsolidationResult.ts").read_text(encoding="utf-8")
-    assert "photo-missing-badge" in photos_view
-    assert "Original file is missing" in photos_view
+    assert "photo-missing-badge" in photo_grid_tile
+    assert "Original file is missing" not in photos_view
+    assert "Original file is missing" in photo_lightbox_primary_actions
     assert "filterPhotoRailFolders" in photos_view
     assert "buildPhotoRailSections" in photos_view
     assert "collapsedRailSections" in photos_view
@@ -2832,16 +3347,20 @@ def assert_static_app_contracts() -> None:
     assert "Move collection up" in photos_view
     assert "Move collection down" in photos_view
     assert "recordPhotoAssetEvent" in photos_view
-    assert "PHOTO_IMPORT_SOURCE_OPTIONS" in photos_view
-    assert "Import source" in photos_view
-    assert "Edit import source" in photos_view
+    assert "PHOTO_IMPORT_SOURCE_OPTIONS" in photo_rail_import_controls
+    assert "Import source" in photo_rail_import_controls
+    assert "Edit import source" in photo_import_provenance_editor
     assert "updatePhotoImportSessionProvenance" in photos_view
     assert "archivePhotoImportSessions" in photos_view
     assert "photoImportSourceLabel" in photos_view
     assert "prepareImportPaths" in photos_view
     assert "Drop photos or folders to import" in photos_view
-    assert "Keep folder organization" in photos_view
-    assert "Keep folders" in photos_view
+    assert "Keep folder organization" in photo_rail_import_controls
+    assert "Keep folders" not in photos_view
+    assert "Keep folders" in photo_managed_roots_panel
+    assert "Inside workspace backup" in photo_managed_roots_panel
+    assert "Workspace managed root" in photo_managed_roots_panel
+    assert "Managed copy destination" in photo_managed_roots_panel
     assert "importKeepFolderOrganization" in photos_view
     assert "PHOTO_IMPORT_KEEP_FOLDERS_KEY" in photos_view
     assert "keepFolderOrganization" in photos_view
@@ -2850,6 +3369,8 @@ def assert_static_app_contracts() -> None:
     assert "relatedMediaCopiedCount" in types_ts
     assert "Reveal original" in photos_view
     assert "Open original" in photos_view
+    assert "Reveal original" in photo_selection_original_actions
+    assert "Open original" in photo_selection_original_actions
     assert "Saved from" in photos_view
     assert "importSourceKind" in types_ts
     assert "recentlyViewed" in api_server
@@ -2907,9 +3428,11 @@ def assert_static_app_contracts() -> None:
     assert "QR code" in photos_view
     assert "lightItemQrActions" in photos_view
     assert "lightItemQrRegions" in photos_view
-    assert "Select QR region" in photos_view
+    assert "Select QR region" not in photos_view
+    assert "Select QR region" in photo_lightbox_stage
     assert "QR regions" in photos_view
-    assert "photos-qr-region-layer" in photos_view
+    assert "photos-qr-region-layer" not in photos_view
+    assert "photos-qr-region-layer" in photo_lightbox_stage
     assert "photos-qr-region-summary" in styles_css
     live_text_actions = (root / "src" / "views" / "photoLiveTextActions.ts").read_text(encoding="utf-8")
     assert "buildPhotoLiveTextActions" in live_text_actions
@@ -2931,37 +3454,56 @@ def assert_static_app_contracts() -> None:
     assert "Retry detected items" in photos_view
     assert "Index pending detected items" in photos_view
     assert "Detected item jobs with no labels" in photos_view
-    assert "Queue loaded OCR" in photos_view
-    assert "Queue pending OCR" in photos_view
-    assert "Queue pending barcodes" in photos_view
-    assert "Queue loaded detected items" in photos_view
-    assert "Queue pending detected items" in photos_view
-    assert "Run next" in photos_view
-    assert "Run queue" in photos_view
-    assert "Retry failed queue" in photos_view
-    assert "Cancel indexing job" in photos_view
-    assert "Dismiss indexing job" in photos_view
-    assert "Retry indexing job" in photos_view
-    assert "attempts" in photos_view
-    assert "lastHistoryLabel" in photos_view
-    assert "photoIndexingActiveJobId" in photos_view
-    assert "photo-indexing-job-details" in photos_view
-    assert "Job details" in photos_view
-    assert "photo-export-result-row-details" in photos_view
-    assert "photo-export-result-success-details" in photos_view
-    assert "Export details" in photos_view
-    assert "Written files" in photos_view
-    assert "No target was written." in photos_view
+    assert "PhotoIndexingQueuePanel" in photos_view
+    assert "PhotoIndexingNoticePanel" in photos_view
+    assert "Queue loaded OCR" not in photos_view
+    assert "Queue loaded OCR" in photo_indexing_queue_panel
+    assert "Queue pending OCR" in photo_indexing_queue_panel
+    assert "Queue pending barcodes" in photo_indexing_queue_panel
+    assert "Queue loaded detected items" in photo_indexing_queue_panel
+    assert "Queue pending detected items" in photo_indexing_queue_panel
+    assert "Run next" in photo_indexing_queue_panel
+    assert "Run queue" in photo_indexing_queue_panel
+    assert "Retry failed queue" in photo_indexing_queue_panel
+    assert "Cancel indexing job" in photo_indexing_queue_panel
+    assert "Dismiss indexing job" in photo_indexing_queue_panel
+    assert "Retry indexing job" in photo_indexing_queue_panel
+    assert "attempts" in photo_indexing_queue_panel
+    assert "lastHistoryLabel" in photo_indexing_queue_panel
+    assert "activeJobId={photoIndexingActiveJobId}" in photos_view
+    assert "photo-indexing-job-details" not in photos_view
+    assert "photo-indexing-job-details" in photo_indexing_queue_panel
+    assert "Job details" in photo_indexing_queue_panel
+    assert "photo-search-index-notice" not in photos_view
+    assert "photo-search-index-notice" in photo_indexing_notice_panel
+    assert "photo-catalog-index-notice" in photo_indexing_notice_panel
+    assert "Search index is catching up" in photo_indexing_notice_panel
+    assert "Catalog refresh progress" in photo_indexing_notice_panel
+    assert "Run next" in photo_indexing_notice_panel
+    assert "PhotoExportResultPanel" in photos_view
+    assert "photo-export-result-row-details" not in photos_view
+    assert "photo-export-result-success-details" not in photos_view
+    assert "photo-export-result-row-details" in photo_export_result_panel
+    assert "photo-export-result-success-details" in photo_export_result_panel
+    assert "Export details" in photo_export_result_panel
+    assert "Written files" in photo_export_result_panel
+    assert "No target was written." in photo_selection_export_results
     assert "Photos mixed export result shows written files and capped missing issues" in photos_e2e
-    assert "lastPhotoSelectionExportSuccessRows.length > 0" in photos_view
-    assert "photo-operation-details" in photos_view
-    assert "Action details" in photos_view
-    assert "photo-restore-rehearsal-details" in photos_view
-    assert "Restore details" in photos_view
-    assert "photo-backup-restore-details" in photos_view
-    assert "Backup details" in photos_view
-    assert "Auto-run indexing queue" in photos_view
-    assert "photo-indexing-job-list" in photos_view
+    assert "panel.successRows.length > 0" in photo_export_result_panel
+    assert "PhotoOperationUndoPanel" in photos_view
+    assert "photo-operation-details" not in photos_view
+    assert "photo-operation-details" in photo_operation_undo_panel
+    assert "Action details" in photo_operation_undo_panel
+    assert "PhotoRestoreRehearsalSummary" in photo_repair_center_section
+    assert "PhotoBackupRestoreRehearsalSummary" in photo_repair_center_section
+    assert "photo-restore-rehearsal-details" in photo_restore_rehearsal_panels
+    assert "Restore details" in photo_restore_rehearsal_panels
+    assert "photo-backup-restore-details" in photo_restore_rehearsal_panels
+    assert "Backup details" in photo_restore_rehearsal_panels
+    assert "Auto-run indexing queue" not in photos_view
+    assert "Auto-run indexing queue" in photo_intelligence_settings_panel
+    assert "photo-indexing-job-list" not in photos_view
+    assert "photo-indexing-job-list" in photo_indexing_queue_panel
     assert "photo-indexing-job-row" in styles_css
     assert "photo-indexing-job-details" in styles_css
     assert "photo-export-result-row-details" in styles_css
@@ -2981,12 +3523,17 @@ def assert_static_app_contracts() -> None:
     assert "Check: photos-readiness" in photos_e2e
     assert "Severity: error" in photos_e2e
     assert "Index all pending barcodes" in photos_e2e
-    assert "photo-ocr-failure-list" in photos_view
+    assert "PhotoLocalIndexingStatusPanel" in photos_view
+    assert "photoLocalIndexingStatusSections" in photos_view
+    assert "photo-ocr-failure-list" not in photos_view
+    assert "photo-ocr-failure-list" in photo_local_indexing_status_panel
     assert "failedOnly" in photos_view
     assert "pendingOnly" in photos_view
     assert "Refresh OCR index status" in photos_view
-    assert "Pause indexing" in photos_view
-    assert "Indexing budget" in photos_view
+    assert "Pause indexing" not in photos_view
+    assert "Pause indexing" in photo_intelligence_settings_panel
+    assert "Indexing budget" not in photos_view
+    assert "Indexing budget" in photo_intelligence_settings_panel
     assert "backgroundIndexingPaused" in photos_view
     assert "backgroundIndexingAutoRun" in photos_view
     assert "indexingPowerMode" in photos_view
@@ -3082,7 +3629,8 @@ def assert_static_app_contracts() -> None:
     assert "selectedLiveTextRegionId" in photos_view
     assert "Live Text regions" in photos_view
     assert "Select Live Text snippet" in photos_view
-    assert "Select text region" in photos_view
+    assert "Select text region" not in photos_view
+    assert "Select text region" in photo_lightbox_stage
     assert "Clear selected text" in photos_view
     assert "OCR metadata" in photos_view
     assert "ocrMetadata" in (root / "src" / "views" / "photoInfoMetadata.ts").read_text(encoding="utf-8")
@@ -3090,7 +3638,9 @@ def assert_static_app_contracts() -> None:
     assert "download={action.downloadName || undefined}" in photos_view
     assert "copyText={copyText}" in (root / "src" / "App.tsx").read_text(encoding="utf-8")
     assert "photoEventActivityText" in photos_view
-    assert "eventMetadata" in photos_view
+    assert "metadata: photoSelectionShareEventMetadata(shareDraft, result)" in photos_view
+    assert "photoSelectionShareEventMetadata" in photo_selection_export_results
+    assert "eventMetadata" in photo_display_text
     assert "eventMetadata" in (root / "src" / "types.ts").read_text(encoding="utf-8")
     assert "event_details_by_asset_id" in api_server
     assert "\"eventMetadata\"" in api_server
@@ -3103,7 +3653,8 @@ def assert_static_app_contracts() -> None:
     assert "descriptionRegionsDraft" in photos_view
     assert "Description regions" in photos_view
     assert "Image description regions" in photos_view
-    assert "photos-description-region-layer" in photos_view
+    assert "photos-description-region-layer" not in photos_view
+    assert "photos-description-region-layer" in photo_lightbox_stage
     description_regions = (root / "src" / "views" / "photoDescriptionRegions.ts").read_text(encoding="utf-8")
     assert "buildPhotoDescriptionRegions" in description_regions
     assert "serializePhotoDescriptionRegions" in description_regions
@@ -3120,14 +3671,16 @@ def assert_static_app_contracts() -> None:
     assert "objectTagReview" in photos_view
     assert "photoObjectTagReviewRows" in photos_view
     assert "selectedObjectTagRegionId" in photos_view
-    assert "photos-object-tag-region" in photos_view
+    assert "photos-object-tag-region" not in photos_view
+    assert "photos-object-tag-region" in photo_lightbox_stage
     assert "visualLookupObjectTagId" in photos_view
     assert "Look up detected item" in photos_view
     assert "Search library" in photos_view
     assert "Confirm detected item" in photos_view
     assert "Hide detected item" in photos_view
     assert "Confirm match" in photos_view
-    assert "Not sensitive" in photos_view
+    assert "photoUtilityRejectLabel" in photos_view
+    assert "Not sensitive" in photo_utility_classifier_review
     assert "Undo utility review" in photos_view
     assert "utilityClassifierReview" in photos_view
     assert "_clean_photo_object_tag_review" in api_server
@@ -3222,7 +3775,8 @@ def assert_static_app_contracts() -> None:
     assert "setIncludePeople([])" in photos_view
     assert "smartQueryGroupFromAlbumRules(albumRules, { includePeople, excludePeople })" in photos_view
     assert "migratePhotoSmartAlbums({ albumId, apply: true })" in photos_view
-    assert "Migrate album" in photos_view
+    assert "Migrate album" not in photos_view
+    assert "Migrate album" in photo_album_editor_panel
     assert "Move section up" in photos_view
     assert "Move section down" in photos_view
     assert "Save sort as custom" in photos_view
@@ -3262,16 +3816,21 @@ def assert_static_app_contracts() -> None:
     assert "Schema object negative exact" in photo_folders
     assert "suggestions: librarySearchResult?.suggestions || []" in photos_view
     assert "suggestionLimit: 32" in photos_view
-    assert "item.snippet" in photos_view
+    assert "item.snippet" in photo_library_search_panel
     assert "Photos global search shows categorized local results snippets and routes" in photos_e2e
-    assert "Local semantic search" in photos_view
+    assert "Local semantic search" in photo_library_search_panel
+    assert "PhotoSemanticSearchPanel" in photos_view
+    assert "photos-semantic-search" not in photos_view
+    assert "photos-semantic-search" in photo_semantic_search_panel
+    assert "Semantic search results" in photo_semantic_search_panel
+    assert "photo-semantic-score" in photo_semantic_search_panel
     assert "semanticQueries" in types_ts
     assert "_photo_semantic_search_queries" in api_server
     assert "PHOTO_SEMANTIC_SEARCH_ALIASES" in api_server
     assert "Semantic match:" in api_server
     assert "search_photo_source_folders" in workspace_db
     assert '"sourceFolders"' in api_server
-    assert 'item.kind === "sourceFolder"' in photos_view
+    assert 'item.kind === "sourceFolder"' in photo_library_search_panel
     assert "_photo_search_folder_candidates" in api_server
     assert "for suggestion in sorted(" in api_server
     assert ")[:suggestion_limit]" in api_server
@@ -3349,7 +3908,7 @@ def assert_static_app_contracts() -> None:
     assert "photoLocationFromClientPoint" in location_picker
     assert "formatPhotoLocationCoordinate" in location_picker
     assert "Show nearby" in photos_view
-    assert "Video quality" in photos_view
+    assert "Video quality" in photo_export_video_controls
     assert "_photo_export_render_video" in api_server
     assert '"videoRendered"' in api_server
     assert "activeTrip" in photos_view
@@ -3384,7 +3943,7 @@ def assert_static_app_contracts() -> None:
     assert "restore_person_label_references" in enroll_manager
     assert "review_candidate_correction_undo_snapshot" in enroll_manager
     assert '"sourceFilename"' in enroll_manager
-    assert "photoPeopleMatchCorrectionCandidateIds" in photos_view
+    assert "photoPeopleMatchCorrectionCandidateIds" in photo_people_match_selection
     assert "selectedMatchCandidateIds" in photos_view
     assert "suggest_photo_review_more_candidates" in api_server
     assert "suggest_photo_review_more_candidates" in workspace_db
@@ -3411,9 +3970,11 @@ def assert_static_app_contracts() -> None:
     assert "Related media added." in photos_e2e
     assert "Related media relinked." in photos_e2e
     assert "Generated related media ignored." in photos_e2e
-    assert "native_share_related_media" in photos_view
+    assert "photoMediaPairShareEventMetadata" in photos_view
+    assert "native_share_related_media" in photo_media_pairs
     assert "photos-related-media" in photos_view
     assert "grantDecoratedMediaPath(mediaPair.relatedSourcePath)" in desktop_main
+    assert 'decoratePath(mediaPair, "relatedSourcePath", "relatedSourceUrl")' in desktop_main
     assert "function grantQueryMediaPath(filePath, trustGeneration = pathTrustGeneration)" in desktop_main
     assert "__relatedMediaSharePaths" in photos_e2e
     assert "manual-related.dng" in photos_e2e
@@ -3435,12 +3996,17 @@ def assert_static_app_contracts() -> None:
     assert "photoLibraryPreviewSweep" in app_tsx
     assert "photoLibraryCatalogCleanup" in app_tsx
     assert "photoRepairHistory" in app_tsx
-    assert "Restore rehearsal" in photos_view
-    assert "Backup rehearsal" in photos_view
+    assert "Restore rehearsal" in photo_repair_center_panel
+    assert "Backup rehearsal" in photo_repair_center_panel
     assert "record_photo_backup_policy_check" in workspace_db
     assert "backupPolicyStatus" in api_server
-    assert "Scheduled backup checks" in photos_view
-    assert "Check when due" in photos_view
+    assert "PhotoBackupPolicyPanel" in photos_view
+    assert "Scheduled backup checks" not in photos_view
+    assert "Scheduled backup checks" in photo_backup_policy_panel
+    assert "Check when due" not in photos_view
+    assert "Check when due" in photo_backup_policy_panel
+    assert "Backup interval" in photo_backup_policy_panel
+    assert "Include generated caches" in photo_backup_policy_panel
     assert "operation_id" in api_server
     assert "favoriteMemories" in api_server
     assert "hiddenMemories" in api_server
@@ -3472,6 +4038,11 @@ def assert_static_app_contracts() -> None:
     assert "appShortcutCommand" in photos_view
     assert "recentPhotoShortcutRef" in photos_view
     assert "Photos shortcuts" in photos_view
+    assert "PhotoShortcutsPanel" in photos_view
+    assert "Press ? to show or hide this panel" not in photos_view
+    assert "Press ? to show or hide this panel" in photo_shortcuts_panel
+    assert "photos-shortcut-panel" not in photos_view
+    assert "photos-shortcut-panel" in photo_shortcuts_panel
     assert "photos-shortcut-panel" in styles_css
     assert '"photos-shortcut"' in types_ts
     assert "photoShortcutFromNativeInput" in desktop_main
@@ -3532,19 +4103,32 @@ def assert_static_app_contracts() -> None:
     assert "installer download is public" in release_verifier
     assert "sha256" in release_verifier
     assert "--require-release-metadata" in release_verifier
+    assert "--verify-signatures" in release_verifier
+    assert "verifyCosignBundles" in release_verifier
+    assert "verifyGithubAttestations" in release_verifier
     release_artifacts = (root / "desktop" / "scripts" / "create-release-artifacts.cjs").read_text(encoding="utf-8")
-    assert "SHA256SUMS.txt" in release_artifacts
-    assert "vintrace-sbom.json" in release_artifacts
-    assert "vintrace-provenance.json" in release_artifacts
+    supply_chain = (root / "desktop" / "scripts" / "release-supply-chain.cjs").read_text(encoding="utf-8")
+    assert "generateSboms" in release_artifacts
+    assert 'const SYFT_VERSION = "1.44.0"' in supply_chain
+    assert 'const COSIGN_VERSION = "3.0.6"' in supply_chain
+    assert 'const CYCLONEDX_NAME = "vintrace.cdx.json"' in supply_chain
+    assert 'const SPDX_NAME = "vintrace.spdx.json"' in supply_chain
+    assert 'const CHECKSUM_NAME = "SHA256SUMS.txt"' in supply_chain
     localization_check = (root / "desktop" / "scripts" / "check-localization.cjs").read_text(encoding="utf-8")
     assert "critical literals" in localization_check
     assert "visible literal translation coverage" in localization_check
+    assert "LANGUAGE_DIRECTIONS" in localization_check
+    assert "reverse-direction language coverage" in localization_check
+    assert "reverse-direction literals" in localization_check
+    assert "reverse-direction ui message isolation" in localization_check
     releases_doc = (root / "RELEASES.md").read_text(encoding="utf-8")
     assert "Windows installer" in releases_doc
     assert "macOS" in releases_doc
     assert "release:verify" in releases_doc
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
     assert "release:artifacts" in package["scripts"]
+    assert "release:sign" in package["scripts"]
+    assert "release:attest:verify" in package["scripts"]
     assert "test:model-downloader" in package["scripts"]
     assert "test:perf-budget" in package["scripts"]
     assert "test:localization" in package["scripts"]
@@ -3623,16 +4207,21 @@ def assert_static_app_contracts() -> None:
     assert "Playwright accessibility keyboard" in qa_workflow
     assert "Playwright memory soak" in qa_workflow
     assert "Localization contract" in qa_workflow
-    windows_workflow = (root / ".github" / "workflows" / "windows-release.yml").read_text(encoding="utf-8")
-    mac_workflow = (root / ".github" / "workflows" / "macos-release.yml").read_text(encoding="utf-8")
-    assert "npm run release:artifacts" in windows_workflow
-    assert "npm run release:artifacts" in mac_workflow
-    assert "SHA256SUMS.txt" in windows_workflow
-    assert "SHA256SUMS.txt" in mac_workflow
-    assert "--require-release-metadata" in windows_workflow
-    assert "--require-release-metadata" in mac_workflow
-    assert "--allow-draft" in windows_workflow
-    assert "--allow-draft" in mac_workflow
+    release_workflows = [
+        (root / ".github" / "workflows" / name).read_text(encoding="utf-8")
+        for name in ("windows-release.yml", "macos-release.yml", "linux-release.yml")
+    ]
+    release_finalizer = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    for platform_workflow in release_workflows:
+        assert "npm run release:artifacts" in platform_workflow
+        assert "SHA256SUMS.txt" in platform_workflow
+        assert "actions/attest@a1948c3f048ba23858d222213b7c278aabede763" in platform_workflow
+        assert "sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6" in platform_workflow
+        assert "softprops/action-gh-release" not in platform_workflow
+    assert "--require-release-metadata" in release_finalizer
+    assert "--allow-draft" in release_finalizer
+    assert "--verify-signatures" in release_finalizer
+    assert "--platform all" in release_finalizer
     package_checker = (root / "desktop" / "scripts" / "check-package-artifacts.cjs").read_text(encoding="utf-8")
     assert "packaged backend checksum" in package_checker
     assert {
@@ -3642,6 +4231,7 @@ def assert_static_app_contracts() -> None:
         "scan_folder",
         "scan_media_paths",
         "query_candidates",
+        "ordered_review_candidates",
         "review_candidate",
         "bulk_review_candidates",
         "export_review_report",
@@ -3814,30 +4404,115 @@ class NoEmbeddingEngine(StaticUnmatchedEngine):
 
 
 def assert_unmatched_clustering_is_global_not_fragmented() -> None:
-    # Phase 2.4: four IDENTICAL unmatched embeddings must form ONE cluster. The old
-    # per-batch flush split identical faces across batch boundaries (the fragmentation
-    # bug); clustering now runs once globally at the terminal flush, so even a tiny
-    # batch size can no longer break one person into multiple "Unmatched cluster N".
+    # ML-08: four identical embeddings form one stable cluster regardless of discovery
+    # order. The old overflow flush and cluster_label_offset path no longer exists.
     root = Path(tempfile.mkdtemp(prefix="crossage-edge-cluster-global-"))
     scan = root / "scan"
     for index in range(4):
         make_face(scan / f"unknown-{index}.jpg", shirt=(60 + index * 38, 80 + index * 22, 120 + index * 11))
-    project = ProjectState(root / "workspace")
+    paths = sorted(scan.glob("*.jpg"))
+
+    project = ProjectState(root / "workspace-forward")
     project.config.safe_mode = False
     project.config.cluster_min_size = 2
-    original_batch_size = manager_module.UNMATCHED_CLUSTER_BATCH_SIZE
-    manager_module.UNMATCHED_CLUSTER_BATCH_SIZE = 2
-    try:
-        added, errors, metrics = project.scan_paths(sorted(scan.glob("*.jpg")), StaticUnmatchedEngine(), total=4)
-    finally:
-        manager_module.UNMATCHED_CLUSTER_BATCH_SIZE = original_batch_size
+    added, errors, metrics = project.scan_paths(paths, StaticUnmatchedEngine(), total=4)
     assert errors == []
     assert added == 4
     assert metrics["unmatched"] == 4
     assert metrics["clustered"] == 4
+    assert metrics["clusterPasses"] == 1
+    assert metrics["clusterModelGroups"] == 1
+    assert metrics["clusterComponents"] == 1
+    assert metrics["clusterUniqueInputs"] == 4
+    assert metrics["clusterDuplicateInputs"] == 0
+    assert metrics["clusterNoise"] == 0
+    assert metrics["clusterSpoolPeak"] == 4
     assert project.scan_history[0]["metrics"]["clustered"] == 4
-    # One global cluster, not two batch-fragmented ones.
-    assert {candidate.person_name for candidate in project.candidates.values()} == {"Unmatched cluster 1"}
+    with project.db.connect() as conn:
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'unmatched_cluster_spool'"
+        ).fetchone() is None
+    forward = {Path(candidate.source_path).name: candidate.person_name for candidate in project.candidates.values()}
+    names = set(forward.values())
+    assert len(names) == 1
+    assert next(iter(names)).startswith("Unmatched cluster ")
+
+    reverse_project = ProjectState(root / "workspace-reverse")
+    reverse_project.config.safe_mode = False
+    reverse_project.config.cluster_min_size = 2
+    reverse_added, reverse_errors, reverse_metrics = reverse_project.scan_paths(
+        list(reversed(paths)), StaticUnmatchedEngine(), total=4
+    )
+    reverse = {
+        Path(candidate.source_path).name: candidate.person_name
+        for candidate in reverse_project.candidates.values()
+    }
+    assert reverse_errors == [] and reverse_added == 4
+    assert reverse_metrics["clusterPasses"] == 1
+    assert reverse == forward
+
+    manager_source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "enroll" / "manager.py").read_text(encoding="utf-8")
+    assert "cluster_label_offset" not in manager_source
+    assert "UNMATCHED_CLUSTER_GLOBAL_CAP" not in manager_source
+
+    close_counts: list[int] = []
+    original_spool = manager_module.GlobalUnmatchedSpool
+
+    class TrackingSpool(original_spool):
+        def close(self) -> None:
+            close_counts.append(self.count)
+            super().close()
+
+    cancelled_project = ProjectState(root / "workspace-cancelled")
+    cancelled_project.config.safe_mode = False
+    cancelled_project.config.cluster_min_size = 2
+
+    def cancelling_paths():
+        yield paths[0]
+        cancelled_project.request_scan_cancel(source="edge-test")
+        yield paths[1]
+
+    manager_module.GlobalUnmatchedSpool = TrackingSpool
+    try:
+        cancelled_added, cancelled_errors, cancelled_metrics = cancelled_project.scan_paths(
+            cancelling_paths(), StaticUnmatchedEngine(), total=2
+        )
+    finally:
+        manager_module.GlobalUnmatchedSpool = original_spool
+    assert cancelled_added == 0
+    assert cancelled_errors == []
+    assert cancelled_metrics["cancelled"] == 1
+    assert cancelled_metrics["unmatched"] == 1
+    assert cancelled_metrics["clusterPasses"] == 0
+    assert cancelled_project.candidates == {}
+    assert close_counts == [1]
+
+    totals_api = DesktopApi.__new__(DesktopApi)
+    totals_api.project = type("ScanTotalsProject", (), {})()
+    totals_api.project.scan_history = [
+        {"durationMs": 10, "completedAt": "2026-07-12T00:00:00Z", "metrics": metrics},
+        {
+            "durationMs": 20,
+            "completedAt": "2026-07-11T00:00:00Z",
+            "metrics": {
+                "clusterPasses": 1,
+                "clusterModelGroups": 2,
+                "clusterComponents": 3,
+                "clusterUniqueInputs": 7,
+                "clusterDuplicateInputs": 1,
+                "clusterNoise": 2,
+                "clusterSpoolPeak": 7,
+            },
+        },
+    ]
+    totals = totals_api._scan_totals()
+    assert totals["clusterPasses"] == 2
+    assert totals["clusterModelGroups"] == 3
+    assert totals["clusterComponents"] == 4
+    assert totals["clusterUniqueInputs"] == 11
+    assert totals["clusterDuplicateInputs"] == 1
+    assert totals["clusterNoise"] == 2
+    assert totals["clusterSpoolPeak"] == 7
 
 
 def assert_embedding_cache_reuses_face_work() -> None:
@@ -3993,6 +4668,73 @@ def assert_reference_backfill_creates_active_model_embeddings() -> None:
     assert errors == []
     assert added == 1
     assert metrics["matched"] == 1
+
+
+def assert_enrollment_reuses_embedding_cache_across_people() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-enroll-cache-"))
+    enroll = root / "enroll"
+    image_path = enroll / "shared.jpg"
+    make_face(image_path)
+    project = ProjectState(root / "workspace")
+    project.config.safe_mode = False
+    original_screen = manager_module.screen_enrollment_face
+    manager_module.screen_enrollment_face = lambda *_args, **_kwargs: SyntheticScreenResult(
+        model_id="unit-screen",
+        model_version="1",
+        stable_score=0.1,
+        original_score=0.1,
+        recompressed_score=0.1,
+        review_threshold=0.9,
+        flagged_for_review=False,
+    )
+    try:
+        first_engine = CountingMatchedEngine()
+        added, errors, reviews = project.enroll_folder("Alice", "adult", enroll, first_engine)
+        assert reviews == 0
+        assert errors == []
+        assert added == 1
+        assert first_engine.calls == 1
+        second_engine = CountingMatchedEngine()
+        added_second, errors_second, reviews_second = project.enroll_folder("Bob", "adult", enroll, second_engine)
+        assert reviews_second == 0
+        assert errors_second == []
+        assert added_second == 1
+        assert second_engine.calls == 0
+    finally:
+        manager_module.screen_enrollment_face = original_screen
+    assert {ref.person_name for ref in project.references.values()} == {"Alice", "Bob"}
+
+
+def assert_reference_backfill_reuses_embedding_cache_for_shared_sources() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-backfill-cache-"))
+    ref_path = root / "shared-ref.jpg"
+    make_face(ref_path)
+    project = ProjectState(root / "workspace")
+    project.config.safe_mode = False
+    for name in ("Alice", "Bob"):
+        ref = ReferenceFace(
+            ref_id=f"ref_old_model_{name.casefold()}",
+            person_name=name,
+            age_bucket="adult",
+            source_path=str(ref_path),
+            capture_date=None,
+            quality=1.0,
+            model_name="old-model-space",
+            vector=[1.0] + [0.0] * 511,
+        )
+        project.references[ref.ref_id] = ref
+        project.vector_store.add(ref.ref_id, ref.vector)
+    engine = CountingMatchedEngine()
+    result = project.backfill_references_for_model(engine)
+    assert result["total"] == 2
+    assert result["added"] == 2
+    assert engine.calls == 1
+    active_refs = [
+        ref
+        for ref in project.references.values()
+        if project._compatible_reference_model_name(engine.model_name, ref.model_name)
+    ]
+    assert {ref.person_name for ref in active_refs} == {"Alice", "Bob"}
 
 
 def assert_pose_bucket_tracking_and_cache_hits() -> None:
@@ -4227,8 +4969,10 @@ def assert_scan_candidates_survive_without_json_snapshot() -> None:
     assert metrics["matched"] == 1
     assert not (workspace / "review_candidates.json").exists()
     reloaded = ProjectState(workspace)
-    assert len(reloaded.candidates) == 1
-    assert next(iter(reloaded.candidates.values())).person_name == "Person"
+    assert reloaded._candidate_index_backed is True  # noqa: SLF001 - verifies lazy boot hydration.
+    assert reloaded.candidates == {}
+    payload = reloaded.db.candidate_payload_by_id(next(iter(project.candidates)))
+    assert payload and payload["person_name"] == "Person"
     api = DesktopApi(workspace)
     api.project.candidates.clear()
     state = api.state(preview_create_budget=0, candidate_limit=10)
@@ -4282,7 +5026,7 @@ def assert_heuristic_fallback_safety_is_not_cached() -> None:
     calls = 0
     original = manager_module.assess_image_safety
 
-    def fake_assess(path: Path, threshold: float, image=None, temperature: float = 1.0) -> SafetyAssessment:
+    def fake_assess(path: Path, threshold: float, image=None, temperature: float = 1.0, **_kwargs: object) -> SafetyAssessment:
         nonlocal calls
         del path, threshold, image, temperature
         calls += 1
@@ -4793,7 +5537,11 @@ def assert_reference_suggestion_staging_reports_progress_and_defers_engine() -> 
     api._engine_instance = forbidden_engine
     no_work_events: list[dict[str, object]] = []
     try:
-        no_work = api._cmd_stage_reference_suggestions({"limit": 3}, progress=no_work_events.append)
+        queued = api._cmd_stage_reference_suggestions({"limit": 3}, progress=no_work_events.append)
+        assert queued["value"]["queuedJob"]["jobKind"] == "reference_suggestions"
+        assert no_work_events == []
+        assert staged_payloads == []
+        no_work = api._cmd_stage_reference_suggestions({"limit": 3, "runInline": True}, progress=no_work_events.append)
     finally:
         api.project.reference_suggestion_candidates = original_candidates  # type: ignore[method-assign]
         api._engine_instance = original_engine
@@ -4849,7 +5597,7 @@ def assert_reference_suggestion_staging_reports_progress_and_defers_engine() -> 
     api._engine_instance = fake_engine
     api._reference_suggestion_embedding = fake_embedding
     try:
-        result = api._cmd_stage_reference_suggestions({"limit": 3}, progress=progress_events.append)
+        result = api._cmd_stage_reference_suggestions({"limit": 3, "runInline": True}, progress=progress_events.append)
     finally:
         api.project.reference_suggestion_candidates = original_candidates  # type: ignore[method-assign]
         api.project.stage_reference_suggestions = original_stage  # type: ignore[method-assign]
@@ -5095,7 +5843,9 @@ def assert_operational_use_case_commands() -> None:
 
     reference_index_version = api.project._reference_index_version
     renamed = api.handle("rename_person", {"oldName": "Person", "newName": "Person Prime"})
-    assert renamed["renamed"] == {"references": 1, "candidates": 1}
+    assert renamed["renamed"]["references"] == 1
+    assert renamed["renamed"]["candidates"] == 1
+    assert renamed["renamed"]["identityMerged"] is False
     assert api.project._reference_index_version > reference_index_version
     assert renamed["state"]["references"][0]["personName"] == "Person Prime"
     assert renamed["state"]["candidates"][0]["personName"] == "Person Prime"
@@ -5193,12 +5943,29 @@ def assert_operational_use_case_commands() -> None:
     assert Path(inventory_value["jsonPath"]).exists()
     assert Path(inventory_value["csvPath"]).exists()
     assert inventory_value["counts"]["sourceFolders"] >= 1
+    inventory_json = json.loads(Path(inventory_value["jsonPath"]).read_text(encoding="utf-8"))
+    assert inventory_json["counts"]["candidates"] == inventory_value["counts"]["candidates"]
+    assert inventory_json["candidates"]
+    assert inventory_json["candidates"][0]["candidateId"]
 
     activity_export = api.handle("export_audit_log", {})
     activity_value = activity_export["value"]
     assert Path(activity_value["jsonPath"]).exists()
     assert Path(activity_value["csvPath"]).exists()
     assert activity_value["counts"]["events"] >= 1
+    manager_source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "enroll" / "manager.py").read_text(encoding="utf-8")
+    report_block = manager_source[
+        manager_source.index("    def export_report("):manager_source.index("    def export_candidates(")
+    ]
+    audit_export_block = manager_source[
+        manager_source.index("    def export_audit_log("):manager_source.index("    def _read_audit_rows(")
+    ]
+    assert "candidates = [" not in report_block
+    assert "json_path.write_text(json.dumps(payload, indent=2)" not in report_block
+    assert "atomic_write(json_path, stream_report)" in report_block
+    assert "rows = self._read_audit_rows()" not in audit_export_block
+    assert "_iter_audit_rows_forward()" in audit_export_block
+    assert "atomic_write(json_path, stream_audit_log)" in audit_export_block
 
     consent_receipt = api.handle("export_consent_receipt", {})
     receipt_value = consent_receipt["value"]
@@ -5338,11 +6105,11 @@ def assert_operational_use_case_commands() -> None:
 
     model_integrity = api.handle("model_integrity", {})
     assert model_integrity["checks"]
-    assert {check["name"] for check in model_integrity["checks"]} >= {"Face model", "Model folder writable", "Image decoder"}
+    assert {check["name"] for check in model_integrity["checks"]} >= {"Face model", "AS-Norm cohort", "Model folder writable", "Image decoder"}
 
     installer = api.handle("installer_self_diagnostics", {})
     installer_checks = {check["name"] for check in installer["checks"]}
-    assert {"App folder write", "Model downloader", "Photo formats", "Workspace health"} <= installer_checks
+    assert {"App folder write", "Model downloader", "AS-Norm cohort", "Photo formats", "Workspace health"} <= installer_checks
     assert installer["generatedAt"]
 
     duplicates = api.handle("duplicate_people", {"threshold": 0.5, "limit": 5})
@@ -5445,7 +6212,7 @@ def assert_operational_use_case_commands() -> None:
 
     self_test = api.handle("runtime_self_test", {})
     check_names = {check["name"] for check in self_test["checks"]}
-    assert {"Workspace write", "Recognition engine", "Image decoder", "Workspace health"} <= check_names
+    assert {"Workspace write", "Recognition engine", "AS-Norm cohort", "Image decoder", "Workspace health"} <= check_names
     assert self_test["generatedAt"]
     assert self_test["recommendations"]
 
@@ -5499,7 +6266,10 @@ def assert_operational_use_case_commands() -> None:
     deleted = api.handle("delete_person", {"personName": "Person Prime"})
     assert deleted["deleted"]["references"] == 1
     assert deleted["state"]["counts"]["references"] == 0
-    expect_raises(KeyError, lambda: api.handle("delete_person", {"personName": "Person Prime"}), "Person")
+    repeated_delete = api.handle("delete_person", {"personName": "Person Prime"})
+    assert repeated_delete["deleted"]["references"] == 0
+    assert repeated_delete["deleted"]["candidates"] == 0
+    assert repeated_delete["deleted"]["receipt"]["originalMediaDeleted"] is False
 
 
 def assert_candidate_risk_lanes_and_reference_counts() -> None:
@@ -5613,20 +6383,75 @@ def assert_candidate_media_actions() -> None:
     make_face(move_source, shirt=(10, 120, 110))
     add_candidate("cand_move_a", move_source)
     add_candidate("cand_move_b", move_source)
+    unrelated_move_source = media / "move-unrelated-source.jpg"
+    make_face(unrelated_move_source, shirt=(180, 100, 60))
+    add_candidate("cand_move_unrelated", unrelated_move_source)
+    unrelated_reference_source = media / "move-unrelated-reference.jpg"
+    make_face(unrelated_reference_source, shirt=(40, 150, 90))
+    api.project.references["ref_move_unrelated"] = ReferenceFace(
+        ref_id="ref_move_unrelated",
+        person_name="Move Reference",
+        age_bucket="adult",
+        source_path=str(unrelated_reference_source),
+        capture_date=None,
+        quality=0.92,
+        model_name="test",
+        vector=[1.0] + [0.0] * 511,
+    )
     api.project.save()
-    move_preview = api.handle("preview_candidate_media_action", {"candidateIds": ["cand_move_a"], "action": "move"})
-    assert move_preview["counts"]["removedCandidatesEstimate"] == 2
-    moved = api.handle("manage_candidate_media", {"candidateIds": ["cand_move_a"], "action": "move"})
+    original_authoritative_candidates = api.project._iter_authoritative_candidates
+    original_safe_resolve = manager_module.safe_resolve
+    blocked_resolve_paths = {str(unrelated_move_source.expanduser()), str(unrelated_reference_source.expanduser())}
+
+    def fail_authoritative_candidate_scan(*_args, **_kwargs):
+        raise AssertionError("media action preview/manage should estimate removable rows from indexed source keys")
+
+    def fail_unrelated_media_resolve(path: Path) -> Path:
+        if str(Path(path).expanduser()) in blocked_resolve_paths:
+            raise AssertionError("media action preview/manage should not resolve unrelated candidate or reference paths")
+        return original_safe_resolve(path)
+
+    api.project._iter_authoritative_candidates = fail_authoritative_candidate_scan  # type: ignore[method-assign]
+    manager_module.safe_resolve = fail_unrelated_media_resolve
+    try:
+        move_preview = api.handle("preview_candidate_media_action", {"candidateIds": ["cand_move_a"], "action": "move"})
+        assert move_preview["counts"]["removedCandidatesEstimate"] == 2
+        moved = api.handle("manage_candidate_media", {"candidateIds": ["cand_move_a"], "action": "move"})
+    finally:
+        api.project._iter_authoritative_candidates = original_authoritative_candidates  # type: ignore[method-assign]
+        manager_module.safe_resolve = original_safe_resolve
     moved_value = moved["value"]
     assert moved_value["counts"]["moved"] == 1
     assert moved_value["counts"]["removedCandidates"] == 2
     assert not move_source.exists()
     assert "cand_move_a" not in api.project.candidates
     assert "cand_move_b" not in api.project.candidates
+    assert "cand_move_unrelated" in api.project.candidates
     assert Path(moved_value["manifestPath"]).exists()
     undone_move = api.handle("undo_media_action", {"manifestPath": moved_value["manifestPath"]})
     assert undone_move["value"]["counts"]["restored"] == 1
+    assert undone_move["value"]["counts"]["restoredCandidates"] == 2
     assert move_source.exists()
+    assert "cand_move_a" in api.project.candidates
+    assert "cand_move_b" in api.project.candidates
+    moved_history = api.handle("media_action_history", {"limit": 10})
+    moved_history_row = next(item for item in moved_history["items"] if item["manifestPath"] == moved_value["manifestPath"])
+    assert moved_history_row["canUndo"] is False
+    assert moved_history_row["undoneAt"]
+    assert Path(moved_value["manifestPath"]).with_name("manifest-summary.json").exists()
+    original_manifest_reader = api.project._read_media_action_manifest
+
+    def fail_full_media_action_manifest(_manifest_path: Path) -> dict[str, object]:
+        raise AssertionError("media action history should read the summary sidecar before the full manifest")
+
+    api.project._read_media_action_manifest = fail_full_media_action_manifest  # type: ignore[method-assign]
+    try:
+        summary_history = api.handle("media_action_history", {"limit": 10})
+    finally:
+        api.project._read_media_action_manifest = original_manifest_reader  # type: ignore[method-assign]
+    summary_history_row = next(item for item in summary_history["items"] if item["manifestPath"] == moved_value["manifestPath"])
+    assert summary_history_row["canUndo"] is False
+    assert summary_history_row["undoneAt"]
 
     trash_source = media / "trash-source.jpg"
     make_face(trash_source, shirt=(130, 60, 110))
@@ -5642,7 +6467,9 @@ def assert_candidate_media_actions() -> None:
     assert "cand_trash" not in api.project.candidates
     restored = api.handle("restore_media_action", {"manifestPath": trashed_value["manifestPath"]})
     assert restored["value"]["counts"]["restored"] == 1
+    assert restored["value"]["counts"]["restoredCandidates"] == 1
     assert trash_source.exists()
+    assert "cand_trash" in api.project.candidates
 
     cleanup_source = media / "cleanup-trash-source.jpg"
     make_face(cleanup_source, shirt=(90, 40, 160))
@@ -5971,10 +6798,13 @@ def assert_review_and_settings_guards() -> None:
     assert fast["config"]["effectivePerformanceMode"] == "fast"
     assert fast["config"]["effectiveFaceDetectorSize"] <= 384
     assert fast["config"]["effectiveTwoPassScan"] is False
-    assert api._effective_engine_config().multi_scale_detect is False
+    fast_engine_config = api._effective_engine_config()
+    assert fast_engine_config.performance_mode == "fast"
+    assert fast_engine_config.multi_scale_detect is False
     auto = api.handle("set_performance_mode", {"mode": "auto"})
     assert auto["config"]["performanceMode"] == "auto"
     assert auto["config"]["effectivePerformanceMode"] in {"fast", "balanced", "quality"}
+    assert api._effective_engine_config().performance_mode == auto["config"]["effectivePerformanceMode"]
     excluded = api.handle("save_settings", {"scanExclusions": {"dirNames": ["skipme"], "pathKeywords": ["private"], "extensions": ["gif"], "filePaths": [str(root / "ignored.jpg")]}})
     assert excluded["config"]["scanExclusions"]["extensions"] == [".gif"]
     assert excluded["config"]["scanExclusions"]["filePaths"] == [str(root / "ignored.jpg")]
@@ -6090,10 +6920,57 @@ def assert_release_hardening_diagnostics() -> None:
     assert distribution["items"]
     assert any(item["kind"] == "face" and item["sha256"] for item in distribution["items"])
     assert any(item["kind"] == "safety" for item in distribution["items"])
+    api_source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "api_server.py").read_text(encoding="utf-8")
+    assert "Current frontal baseline" not in api_source
+    assert "Pose-aware candidate" not in api_source
+    assert "Noisy candidate" not in api_source
 
-    readiness = api.handle("release_readiness", {})
+    public_report = root / "public-dataset-benchmark.json"
+    public_report.write_text(json.dumps({
+        "generatedAt": "2999-01-01T00:00:00Z",
+        "baselinePack": "antelopev2",
+        "rows": [{
+            "datasetId": "cfp",
+            "pack": "buffalo_l",
+            "status": "complete",
+            "evaluated": 80,
+            "precision": 0.98,
+            "recall": 0.82,
+            "accuracy": 0.86,
+            "profileRecall": 0.82,
+            "wrongIdentity": 1,
+            "falsePositives": 1,
+            "hardNegativeFalsePositives": 0,
+        }],
+    }), encoding="utf-8")
+    old_report = os.environ.get("VINTRACE_PUBLIC_BENCHMARK_REPORT")
+    old_required = os.environ.get("VINTRACE_PUBLIC_BENCHMARK_REQUIRED_DATASETS")
+    try:
+        os.environ["VINTRACE_PUBLIC_BENCHMARK_REPORT"] = str(public_report)
+        os.environ["VINTRACE_PUBLIC_BENCHMARK_REQUIRED_DATASETS"] = "cfp"
+        dataset_gate = api._dataset_regression_gate_summary()
+        assert dataset_gate["ok"] is True
+        assert dataset_gate["source"] == "public-dataset-benchmark-report"
+        assert dataset_gate["rowCount"] == 1
+        assert dataset_gate["completedDatasets"] == ["cfp"]
+
+        os.environ["VINTRACE_PUBLIC_BENCHMARK_REPORT"] = str(root / "missing-public-benchmark.json")
+        readiness = api.handle("release_readiness", {})
+    finally:
+        if old_report is None:
+            os.environ.pop("VINTRACE_PUBLIC_BENCHMARK_REPORT", None)
+        else:
+            os.environ["VINTRACE_PUBLIC_BENCHMARK_REPORT"] = old_report
+        if old_required is None:
+            os.environ.pop("VINTRACE_PUBLIC_BENCHMARK_REQUIRED_DATASETS", None)
+        else:
+            os.environ["VINTRACE_PUBLIC_BENCHMARK_REQUIRED_DATASETS"] = old_required
     check_names = {check["name"] for check in readiness["checks"]}
     assert {"Model license manifest", "Database integrity", "Video decoder", "Accuracy validation pack", "Auto-update", "Self-learning R&D boundary"} <= check_names
+    dataset_check = next(check for check in readiness["checks"] if check["name"] == "Dataset regression gates")
+    assert dataset_check["ok"] is False
+    assert dataset_check["value"]["status"] == "missing"
+    assert dataset_check["value"]["source"] == "public-dataset-benchmark-report"
     self_learning = next(check for check in readiness["checks"] if check["name"] == "Self-learning R&D boundary")
     assert self_learning["ok"] is True
     assert self_learning["value"]["auditOk"] is False
@@ -6319,15 +7196,22 @@ def assert_safe_mode_zero_admittance() -> None:
     workspace = root / "workspace"
     api = make_api(workspace)
     assert api.state()["config"].get("safeModeZeroAdmittance") is False
-    api.handle("save_settings", {"safeMode": True, "safeModeZeroAdmittance": True})
+    assert api.state()["config"].get("safeModeMultimodal") is False
+    api.handle(
+        "save_settings",
+        {"safeMode": True, "safeModeMultimodal": True, "safeModeZeroAdmittance": True},
+    )
     reopened = make_api(workspace)
     assert reopened.project.config.safe_mode_zero_admittance is True, "flag should persist across reload"
+    assert reopened.project.config.safe_mode_multimodal is True, "multimodal guardrail choice should persist"
     assert reopened.state()["config"].get("safeModeZeroAdmittance") is True
+    assert reopened.state()["config"].get("safeModeMultimodal") is True
     audit = reopened.handle("export_safe_mode_audit", {})
     audit_value = audit.get("value", audit)
     import json as _json
     policy = _json.loads(Path(audit_value["jsonPath"]).read_text(encoding="utf-8"))["policy"]
     assert policy["safeModeZeroAdmittance"] is True
+    assert policy["safeModeMultimodal"] is True
     assert policy["faceCropCarveOutActive"] is False
     shutil.rmtree(root, ignore_errors=True)
     print("  safe mode zero-admittance ok")
@@ -6394,7 +7278,7 @@ def assert_jurisdiction_presets() -> None:
     api = make_api(workspace)
     assert api.state()["config"]["jurisdictionPreset"] == "standard"
     gdpr = jurisdiction_preset("gdpr")
-    res = api.handle("set_jurisdiction_preset", {"preset": "gdpr"})
+    res = api.handle("set_jurisdiction_preset", {"preset": "gdpr", "confirm": True})
     assert res["value"]["preset"] == "gdpr"
     cfg = api.state()["config"]
     assert cfg["jurisdictionPreset"] == "gdpr"
@@ -6407,7 +7291,7 @@ def assert_jurisdiction_presets() -> None:
     assert report["policy"]["jurisdictionPreset"] == "gdpr"
     # Unknown preset is rejected.
     try:
-        api.handle("set_jurisdiction_preset", {"preset": "atlantis"})
+        api.handle("set_jurisdiction_preset", {"preset": "atlantis", "confirm": True})
         raise AssertionError("unknown preset should raise")
     except ValueError:
         pass
@@ -6424,7 +7308,7 @@ def assert_compliance_pack() -> None:
     workspace = root / "workspace"
     api = make_api(workspace)
     api.handle("set_consent", {"value": True, "operator": "tester"})
-    api.handle("set_jurisdiction_preset", {"preset": "gdpr"})
+    api.handle("set_jurisdiction_preset", {"preset": "gdpr", "confirm": True})
     result = api.handle("export_compliance_pack", {})
     value = result.get("value", result)
     pack_path = Path(value["zipPath"])
@@ -6434,6 +7318,10 @@ def assert_compliance_pack() -> None:
         required = {
             "00-manifest.json",
             "consent-summary.json",
+            "subject-release-evidence.json",
+            "ai-disclosure-notice.json",
+            "biometric-retention-policy.json",
+            "destruction-receipts.json",
             "audit-chain-status.json",
             "retention-policy.json",
             "model-distribution-audit.json",
@@ -6444,6 +7332,17 @@ def assert_compliance_pack() -> None:
             "README.md",
         }
         assert required <= names, f"missing members: {required - names}"
+        manifest = json.loads(archive.read("00-manifest.json"))
+        assert manifest["schemaVersion"] == 2
+        manifest_rows = {row["name"]: row for row in manifest["members"]}
+        assert set(manifest_rows) == names - {"00-manifest.json"}
+        for name, row in manifest_rows.items():
+            content = archive.read(name)
+            assert row["bytes"] == len(content)
+            assert row["sha256"] == hashlib.sha256(content).hexdigest()
+        release_evidence = json.loads(archive.read("subject-release-evidence.json"))
+        assert "personName" not in json.dumps(release_evidence)
+        assert "signerName" not in json.dumps(release_evidence)
         # No biometric/media artifacts leak into the pack.
         forbidden = (".jpg", ".jpeg", ".png", ".webp", ".onnx", ".npy", ".sqlite3", ".mp4")
         assert not any(n.lower().endswith(forbidden) for n in names), names
@@ -6546,6 +7445,33 @@ def assert_reverse_geocode_http_is_job_based() -> None:
     print("  reverse geocode HTTP job dispatch ok")
 
 
+def assert_workspace_state_lock_heartbeats() -> None:
+    root = Path(tempfile.mkdtemp(prefix="crossage-edge-lock-heartbeat-"))
+    project = ProjectState(root / "workspace")
+    previous = os.environ.get("VINTRACE_STATE_LOCK_HEARTBEAT_SECONDS")
+    os.environ["VINTRACE_STATE_LOCK_HEARTBEAT_SECONDS"] = "0.05"
+    try:
+        with project._state_lock():  # noqa: SLF001 - edge test exercises the lock primitive directly.
+            first_mtime = project.lock_path.stat().st_mtime_ns
+            time.sleep(0.18)
+            second_mtime = project.lock_path.stat().st_mtime_ns
+            assert second_mtime > first_mtime
+            assert project._workspace_state_lock_active() is True  # noqa: SLF001
+        os.environ["VINTRACE_STATE_LOCK_HEARTBEAT_SECONDS"] = "60"
+        stolen_project = ProjectState(root / "stolen-workspace")
+        with stolen_project._state_lock():  # noqa: SLF001
+            stolen_project.lock_path.write_text("other-process-token 2026-07-08T00:00:00Z\n", encoding="utf-8")
+        assert stolen_project.lock_path.exists()
+        assert stolen_project.lock_path.read_text(encoding="utf-8").startswith("other-process-token ")
+        stolen_project.lock_path.unlink()
+    finally:
+        if previous is None:
+            os.environ.pop("VINTRACE_STATE_LOCK_HEARTBEAT_SECONDS", None)
+        else:
+            os.environ["VINTRACE_STATE_LOCK_HEARTBEAT_SECONDS"] = previous
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main() -> None:
     assert_corrupt_workspace_recovery()
     assert_corrupt_sqlite_startup_recovery()
@@ -6566,6 +7492,8 @@ def main() -> None:
     assert_model_spaces_are_isolated_for_matching()
     assert_api_scan_requires_backfill_for_mixed_model_spaces()
     assert_reference_backfill_creates_active_model_embeddings()
+    assert_enrollment_reuses_embedding_cache_across_people()
+    assert_reference_backfill_reuses_embedding_cache_for_shared_sources()
     assert_pose_bucket_tracking_and_cache_hits()
     assert_profile_pose_uses_review_threshold_without_accepting_frontal_noise()
     assert_match_scoring_flags_close_single_reference_decisions()
@@ -6604,6 +7532,7 @@ def main() -> None:
     assert_vector_store_edges()
     assert_backend_json_rpc_errors()
     assert_reverse_geocode_http_is_job_based()
+    assert_workspace_state_lock_heartbeats()
     assert_structured_backend_error_codes()
     assert_release_hardening_diagnostics()
     assert_support_bundle_redaction_is_strict()

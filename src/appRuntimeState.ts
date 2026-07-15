@@ -10,10 +10,10 @@ import type {
   ModelDownloadProgress,
   PhotoExternalImportRequest,
   ReviewRulesApplyResult,
-  ScanProgress,
   SystemIntegration,
   SystemPhotoSource,
   UpdateStatus,
+  WorkspaceEncryptionStatus,
   WorkspaceLockStatus,
 } from "./types";
 
@@ -45,12 +45,14 @@ export interface AppRuntimeStatusState {
   setInstallerDiagnostics: StateSetter<InstallerDiagnosticsResult | null>;
   workspaceLock: WorkspaceLockStatus | null;
   setWorkspaceLock: StateSetter<WorkspaceLockStatus | null>;
+  workspaceEncryption: WorkspaceEncryptionStatus | null;
+  setWorkspaceEncryption: StateSetter<WorkspaceEncryptionStatus | null>;
+  workspaceRecoveryCode: string;
+  setWorkspaceRecoveryCode: StateSetter<string>;
   duplicatePeople: DuplicatePeopleResult | null;
   setDuplicatePeople: StateSetter<DuplicatePeopleResult | null>;
   reviewRuleResult: ReviewRulesApplyResult | null;
   setReviewRuleResult: StateSetter<ReviewRulesApplyResult | null>;
-  scanProgress: ScanProgress | null;
-  setScanProgress: StateSetter<ScanProgress | null>;
   localScanMarkers: LocalScanMarkers;
   setLocalScanMarkers: StateSetter<LocalScanMarkers>;
   modelDownloadProgress: ModelDownloadProgress | null;
@@ -88,9 +90,10 @@ export function useAppRuntimeStatusState(): AppRuntimeStatusState {
   const [diagnosticsReport, setDiagnosticsReport] = useState<DiagnosticsReport | null>(null);
   const [installerDiagnostics, setInstallerDiagnostics] = useState<InstallerDiagnosticsResult | null>(null);
   const [workspaceLock, setWorkspaceLock] = useState<WorkspaceLockStatus | null>(null);
+  const [workspaceEncryption, setWorkspaceEncryption] = useState<WorkspaceEncryptionStatus | null>(null);
+  const [workspaceRecoveryCode, setWorkspaceRecoveryCode] = useState("");
   const [duplicatePeople, setDuplicatePeople] = useState<DuplicatePeopleResult | null>(null);
   const [reviewRuleResult, setReviewRuleResult] = useState<ReviewRulesApplyResult | null>(null);
-  const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
   const [localScanMarkers, setLocalScanMarkers] = useState<LocalScanMarkers>(null);
   const [modelDownloadProgress, setModelDownloadProgress] = useState<ModelDownloadProgress | null>(null);
   const [mediaActionProgress, setMediaActionProgress] = useState<MediaActionProgress | null>(null);
@@ -107,12 +110,14 @@ export function useAppRuntimeStatusState(): AppRuntimeStatusState {
     setInstallerDiagnostics,
     workspaceLock,
     setWorkspaceLock,
+    workspaceEncryption,
+    setWorkspaceEncryption,
+    workspaceRecoveryCode,
+    setWorkspaceRecoveryCode,
     duplicatePeople,
     setDuplicatePeople,
     reviewRuleResult,
     setReviewRuleResult,
-    scanProgress,
-    setScanProgress,
     localScanMarkers,
     setLocalScanMarkers,
     modelDownloadProgress,

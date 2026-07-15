@@ -460,6 +460,64 @@ def _ffprobe_path() -> str:
     return str(_discover_ffprobe().get("path") or "")
 
 
+def extract_audio_waveform(
+    path: Path,
+    *,
+    start_ms: int = 0,
+    duration_ms: int = 60_000,
+    sample_rate: int = 16_000,
+) -> np.ndarray:
+    """Decode a bounded, mono float32 waveform with the managed FFmpeg runtime."""
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file() or resolved.is_symlink():
+        raise VideoLoadError(f"Media source is unavailable: {resolved}")
+    ffmpeg = _ffmpeg_path()
+    if not ffmpeg:
+        raise VideoLoadError("Audio analysis requires the managed FFmpeg decoder.")
+    clean_start_ms = max(0, int(start_ms or 0))
+    clean_duration_ms = max(1, min(300_000, int(duration_ms or 60_000)))
+    clean_sample_rate = max(8_000, min(48_000, int(sample_rate or 16_000)))
+    command = [
+        ffmpeg,
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(resolved),
+        "-ss",
+        f"{clean_start_ms / 1000:.3f}",
+        "-t",
+        f"{clean_duration_ms / 1000:.3f}",
+        "-vn",
+        "-map_metadata",
+        "-1",
+        "-ac",
+        "1",
+        "-ar",
+        str(clean_sample_rate),
+        "-acodec",
+        "pcm_f32le",
+        "-f",
+        "f32le",
+        "pipe:1",
+    ]
+    timeout_seconds = max(30, min(360, int(math.ceil(clean_duration_ms / 1000)) * 3))
+    try:
+        completed = subprocess.run(command, capture_output=True, timeout=timeout_seconds, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise VideoLoadError(f"Timed out decoding audio from {resolved}.") from exc
+    if completed.returncode != 0:
+        message = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise VideoLoadError((message or f"Could not decode audio from {resolved}")[:400])
+    if len(completed.stdout) % 4:
+        raise VideoLoadError(f"FFmpeg returned a malformed float32 audio stream for {resolved}.")
+    waveform = np.frombuffer(completed.stdout, dtype="<f4").astype(np.float32, copy=True)
+    if not np.isfinite(waveform).all():
+        raise VideoLoadError(f"FFmpeg returned non-finite audio samples for {resolved}.")
+    return np.clip(waveform, -1.0, 1.0)
+
+
 def _probe_video_ffmpeg(path: Path) -> dict[str, object]:
     resolved = path.expanduser().resolve()
     ffprobe = _ffprobe_path()
@@ -624,8 +682,7 @@ def _sample_video_frames_ffmpeg(
             timestamp_ms = int(round(offset * interval_seconds * 1000))
             frame_path = target_dir / f"frame-ffmpeg-{offset:08d}-{timestamp_ms:010d}ms.jpg"
             try:
-                frame_path.unlink(missing_ok=True)
-                shutil.move(str(source_frame), str(frame_path))
+                os.replace(source_frame, frame_path)
             except OSError as exc:
                 raise VideoLoadError(f"Could not cache decoded frame for {resolved}: {exc}") from exc
             samples.append(

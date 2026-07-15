@@ -18,6 +18,7 @@ esbuild.buildSync({
   outfile: outFile,
 });
 const mod = await import(pathToFileURL(outFile).href);
+const hookSource = fs.readFileSync(path.join(ROOT, "src/shell/useCountRoll.ts"), "utf8");
 
 function run(name, fn) {
   fn();
@@ -79,6 +80,11 @@ run("throttled bump: only when changed AND interval elapsed AND not initial", ()
   assert.strictEqual(mod.shouldThrottledBump(5, 5, 0, 999, 300), false);
   // initial (prev undefined) → no bump
   assert.strictEqual(mod.shouldThrottledBump(undefined, 6, 0, 999, 300), false);
+});
+
+run("hooks compute bump keys without post-commit state effects", () => {
+  assert.doesNotMatch(hookSource, /useEffect/);
+  assert.doesNotMatch(hookSource, /useState/);
 });
 
 console.log("\nall count-roll tests passed");

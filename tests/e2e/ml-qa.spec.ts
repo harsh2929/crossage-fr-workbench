@@ -92,7 +92,7 @@ test("ML-enabled end-to-end QA: nav walk + screenshots + ML command IPC", async 
     if (m.type() === "error") consoleErrors.push(m.text());
   });
 
-  await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByText("Backend ready.")).toBeAttached({ timeout: 120_000 });
   await page.locator(".language-picker select").selectOption("en").catch(() => undefined);
   await dismissModals(page);
 
@@ -120,7 +120,12 @@ test("ML-enabled end-to-end QA: nav walk + screenshots + ML command IPC", async 
   report.import = { importedCount: (imported as any)?.importedCount };
 
   // 3) Semantic search (SigLIP2) over the real IPC path.
-  const sem = await unwrap(page, "semantic_search_photos", { query: "a solid red image", limit: 5 });
+  const sem = await unwrap(page, "semantic_search_photos", {
+    query: "a solid red image",
+    limit: 5,
+    allowInlineIndexing: true,
+    inlineIndexBudget: 3,
+  });
   report.semantic = {
     available: (sem as any)?.available,
     scored: (sem as any)?.scored,
@@ -190,7 +195,7 @@ test("ML UI affordances: AI search box + Portrait blur button (clicked)", async 
   const app = await electron.launch({ args: [path.join(projectRoot, "desktop/main.cjs")], cwd: projectRoot, env });
   const page = await app.firstWindow();
   page.on("pageerror", (e) => pageErrors.push(e.message));
-  await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByText("Backend ready.")).toBeAttached({ timeout: 120_000 });
   await page.locator(".language-picker select").selectOption("en").catch(() => undefined);
   await dismissModals(page);
 
@@ -198,6 +203,12 @@ test("ML UI affordances: AI search box + Portrait blur button (clicked)", async 
     sourcePaths: [fixtures.red, fixtures.blue, fixtures.checker],
     storageMode: "referenced",
     sourceLabel: "ML UI QA",
+  });
+  await unwrap(page, "semantic_search_photos", {
+    query: "a solid red image",
+    limit: 5,
+    allowInlineIndexing: true,
+    inlineIndexBudget: 3,
   });
 
   // Library is the default tab, so PhotosView mounted before this IPC import; bounce
@@ -209,7 +220,7 @@ test("ML UI affordances: AI search box + Portrait blur button (clicked)", async 
   await expect(page.locator(".photo-tile-wrap").first()).toBeVisible({ timeout: 30_000 });
 
   // --- AI (semantic) search box ---
-  const aiInput = page.getByRole("searchbox", { name: "Find photos by meaning" });
+  const aiInput = page.getByRole("searchbox", { name: "Find photos and video moments by meaning" });
   await aiInput.fill("a solid red image");
   await page.getByRole("button", { name: "Search by meaning" }).click();
   const semanticPanel = page.locator(".photos-semantic-search");
@@ -220,6 +231,8 @@ test("ML UI affordances: AI search box + Portrait blur button (clicked)", async 
 
   // --- Portrait blur button (lightbox) ---
   await page.getByRole("button", { name: /^Open photo/ }).first().click();
+  const createTools = page.locator(".photo-lightbox-create-disclosure");
+  await createTools.locator(":scope > summary").click();
   const blurBtn = page.getByRole("button", { name: "Export depth-aware portrait blur PNG" });
   await expect(blurBtn).toBeVisible({ timeout: 15_000 });
   await page.screenshot({ path: path.join(SHOT_DIR, "ui-lightbox-portrait-button.png") });

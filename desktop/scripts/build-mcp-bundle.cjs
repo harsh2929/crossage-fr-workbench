@@ -69,6 +69,7 @@ function buildMcpBundle(options = {}) {
   const serverDir = path.join(buildRoot, "server");
   const modelSourceDir = path.join(root, "models", "safety");
   const modelDestDir = path.join(buildRoot, "models", "safety");
+  const mcpAppsLicense = path.join(root, "node_modules", "@modelcontextprotocol", "ext-apps", "LICENSE");
   const outputDir = path.join(root, "dist");
   const outputPath = path.join(outputDir, `Vintrace-${platform}-${arch}.mcpb`);
   const reportPath = path.join(root, "report.md");
@@ -103,6 +104,12 @@ function buildMcpBundle(options = {}) {
   if (fsImpl.existsSync(reportPath)) {
     fsImpl.copyFileSync(reportPath, path.join(buildRoot, "report.md"));
   }
+  if (!fsImpl.existsSync(mcpAppsLicense)) {
+    stderr(`Missing MCP Apps SDK license at ${mcpAppsLicense}. Run npm ci first.`);
+    return 1;
+  }
+  fsImpl.mkdirSync(path.join(buildRoot, "licenses"), { recursive: true });
+  fsImpl.copyFileSync(mcpAppsLicense, path.join(buildRoot, "licenses", "MCP-Apps-SDK-LICENSE.txt"));
   const mcpIcon = path.join(root, "mcp", "icon.png");
   const fallbackIcon = path.join(root, "desktop", "assets", "icon.png");
   fsImpl.copyFileSync(fsImpl.existsSync(mcpIcon) ? mcpIcon : fallbackIcon, path.join(buildRoot, "icon.png"));

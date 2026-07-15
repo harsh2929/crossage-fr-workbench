@@ -6,6 +6,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable
+from unittest.mock import patch
 
 from crossage_fr.api_server import DesktopApi
 from crossage_fr.match import adapters as match_adapters
@@ -224,14 +225,28 @@ def photo_export_budget(api: DesktopApi, asset_count: int) -> dict[str, Any]:
         render_max_dimension=16,
         filename_mode="numbered",
     ))
-    rendered_video_export, rendered_video_ms = timed(lambda: api.export_photo_selection(
-        video_paths[:1],
-        export_variant="rendered",
-        video_render_format="mp4",
-        video_render_quality="small",
-        render_max_dimension=0,
-        filename_mode="numbered",
-    ))
+    def sign_synthetic_video(**sign_kwargs: Any) -> dict[str, Any]:
+        if not Path(sign_kwargs["unsigned_path"]).is_file() or not Path(sign_kwargs["parent_path"]).is_file():
+            raise RuntimeError("Synthetic performance export did not stage both credential inputs.")
+        return {
+            "contentCredentials": {
+                "present": True,
+                "embedded": True,
+                "validationState": "trusted",
+            }
+        }
+
+    # The benchmark isolates export orchestration with fake media/FFmpeg bytes;
+    # real codec and fail-closed C2PA behavior are covered in photo_folders_units.
+    with patch.object(api._content_credentials, "sign_edited_asset", side_effect=sign_synthetic_video):
+        rendered_video_export, rendered_video_ms = timed(lambda: api.export_photo_selection(
+            video_paths[:1],
+            export_variant="rendered",
+            video_render_format="mp4",
+            video_render_quality="small",
+            render_max_dimension=0,
+            filename_mode="numbered",
+        ))
     slideshow_sources = image_paths[: min(8, len(image_paths))]
     slideshow_movie, slideshow_movie_ms = timed(lambda: api.export_photo_slideshow({
         "sourcePaths": slideshow_sources,
@@ -1602,13 +1617,13 @@ def main() -> None:
         "photoSmartAlbumsQueueRunMs": budget("photo_smart_albums_queue_run", 10000),
         "photoCatalogQueueStatusMs": budget("photo_catalog_queue_status", 5000),
         "photoDuplicateRebuildMs": budget("photo_duplicate_rebuild", 10000),
-        "photoDuplicatePageMs": budget("photo_duplicate_page", 12000),
-        "photoDuplicateRailSummaryMs": budget("photo_duplicate_rail_summary", 10000),
+        "photoDuplicatePageMs": budget("photo_duplicate_page", 1000),
+        "photoDuplicateRailSummaryMs": budget("photo_duplicate_rail_summary", 2000),
         "photoDuplicateInvalidMergeMs": budget("photo_duplicate_invalid_merge", 10000),
         "photoDuplicateMergeMs": budget("photo_duplicate_merge", 10000),
         "photoDuplicateMergeUndoMs": budget("photo_duplicate_merge_undo", 10000),
         "photoDuplicateDismissMs": budget("photo_duplicate_dismiss", 10000),
-        "photoGlobalNonPhotoSearchMs": budget("photo_global_non_photo_search", 8000),
+        "photoGlobalNonPhotoSearchMs": budget("photo_global_non_photo_search", 1500),
     }
     checks = [
         {"name": name, "ok": metrics[name] <= limit, "valueMs": metrics[name], "budgetMs": limit}

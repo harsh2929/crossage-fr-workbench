@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 import json
 import os
+import re
 import shutil
 import time
 import zipfile
@@ -14,12 +15,22 @@ from PIL import Image
 
 from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, sha256_file
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS
+from crossage_fr.match.age_trajectory import age_bucket_for_years
 from crossage_fr.storage import safe_resolve
 
 
 CFP_DATASET_URL = "http://www.cfpw.io/cfp-dataset.zip"
 CFP_DATASET_SHA256 = "666b87635e6af028177ac72a85f03099fac263baf09c21f333fa445f930f65b1"
 CFP_DATASET_BYTES = 86_312_557
+FGNET_PREPARATION_VERSION = "fgnet-local-research-preparer-v1"
+FGNET_TERMS_SUMMARY = (
+    "FG-NET is supplied free of charge for academic research-related activities. "
+    "Obtain it from the dataset maintainers; do not redistribute it through Vintrace."
+)
+_FGNET_FILENAME = re.compile(
+    r"^(?P<subject>\d{3})A(?P<age>\d{1,3})(?P<suffix>[^/]*)\.(?P<extension>jpe?g|png|bmp|tiff?)$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -159,6 +170,20 @@ PUBLIC_DATASET_CATALOG: tuple[dict[str, Any], ...] = (
         "recommendedUse": "Cross-age validation and false-negative analysis.",
     },
     {
+        "datasetId": "fgnet",
+        "name": "FG-NET Aging Database",
+        "shortName": "FG-NET",
+        "bestFor": ["cross-age", "longitudinal subjects", "child-to-adult gaps"],
+        "scale": {"images": 1002, "identities": 82, "videos": 0},
+        "inputMode": "local-folder",
+        "layout": "maintainer-supplied flat files named like 001A02.JPG; prepared locally into identity folders",
+        "download": {"available": False, "method": "request from the FG-NET maintainers"},
+        "sourceUrl": "https://ietresearch.onlinelibrary.wiley.com/doi/10.1049/iet-bmt.2014.0053",
+        "terms": FGNET_TERMS_SUMMARY,
+        "recommendedUse": "Research-only longitudinal cross-age evaluation from an authorized local copy.",
+        "requiresTermsAcknowledgement": True,
+    },
+    {
         "datasetId": "cfp",
         "name": "Celebrities in Frontal-Profile",
         "shortName": "CFP",
@@ -245,6 +270,137 @@ def public_dataset_catalog() -> dict[str, Any]:
     }
 
 
+def parse_fgnet_filename(path: str | Path) -> tuple[str, int] | None:
+    match = _FGNET_FILENAME.fullmatch(Path(str(path)).name)
+    if match is None:
+        return None
+    age = int(match.group("age"))
+    if age < 0 or age > 120:
+        return None
+    return match.group("subject"), age
+
+
+def fgnet_identity_media_index(
+    folder: Path,
+    *,
+    max_identities: int = 25000,
+    entry_budget: int = 1_000_000,
+) -> tuple[list[IdentityMedia], bool, int]:
+    """Inspect the maintainer's flat FG-NET layout without copying or decoding it."""
+    root = safe_resolve(folder)
+    if not root.exists() or not root.is_dir():
+        return [], False, 0
+    grouped: dict[str, list[Path]] = {}
+    checked = 0
+    truncated = False
+    for candidate in sorted(root.rglob("*"), key=lambda item: str(item).casefold()):
+        checked += 1
+        if checked > max(1, int(entry_budget)):
+            truncated = True
+            break
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        parsed = parse_fgnet_filename(candidate)
+        if parsed is None:
+            continue
+        resolved = safe_resolve(candidate)
+        if root not in resolved.parents:
+            continue
+        grouped.setdefault(parsed[0], []).append(resolved)
+    identities: list[IdentityMedia] = []
+    for subject in sorted(grouped, key=str.casefold):
+        if len(identities) >= max(1, int(max_identities)):
+            truncated = True
+            break
+        images = tuple(sorted(grouped[subject], key=lambda item: item.name.casefold()))
+        identities.append(IdentityMedia(subject, root, images, ()))
+    return identities, truncated, min(checked, max(1, int(entry_budget)))
+
+
+def prepare_fgnet_dataset(
+    source_folder: Path,
+    destination_folder: Path,
+    *,
+    terms_acknowledged: bool,
+) -> dict[str, Any]:
+    """Prepare an authorized local FG-NET copy without downloading or mutating it."""
+    if not terms_acknowledged:
+        raise PermissionError("Acknowledge the FG-NET academic-research terms before preparing this local copy.")
+    source = safe_resolve(source_folder)
+    destination = destination_folder.expanduser().resolve()
+    if not source.exists() or not source.is_dir():
+        raise ValueError("Choose the folder containing an authorized FG-NET copy.")
+    if source == destination or source in destination.parents:
+        raise ValueError("The prepared FG-NET workspace must be outside the source dataset folder.")
+
+    parsed: list[tuple[str, int, Path]] = []
+    checked = 0
+    for candidate in sorted(source.rglob("*"), key=lambda item: str(item).casefold()):
+        checked += 1
+        if checked > 5000:
+            raise ValueError("FG-NET source inspection exceeded the 5,000-entry safety budget.")
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        identity_age = parse_fgnet_filename(candidate)
+        if identity_age is None:
+            continue
+        resolved = safe_resolve(candidate)
+        if source not in resolved.parents:
+            raise ValueError("FG-NET source contains a file outside the selected folder.")
+        parsed.append((identity_age[0], identity_age[1], resolved))
+    if not parsed:
+        raise ValueError("No FG-NET files named like 001A02.JPG were found.")
+
+    destination.mkdir(parents=True, exist_ok=True)
+    manifest_rows: list[dict[str, Any]] = []
+    identities: set[str] = set()
+    for subject, age, source_path in parsed:
+        identities.add(subject)
+        target = destination / subject / source_path.name
+        if target.exists() and sha256_file(target) != sha256_file(source_path):
+            target = destination / subject / f"{sha256_file(source_path)[:12]}-{source_path.name}"
+        materialize_file(source_path, target)
+        manifest_rows.append(
+            {
+                "subject": subject,
+                "age": age,
+                "ageBucket": age_bucket_for_years(age),
+                "sourceRelativePath": str(source_path.relative_to(source)),
+                "preparedRelativePath": str(target.relative_to(destination)),
+                "sha256": sha256_file(source_path),
+                "bytes": source_path.stat().st_size,
+            }
+        )
+    manifest = {
+        "schemaVersion": 1,
+        "preparationVersion": FGNET_PREPARATION_VERSION,
+        "generatedAt": _now_iso(),
+        "datasetId": "fgnet",
+        "sourceFolder": str(source),
+        "preparedFolder": str(destination),
+        "termsAcknowledged": True,
+        "terms": FGNET_TERMS_SUMMARY,
+        "downloadPerformed": False,
+        "sourceMutated": False,
+        "identityCount": len(identities),
+        "imageCount": len(manifest_rows),
+        "files": manifest_rows,
+    }
+    manifest_path = destination.parent / f"{destination.name}-manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return {
+        "status": "prepared",
+        "folder": str(destination),
+        "manifestPath": str(manifest_path),
+        "manifestSha256": sha256_file(manifest_path),
+        "preparationVersion": FGNET_PREPARATION_VERSION,
+        "identityCount": len(identities),
+        "imageCount": len(manifest_rows),
+        "termsAcknowledged": True,
+        "downloadPerformed": False,
+    }
+
+
 def inspect_identity_dataset(
     folder: Path,
     *,
@@ -255,12 +411,19 @@ def inspect_identity_dataset(
 ) -> dict[str, Any]:
     root = safe_resolve(folder)
     started = time.monotonic()
-    identities, truncated, entries_checked = identity_media_index(
-        root,
-        max_identities=max_identities,
-        entry_budget=entry_budget,
-        include_videos=include_videos,
-    )
+    if str(dataset_id or "").casefold() == "fgnet":
+        identities, truncated, entries_checked = fgnet_identity_media_index(
+            root,
+            max_identities=max_identities,
+            entry_budget=entry_budget,
+        )
+    else:
+        identities, truncated, entries_checked = identity_media_index(
+            root,
+            max_identities=max_identities,
+            entry_budget=entry_budget,
+            include_videos=include_videos,
+        )
     image_count = sum(len(item.images) for item in identities)
     video_count = sum(len(item.videos) for item in identities)
     usable = [item for item in identities if len(item.images) >= 2]

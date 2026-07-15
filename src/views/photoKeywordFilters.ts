@@ -19,6 +19,39 @@ function keywordKey(value: unknown): string {
   return cleanKeywordName(value).toLocaleLowerCase();
 }
 
+export function parseKeywordsDraft(value: unknown): string[] {
+  const raw = Array.isArray(value) ? value : String(value || "").split(/[,;\n]/);
+  const seen = new Set<string>();
+  const keywords: string[] = [];
+  raw.forEach((item) => {
+    const keyword = String(item || "").replace(/\s+/g, " ").trim().slice(0, 64);
+    const key = keyword.toLocaleLowerCase();
+    if (!keyword || seen.has(key)) return;
+    seen.add(key);
+    keywords.push(keyword);
+  });
+  return keywords.slice(0, 64);
+}
+
+export function formatKeywords(keywords: unknown): string {
+  return parseKeywordsDraft(keywords).join(", ");
+}
+
+export function toggleKeywordDraft(current: string, keyword: string): string {
+  const clean = String(keyword || "").trim();
+  if (!clean) return current;
+  const keywords = parseKeywordsDraft(current);
+  const key = clean.toLocaleLowerCase();
+  const exists = keywords.some((item) => item.toLocaleLowerCase() === key);
+  return (exists ? keywords.filter((item) => item.toLocaleLowerCase() !== key) : [...keywords, clean]).join(", ");
+}
+
+export function keywordsEqual(left: unknown, right: unknown): boolean {
+  const a = parseKeywordsDraft(left).map((keyword) => keyword.toLocaleLowerCase()).sort();
+  const b = parseKeywordsDraft(right).map((keyword) => keyword.toLocaleLowerCase()).sort();
+  return a.length === b.length && a.every((keyword, index) => keyword === b[index]);
+}
+
 export function buildPhotoKeywordFilterOptions(
   keywords: PhotoKeywordFilterCandidate[],
   activeKeyword: unknown,

@@ -73,9 +73,9 @@ The decision/measurement/governance scaffolding is **at or near its constrained 
 | Stage | Shipped |
 |---|---|
 | Detection | SCRFD-10G + **multi-scale** normal pass + coordinate-correct **tiling** (IoU-NMS) for small faces; profile rescue; `det_score` + native **inter-eye distance** captured |
-| Recognition | ArcFace `glintr100`/`w600k_r50`, 512-d; **horizontal-flip TTA** (off by default); **config-driven recognizer seam** (`recognizer_filename` + `apply_recognizer_preference`) |
-| Quality | calibrated embedding-norm→[0,1] (re-armed the dead gate); **FIQA scorer seam** (`embed/fiqa.py`, eDifFIQA drop-in) |
-| Decision | raw cosine→**Platt calibration** (P(same)) + **FMR-targeted thresholds**; **model-pack-versioned** calibrator; conservative cross-age-safe quality demotion; additive same-era **age-consistency** support; runner-up margins |
+| Recognition | ArcFace `glintr100`/`w600k_r50`, 512-d; **horizontal-flip TTA** (off by default); **A/B-gated alignment recovery** for suspect five-point crops; **config-driven recognizer seam** (`recognizer_filename` + `apply_recognizer_preference`) |
+| Quality | bundled, integrity-pinned **eDifFIQA(T)** on the recognizer-aligned crop; calibrated embedding norm retained as an explicit failure fallback |
+| Decision | identity-held-out **AC-Linear local calibration** over pair center + raw cosine, with per-person/global **Platt fallbacks** and **FMR-targeted thresholds**; model/artifact versioning; fixed-cohort symmetric AS-Norm precision guard; conservative quality, age-consistency, and runner-up handling |
 | Cross-age | multi-age enrollment; relaxed_child band; **per-age-gap DET report**; **§5.4 capture-date provenance** governance (EXIF vs mtime → unverified gaps downgraded to "estimated") |
 | Fairness/Eval | **per-cohort fairness** report; real harness — **TAR@FAR, DET, EER, accuracy@EER, open-set FNIR@FPIR**, identity-level **bootstrap CIs**, honest resolvable-FAR floor |
 | Clustering | license-clean **cosine kNN-graph + connected-components** (PCA/copyleft dropped); **one global pass** (fixed per-batch fragmentation) |
@@ -92,10 +92,10 @@ deliberately weighted to **upstream (alignment, video) + review-UX (active learn
 | Decision / calibration / eval / governance | **at ceiling** | ~0 |
 | Detection model | **at license-clean WIDER-Hard ceiling** (multi-scale+tiling) | ~0 |
 | Recognition backbone | open-research SOTA tier (~97.5% IJB-C@1e-4) | **+1–4pp at strict FAR** via LVFace; **+19pt on MFR-Children**¹ |
-| Alignment / crop quality | fixed 5-pt `norm_crop`, **no failure path** | **+2–5pp on the child tail** (crop quality swings child TAR up to 88pt) |
+| Alignment / crop quality | fixed 5-pt control plus bounded alternate warps, FIQA/identity-consistency A/B gate, cache telemetry, and review fallback | Real-world recall gain remains cohort-dependent; CALFW/CPLFW no-regression gate is shipped |
 | Video ingest | uniform sampling, all-frames, no per-track aggregation | quality keyframe + pooling (throughput + modest recall) |
-| Decision pooling / cohort-norm | top-3 heuristic; no cohort normalization | **+1–3pp** (pooling) / **+2–2.5pp@1e-4** (AS-norm) |
-| On-device personalization | global calibrator only | **+1–3pp** on the user's hard pairs (label-starved) |
+| Decision pooling / cohort-norm | top-3 support plus fixed-cohort symmetric AS-Norm; CALFW/CPLFW no-regression shown | Any positive local gain remains library-dependent; no gain is claimed from the public slices |
+| On-device personalization | AC-Linear local context plus guarded per-identity/global Platt fallback | Further gains remain label-starved and require the held-out gate |
 | Cross-age child→adult | near the honest ceiling | **fundamentally capped ~50–75%** |
 
 ¹ MFR-Ongoing "Children" (2–16, strict FAR): shipped `glintr100` = 75.20% vs LVFace-L = 94.31% (self-reported,
@@ -130,6 +130,10 @@ critic's ranking, adjusted for this app.
   only if it wins on the held-out split.
 
 ### 5.2 — Alignment-failure detection + re-align/re-embed + review demotion  ·  Effort **S–M**  ·  the biggest TRUE lever
+- **Shipped 2026-07-12:** residuals above `0.15` generate at most four alternate five-point hypotheses. The
+  original crop remains the control; an alternate must improve geometry and FIQA, stay embedding-consistent,
+  and win a combined A/B score. Failed or incomparable alternatives fall back to the control. Recovery fields
+  are cache-versioned, scans expose attempted/succeeded/rejected counts, and accepted rescues are review-flagged.
 - **What:** detect bad alignments (low landmark confidence / large residual after the similarity fit); (a) try
   an alternate crop / 2-D warp and re-embed, and (b) **demote** unfixable ones in review ordering.
 - **Why:** the literature shows child TAR swings **7%→95% on crop quality alone** — for this app's headline
@@ -192,8 +196,8 @@ critic's ranking, adjusted for this app.
 - **Validation:** held-out per-user; abort if it doesn't beat the global calibrator on that user's slice.
 
 ### 5.7 — Fetch the eDifFIQA(T) ONNX (unblocks 5.3)  ·  Effort **S**
-- **What:** drop `ediffiqa_tiny_jun2024.onnx` (~7.3 MB, MIT, OpenCV Model Zoo) into `models/fiq/` — the seam
-  already exists (`embed/fiqa.py`).
+- **Shipped 2026-07-12:** bundled `ediffiqa_tiny_jun2024.onnx` (~7.3 MB, **CC-BY-4.0**, OpenCV Model Zoo)
+  with source pin, attribution, license, checksum manifest, packaged-runtime integrity validation, and offline inference tests.
 - **Why:** upgrades quality-weighting/keyframe selection from the norm/self-consistency proxy to a real
   recognition-aware FIQA (EDC pAUC ~0.77→~0.68); trims unrecoverable tiny/blurry faces from review.
 - **Risk:** only blocker is fetching the file offline; calibrate the cut conservatively so genuine low-quality
@@ -311,15 +315,16 @@ All §5 + §6 levers are implemented and unit-tested (TDD). New `npm run` gates:
 |---|---|---|
 | §6 held-out validation gate | ✅ done | `match/validation.py` (`held_out_gate`, `split_by_identity`); wired to the global calibration via `ProjectState.validate_calibration_change` |
 | §5.2 alignment-failure signal + demotion + abstention | ✅ done | `engine.alignment_error` captured → `scoring._demote_alignment_suspect` → `review_order` low-information lane |
-| §5.2 re-align/re-embed fallback | ⏸ deferred | needs an alternate landmark hypothesis + A/B gate; the signal+demotion+abstention deliver the safe value |
+| §5.2 re-align/re-embed fallback | ✅ done | `alignment_recovery_hypotheses` + `_recognition_attempt` + `select_alignment_recovery`; original-control fallback, cache/scan telemetry, review risk, and CALFW/CPLFW A/B benchmark |
 | §5.3 self-consistency pooling | ✅ done | `match/pooling.py` (`pool_template`, `self_consistency_weights`) + `ProjectState.person_template` |
 | §5.3 sharpness video keyframes | ✅ done | `ingest/video_io.py` `variance_of_laplacian` + `_sharpest_in_window` (window=1) in the decode loop |
 | §5.4 active-learning review ordering + abstention | ✅ done | `match/review_order.py` (`review_lane`, `review_priority`) wired into candidate creation + queue sort |
-| §5.5 cohort AS-norm | ✅ done | `calibration.as_norm_score` + `CohortNormalizer`; `scoring._demote_low_cohort_separation` auto-derives the impostor cohort from other-person hits (no new store) |
+| §5.5 cohort AS-norm | ✅ done | Integrity-pinned antelopev2/buffalo_l Syn-Vis-v0 packs; true symmetric probe/reference AS-Norm in live scoring; persisted versioned pair context; AC-Linear held-out promotion with explicit Platt fallback; CALFW/CPLFW and frozen-package gates |
 | §5.6 per-identity personalization | ✅ done | `calibration.fit_per_identity_calibrators` + `config.calibration_platt_by_person` + `ProjectState.apply_personalized_calibration` + `match_probability(person_name=)` |
 | §5.6 2-model fusion | ✅ primitive | `calibration.fuse_scores` (score-level); live 2-model path pends a 2nd recognizer weight |
 | §5.1 recognizer drop-in validation | ✅ done | `embed/model_validation.py` (`assess_recognizer_io`, `validate_recognizer_onnx`) + `ProjectState.validate_drop_in_recognizer` (catches the square-%16/single-output routing + Sub/Mul normalization-flip traps) |
-| §5.1 LVFace activation / §5.7 eDifFIQA | ⏸ drop-in ready | seams + validation in place; the actual non-commercial/MIT ONNX weights must be fetched (can't be obtained offline here) |
+| §5.1 LVFace activation | ⏸ drop-in ready | seam + validation in place; LVFace weights remain research-only pending a permissive/synthetic retrain |
+| §5.7 eDifFIQA | ✅ done | official CC-BY-4.0 tiny ONNX bundled, attributed, integrity-pinned, packaged, and exercised by real offline inference |
 
 **Design invariants honored:** every scoring change is precision-only and **never** touches
 the cross-age relaxed band (recall-safe); every adaptive change is same-embedding-space

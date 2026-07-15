@@ -1,25 +1,13 @@
-name: Windows Release
+name: Windows Signed Build
 
 on:
+  workflow_call:
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: "Optional GitHub Release tag to publish installer/update metadata to, for example v0.1.0"
-        required: false
-        type: string
-      draft:
-        description: "Create or update the release as a draft"
-        required: false
-        default: true
-        type: boolean
-      prerelease:
-        description: "Mark the release as a prerelease"
-        required: false
-        default: false
-        type: boolean
-
 permissions:
-  contents: write
+  contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 jobs:
   build-windows-installer:
@@ -28,20 +16,23 @@ jobs:
     env:
       VINTRACE_BUILD_SHA: ${{ github.sha }}
       VINTRACE_BUILD_REF: ${{ github.ref_name }}
+      VINTRACE_BUILD_SOURCE_REF: ${{ github.ref }}
+      VINTRACE_BUILD_PYTHON: python
+      VINTRACE_REQUIRE_PYTHON_MINOR: "3.11"
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "24"
           cache: npm
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
           cache: pip
@@ -49,11 +40,25 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
+      - name: Install pinned Electron binary
+        run: npm run electron:install
+
       - name: Install Python production dependencies
         run: |
           python -m pip install --upgrade pip wheel setuptools
           # BRS-1: install from the pinned + hashed lock (reproducible/tamper-evident).
           python -m pip install --require-hashes -r requirements-production.lock.txt
+
+      - name: Verify Electron and ONNX Runtime currency
+        run: npm run test:dependency-currency
+
+      - name: Audit Windows locked Python dependencies
+        shell: pwsh
+        run: |
+          $auditVenv = Join-Path $env:RUNNER_TEMP "pip-audit"
+          python -m venv $auditVenv
+          & (Join-Path $auditVenv "Scripts\python.exe") -m pip install --disable-pip-version-check pip-audit==2.10.1
+          & (Join-Path $auditVenv "Scripts\pip-audit.exe") --require-hashes -r requirements-production.lock.txt
 
       - name: Run backend smoke tests
         env:
@@ -65,23 +70,203 @@ jobs:
           python tests/clean_workspace_smoke.py
           python tests/accuracy_benchmark.py
           python tests/dataset_regression_gates.py
+          python tests/model_lifecycle_units.py
+          python benchmarks/run_model_lifecycle_evals.py --output (Join-Path $env:RUNNER_TEMP "model-lifecycle.json")
+          python tests/audio_intelligence_units.py
           python tests/mcp_redaction.py
+          python tests/photo_source_adapters_units.py
+          python tests/photo_source_service_units.py
+          python tests/photo_source_api_units.py
+          python tests/photo_source_scale.py
+          python tests/vector_store_units.py
+          python -c "import importlib.util; assert importlib.util.find_spec('osxphotos') is None"
 
       - name: Validate update feed and release checks
         env:
           CROSSAGE_FORCE_FALLBACK: "1"
           PYTHONPATH: ${{ github.workspace }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          AZURE_ARTIFACT_SIGNING_PROFILE: ${{ secrets.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          AZURE_ARTIFACT_SIGNING_PUBLISHER: ${{ secrets.AZURE_ARTIFACT_SIGNING_PUBLISHER }}
         run: |
           npm run update:dry-run
+          npm run test:release-signing-policy
           npm run release:check
 
-      - name: Build Windows installer
+      - name: Validate Azure Artifact Signing configuration
+        shell: pwsh
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: npm run dist:win
+          AZURE_CLIENT_ID_VALUE: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID_VALUE: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID_VALUE: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          AZURE_ARTIFACT_SIGNING_PROFILE: ${{ secrets.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          AZURE_ARTIFACT_SIGNING_PUBLISHER: ${{ secrets.AZURE_ARTIFACT_SIGNING_PUBLISHER }}
+        run: |
+          $required = @{
+            AZURE_CLIENT_ID = $env:AZURE_CLIENT_ID_VALUE
+            AZURE_TENANT_ID = $env:AZURE_TENANT_ID_VALUE
+            AZURE_SUBSCRIPTION_ID = $env:AZURE_SUBSCRIPTION_ID_VALUE
+            AZURE_ARTIFACT_SIGNING_ENDPOINT = $env:AZURE_ARTIFACT_SIGNING_ENDPOINT
+            AZURE_ARTIFACT_SIGNING_ACCOUNT = $env:AZURE_ARTIFACT_SIGNING_ACCOUNT
+            AZURE_ARTIFACT_SIGNING_PROFILE = $env:AZURE_ARTIFACT_SIGNING_PROFILE
+            AZURE_ARTIFACT_SIGNING_PUBLISHER = $env:AZURE_ARTIFACT_SIGNING_PUBLISHER
+          }
+          foreach ($entry in $required.GetEnumerator()) {
+            if ([string]::IsNullOrWhiteSpace($entry.Value)) { throw "Missing $($entry.Key)" }
+          }
+          $endpoint = [Uri]$env:AZURE_ARTIFACT_SIGNING_ENDPOINT
+          if ($endpoint.Scheme -ne "https" -or [string]::IsNullOrWhiteSpace($endpoint.Host)) {
+            throw "AZURE_ARTIFACT_SIGNING_ENDPOINT must be an absolute HTTPS URL"
+          }
+          if (![string]::IsNullOrEmpty($endpoint.UserInfo) -or ![string]::IsNullOrEmpty($endpoint.Query) -or ![string]::IsNullOrEmpty($endpoint.Fragment)) {
+            throw "AZURE_ARTIFACT_SIGNING_ENDPOINT must not contain credentials, a query, or a fragment"
+          }
 
-      - name: Generate release metadata
+      - name: Authenticate to Azure with GitHub OIDC
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build with Azure Artifact Signing
+        shell: pwsh
+        env:
+          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          AZURE_ARTIFACT_SIGNING_PROFILE: ${{ secrets.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          AZURE_ARTIFACT_SIGNING_PUBLISHER: ${{ secrets.AZURE_ARTIFACT_SIGNING_PUBLISHER }}
+        run: |
+          npm run build
+          npm run build:backend
+          $env:VINTRACE_MODEL_LIFECYCLE_TEST_EXECUTABLE = Join-Path $PWD "backend-dist\crossage-backend\crossage-backend.exe"
+          npm run test:frozen-model-lifecycle
+          $env:VINTRACE_AUDIO_TEST_EXECUTABLE = Join-Path $PWD "backend-dist\crossage-backend\crossage-backend.exe"
+          npm run test:frozen-audio-intelligence
+          $env:VINTRACE_LOCAL_SYNC_TEST_EXECUTABLE = Join-Path $PWD "backend-dist\crossage-backend\crossage-backend.exe"
+          npm run test:frozen-local-sync
+          $env:VINTRACE_DEPENDENCY_TEST_EXECUTABLE = Join-Path $PWD "backend-dist\crossage-backend\crossage-backend.exe"
+          npm run test:frozen-dependency-currency
+          $env:VINTRACE_ENCRYPTION_TEST_EXECUTABLE = Join-Path $PWD "backend-dist\crossage-backend\crossage-backend.exe"
+          npm run test:frozen-workspace-encryption
+          npm run test:frozen-compliance
+          $env:VINTRACE_CONTENT_CREDENTIALS_TEST_EXECUTABLE = Join-Path $PWD "backend-dist\crossage-backend\crossage-backend.exe"
+          npm run test:frozen-content-credentials
+          $env:VINTRACE_MCP_TEST_EXECUTABLE = Join-Path $PWD "backend-dist\crossage-backend\crossage-backend.exe"
+          npm run test:frozen-mobile-companion
+          npx electron-builder --win nsis --x64 --publish never `
+            --config.win.forceCodeSigning=true `
+            --config.win.azureSignOptions.endpoint="$env:AZURE_ARTIFACT_SIGNING_ENDPOINT" `
+            --config.win.azureSignOptions.codeSigningAccountName="$env:AZURE_ARTIFACT_SIGNING_ACCOUNT" `
+            --config.win.azureSignOptions.certificateProfileName="$env:AZURE_ARTIFACT_SIGNING_PROFILE" `
+            --config.win.azureSignOptions.publisherName="$env:AZURE_ARTIFACT_SIGNING_PUBLISHER" `
+            --config.win.azureSignOptions.fileDigest=SHA256 `
+            --config.win.azureSignOptions.timestampRfc3161=http://timestamp.acs.microsoft.com `
+            --config.win.azureSignOptions.timestampDigest=SHA256
+
+      - name: Smoke test packaged Electron 43 application
+        run: npm run test:e2e:packaged
+
+      - name: Build validated Windows MCPB package
+        run: npm run mcp:bundle:package
+
+      - name: Verify Azure Authenticode signatures and timestamps
+        shell: pwsh
+        env:
+          AZURE_ARTIFACT_SIGNING_PUBLISHER: ${{ secrets.AZURE_ARTIFACT_SIGNING_PUBLISHER }}
+        run: |
+          $installers = @(Get-ChildItem -Path dist -Filter "*.exe" -File)
+          if (!$installers) { throw "No Windows installer found" }
+          $app = Get-ChildItem -Path dist -Filter "Vintrace.exe" -Recurse -File | Select-Object -First 1
+          if (!$app) { throw "No packaged Vintrace.exe found" }
+          $backend = Get-ChildItem -Path dist -Filter "crossage-backend.exe" -Recurse -File | Select-Object -First 1
+          if (!$backend) { throw "No packaged crossage-backend.exe found" }
+          $targets = @($installers) + @($app, $backend)
+          foreach ($target in $targets) {
+            $signature = Get-AuthenticodeSignature $target.FullName
+            if ($signature.Status -ne "Valid") {
+              throw "Invalid Authenticode signature for $($target.Name): $($signature.Status)"
+            }
+            if (!$signature.TimeStamperCertificate) { throw "Missing RFC3161 timestamp for $($target.Name)" }
+            if (!$signature.SignerCertificate.Subject.Contains($env:AZURE_ARTIFACT_SIGNING_PUBLISHER)) {
+              throw "Unexpected signer for $($target.Name): $($signature.SignerCertificate.Subject)"
+            }
+          }
+
+      - name: Install pinned Syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: v1.44.0
+
+      - name: Install pinned cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+
+      - name: Generate standard SBOMs and release checksums
+        env:
+          VINTRACE_SYFT_BIN: ${{ steps.syft.outputs.cmd }}
         run: npm run release:artifacts
+
+      - name: Prepare Windows-native attestation checksum input
+        id: attestation_checksums
+        shell: pwsh
+        run: |
+          $source = [IO.File]::ReadAllText((Join-Path $PWD "dist\SHA256SUMS.txt"))
+          $normalized = $source -replace "`r?`n", "`r`n"
+          $target = Join-Path $env:RUNNER_TEMP "vintrace-attestation-subjects.txt"
+          [IO.File]::WriteAllText($target, $normalized, [Text.UTF8Encoding]::new($false))
+          "path=$target" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Attest release subjects with SLSA provenance
+        id: attest_slsa
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: ${{ steps.attestation_checksums.outputs.path }}
+
+      - name: Preserve SLSA provenance bundle
+        shell: pwsh
+        run: Copy-Item -LiteralPath "${{ steps.attest_slsa.outputs.bundle-path }}" -Destination "dist\vintrace-slsa-provenance.attestation.sigstore.json"
+
+      - name: Attest release subjects with CycloneDX SBOM
+        id: attest_cyclonedx
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: ${{ steps.attestation_checksums.outputs.path }}
+          sbom-path: dist/vintrace.cdx.json
+
+      - name: Preserve CycloneDX attestation bundle
+        shell: pwsh
+        run: Copy-Item -LiteralPath "${{ steps.attest_cyclonedx.outputs.bundle-path }}" -Destination "dist\vintrace-cyclonedx.attestation.sigstore.json"
+
+      - name: Attest release subjects with SPDX SBOM
+        id: attest_spdx
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: ${{ steps.attestation_checksums.outputs.path }}
+          sbom-path: dist/vintrace.spdx.json
+
+      - name: Preserve SPDX attestation bundle
+        shell: pwsh
+        run: Copy-Item -LiteralPath "${{ steps.attest_spdx.outputs.bundle-path }}" -Destination "dist\vintrace-spdx.attestation.sigstore.json"
+
+      - name: Keylessly sign every release subject
+        env:
+          VINTRACE_COSIGN_IDENTITY: "https://github.com/${{ github.repository }}/.github/workflows/windows-release.yml@${{ github.ref }}"
+        run: npm run release:sign
+
+      - name: Verify GitHub-hosted provenance and SBOM attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VINTRACE_GITHUB_WORKFLOW_PATH: .github/workflows/windows-release.yml
+        run: npm run release:attest:verify
 
       - name: Validate packaged artifacts
         env:
@@ -118,53 +303,17 @@ jobs:
         run: npm run test:e2e:packaged
 
       - name: Upload installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: Vintrace-Windows-Installer
+          name: Vintrace-Windows-Signed-Azure
           if-no-files-found: error
           path: |
             dist/*.exe
             dist/*.blockmap
             dist/latest*.yml
-            dist/SHA256SUMS.txt
-            dist/vintrace-sbom.json
-            dist/vintrace-provenance.json
-
-      - name: Stage installer in draft GitHub Release
-        if: ${{ inputs.release_tag != '' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.release_tag }}
-          name: Vintrace ${{ inputs.release_tag }}
-          draft: true
-          prerelease: ${{ inputs.prerelease }}
-          fail_on_unmatched_files: true
-          files: |
-            dist/*.exe
-            dist/*.blockmap
-            dist/latest*.yml
-            dist/SHA256SUMS.txt
-            dist/vintrace-sbom.json
-            dist/vintrace-provenance.json
-
-      - name: Verify staged release assets
-        if: ${{ inputs.release_tag != '' }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run release:verify -- --repo "${{ github.repository }}" --tag "${{ inputs.release_tag }}" --platform win32 --full --require-release-metadata --allow-draft
-
-      - name: Publish verified GitHub Release
-        if: ${{ inputs.release_tag != '' && inputs.draft == false }}
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { owner, repo } = context.repo;
-            const tag = `${{ inputs.release_tag }}`;
-            const { data: release } = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
-            await github.rest.repos.updateRelease({
-              owner,
-              repo,
-              release_id: release.id,
-              draft: false,
-              prerelease: ${{ inputs.prerelease }}
-            });
+            dist/SHA256SUMS.txt*
+            dist/vintrace.cdx.json
+            dist/vintrace.spdx.json
+            dist/vintrace-build-metadata.json
+            dist/*.sigstore.json
+            dist/Vintrace-win32-*.mcpb

@@ -60,6 +60,27 @@ def test_backup_check_flags_media_pair_with_missing_related_asset() -> None:
         assert pair_samples[0]["relatedAssetId"] == "ghost-related-asset", pair_samples
 
 
+def test_backup_check_accepts_derived_album_folder_covers() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        folder = api.save_photo_album_folder({"name": "Derived cover folder"})
+        api.save_photo_album(
+            {
+                "name": "Folder album",
+                "albumKind": "manual",
+                "folderId": folder["folderId"],
+            }
+        )
+
+        result = api.photo_library_backup_check({"sampleLimit": 10})
+        assert result["counts"]["albumFolders"] == 1, result["counts"]
+        assert all(
+            sample.get("table") != "photo_album_folders"
+            for sample in result["samples"]["catalogIntegrityIssues"]
+        ), result["samples"]["catalogIntegrityIssues"]
+
+
 if __name__ == "__main__":
     test_backup_check_flags_media_pair_with_missing_related_asset()
+    test_backup_check_accepts_derived_album_folder_covers()
     print("all photo_media_pair_backup_check_units tests passed")

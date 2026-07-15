@@ -13,22 +13,40 @@ import mimetypes
 import os
 import re
 import shutil
-import sqlite3
+import struct
+import threading
 import uuid
 import xml.etree.ElementTree as ET
 from typing import Any, Iterable, Iterator
 
+try:
+    from sqlcipher3 import dbapi2 as sqlite3
+
+    SQLCIPHER_AVAILABLE = True
+except ImportError:  # pragma: no cover - production lock always includes sqlcipher3.
+    import sqlite3
+
+    SQLCIPHER_AVAILABLE = False
+
 from crossage_fr.ingest.video_io import probe_video
 from crossage_fr.models import normalize_risk_flags
+from crossage_fr.store.workspace_encryption import WorkspaceEncryption, WorkspaceEncryptionError, workspace_key_id
 from crossage_fr.workspace_registry import now_iso, restrict_file_mode
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 15
 PHOTO_LOCATION_INDEX_VERSION = "1"
 PHOTO_IMPORT_BACKFILL_SIGNATURE_META_KEY = "photoImportBackfillSignature"
 PHOTO_IMPORT_BACKFILL_SIGNATURE_VERSION = "1"
+PHOTO_STARTUP_REPAIR_META_KEY = "photoStartupRepairVersion"
+PHOTO_STARTUP_REPAIR_VERSION = "1"
+PHOTO_SEMANTIC_INDEX_GENERATION_META_KEY = "photoSemanticIndexGeneration"
+VIDEO_SEMANTIC_INDEX_GENERATION_META_KEY = "videoSemanticIndexGeneration"
+PHOTO_CATALOG_CHANGE_BASELINE_META_KEY = "photoCatalogChangeBaselineVersion"
+PHOTO_CATALOG_CHANGE_BASELINE_VERSION = "1"
 SQLITE_CACHE_SIZE_KIB = 65536
 SQLITE_MMAP_SIZE_BYTES = 256 * 1024 * 1024
+SQLITE_PLAINTEXT_HEADER = b"SQLite format 3\x00"
 PHOTO_OPERATION_JOURNAL_PENDING_LIMIT = 250
 PHOTO_OPERATION_JOURNAL_UNDONE_LIMIT = 50
 PHOTO_DB_PET_KIND_TERMS: dict[str, tuple[str, ...]] = {
@@ -77,11 +95,20 @@ class WorkspaceDb:
         "other": "Other app",
     }
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, encryption: WorkspaceEncryption | None = None):
         self.path = path.expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # SQLCipher's SQLite build can deadlock when one thread opens a WAL
+        # connection while another closes one for the same workspace. Keep a
+        # workspace's connection lifecycle serialized; RLock preserves nested
+        # helper calls on the request thread.
+        self._connection_lock = threading.RLock()
+        self.encryption = encryption or WorkspaceEncryption.from_environment(self.path.parent)
+        self._key = self.encryption.key
+        self._cipher_version = ""
         self._scale_summary_cache_key: tuple[tuple[str, int, int], ...] | None = None
         self._scale_summary_cache_value: dict[str, Any] | None = None
+        self._prepare_database_encryption()
         try:
             self._init_schema()
         except sqlite3.DatabaseError as exc:
@@ -94,6 +121,170 @@ class WorkspaceDb:
         for sidecar in (Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
             if sidecar.exists():
                 restrict_file_mode(sidecar, 0o600)
+
+    @staticmethod
+    def _is_plaintext_database(path: Path) -> bool:
+        try:
+            with path.open("rb") as handle:
+                return handle.read(len(SQLITE_PLAINTEXT_HEADER)) == SQLITE_PLAINTEXT_HEADER
+        except OSError:
+            return False
+
+    @staticmethod
+    def _is_plausibly_encrypted_database(path: Path) -> bool:
+        try:
+            size = path.stat().st_size
+            return size >= 512 and size % 512 == 0
+        except OSError:
+            return False
+
+    @staticmethod
+    def _sql_path(path: Path) -> str:
+        return str(path).replace("'", "''")
+
+    @staticmethod
+    def _wipe_file(path: Path) -> None:
+        try:
+            size = path.stat().st_size
+            if path.is_file() and not path.is_symlink() and size > 0:
+                with path.open("r+b", buffering=0) as handle:
+                    block = b"\x00" * (1024 * 1024)
+                    remaining = size
+                    while remaining > 0:
+                        chunk = block if remaining >= len(block) else block[:remaining]
+                        handle.write(chunk)
+                        remaining -= len(chunk)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+        except OSError:
+            pass
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+    @staticmethod
+    def _apply_key(conn: sqlite3.Connection, key: bytes | None) -> None:
+        if key is None:
+            return
+        conn.execute(f"PRAGMA key=\"x'{key.hex()}'\"")
+        conn.execute("PRAGMA cipher_memory_security=ON")
+        conn.execute("PRAGMA temp_store=MEMORY")
+
+    def _open_connection(
+        self,
+        path: Path | None = None,
+        *,
+        key: bytes | None = None,
+        timeout: float = 30,
+        isolation_level: str | None = "",
+    ) -> sqlite3.Connection:
+        resolved_key = self._key if key is None else key
+        conn = sqlite3.connect(str(path or self.path), timeout=timeout, isolation_level=isolation_level)
+        self._apply_key(conn, resolved_key)
+        if resolved_key is not None:
+            try:
+                version = conn.execute("PRAGMA cipher_version").fetchone()
+                self._cipher_version = str(version[0] if version else "")
+                conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+            except sqlite3.DatabaseError as exc:
+                conn.close()
+                raise WorkspaceEncryptionError(
+                    "The workspace database key is unavailable, incorrect, or no longer matches this app folder."
+                ) from exc
+        return conn
+
+    def _verify_encrypted_database(self, path: Path, key: bytes) -> None:
+        conn = self._open_connection(path, key=key, isolation_level=None)
+        try:
+            integrity = [str(row[0]) for row in conn.execute("PRAGMA integrity_check").fetchall()]
+            cipher_integrity = [str(row[0]) for row in conn.execute("PRAGMA cipher_integrity_check").fetchall()]
+            if integrity != ["ok"] or (cipher_integrity and cipher_integrity != ["ok"]):
+                raise WorkspaceEncryptionError("Encrypted workspace database failed integrity verification.")
+        finally:
+            conn.close()
+
+    def _select_database_key(self, path: Path) -> bytes:
+        last_error: Exception | None = None
+        for candidate in self.encryption.key_candidates:
+            try:
+                self._verify_encrypted_database(path, candidate)
+                retained = list(self.encryption.key_candidates)
+                self._key = candidate
+                self.encryption.set_primary_key(candidate, retain=retained)
+                return candidate
+            except WorkspaceEncryptionError as exc:
+                last_error = exc
+        raise WorkspaceEncryptionError(
+            "The workspace database key is unavailable, incorrect, or no longer matches this app folder."
+        ) from last_error
+
+    def _recover_interrupted_migration(self, migrating: Path, retired: Path) -> None:
+        if self.path.exists():
+            if self._key is not None and not self._is_plaintext_database(self.path):
+                self._select_database_key(self.path)
+                self._wipe_file(retired)
+                self._wipe_file(migrating)
+            return
+        if migrating.exists() and retired.exists() and self._key is not None:
+            self._select_database_key(migrating)
+            os.replace(migrating, self.path)
+            restrict_file_mode(self.path, 0o600)
+            self._wipe_file(retired)
+            return
+        if retired.exists():
+            os.replace(retired, self.path)
+        self._wipe_file(migrating)
+
+    def _migrate_plaintext_database(self, migrating: Path, retired: Path) -> None:
+        assert self._key is not None
+        self._wipe_file(migrating)
+        source = sqlite3.connect(str(self.path), timeout=30, isolation_level=None)
+        try:
+            source.execute("PRAGMA busy_timeout=30000")
+            source.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            user_version_row = source.execute("PRAGMA user_version").fetchone()
+            user_version = int(user_version_row[0] if user_version_row else 0)
+            source.execute(
+                f"ATTACH DATABASE '{self._sql_path(migrating)}' AS encrypted KEY \"x'{self._key.hex()}'\""
+            )
+            try:
+                source.execute("SELECT sqlcipher_export('encrypted')")
+                source.execute(f"PRAGMA encrypted.user_version={user_version}")
+            finally:
+                source.execute("DETACH DATABASE encrypted")
+        finally:
+            source.close()
+        restrict_file_mode(migrating, 0o600)
+        self._verify_encrypted_database(migrating, self._key)
+        self._wipe_file(retired)
+        os.replace(self.path, retired)
+        os.replace(migrating, self.path)
+        restrict_file_mode(self.path, 0o600)
+        for sidecar in (Path(str(retired) + "-wal"), Path(str(retired) + "-shm")):
+            self._wipe_file(sidecar)
+        for sidecar in (Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
+            self._wipe_file(sidecar)
+        self._wipe_file(retired)
+
+    def _prepare_database_encryption(self) -> None:
+        migrating = self.path.with_name(f".{self.path.name}.sqlcipher-migrating")
+        retired = self.path.with_name(f".{self.path.name}.plaintext-retired")
+        self._recover_interrupted_migration(migrating, retired)
+        if self._key is None:
+            if (
+                self.path.exists()
+                and not self._is_plaintext_database(self.path)
+                and self._is_plausibly_encrypted_database(self.path)
+            ):
+                raise WorkspaceEncryptionError("This workspace database is encrypted; unlock it with the desktop app or recovery key.")
+            return
+        if not SQLCIPHER_AVAILABLE:
+            raise WorkspaceEncryptionError("SQLCipher support is required but is not installed in this runtime.")
+        if self.path.exists() and self._is_plaintext_database(self.path):
+            self._migrate_plaintext_database(migrating, retired)
+        elif self.path.exists():
+            self._select_database_key(self.path)
 
     def _looks_corrupt(self, exc: sqlite3.DatabaseError) -> bool:
         message = str(exc).lower()
@@ -109,19 +300,20 @@ class WorkspaceDb:
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA busy_timeout=30000")
-            conn.execute(f"PRAGMA cache_size=-{SQLITE_CACHE_SIZE_KIB}")
-            conn.execute(f"PRAGMA mmap_size={SQLITE_MMAP_SIZE_BYTES}")
-            conn.execute("PRAGMA foreign_keys=ON")
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+        with self._connection_lock:
+            conn = self._open_connection(timeout=30)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA busy_timeout=30000")
+                conn.execute(f"PRAGMA cache_size=-{SQLITE_CACHE_SIZE_KIB}")
+                conn.execute(f"PRAGMA mmap_size={0 if self._key is not None else SQLITE_MMAP_SIZE_BYTES}")
+                conn.execute("PRAGMA foreign_keys=ON")
+                yield conn
+                conn.commit()
+            finally:
+                conn.close()
 
     def _scale_summary_stat_key(self) -> tuple[tuple[str, int, int], ...]:
         rows: list[tuple[str, int, int]] = []
@@ -219,6 +411,107 @@ class WorkspaceDb:
                     ON photo_assets(updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_photo_assets_scan_run
                     ON photo_assets(source_scan_run, added_at DESC, source_path ASC);
+                CREATE TABLE IF NOT EXISTS photo_external_sources (
+                    source_id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    library_id TEXT NOT NULL,
+                    root_path TEXT NOT NULL DEFAULT '',
+                    display_name TEXT NOT NULL DEFAULT '',
+                    platform TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'ready',
+                    capabilities_json TEXT NOT NULL DEFAULT '{}',
+                    consent_json TEXT NOT NULL DEFAULT '{}',
+                    cursor_json TEXT NOT NULL DEFAULT '{}',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    last_preview_at TEXT NOT NULL DEFAULT '',
+                    last_sync_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(provider, library_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_external_sources_provider_status
+                    ON photo_external_sources(provider, status, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS photo_asset_external_ids (
+                    provider TEXT NOT NULL,
+                    library_id TEXT NOT NULL,
+                    external_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL DEFAULT '',
+                    asset_id TEXT REFERENCES photo_assets(asset_id) ON DELETE SET NULL,
+                    external_updated_at TEXT NOT NULL DEFAULT '',
+                    state TEXT NOT NULL DEFAULT 'active',
+                    sync_signature TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    PRIMARY KEY(provider, library_id, external_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_asset_external_ids_asset
+                    ON photo_asset_external_ids(asset_id, provider, library_id);
+                CREATE INDEX IF NOT EXISTS idx_photo_asset_external_ids_source_state
+                    ON photo_asset_external_ids(source_id, state, last_seen_at DESC);
+                CREATE TABLE IF NOT EXISTS photo_external_album_links (
+                    provider TEXT NOT NULL,
+                    library_id TEXT NOT NULL,
+                    external_album_id TEXT NOT NULL,
+                    album_id TEXT NOT NULL DEFAULT '',
+                    external_parent_id TEXT NOT NULL DEFAULT '',
+                    folder_id TEXT NOT NULL DEFAULT '',
+                    name TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(provider, library_id, external_album_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_external_album_links_album
+                    ON photo_external_album_links(album_id, provider, library_id);
+                CREATE INDEX IF NOT EXISTS idx_photo_external_album_links_folder
+                    ON photo_external_album_links(folder_id, provider, library_id);
+                CREATE TABLE IF NOT EXISTS photo_external_album_items (
+                    provider TEXT NOT NULL,
+                    library_id TEXT NOT NULL,
+                    external_album_id TEXT NOT NULL,
+                    external_asset_id TEXT NOT NULL,
+                    album_id TEXT NOT NULL,
+                    asset_id TEXT NOT NULL REFERENCES photo_assets(asset_id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL DEFAULT 0,
+                    was_preexisting INTEGER NOT NULL DEFAULT 0,
+                    last_seen_at TEXT NOT NULL,
+                    PRIMARY KEY(provider, library_id, external_album_id, external_asset_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_external_album_items_asset
+                    ON photo_external_album_items(asset_id, provider, library_id);
+                CREATE TABLE IF NOT EXISTS photo_external_people_hints (
+                    hint_id TEXT PRIMARY KEY,
+                    asset_id TEXT NOT NULL REFERENCES photo_assets(asset_id) ON DELETE CASCADE,
+                    provider TEXT NOT NULL,
+                    library_id TEXT NOT NULL,
+                    external_asset_id TEXT NOT NULL,
+                    external_person_id TEXT NOT NULL DEFAULT '',
+                    external_face_id TEXT NOT NULL DEFAULT '',
+                    person_name TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    region_json TEXT NOT NULL DEFAULT '{}',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(provider, library_id, external_asset_id, external_face_id, person_name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_external_people_hints_person
+                    ON photo_external_people_hints(person_name, status, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_photo_external_people_hints_asset
+                    ON photo_external_people_hints(asset_id, provider, library_id);
+                CREATE TABLE IF NOT EXISTS photo_asset_keyword_sources (
+                    asset_id TEXT NOT NULL REFERENCES photo_assets(asset_id) ON DELETE CASCADE,
+                    keyword_id TEXT NOT NULL REFERENCES photo_keywords(keyword_id) ON DELETE CASCADE,
+                    provider TEXT NOT NULL,
+                    library_id TEXT NOT NULL,
+                    external_asset_id TEXT NOT NULL,
+                    was_preexisting INTEGER NOT NULL DEFAULT 0,
+                    last_seen_at TEXT NOT NULL,
+                    PRIMARY KEY(asset_id, keyword_id, provider, library_id, external_asset_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_asset_keyword_sources_external
+                    ON photo_asset_keyword_sources(provider, library_id, external_asset_id);
                 CREATE TABLE IF NOT EXISTS photo_semantic_embeddings (
                     asset_id TEXT NOT NULL,
                     model_name TEXT NOT NULL,
@@ -232,6 +525,158 @@ class WorkspaceDb:
                 );
                 CREATE INDEX IF NOT EXISTS idx_photo_semantic_embeddings_model
                     ON photo_semantic_embeddings(model_name, asset_id);
+                CREATE TABLE IF NOT EXISTS video_semantic_segments (
+                    segment_id TEXT PRIMARY KEY,
+                    asset_id TEXT NOT NULL,
+                    model_name TEXT NOT NULL,
+                    index_version TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    source_fingerprint TEXT NOT NULL,
+                    file_size INTEGER NOT NULL DEFAULT -1,
+                    file_mtime_ns INTEGER NOT NULL DEFAULT -1,
+                    start_ms INTEGER NOT NULL,
+                    end_ms INTEGER NOT NULL,
+                    timestamp_ms INTEGER NOT NULL,
+                    frame_index INTEGER NOT NULL DEFAULT 0,
+                    duration_ms INTEGER NOT NULL DEFAULT 0,
+                    preview_path TEXT NOT NULL,
+                    sample_count INTEGER NOT NULL DEFAULT 1,
+                    vector_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (asset_id) REFERENCES photo_assets(asset_id) ON DELETE CASCADE,
+                    UNIQUE (asset_id, model_name, index_version, source_fingerprint, start_ms, end_ms)
+                );
+                CREATE INDEX IF NOT EXISTS idx_video_semantic_segments_model
+                    ON video_semantic_segments(model_name, index_version, segment_id);
+                CREATE INDEX IF NOT EXISTS idx_video_semantic_segments_asset
+                    ON video_semantic_segments(asset_id, model_name, index_version);
+                CREATE TABLE IF NOT EXISTS photo_audio_segments (
+                    segment_id TEXT PRIMARY KEY,
+                    asset_id TEXT NOT NULL REFERENCES photo_assets(asset_id) ON DELETE CASCADE,
+                    segment_kind TEXT NOT NULL,
+                    start_ms INTEGER NOT NULL,
+                    end_ms INTEGER NOT NULL,
+                    timestamp_ms INTEGER NOT NULL,
+                    text TEXT NOT NULL DEFAULT '',
+                    label TEXT NOT NULL DEFAULT '',
+                    confidence REAL,
+                    language TEXT NOT NULL DEFAULT '',
+                    model_name TEXT NOT NULL,
+                    model_version TEXT NOT NULL,
+                    index_version TEXT NOT NULL,
+                    source_fingerprint TEXT NOT NULL,
+                    file_size INTEGER NOT NULL DEFAULT -1,
+                    file_mtime_ns INTEGER NOT NULL DEFAULT -1,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(asset_id, index_version, source_fingerprint, segment_kind, start_ms, end_ms, text, label)
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_audio_segments_asset_timeline
+                    ON photo_audio_segments(asset_id, start_ms, end_ms, segment_id);
+                CREATE INDEX IF NOT EXISTS idx_photo_audio_segments_kind
+                    ON photo_audio_segments(segment_kind, label, asset_id);
+                CREATE INDEX IF NOT EXISTS idx_photo_audio_segments_text
+                    ON photo_audio_segments(text, asset_id);
+                CREATE TABLE IF NOT EXISTS photo_audio_index_state (
+                    asset_id TEXT PRIMARY KEY REFERENCES photo_assets(asset_id) ON DELETE CASCADE,
+                    index_version TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    source_fingerprint TEXT NOT NULL,
+                    file_size INTEGER NOT NULL DEFAULT -1,
+                    file_mtime_ns INTEGER NOT NULL DEFAULT -1,
+                    transcription_enabled INTEGER NOT NULL DEFAULT 1,
+                    sound_events_enabled INTEGER NOT NULL DEFAULT 1,
+                    language TEXT NOT NULL DEFAULT '',
+                    segment_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_audio_index_state_version
+                    ON photo_audio_index_state(index_version, updated_at DESC, asset_id);
+                CREATE TABLE IF NOT EXISTS photo_sync_operations (
+                    operation_id TEXT PRIMARY KEY,
+                    origin_device_id TEXT NOT NULL,
+                    origin_seq INTEGER NOT NULL,
+                    signing_public_key TEXT NOT NULL,
+                    signature TEXT NOT NULL,
+                    hlc_physical_ms INTEGER NOT NULL,
+                    hlc_logical INTEGER NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    entity_key TEXT NOT NULL,
+                    field_name TEXT NOT NULL,
+                    value_json TEXT NOT NULL DEFAULT 'null',
+                    tombstone INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    received_at TEXT NOT NULL,
+                    UNIQUE(origin_device_id, origin_seq)
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_sync_operations_origin_seq
+                    ON photo_sync_operations(origin_device_id, origin_seq);
+                CREATE INDEX IF NOT EXISTS idx_photo_sync_operations_entity
+                    ON photo_sync_operations(entity_type, entity_key, field_name, hlc_physical_ms, hlc_logical);
+                CREATE TABLE IF NOT EXISTS photo_sync_registers (
+                    entity_type TEXT NOT NULL,
+                    entity_key TEXT NOT NULL,
+                    field_name TEXT NOT NULL,
+                    operation_id TEXT NOT NULL REFERENCES photo_sync_operations(operation_id) ON DELETE CASCADE,
+                    origin_device_id TEXT NOT NULL,
+                    origin_seq INTEGER NOT NULL,
+                    hlc_physical_ms INTEGER NOT NULL,
+                    hlc_logical INTEGER NOT NULL,
+                    value_json TEXT NOT NULL DEFAULT 'null',
+                    tombstone INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(entity_type, entity_key, field_name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_sync_registers_operation
+                    ON photo_sync_registers(operation_id);
+                CREATE TABLE IF NOT EXISTS photo_sync_dirty (
+                    entity_type TEXT NOT NULL,
+                    entity_key TEXT NOT NULL,
+                    local_asset_id TEXT NOT NULL DEFAULT '',
+                    tombstone INTEGER NOT NULL DEFAULT 0,
+                    dirty_at TEXT NOT NULL,
+                    PRIMARY KEY(entity_type, entity_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_sync_dirty_time
+                    ON photo_sync_dirty(dirty_at, entity_type, entity_key);
+                CREATE TABLE IF NOT EXISTS photo_catalog_changes (
+                    change_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    asset_id TEXT NOT NULL,
+                    content_hash TEXT NOT NULL DEFAULT '',
+                    change_kind TEXT NOT NULL,
+                    change_scope TEXT NOT NULL,
+                    changed_at TEXT NOT NULL,
+                    origin TEXT NOT NULL DEFAULT 'local'
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_catalog_changes_asset
+                    ON photo_catalog_changes(asset_id, change_seq DESC);
+                CREATE INDEX IF NOT EXISTS idx_photo_catalog_changes_time
+                    ON photo_catalog_changes(changed_at, change_seq);
+                CREATE TABLE IF NOT EXISTS photo_sync_conflicts (
+                    conflict_id TEXT PRIMARY KEY,
+                    entity_type TEXT NOT NULL,
+                    entity_key TEXT NOT NULL,
+                    field_name TEXT NOT NULL,
+                    winner_operation_id TEXT NOT NULL,
+                    loser_operation_id TEXT NOT NULL,
+                    resolution TEXT NOT NULL DEFAULT 'hlc-lww',
+                    resolved_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_sync_conflicts_resolved
+                    ON photo_sync_conflicts(resolved_at DESC, conflict_id);
+                CREATE TABLE IF NOT EXISTS photo_sync_seen_requests (
+                    sender_device_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    seen_at TEXT NOT NULL,
+                    PRIMARY KEY(sender_device_id, request_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_sync_seen_requests_time
+                    ON photo_sync_seen_requests(seen_at DESC);
+                CREATE TABLE IF NOT EXISTS photo_sync_local_state (
+                    state_key TEXT PRIMARY KEY,
+                    state_value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS photo_import_sessions (
                     import_id TEXT PRIMARY KEY,
                     source_kind TEXT NOT NULL DEFAULT 'folder',
@@ -266,6 +711,56 @@ class WorkspaceDb:
                     ON photo_import_failures(source_path);
                 CREATE INDEX IF NOT EXISTS idx_photo_import_failures_recovered
                     ON photo_import_failures(recovered_path);
+                CREATE TABLE IF NOT EXISTS photo_tether_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    mode TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    source_path TEXT NOT NULL,
+                    destination_path TEXT NOT NULL DEFAULT '',
+                    storage_mode TEXT NOT NULL DEFAULT 'referenced',
+                    managed_root TEXT NOT NULL DEFAULT '',
+                    naming_template TEXT NOT NULL DEFAULT 'capture_{sequence:04}',
+                    next_sequence INTEGER NOT NULL DEFAULT 1,
+                    source_label TEXT NOT NULL DEFAULT '',
+                    camera_id TEXT NOT NULL DEFAULT '',
+                    camera_model TEXT NOT NULL DEFAULT '',
+                    camera_port TEXT NOT NULL DEFAULT '',
+                    capabilities_json TEXT NOT NULL DEFAULT '{}',
+                    settings_json TEXT NOT NULL DEFAULT '{}',
+                    started_at TEXT NOT NULL,
+                    stopped_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    imported_count INTEGER NOT NULL DEFAULT 0,
+                    failed_count INTEGER NOT NULL DEFAULT 0,
+                    last_capture_id TEXT NOT NULL DEFAULT '',
+                    last_error TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_tether_sessions_status
+                    ON photo_tether_sessions(status, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_photo_tether_sessions_updated
+                    ON photo_tether_sessions(updated_at DESC, started_at DESC);
+                CREATE TABLE IF NOT EXISTS photo_tether_captures (
+                    capture_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES photo_tether_sessions(session_id) ON DELETE CASCADE,
+                    sequence INTEGER NOT NULL,
+                    source_path TEXT NOT NULL,
+                    source_signature TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    target_path TEXT NOT NULL DEFAULT '',
+                    asset_id TEXT NOT NULL DEFAULT '',
+                    import_id TEXT NOT NULL DEFAULT '',
+                    size_bytes INTEGER NOT NULL DEFAULT 0,
+                    captured_at TEXT NOT NULL,
+                    imported_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    error TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    UNIQUE(session_id, source_path, source_signature)
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_tether_captures_session
+                    ON photo_tether_captures(session_id, sequence DESC, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_photo_tether_captures_status
+                    ON photo_tether_captures(status, updated_at DESC);
                 CREATE TABLE IF NOT EXISTS photo_duplicate_groups (
                     group_id TEXT PRIMARY KEY,
                     algorithm TEXT NOT NULL,
@@ -300,6 +795,10 @@ class WorkspaceDb:
                     title TEXT NOT NULL DEFAULT '',
                     caption TEXT NOT NULL DEFAULT '',
                     favorite INTEGER NOT NULL DEFAULT 0,
+                    rating INTEGER NOT NULL DEFAULT 0,
+                    rating_explicit INTEGER NOT NULL DEFAULT 0,
+                    color_label TEXT NOT NULL DEFAULT '',
+                    pick_status TEXT NOT NULL DEFAULT '',
                     hidden INTEGER NOT NULL DEFAULT 0,
                     deleted_at TEXT,
                     date_override TEXT,
@@ -310,6 +809,110 @@ class WorkspaceDb:
                 );
                 CREATE INDEX IF NOT EXISTS idx_photo_asset_metadata_flags
                     ON photo_asset_metadata(favorite, hidden, deleted_at, edited);
+                CREATE TRIGGER IF NOT EXISTS trg_photo_semantic_embeddings_insert_generation
+                AFTER INSERT ON photo_semantic_embeddings
+                BEGIN
+                    INSERT INTO meta(key, value)
+                    VALUES('photoSemanticIndexGeneration', '1')
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT);
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_semantic_embeddings_update_generation
+                AFTER UPDATE ON photo_semantic_embeddings
+                BEGIN
+                    INSERT INTO meta(key, value)
+                    VALUES('photoSemanticIndexGeneration', '1')
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT);
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_semantic_embeddings_delete_generation
+                AFTER DELETE ON photo_semantic_embeddings
+                BEGIN
+                    INSERT INTO meta(key, value)
+                    VALUES('photoSemanticIndexGeneration', '1')
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT);
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_video_semantic_segments_insert_generation
+                AFTER INSERT ON video_semantic_segments
+                BEGIN
+                    INSERT INTO meta(key, value)
+                    VALUES('videoSemanticIndexGeneration', '1')
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT);
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_video_semantic_segments_update_generation
+                AFTER UPDATE ON video_semantic_segments
+                BEGIN
+                    INSERT INTO meta(key, value)
+                    VALUES('videoSemanticIndexGeneration', '1')
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT);
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_video_semantic_segments_delete_generation
+                AFTER DELETE ON video_semantic_segments
+                BEGIN
+                    INSERT INTO meta(key, value)
+                    VALUES('videoSemanticIndexGeneration', '1')
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT);
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_semantic_visibility_insert_generation
+                AFTER INSERT ON photo_asset_metadata
+                BEGIN
+                    INSERT INTO meta(key, value)
+                    VALUES('photoSemanticIndexGeneration', '1')
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT);
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_semantic_visibility_update_generation
+                AFTER UPDATE OF hidden, deleted_at ON photo_asset_metadata
+                WHEN COALESCE(OLD.hidden, 0) <> COALESCE(NEW.hidden, 0)
+                    OR COALESCE(OLD.deleted_at, '') <> COALESCE(NEW.deleted_at, '')
+                BEGIN
+                    INSERT INTO meta(key, value)
+                    VALUES('photoSemanticIndexGeneration', '1')
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT);
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_semantic_asset_update_generation
+                AFTER UPDATE OF source_path, media_kind ON photo_assets
+                WHEN COALESCE(OLD.source_path, '') <> COALESCE(NEW.source_path, '')
+                    OR COALESCE(OLD.media_kind, '') <> COALESCE(NEW.media_kind, '')
+                BEGIN
+                    INSERT INTO meta(key, value)
+                    VALUES('photoSemanticIndexGeneration', '1')
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT);
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_video_semantic_visibility_insert_generation
+                AFTER INSERT ON photo_asset_metadata
+                BEGIN
+                    INSERT INTO meta(key, value)
+                    VALUES('videoSemanticIndexGeneration', '1')
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT);
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_video_semantic_visibility_update_generation
+                AFTER UPDATE OF hidden, deleted_at ON photo_asset_metadata
+                WHEN COALESCE(OLD.hidden, 0) <> COALESCE(NEW.hidden, 0)
+                    OR COALESCE(OLD.deleted_at, '') <> COALESCE(NEW.deleted_at, '')
+                BEGIN
+                    INSERT INTO meta(key, value)
+                    VALUES('videoSemanticIndexGeneration', '1')
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT);
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_video_semantic_asset_update_generation
+                AFTER UPDATE OF source_path, media_kind ON photo_assets
+                WHEN COALESCE(OLD.source_path, '') <> COALESCE(NEW.source_path, '')
+                    OR COALESCE(OLD.media_kind, '') <> COALESCE(NEW.media_kind, '')
+                BEGIN
+                    INSERT INTO meta(key, value)
+                    VALUES('videoSemanticIndexGeneration', '1')
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = CAST(CAST(meta.value AS INTEGER) + 1 AS TEXT);
+                END;
                 CREATE TABLE IF NOT EXISTS photo_asset_locations (
                     asset_id TEXT PRIMARY KEY REFERENCES photo_assets(asset_id) ON DELETE CASCADE,
                     latitude REAL NOT NULL,
@@ -329,6 +932,8 @@ class WorkspaceDb:
                     language TEXT,
                     confidence REAL,
                     bounds_json TEXT NOT NULL DEFAULT '{}',
+                    source TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_photo_ocr_blocks_asset
@@ -407,6 +1012,26 @@ class WorkspaceDb:
                     ON photo_indexing_jobs(status, updated_at DESC, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_photo_indexing_jobs_kind_status
                     ON photo_indexing_jobs(job_kind, status, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS photo_source_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    source_id TEXT NOT NULL DEFAULT '',
+                    provider TEXT NOT NULL,
+                    job_kind TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    params_json TEXT NOT NULL DEFAULT '{}',
+                    progress_json TEXT NOT NULL DEFAULT '{}',
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    error TEXT NOT NULL DEFAULT '',
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    started_at TEXT NOT NULL DEFAULT '',
+                    completed_at TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_source_jobs_status
+                    ON photo_source_jobs(status, updated_at DESC, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_photo_source_jobs_source_kind
+                    ON photo_source_jobs(source_id, job_kind, status, updated_at DESC);
                 CREATE TABLE IF NOT EXISTS photo_edit_stacks (
                     edit_id TEXT PRIMARY KEY,
                     asset_id TEXT NOT NULL UNIQUE REFERENCES photo_assets(asset_id) ON DELETE CASCADE,
@@ -438,6 +1063,8 @@ class WorkspaceDb:
                     score REAL NOT NULL DEFAULT 0,
                     quality REAL NOT NULL DEFAULT 0,
                     band TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(asset_id, candidate_id)
                 );
@@ -487,6 +1114,22 @@ class WorkspaceDb:
                 );
                 CREATE INDEX IF NOT EXISTS idx_photo_people_groups_order
                     ON photo_people_groups(favorite DESC, hidden ASC, manual_order ASC, name ASC, group_id ASC);
+                CREATE TABLE IF NOT EXISTS photo_relationship_name_reviews (
+                    suggestion_id TEXT PRIMARY KEY,
+                    source_cluster TEXT NOT NULL,
+                    target_person TEXT NOT NULL,
+                    evidence_hash TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL DEFAULT '',
+                    operation_id TEXT NOT NULL DEFAULT '',
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    reviewed_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_relationship_name_reviews_decision
+                    ON photo_relationship_name_reviews(decision, reviewed_at DESC, suggestion_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_photo_relationship_name_reviews_idempotency
+                    ON photo_relationship_name_reviews(idempotency_key)
+                    WHERE idempotency_key != '';
                 CREATE TABLE IF NOT EXISTS photo_place_profiles (
                     place_id TEXT PRIMARY KEY,
                     key_asset_id TEXT NOT NULL DEFAULT '',
@@ -567,13 +1210,27 @@ class WorkspaceDb:
                     is_match INTEGER,
                     safe_label TEXT NOT NULL DEFAULT '',
                     pose_bucket TEXT NOT NULL DEFAULT '',
+                    media_kind TEXT NOT NULL DEFAULT '',
                     age_gap_years REAL,
                     raw_cosine REAL,
                     model_name TEXT NOT NULL DEFAULT '',
+                    best_ref_id TEXT NOT NULL DEFAULT '',
+                    pair_center BLOB,
+                    cohort_z REAL,
+                    context_version TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_calibration_labels_created
                     ON calibration_labels(created_at DESC);
+                CREATE TABLE IF NOT EXISTS candidate_match_context (
+                    candidate_id TEXT PRIMARY KEY,
+                    best_ref_id TEXT NOT NULL,
+                    model_name TEXT NOT NULL,
+                    pair_center BLOB NOT NULL,
+                    cohort_z REAL,
+                    cohort_version TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS training_examples (
                     example_id TEXT PRIMARY KEY,
                     natural_key TEXT NOT NULL UNIQUE,
@@ -726,6 +1383,19 @@ class WorkspaceDb:
                 );
                 CREATE INDEX IF NOT EXISTS idx_photo_albums_updated
                     ON photo_albums(updated_at DESC, name ASC);
+                CREATE TABLE IF NOT EXISTS photo_smart_album_materialized_items (
+                    cache_key TEXT NOT NULL,
+                    album_id TEXT NOT NULL,
+                    library_root TEXT NOT NULL DEFAULT '',
+                    source_path TEXT NOT NULL,
+                    position INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(cache_key, source_path)
+                );
+                CREATE INDEX IF NOT EXISTS idx_photo_smart_album_materialized_items_cache_position
+                    ON photo_smart_album_materialized_items(cache_key, position ASC, source_path ASC);
+                CREATE INDEX IF NOT EXISTS idx_photo_smart_album_materialized_items_album_root
+                    ON photo_smart_album_materialized_items(album_id, library_root);
                 CREATE TABLE IF NOT EXISTS photo_saved_filters (
                     filter_id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -752,19 +1422,461 @@ class WorkspaceDb:
                     ON photo_album_items(album_id, position ASC, added_at ASC);
                 CREATE INDEX IF NOT EXISTS idx_photo_album_items_asset
                     ON photo_album_items(asset_id);
+                CREATE TRIGGER IF NOT EXISTS trg_photo_sync_asset_insert_dirty
+                AFTER INSERT ON photo_assets
+                WHEN NEW.content_hash != ''
+                    AND COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') != '1'
+                BEGIN
+                    INSERT INTO photo_sync_dirty(entity_type, entity_key, local_asset_id, tombstone, dirty_at)
+                    VALUES('asset', LOWER(NEW.content_hash), NEW.asset_id, 0, STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                    ON CONFLICT(entity_type, entity_key) DO UPDATE SET
+                        local_asset_id=excluded.local_asset_id,
+                        tombstone=0,
+                        dirty_at=excluded.dirty_at;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_sync_asset_update_dirty
+                AFTER UPDATE OF content_hash, capture_date ON photo_assets
+                WHEN NEW.content_hash != ''
+                    AND COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') != '1'
+                BEGIN
+                    INSERT INTO photo_sync_dirty(entity_type, entity_key, local_asset_id, tombstone, dirty_at)
+                    VALUES('asset', LOWER(NEW.content_hash), NEW.asset_id, 0, STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                    ON CONFLICT(entity_type, entity_key) DO UPDATE SET
+                        local_asset_id=excluded.local_asset_id,
+                        tombstone=0,
+                        dirty_at=excluded.dirty_at;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_sync_asset_delete_dirty
+                BEFORE DELETE ON photo_assets
+                WHEN OLD.content_hash != ''
+                    AND COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') != '1'
+                BEGIN
+                    INSERT INTO photo_sync_dirty(entity_type, entity_key, local_asset_id, tombstone, dirty_at)
+                    VALUES('asset', LOWER(OLD.content_hash), OLD.asset_id, 1, STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                    ON CONFLICT(entity_type, entity_key) DO UPDATE SET
+                        local_asset_id=excluded.local_asset_id,
+                        tombstone=1,
+                        dirty_at=excluded.dirty_at;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_sync_metadata_insert_dirty
+                AFTER INSERT ON photo_asset_metadata
+                WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') != '1'
+                BEGIN
+                    INSERT INTO photo_sync_dirty(entity_type, entity_key, local_asset_id, tombstone, dirty_at)
+                    SELECT 'asset', LOWER(content_hash), asset_id, 0, STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    FROM photo_assets WHERE asset_id = NEW.asset_id AND content_hash != ''
+                    ON CONFLICT(entity_type, entity_key) DO UPDATE SET
+                        local_asset_id=excluded.local_asset_id,
+                        tombstone=0,
+                        dirty_at=excluded.dirty_at;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_sync_metadata_update_dirty
+                AFTER UPDATE ON photo_asset_metadata
+                WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') != '1'
+                BEGIN
+                    INSERT INTO photo_sync_dirty(entity_type, entity_key, local_asset_id, tombstone, dirty_at)
+                    SELECT 'asset', LOWER(content_hash), asset_id, 0, STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    FROM photo_assets WHERE asset_id = NEW.asset_id AND content_hash != ''
+                    ON CONFLICT(entity_type, entity_key) DO UPDATE SET
+                        local_asset_id=excluded.local_asset_id,
+                        tombstone=0,
+                        dirty_at=excluded.dirty_at;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_sync_keyword_insert_dirty
+                AFTER INSERT ON photo_asset_keywords
+                WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') != '1'
+                BEGIN
+                    INSERT INTO photo_sync_dirty(entity_type, entity_key, local_asset_id, tombstone, dirty_at)
+                    SELECT 'asset', LOWER(content_hash), asset_id, 0, STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    FROM photo_assets WHERE asset_id = NEW.asset_id AND content_hash != ''
+                    ON CONFLICT(entity_type, entity_key) DO UPDATE SET
+                        local_asset_id=excluded.local_asset_id,
+                        tombstone=0,
+                        dirty_at=excluded.dirty_at;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_sync_keyword_delete_dirty
+                AFTER DELETE ON photo_asset_keywords
+                WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') != '1'
+                BEGIN
+                    INSERT INTO photo_sync_dirty(entity_type, entity_key, local_asset_id, tombstone, dirty_at)
+                    SELECT 'asset', LOWER(content_hash), asset_id, 0, STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    FROM photo_assets WHERE asset_id = OLD.asset_id AND content_hash != ''
+                    ON CONFLICT(entity_type, entity_key) DO UPDATE SET
+                        local_asset_id=excluded.local_asset_id,
+                        tombstone=0,
+                        dirty_at=excluded.dirty_at;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_asset_insert_change
+                AFTER INSERT ON photo_assets
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    ) VALUES(
+                        NEW.asset_id,
+                        NEW.content_hash,
+                        'upsert',
+                        'asset',
+                        COALESCE(NULLIF(NEW.updated_at, ''), STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    );
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_asset_update_change
+                AFTER UPDATE ON photo_assets
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    ) VALUES(
+                        NEW.asset_id,
+                        NEW.content_hash,
+                        'upsert',
+                        'asset',
+                        COALESCE(NULLIF(NEW.updated_at, ''), STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    );
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_asset_delete_change
+                BEFORE DELETE ON photo_assets
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    ) VALUES(
+                        OLD.asset_id,
+                        OLD.content_hash,
+                        'delete',
+                        'asset',
+                        STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    );
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_metadata_insert_change
+                AFTER INSERT ON photo_asset_metadata
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        NEW.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'metadata',
+                        COALESCE(NULLIF(NEW.updated_at, ''), STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE a.asset_id = NEW.asset_id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_metadata_update_change
+                AFTER UPDATE ON photo_asset_metadata
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        NEW.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'metadata',
+                        COALESCE(NULLIF(NEW.updated_at, ''), STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE a.asset_id = NEW.asset_id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_metadata_delete_change
+                AFTER DELETE ON photo_asset_metadata
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        OLD.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'metadata',
+                        STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE a.asset_id = OLD.asset_id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_keyword_insert_change
+                AFTER INSERT ON photo_asset_keywords
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        NEW.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'keywords',
+                        COALESCE(NULLIF(NEW.assigned_at, ''), STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE a.asset_id = NEW.asset_id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_keyword_delete_change
+                AFTER DELETE ON photo_asset_keywords
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        OLD.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'keywords',
+                        STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE a.asset_id = OLD.asset_id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_album_item_insert_change
+                AFTER INSERT ON photo_album_items
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        NEW.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'albums',
+                        COALESCE(NULLIF(NEW.added_at, ''), STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE a.asset_id = NEW.asset_id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_album_item_update_change
+                AFTER UPDATE ON photo_album_items
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        NEW.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'albums',
+                        STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE a.asset_id = NEW.asset_id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_album_item_delete_change
+                AFTER DELETE ON photo_album_items
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        OLD.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'albums',
+                        STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE a.asset_id = OLD.asset_id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_people_insert_change
+                AFTER INSERT ON photo_asset_people
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        NEW.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'people',
+                        COALESCE(NULLIF(NEW.updated_at, ''), STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE a.asset_id = NEW.asset_id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_people_update_change
+                AFTER UPDATE ON photo_asset_people
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        NEW.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'people',
+                        COALESCE(NULLIF(NEW.updated_at, ''), STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE a.asset_id = NEW.asset_id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_people_delete_change
+                AFTER DELETE ON photo_asset_people
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        OLD.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'people',
+                        STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE a.asset_id = OLD.asset_id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_edit_insert_change
+                AFTER INSERT ON photo_edit_stacks
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        NEW.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'edits',
+                        COALESCE(NULLIF(NEW.updated_at, ''), STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE a.asset_id = NEW.asset_id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_edit_update_change
+                AFTER UPDATE ON photo_edit_stacks
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        NEW.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'edits',
+                        COALESCE(NULLIF(NEW.updated_at, ''), STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE a.asset_id = NEW.asset_id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_edit_delete_change
+                AFTER DELETE ON photo_edit_stacks
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        OLD.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'edits',
+                        STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE a.asset_id = OLD.asset_id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_external_id_insert_change
+                AFTER INSERT ON photo_asset_external_ids
+                WHEN NEW.asset_id IS NOT NULL
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        NEW.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'externalIds',
+                        COALESCE(NULLIF(NEW.last_seen_at, ''), STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE a.asset_id = NEW.asset_id;
+                END;
+                DROP TRIGGER IF EXISTS trg_photo_catalog_external_id_update_change;
+                CREATE TRIGGER trg_photo_catalog_external_id_update_change
+                AFTER UPDATE ON photo_asset_external_ids
+                WHEN NEW.asset_id IS NOT NULL OR OLD.asset_id IS NOT NULL
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        NEW.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'externalIds',
+                        COALESCE(NULLIF(NEW.last_seen_at, ''), STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE NEW.asset_id IS NOT NULL
+                      AND a.asset_id = NEW.asset_id;
+
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        OLD.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'externalIds',
+                        COALESCE(NULLIF(NEW.last_seen_at, ''), STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE OLD.asset_id IS NOT NULL
+                      AND (NEW.asset_id IS NULL OR NEW.asset_id <> OLD.asset_id)
+                      AND a.asset_id = OLD.asset_id;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_photo_catalog_external_id_delete_change
+                AFTER DELETE ON photo_asset_external_ids
+                WHEN OLD.asset_id IS NOT NULL
+                BEGIN
+                    INSERT INTO photo_catalog_changes(
+                        asset_id, content_hash, change_kind, change_scope, changed_at, origin
+                    )
+                    SELECT
+                        OLD.asset_id,
+                        a.content_hash,
+                        'upsert',
+                        'externalIds',
+                        STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        CASE WHEN COALESCE((SELECT value FROM meta WHERE key = 'photoSyncApplying'), '0') = '1'
+                            THEN 'sync' ELSE 'local' END
+                    FROM photo_assets AS a
+                    WHERE a.asset_id = OLD.asset_id;
+                END;
                 """
             )
-            self._ensure_column(conn, "review_candidates", "folder_path", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(conn, "review_candidates", "risk_flags", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(conn, "review_candidates", "close_runner_up", "INTEGER NOT NULL DEFAULT 0")
-            self._ensure_column(conn, "review_candidates", "single_reference_match", "INTEGER NOT NULL DEFAULT 0")
+            for column, definition in self._review_candidate_column_migrations():
+                self._ensure_column(conn, "review_candidates", column, definition)
             # Phase 1.2: stratification keys for per-bucket probabilistic calibration.
             self._ensure_column(conn, "calibration_labels", "pose_bucket", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "calibration_labels", "media_kind", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "calibration_labels", "age_gap_years", "REAL")
             self._ensure_column(conn, "calibration_labels", "raw_cosine", "REAL")
             # Phase 3.4: tag each label with the recognizer that produced it so a model
             # switch can't silently mix incomparable embedding spaces in calibration.
             self._ensure_column(conn, "calibration_labels", "model_name", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "calibration_labels", "best_ref_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "calibration_labels", "pair_center", "BLOB")
+            self._ensure_column(conn, "calibration_labels", "cohort_z", "REAL")
+            self._ensure_column(conn, "calibration_labels", "context_version", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "training_examples", "candidate_embedding_key", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "training_examples", "reference_model_name", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "training_examples", "features_json", "TEXT NOT NULL DEFAULT '{}'")
@@ -792,9 +1904,16 @@ class WorkspaceDb:
             for table, columns in self._photo_table_column_migrations():
                 for column, definition in columns:
                     self._ensure_column(conn, table, column, definition)
-            self._backfill_photo_album_item_positions(conn)
-            self._backfill_photo_timestamp_defaults(conn)
-            self._repair_photo_duplicate_group_summaries(conn)
+            conn.execute(
+                "UPDATE photo_asset_metadata SET rating_explicit = 1 WHERE rating != 0 AND rating_explicit = 0"
+            )
+            self._run_photo_startup_repairs(conn)
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_photo_asset_metadata_curation
+                    ON photo_asset_metadata(pick_status, rating DESC, color_label, updated_at DESC)
+                """
+            )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_photo_albums_folder_updated
@@ -840,10 +1959,7 @@ class WorkspaceDb:
             ):
                 for column, definition in columns:
                     self._ensure_column(conn, table, column, definition)
-            for column, definition in (
-                ("review_priority", "REAL NOT NULL DEFAULT 0"),
-                ("review_lane", "TEXT NOT NULL DEFAULT ''"),
-            ):
+            for column, definition in self._review_candidate_column_migrations():
                 self._ensure_column(conn, "review_candidates", column, definition)
             conn.execute(
                 """
@@ -887,10 +2003,39 @@ class WorkspaceDb:
                     ON photo_asset_people(candidate_id)
                 """
             )
+            self._ensure_photo_catalog_change_baseline(conn)
             conn.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schemaVersion', ?)",
                 (str(SCHEMA_VERSION),),
             )
+
+    def _ensure_photo_catalog_change_baseline(self, conn: sqlite3.Connection) -> None:
+        marker = conn.execute(
+            "SELECT value FROM meta WHERE key = ? LIMIT 1",
+            (PHOTO_CATALOG_CHANGE_BASELINE_META_KEY,),
+        ).fetchone()
+        if marker is not None and str(marker["value"] or "") == PHOTO_CATALOG_CHANGE_BASELINE_VERSION:
+            return
+        conn.execute(
+            """
+            INSERT INTO photo_catalog_changes(
+                asset_id, content_hash, change_kind, change_scope, changed_at, origin
+            )
+            SELECT
+                asset_id,
+                content_hash,
+                'upsert',
+                'baseline',
+                COALESCE(NULLIF(updated_at, ''), NULLIF(added_at, ''), STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                'migration'
+            FROM photo_assets
+            ORDER BY added_at ASC, asset_id ASC
+            """
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+            (PHOTO_CATALOG_CHANGE_BASELINE_META_KEY, PHOTO_CATALOG_CHANGE_BASELINE_VERSION),
+        )
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
         columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -952,6 +2097,50 @@ class WorkspaceDb:
                 ),
             ),
             (
+                "photo_tether_sessions",
+                (
+                    ("mode", "TEXT NOT NULL DEFAULT 'watch'"),
+                    ("status", "TEXT NOT NULL DEFAULT 'active'"),
+                    ("source_path", "TEXT NOT NULL DEFAULT ''"),
+                    ("destination_path", "TEXT NOT NULL DEFAULT ''"),
+                    ("storage_mode", "TEXT NOT NULL DEFAULT 'referenced'"),
+                    ("managed_root", "TEXT NOT NULL DEFAULT ''"),
+                    ("naming_template", "TEXT NOT NULL DEFAULT 'capture_{sequence:04}'"),
+                    ("next_sequence", "INTEGER NOT NULL DEFAULT 1"),
+                    ("source_label", "TEXT NOT NULL DEFAULT ''"),
+                    ("camera_id", "TEXT NOT NULL DEFAULT ''"),
+                    ("camera_model", "TEXT NOT NULL DEFAULT ''"),
+                    ("camera_port", "TEXT NOT NULL DEFAULT ''"),
+                    ("capabilities_json", "TEXT NOT NULL DEFAULT '{}'"),
+                    ("settings_json", "TEXT NOT NULL DEFAULT '{}'"),
+                    ("started_at", "TEXT NOT NULL DEFAULT ''"),
+                    ("stopped_at", "TEXT"),
+                    ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+                    ("imported_count", "INTEGER NOT NULL DEFAULT 0"),
+                    ("failed_count", "INTEGER NOT NULL DEFAULT 0"),
+                    ("last_capture_id", "TEXT NOT NULL DEFAULT ''"),
+                    ("last_error", "TEXT NOT NULL DEFAULT ''"),
+                ),
+            ),
+            (
+                "photo_tether_captures",
+                (
+                    ("sequence", "INTEGER NOT NULL DEFAULT 0"),
+                    ("source_path", "TEXT NOT NULL DEFAULT ''"),
+                    ("source_signature", "TEXT NOT NULL DEFAULT ''"),
+                    ("status", "TEXT NOT NULL DEFAULT 'pending'"),
+                    ("target_path", "TEXT NOT NULL DEFAULT ''"),
+                    ("asset_id", "TEXT NOT NULL DEFAULT ''"),
+                    ("import_id", "TEXT NOT NULL DEFAULT ''"),
+                    ("size_bytes", "INTEGER NOT NULL DEFAULT 0"),
+                    ("captured_at", "TEXT NOT NULL DEFAULT ''"),
+                    ("imported_at", "TEXT"),
+                    ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+                    ("error", "TEXT NOT NULL DEFAULT ''"),
+                    ("metadata_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ),
+            ),
+            (
                 "photo_duplicate_groups",
                 (
                     ("algorithm", "TEXT NOT NULL DEFAULT 'exact_hash'"),
@@ -975,6 +2164,10 @@ class WorkspaceDb:
                     ("title", "TEXT NOT NULL DEFAULT ''"),
                     ("caption", "TEXT NOT NULL DEFAULT ''"),
                     ("favorite", "INTEGER NOT NULL DEFAULT 0"),
+                    ("rating", "INTEGER NOT NULL DEFAULT 0"),
+                    ("rating_explicit", "INTEGER NOT NULL DEFAULT 0"),
+                    ("color_label", "TEXT NOT NULL DEFAULT ''"),
+                    ("pick_status", "TEXT NOT NULL DEFAULT ''"),
                     ("hidden", "INTEGER NOT NULL DEFAULT 0"),
                     ("deleted_at", "TEXT"),
                     ("date_override", "TEXT"),
@@ -982,6 +2175,26 @@ class WorkspaceDb:
                     ("location_hidden", "INTEGER NOT NULL DEFAULT 0"),
                     ("edited", "INTEGER NOT NULL DEFAULT 0"),
                     ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+                ),
+            ),
+            (
+                "photo_ocr_blocks",
+                (
+                    ("source", "TEXT NOT NULL DEFAULT ''"),
+                    ("metadata_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ),
+            ),
+            (
+                "photo_asset_people",
+                (
+                    ("source", "TEXT NOT NULL DEFAULT ''"),
+                    ("metadata_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ),
+            ),
+            (
+                "photo_external_album_items",
+                (
+                    ("was_preexisting", "INTEGER NOT NULL DEFAULT 0"),
                 ),
             ),
             (
@@ -1126,13 +2339,50 @@ class WorkspaceDb:
             ),
         )
 
+    def _review_candidate_column_migrations(self) -> tuple[tuple[str, str], ...]:
+        return (
+            ("source_path", "TEXT NOT NULL DEFAULT ''"),
+            ("person_name", "TEXT NOT NULL DEFAULT ''"),
+            ("person_key", "TEXT NOT NULL DEFAULT ''"),
+            ("best_ref_id", "TEXT NOT NULL DEFAULT ''"),
+            ("best_ref_path", "TEXT NOT NULL DEFAULT ''"),
+            ("score", "REAL NOT NULL DEFAULT 0"),
+            ("band", "TEXT NOT NULL DEFAULT ''"),
+            ("quality", "REAL NOT NULL DEFAULT 0"),
+            ("model_name", "TEXT NOT NULL DEFAULT ''"),
+            ("status", "TEXT NOT NULL DEFAULT 'pending'"),
+            ("note", "TEXT NOT NULL DEFAULT ''"),
+            ("risk_flags", "TEXT NOT NULL DEFAULT ''"),
+            ("close_runner_up", "INTEGER NOT NULL DEFAULT 0"),
+            ("single_reference_match", "INTEGER NOT NULL DEFAULT 0"),
+            ("media_kind", "TEXT NOT NULL DEFAULT 'image'"),
+            ("media_source_path", "TEXT NOT NULL DEFAULT ''"),
+            ("media_path", "TEXT NOT NULL DEFAULT ''"),
+            ("folder_path", "TEXT NOT NULL DEFAULT ''"),
+            ("video_timestamp_ms", "INTEGER"),
+            ("video_frame_index", "INTEGER"),
+            ("video_duration_ms", "INTEGER"),
+            ("source_hash", "TEXT NOT NULL DEFAULT ''"),
+            ("review_priority", "REAL NOT NULL DEFAULT 0"),
+            ("review_lane", "TEXT NOT NULL DEFAULT ''"),
+            ("created_at", "TEXT NOT NULL DEFAULT ''"),
+            ("payload_json", "TEXT NOT NULL DEFAULT '{}'"),
+        )
+
     def _preflight_existing_photo_schema(self, conn: sqlite3.Connection) -> None:
+        self._preflight_review_candidates_schema(conn)
         self._preflight_safe_mode_overrides_schema(conn)
         for table, columns in self._photo_table_column_migrations():
             if not self._table_exists(conn, table):
                 continue
             for column, definition in columns:
                 self._ensure_column(conn, table, column, definition)
+
+    def _preflight_review_candidates_schema(self, conn: sqlite3.Connection) -> None:
+        if not self._table_exists(conn, "review_candidates"):
+            return
+        for column, definition in self._review_candidate_column_migrations():
+            self._ensure_column(conn, "review_candidates", column, definition)
 
     def _preflight_safe_mode_overrides_schema(self, conn: sqlite3.Connection) -> None:
         if not self._table_exists(conn, "safe_mode_overrides"):
@@ -1211,6 +2461,21 @@ class WorkspaceDb:
                 """,
                 [(content_hash, value, reason, created_at or now_iso()) for content_hash, value, reason, created_at in migrated_rows if content_hash],
             )
+
+    def _run_photo_startup_repairs(self, conn: sqlite3.Connection) -> None:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = ? LIMIT 1",
+            (PHOTO_STARTUP_REPAIR_META_KEY,),
+        ).fetchone()
+        if row and str(row["value"] or "") == PHOTO_STARTUP_REPAIR_VERSION:
+            return
+        self._backfill_photo_album_item_positions(conn)
+        self._backfill_photo_timestamp_defaults(conn)
+        self._repair_photo_duplicate_group_summaries(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+            (PHOTO_STARTUP_REPAIR_META_KEY, PHOTO_STARTUP_REPAIR_VERSION),
+        )
 
     def _backfill_photo_album_item_positions(self, conn: sqlite3.Connection) -> None:
         if not self._table_exists(conn, "photo_album_items"):
@@ -1449,9 +2714,19 @@ class WorkspaceDb:
                 "video_timestamp_ms": getattr(candidate, "video_timestamp_ms", None),
                 "video_frame_index": getattr(candidate, "video_frame_index", None),
                 "video_duration_ms": getattr(candidate, "video_duration_ms", None),
+                "video_track_id": getattr(candidate, "video_track_id", ""),
+                "video_track_version": getattr(candidate, "video_track_version", ""),
+                "video_track_start_ms": getattr(candidate, "video_track_start_ms", None),
+                "video_track_end_ms": getattr(candidate, "video_track_end_ms", None),
+                "video_track_frame_count": getattr(candidate, "video_track_frame_count", 0),
+                "video_track_keyframe_timestamps_ms": getattr(candidate, "video_track_keyframe_timestamps_ms", []),
+                "video_track_keyframe_indices": getattr(candidate, "video_track_keyframe_indices", []),
                 "source_hash": getattr(candidate, "source_hash", ""),
                 "review_priority": getattr(candidate, "review_priority", 0.0),
                 "review_lane": getattr(candidate, "review_lane", ""),
+                "calibrated_probability": getattr(candidate, "calibrated_probability", None),
+                "calibration_source": getattr(candidate, "calibration_source", ""),
+                "calibration_version": getattr(candidate, "calibration_version", ""),
                 "created_at": getattr(candidate, "created_at", now_iso()),
             }
         return payload
@@ -1595,6 +2870,8 @@ class WorkspaceDb:
         "video_still",
         "metadata_sidecar",
         "edit_sidecar",
+        "depth_sidecar",
+        "stereo_pair",
     }
     _PHOTO_IMPORT_EXTENSIONS = _IMAGE_ASSET_EXTENSIONS | _RAW_ASSET_EXTENSIONS | _VIDEO_ASSET_EXTENSIONS
     # Directory basenames pruned during a broad "index everything on this computer"
@@ -1764,6 +3041,87 @@ class WorkspaceDb:
     def _photo_asset_id(self, source_path: str) -> str:
         digest = hashlib.sha256(str(Path(str(source_path or "")).expanduser()).encode("utf-8")).hexdigest()
         return f"asset_{digest[:32]}"
+
+    def _photo_asset_id_for_moved_file(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        source: str,
+        content_hash: str,
+    ) -> str:
+        """Resolve a file that appeared at a new path to the asset it *is*, if it moved.
+
+        `asset_id` is derived from the source path, so a move or rename otherwise mints a
+        brand-new asset and orphans everything hanging off the old one. When the incoming
+        bytes match an existing asset whose own path has vanished from disk, that is a move,
+        and identity must follow the bytes.
+
+        Deliberately conservative — a wrong merge silently destroys data, so every one of
+        these must hold, and any doubt means "mint a new asset":
+
+          * the incoming file must carry a content hash
+          * the incoming file must be stat-able (we need its real size and mtime)
+          * the candidate's path must have vanished from disk
+          * the candidate must carry a stored file signature, and its size AND mtime must
+            match the incoming file exactly
+          * exactly one candidate may satisfy all of the above
+
+        The size+mtime requirement is what makes this safe. "The old path is missing" is NOT
+        evidence of a move — it is evidence of absence, and absence has other causes. The
+        one that matters: an asset on an EXTERNAL DRIVE has a missing path whenever the drive
+        is unplugged. Without the signature check, importing an identical photo from a backup
+        would "rehome" the external-drive asset onto the new path and lose the record of where
+        the original actually lives. A move preserves size and mtime; a separate copy does not.
+
+        Returns the asset_id to adopt, or "" to mint a new asset.
+        """
+        digest = str(content_hash or "").strip().lower()
+        if not digest:
+            return ""
+        try:
+            incoming = path_signature(Path(source).expanduser())
+        except OSError:
+            # We cannot characterise the incoming file, so we cannot prove a move.
+            return ""
+
+        rows = conn.execute(
+            """
+            SELECT asset_id, source_path, file_signature_json
+            FROM photo_assets
+            WHERE LOWER(content_hash) = ?
+            """,
+            (digest,),
+        ).fetchall()
+
+        candidates: list[str] = []
+        for candidate in rows:
+            candidate_path = str(candidate["source_path"] or "")
+            if not candidate_path or candidate_path == source:
+                continue
+            try:
+                if Path(candidate_path).expanduser().exists():
+                    continue  # still on disk -> this is a COPY, not a move
+            except OSError:
+                continue  # unreadable path is not evidence of a move
+
+            try:
+                stored = json.loads(str(candidate["file_signature_json"] or "{}"))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(stored, dict):
+                continue
+            stored_size = stored.get("size")
+            stored_mtime = stored.get("mtimeNs")
+            if stored_size is None or stored_mtime is None:
+                continue  # no signature to compare -> cannot prove a move
+            if int(stored_size) != int(incoming["size"]) or int(stored_mtime) != int(incoming["mtimeNs"]):
+                continue  # same bytes, different file -> not the same file moved
+
+            candidates.append(str(candidate["asset_id"] or ""))
+
+        if len(candidates) != 1:
+            return ""
+        return candidates[0]
 
     def _photo_asset_visual_kind_hint(self, source_path: str) -> str:
         normalized = re.sub(r"[\s._-]+", " ", Path(str(source_path or "")).name.lower()).strip()
@@ -1970,11 +3328,17 @@ class WorkspaceDb:
         except OSError:
             source_resolved = source
         suffix = source_resolved.suffix.lower()
-        companion_specs: list[tuple[str, Path, bool]] = []
+        companion_specs: list[tuple[str, Path, bool, str]] = []
 
-        def add_companions(pair_kind: str, companions: Iterable[Path], *, sidecar: bool = False) -> None:
+        def add_companions(
+            pair_kind: str,
+            companions: Iterable[Path],
+            *,
+            sidecar: bool = False,
+            target_role: str = "",
+        ) -> None:
             for companion in companions:
-                companion_specs.append((pair_kind, companion, sidecar))
+                companion_specs.append((pair_kind, companion, sidecar, target_role))
 
         add_companions("metadata_sidecar", self._adjacent_photo_sidecar_companions(source_resolved, self._PHOTO_METADATA_SIDECAR_EXTENSIONS), sidecar=True)
         add_companions("edit_sidecar", self._adjacent_photo_sidecar_companions(source_resolved, self._PHOTO_EDIT_SIDECAR_EXTENSIONS), sidecar=True)
@@ -1984,10 +3348,13 @@ class WorkspaceDb:
             add_companions("video_still", self._adjacent_photo_companions(source_resolved, self._IMAGE_ASSET_EXTENSIONS))
         elif suffix in self._RAW_ASSET_EXTENSIONS:
             add_companions("raw_preview_proxy", self._adjacent_photo_companions(source_resolved, self._IMAGE_ASSET_EXTENSIONS))
+        if suffix in self._IMAGE_ASSET_EXTENSIONS:
+            for pair_kind, companion, role in self._adjacent_spatial_companions(source_resolved):
+                add_companions(pair_kind, [companion], target_role=role)
 
         records: list[dict[str, Any]] = []
         seen_targets: set[str] = set()
-        for pair_kind, companion, is_sidecar in companion_specs:
+        for pair_kind, companion, is_sidecar, target_role in companion_specs:
             try:
                 companion_resolved = companion.expanduser().resolve()
             except OSError:
@@ -1998,12 +3365,22 @@ class WorkspaceDb:
             existing_target = pre_copied_targets.get(companion_key)
             copied = False
             if existing_target is None:
-                companion_target = self._managed_related_companion_target(
-                    source=source_resolved,
-                    target=target,
-                    companion=companion_resolved,
-                    sidecar=is_sidecar,
-                )
+                if target_role:
+                    companion_suffix = companion_resolved.suffix.lower() or ".bin"
+                    companion_target = target.with_name(f"{target.stem}.{target_role}{companion_suffix}")
+                    target_counter = 2
+                    while companion_target.exists():
+                        companion_target = target.with_name(
+                            f"{target.stem}.{target_role}-{target_counter}{companion_suffix}"
+                        )
+                        target_counter += 1
+                else:
+                    companion_target = self._managed_related_companion_target(
+                        source=source_resolved,
+                        target=target,
+                        companion=companion_resolved,
+                        sidecar=is_sidecar,
+                    )
                 target_key = str(companion_target)
                 if target_key in seen_targets:
                     companion_target = self._managed_related_companion_target(
@@ -2024,6 +3401,7 @@ class WorkspaceDb:
                 "from": str(companion_resolved),
                 "to": str(companion_target),
                 "copied": copied,
+                "role": target_role,
             })
         return records
 
@@ -2101,6 +3479,71 @@ class WorkspaceDb:
                     seen_files.add(file_key)
                     companions.append(resolved)
         return companions
+
+    def _adjacent_spatial_companions(self, source: Path) -> list[tuple[str, Path, str]]:
+        """Find explicit depth/disparity or alternate-eye files without guessing from pixels."""
+        try:
+            resolved_source = source.expanduser().resolve()
+        except OSError:
+            resolved_source = source.expanduser()
+        if resolved_source.suffix.lower() not in self._IMAGE_ASSET_EXTENSIONS:
+            return []
+        source_stem = resolved_source.stem
+        lower_stem = source_stem.casefold()
+        if re.search(r"(?:[._-])(depth|disparity|portrait[-_]?matte|right(?:[-_]?eye)?)$", lower_stem):
+            return []
+
+        candidate_specs: list[tuple[str, Path, str]] = []
+        depth_suffixes = [".png", ".tif", ".tiff"]
+        if resolved_source.suffix.lower() not in depth_suffixes:
+            depth_suffixes.append(resolved_source.suffix.lower())
+        for marker, role in (
+            ("depth", "depth"),
+            ("disparity", "disparity"),
+            ("portrait-matte", "portrait-matte"),
+        ):
+            for separator in (".", "_", "-"):
+                for suffix in depth_suffixes:
+                    candidate_specs.append(("depth_sidecar", resolved_source.with_name(f"{source_stem}{separator}{marker}{suffix}"), role))
+
+        stereo_stems: list[str] = [
+            f"{source_stem}.right",
+            f"{source_stem}_right",
+            f"{source_stem}-right",
+            f"{source_stem}.right-eye",
+            f"{source_stem}_right_eye",
+            f"{source_stem}-right-eye",
+        ]
+        match = re.match(r"^(.*?)([._-])left(?:[-_]?eye)?$", source_stem, flags=re.IGNORECASE)
+        if match:
+            base, separator = match.group(1), match.group(2)
+            stereo_stems.insert(0, f"{base}{separator}right")
+            stereo_stems.insert(1, f"{base}{separator}right-eye")
+        for stem in stereo_stems:
+            candidate_specs.append(("stereo_pair", resolved_source.with_name(f"{stem}{resolved_source.suffix}"), "right-eye"))
+
+        output: list[tuple[str, Path, str]] = []
+        seen_paths: set[str] = set()
+        seen_files: set[tuple[int, int]] = set()
+        for pair_kind, candidate, role in candidate_specs:
+            try:
+                candidate_resolved = candidate.resolve()
+                stat_result = candidate_resolved.stat()
+            except OSError:
+                continue
+            candidate_key = str(candidate_resolved)
+            file_key = (int(stat_result.st_dev), int(stat_result.st_ino))
+            if (
+                candidate_key == str(resolved_source)
+                or candidate_key in seen_paths
+                or file_key in seen_files
+                or not candidate_resolved.is_file()
+            ):
+                continue
+            seen_paths.add(candidate_key)
+            seen_files.add(file_key)
+            output.append((pair_kind, candidate_resolved, role))
+        return output
 
     def _upsert_generated_photo_media_pair(
         self,
@@ -2382,6 +3825,21 @@ class WorkspaceDb:
                     },
                 )
         if suffix in self._IMAGE_ASSET_EXTENSIONS and media != "live_photo":
+            for pair_kind, companion, role in self._adjacent_spatial_companions(resolved):
+                if self._photo_generated_media_pair_is_suppressed(conn, asset_id, pair_kind, str(companion)):
+                    continue
+                self._upsert_generated_photo_media_pair(
+                    conn,
+                    asset_id=asset_id,
+                    pair_kind=pair_kind,
+                    source_path=str(resolved),
+                    related_source_path=str(companion),
+                    now=now,
+                    metadata_extra={
+                        "spatialRole": role,
+                        "preservesOriginal": True,
+                    },
+                )
             for companion in self._adjacent_photo_companions(resolved, self._RAW_ASSET_EXTENSIONS):
                 if self._photo_generated_media_pair_is_suppressed(conn, asset_id, "raw_sidecar", str(companion)):
                     continue
@@ -2707,12 +4165,21 @@ class WorkspaceDb:
         digest = hashlib.sha256(f"{album_id}\n{library_root}".encode("utf-8")).hexdigest()[:24]
         return f"photo_smart_album_materialization:{digest}"
 
-    def _clean_photo_smart_album_materialization_cache(self, value: dict[str, Any] | None) -> dict[str, Any]:
+    def _clean_photo_smart_album_materialization_cache(
+        self,
+        value: dict[str, Any] | None,
+        *,
+        source_paths: Iterable[Any] | None = None,
+        parse_body_paths: bool = True,
+    ) -> dict[str, Any]:
         body = value if isinstance(value, dict) else {}
-        raw_paths = body.get("sourcePaths", body.get("source_paths", []))
+        raw_paths = source_paths
+        if raw_paths is None and parse_body_paths:
+            raw_paths = body.get("sourcePaths", body.get("source_paths", []))
         paths: list[str] = []
         seen: set[str] = set()
-        for raw_path in (raw_paths if isinstance(raw_paths, list) else []):
+        iterable_paths = [] if raw_paths is None or isinstance(raw_paths, (str, bytes, dict)) else raw_paths
+        for raw_path in iterable_paths:
             source_path = str(raw_path or "").strip()
             if not source_path or source_path in seen:
                 continue
@@ -2724,6 +4191,8 @@ class WorkspaceDb:
             asset_count = max(0, int(body.get("assetCount", body.get("asset_count", len(paths))) or 0))
         except (TypeError, ValueError):
             asset_count = len(paths)
+        if paths:
+            asset_count = len(paths)
         return {
             "schemaVersion": "1",
             "albumId": str(body.get("albumId", body.get("album_id", "")) or ""),
@@ -2731,6 +4200,7 @@ class WorkspaceDb:
             "signature": str(body.get("signature", "") or ""),
             "generatedAt": str(body.get("generatedAt", "") or ""),
             "assetCount": asset_count,
+            "sourcePathStorage": str(body.get("sourcePathStorage", body.get("source_path_storage", "")) or ""),
             "sourcePaths": paths,
         }
 
@@ -2836,6 +4306,9 @@ class WorkspaceDb:
         indexing_power_mode = str(body.get("indexingPowerMode", "balanced") or "balanced").strip().lower()
         if indexing_power_mode not in {"low", "balanced", "performance"}:
             indexing_power_mode = "balanced"
+        vision_model_tier = str(body.get("visionModelTier", "auto") or "auto").strip().lower()
+        if vision_model_tier not in {"auto", "quality", "low-memory"}:
+            vision_model_tier = "auto"
         passcode_salt = passcode_token("sensitivePasscodeSalt")
         passcode_hash = passcode_token("sensitivePasscodeHash")
         media_settings_by_root = self._clean_photo_media_settings_by_library_root(body.get("mediaSettingsByLibraryRoot", {}))
@@ -2861,6 +4334,7 @@ class WorkspaceDb:
             "backgroundIndexingPaused": bool_value("backgroundIndexingPaused", False),
             "backgroundIndexingAutoRun": bool_value("backgroundIndexingAutoRun", True),
             "indexingPowerMode": indexing_power_mode,
+            "visionModelTier": vision_model_tier,
             "railPreferences": self._clean_photo_rail_preferences(body.get("railPreferences", {})),
         }
 
@@ -3548,6 +5022,44 @@ class WorkspaceDb:
             rows = clean_strings(body.get(key))
             if rows:
                 cleaned[key] = rows
+        raw_examples = body.get("examples")
+        if isinstance(raw_examples, list):
+            examples: list[dict[str, Any]] = []
+            seen_example_paths: set[str] = set()
+            for item in raw_examples:
+                if not isinstance(item, dict):
+                    continue
+                path = str(item.get("path", "") or "").strip()
+                if not path or path in seen_example_paths:
+                    continue
+                seen_example_paths.add(path)
+                examples.append({
+                    "path": path[:4096],
+                    "sensitive": bool(item.get("sensitive", item.get("label", False))),
+                })
+                if len(examples) >= 10_000:
+                    break
+            if examples:
+                cleaned["examples"] = examples
+        raw_folders = body.get("folders")
+        if isinstance(raw_folders, list):
+            folders: list[dict[str, Any]] = []
+            seen_folder_paths: set[str] = set()
+            for item in raw_folders:
+                if not isinstance(item, dict):
+                    continue
+                path = str(item.get("path", "") or "").strip()
+                if not path or path in seen_folder_paths:
+                    continue
+                seen_folder_paths.add(path)
+                folders.append({
+                    "path": path[:4096],
+                    "sensitive": bool(item.get("sensitive", item.get("label", False))),
+                })
+                if len(folders) >= 100:
+                    break
+            if folders:
+                cleaned["folders"] = folders
         for key in ("sourcePath", "assetId", "albumId", "folderId"):
             text = str(body.get(key, "") or "").strip()
             if text:
@@ -3572,14 +5084,23 @@ class WorkspaceDb:
             "force",
             "reset",
             "rebuild",
+            "rebuildVectorIndex",
+            "vectorIndexOnly",
             "sidecarOnly",
             "useExternalEngine",
+            "transcribe",
+            "soundEvents",
             "ignoreSettings",
             "ignorePaused",
         ):
             if key in body:
                 cleaned[key] = bool(body.get(key))
-        for key, maximum in (("limit", 100_000), ("budgetLimit", 5000)):
+        for key, maximum in (
+            ("limit", 100_000),
+            ("budgetLimit", 5000),
+            ("audioBudgetLimit", 100),
+            ("audioMaxDurationSeconds", 14_400),
+        ):
             if key not in body:
                 continue
             try:
@@ -3687,8 +5208,16 @@ class WorkspaceDb:
             clean_kind = "generated_collections"
         if clean_kind in {"smart", "smart-albums", "smart_albums", "smartalbums", "smart-album-materialization", "smart_album_materialization"}:
             clean_kind = "smart_albums"
-        if clean_kind not in {"ocr", "barcode", "objects", "search", "generated_collections", "smart_albums"}:
-            raise ValueError("Photo indexing job kind must be ocr, barcode, objects, search, generated_collections, or smart_albums.")
+        if clean_kind in {"semantic", "semantic-search", "semantic_search", "semantic-embeddings", "semantic_embeddings", "siglip", "siglip2"}:
+            clean_kind = "semantic"
+        if clean_kind in {"reference-suggestions", "reference_suggestions", "reference-suggestion", "reference_suggestion", "suggested-references", "suggested_references"}:
+            clean_kind = "reference_suggestions"
+        if clean_kind in {"safe-mode-calibration", "safe_mode_calibration", "safe-calibration", "safe_calibration", "safety-calibration", "safety_calibration"}:
+            clean_kind = "safe_mode_calibration"
+        if clean_kind in {"audio", "audio-index", "audio_index", "transcript", "transcription", "sound-events", "sound_events"}:
+            clean_kind = "audio"
+        if clean_kind not in {"ocr", "barcode", "objects", "search", "generated_collections", "smart_albums", "semantic", "reference_suggestions", "safe_mode_calibration", "audio"}:
+            raise ValueError("Unsupported Photo indexing job kind.")
         now = now_iso()
         job_id = f"photo_index_job_{uuid.uuid4().hex}"
         clean_scope = self._clean_photo_indexing_job_scope(scope)
@@ -4244,6 +5773,196 @@ class WorkspaceDb:
         )
         return len(current) - len(next_memories)
 
+    def _clean_photo_stories(self, value: Any) -> list[dict[str, Any]]:
+        from crossage_fr.photo_story import clean_photo_story_record
+
+        raw_values = value if isinstance(value, list) else []
+        stories: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw_value in raw_values:
+            try:
+                clean = clean_photo_story_record(raw_value)
+            except (TypeError, ValueError, OverflowError):
+                clean = None
+            if not clean:
+                continue
+            story_id = str(clean.get("id", "") or "")
+            if not story_id or story_id in seen:
+                continue
+            seen.add(story_id)
+            stories.append(clean)
+            if len(stories) >= 60:
+                break
+        return sorted(
+            stories,
+            key=lambda item: (str(item.get("updatedAt", "") or ""), str(item.get("title", "") or "")),
+            reverse=True,
+        )
+
+    def photo_stories(
+        self,
+        *,
+        memory_id: str = "",
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_stories(memory_id=memory_id, conn=local_conn)
+        row = conn.execute("SELECT value FROM meta WHERE key = 'photo_stories' LIMIT 1").fetchone()
+        try:
+            body = json.loads(str(row["value"] if row is not None else "[]") or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            body = []
+        stories = self._clean_photo_stories(body)
+        clean_memory_id = re.sub(r"\s+", " ", str(memory_id or "")).strip()
+        if clean_memory_id:
+            stories = [story for story in stories if str(story.get("sourceMemoryId", "") or "") == clean_memory_id]
+        return stories
+
+    def photo_story_by_id(
+        self,
+        story_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        clean_id = re.sub(r"[^A-Za-z0-9:_-]+", "-", str(story_id or "")).strip("-")
+        if not clean_id:
+            return None
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_story_by_id(clean_id, local_conn)
+        return next((story for story in self.photo_stories(conn=conn) if str(story.get("id", "") or "") == clean_id), None)
+
+    def save_photo_story(
+        self,
+        story: dict[str, Any],
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        from crossage_fr.photo_story import clean_photo_story_record
+
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.save_photo_story(story, local_conn)
+        timestamp = now_iso()
+        current = self.photo_stories(conn=conn)
+        requested_id = str(story.get("id", story.get("storyId", "")) or "") if isinstance(story, dict) else ""
+        existing = next((item for item in current if str(item.get("id", "") or "") == requested_id), None)
+        body = {
+            **(existing or {}),
+            **(story if isinstance(story, dict) else {}),
+            "updatedAt": timestamp,
+        }
+        if existing and existing.get("createdAt"):
+            body["createdAt"] = existing["createdAt"]
+        clean = clean_photo_story_record(body)
+        if clean is None:
+            raise ValueError("Photo story requires an id, two sources, and at least one valid chapter.")
+        next_stories = [clean, *[item for item in current if str(item.get("id", "") or "") != clean["id"]]]
+        next_stories = self._clean_photo_stories(next_stories)
+        conn.execute(
+            """
+            INSERT INTO meta(key, value)
+            VALUES('photo_stories', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (json.dumps(next_stories, ensure_ascii=True, separators=(",", ":"), sort_keys=True),),
+        )
+        return clean
+
+    def delete_photo_story(self, story_id: str, conn: sqlite3.Connection | None = None) -> int:
+        clean_id = re.sub(r"[^A-Za-z0-9:_-]+", "-", str(story_id or "")).strip("-")
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.delete_photo_story(clean_id, local_conn)
+        current = self.photo_stories(conn=conn)
+        next_stories = [story for story in current if str(story.get("id", "") or "") != clean_id]
+        if len(next_stories) == len(current):
+            return 0
+        conn.execute(
+            """
+            INSERT INTO meta(key, value)
+            VALUES('photo_stories', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (json.dumps(next_stories, ensure_ascii=True, separators=(",", ":"), sort_keys=True),),
+        )
+        return len(current) - len(next_stories)
+
+    def _clean_photo_culling_results(self, value: Any) -> list[dict[str, Any]]:
+        from crossage_fr.photo_culling import clean_photo_culling_result
+
+        rows = value if isinstance(value, list) else []
+        results: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in rows:
+            try:
+                clean = clean_photo_culling_result(row)
+            except (TypeError, ValueError, OverflowError):
+                clean = None
+            if clean is None or clean["stackId"] in seen:
+                continue
+            seen.add(clean["stackId"])
+            results.append(clean)
+            if len(results) >= 500:
+                break
+        return sorted(
+            results,
+            key=lambda item: (str(item.get("analyzedAt", "") or ""), str(item.get("stackId", "") or "")),
+            reverse=True,
+        )
+
+    def photo_culling_results(self, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_culling_results(local_conn)
+        row = conn.execute("SELECT value FROM meta WHERE key = 'photo_culling_results' LIMIT 1").fetchone()
+        try:
+            body = json.loads(str(row["value"] if row is not None else "[]") or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            body = []
+        return self._clean_photo_culling_results(body)
+
+    def photo_culling_result_by_stack(
+        self,
+        stack_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        clean_id = re.sub(r"[^A-Za-z0-9:_-]+", "-", str(stack_id or "")).strip("-")
+        if not clean_id:
+            return None
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_culling_result_by_stack(clean_id, local_conn)
+        return next(
+            (result for result in self.photo_culling_results(conn) if str(result.get("stackId", "") or "") == clean_id),
+            None,
+        )
+
+    def save_photo_culling_result(
+        self,
+        result: dict[str, Any],
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        from crossage_fr.photo_culling import clean_photo_culling_result
+
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.save_photo_culling_result(result, local_conn)
+        clean = clean_photo_culling_result(result)
+        if clean is None:
+            raise ValueError("The assisted-culling result is invalid.")
+        current = self.photo_culling_results(conn)
+        next_results = [clean, *[row for row in current if str(row.get("stackId", "") or "") != clean["stackId"]]]
+        next_results = self._clean_photo_culling_results(next_results)
+        conn.execute(
+            """
+            INSERT INTO meta(key, value)
+            VALUES('photo_culling_results', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (json.dumps(next_results, ensure_ascii=True, separators=(",", ":"), sort_keys=True),),
+        )
+        return clean
+
     def photo_generated_collection_cache(
         self,
         library_root: str = "",
@@ -4285,6 +6004,162 @@ class WorkspaceDb:
         )
         return body
 
+    def photo_folder_enrichment_revision(self, conn: sqlite3.Connection | None = None) -> str:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_folder_enrichment_revision(local_conn)
+
+        def table_summary(table: str, timestamp_column: str) -> tuple[int, str]:
+            try:
+                row = conn.execute(
+                    f"SELECT COUNT(*) AS n, COALESCE(MAX({timestamp_column}), '') AS latest FROM {table}"
+                ).fetchone()
+            except sqlite3.Error:
+                return 0, ""
+            return int(row["n"] if row else 0), str(row["latest"] if row else "" or "")
+
+        def table_fingerprint(table: str, columns: tuple[str, ...]) -> tuple[int, str]:
+            try:
+                rows = conn.execute(
+                    f"SELECT {', '.join(columns)} FROM {table} ORDER BY rowid"
+                ).fetchall()
+            except sqlite3.Error:
+                return 0, ""
+            digest = hashlib.sha256()
+            for row in rows:
+                encoded = json.dumps(
+                    [row[column] for column in columns],
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+                digest.update(len(encoded).to_bytes(8, "big"))
+                digest.update(encoded)
+            return len(rows), digest.hexdigest()
+
+        base = self.photo_smart_album_materialization_revision(conn)
+        extra_tables = {
+            "reviewCandidates": table_summary("review_candidates", "created_at"),
+            "photoPeopleProfiles": table_summary("photo_people_profiles", "updated_at"),
+            "photoPetProfiles": table_summary("photo_pet_profiles", "updated_at"),
+            "photoPeopleGroups": table_summary("photo_people_groups", "updated_at"),
+            "photoPlaceProfiles": table_summary("photo_place_profiles", "updated_at"),
+            "photoUtilityProfiles": table_summary("photo_utility_profiles", "updated_at"),
+            "photoAlbumFolders": table_summary("photo_album_folders", "updated_at"),
+            # Import archive/restore can happen twice within now_iso's one-second
+            # precision. Hash the small session catalog so either mutation always
+            # invalidates the persisted rail enrichment snapshot.
+            "photoImportSessions": table_fingerprint(
+                "photo_import_sessions",
+                (
+                    "import_id",
+                    "source_kind",
+                    "storage_mode",
+                    "source_label",
+                    "root_path",
+                    "status",
+                    "started_at",
+                    "completed_at",
+                    "updated_at",
+                    "imported_count",
+                    "failed_count",
+                    "metadata_json",
+                ),
+            ),
+            "photoImportFailures": table_summary("photo_import_failures", "created_at"),
+            "photoAssetEvents": table_summary("photo_asset_events", "event_at"),
+            "photoObjectTags": table_summary("photo_object_tags", "created_at"),
+            "photoOcrBlocks": table_summary("photo_ocr_blocks", "created_at"),
+        }
+        meta_rows = conn.execute(
+            """
+            SELECT key, value
+            FROM meta
+            WHERE key IN ('photo_curation_preferences', 'photo_library_settings', 'photo_user_memories')
+            ORDER BY key ASC
+            """
+        ).fetchall()
+        candidate_fingerprint = conn.execute(
+            """
+            SELECT COUNT(*) AS n,
+                COALESCE(SUM(CAST(ROUND(score * 1000000) AS INTEGER)), 0) AS score_sum,
+                COALESCE(SUM(CAST(ROUND(quality * 1000000) AS INTEGER)), 0) AS quality_sum,
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+                SUM(CASE WHEN status = 'accepted' THEN 1 ELSE 0 END) AS accepted_count,
+                SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected_count,
+                COALESCE(SUM(LENGTH(person_name) + LENGTH(payload_json)), 0) AS text_bytes
+            FROM review_candidates
+            """
+        ).fetchone()
+        body = {
+            "base": base,
+            "extra": extra_tables,
+            "meta": {str(row["key"] or ""): str(row["value"] or "") for row in meta_rows},
+            "reviewCandidates": dict(candidate_fingerprint) if candidate_fingerprint is not None else {},
+        }
+        return hashlib.sha256(
+            json.dumps(body, separators=(",", ":"), sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+
+    def _photo_folder_enrichment_cache_key(self, scope_key: str) -> str:
+        digest = hashlib.sha256(str(scope_key or "").encode("utf-8")).hexdigest()[:24]
+        return f"photo_folder_enrichment_cache:{digest}"
+
+    def photo_folder_enrichment_cache(
+        self,
+        scope_key: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_folder_enrichment_cache(scope_key, local_conn)
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = ? LIMIT 1",
+            (self._photo_folder_enrichment_cache_key(scope_key),),
+        ).fetchone()
+        try:
+            body = json.loads(str(row["value"] if row is not None else "{}") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            body = {}
+        if not isinstance(body, dict):
+            return {}
+        folders = body.get("folders", []) if isinstance(body.get("folders", []), list) else []
+        return {
+            "revision": str(body.get("revision", "") or ""),
+            "generatedAt": str(body.get("generatedAt", "") or ""),
+            "folders": [folder for folder in folders[:2000] if isinstance(folder, dict)],
+        }
+
+    def save_photo_folder_enrichment_cache(
+        self,
+        scope_key: str,
+        *,
+        revision: str,
+        folders: list[dict[str, Any]],
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.save_photo_folder_enrichment_cache(
+                    scope_key,
+                    revision=revision,
+                    folders=folders,
+                    conn=local_conn,
+                )
+        body = {
+            "revision": str(revision or ""),
+            "generatedAt": now_iso(),
+            "folders": [folder for folder in folders[:2000] if isinstance(folder, dict)],
+        }
+        conn.execute(
+            """
+            INSERT INTO meta(key, value)
+            VALUES(?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (self._photo_folder_enrichment_cache_key(scope_key), self._clean_json_dict(body)),
+        )
+        return body
+
     def photo_smart_album_materialization_cache(
         self,
         album_id: str,
@@ -4300,10 +6175,197 @@ class WorkspaceDb:
         key = self._photo_smart_album_materialization_cache_key(clean_album_id, library_root)
         row = conn.execute("SELECT value FROM meta WHERE key = ? LIMIT 1", (key,)).fetchone()
         try:
-            body = json.loads(str(row["value"] if row is not None else "{}") or "{}")
+            raw_value = str(row["value"] if row is not None else "{}") or "{}"
+            body = json.loads(raw_value)
         except (TypeError, ValueError, json.JSONDecodeError):
             body = {}
-        return self._clean_photo_smart_album_materialization_cache(body if isinstance(body, dict) else {})
+            raw_value = "{}"
+        if not isinstance(body, dict):
+            body = {}
+        row_paths = self.photo_smart_album_materialization_source_paths(clean_album_id, library_root, conn=conn)
+        if row_paths:
+            return self._clean_photo_smart_album_materialization_cache(body, source_paths=row_paths, parse_body_paths=False)
+        legacy = self._clean_photo_smart_album_materialization_cache(body)
+        if legacy["sourcePaths"] and ("sourcePaths" in raw_value or "source_paths" in raw_value):
+            self._replace_photo_smart_album_materialization_paths(
+                conn,
+                key,
+                clean_album_id,
+                str(library_root or ""),
+                legacy["sourcePaths"],
+            )
+            compact = {key_name: value for key_name, value in legacy.items() if key_name != "sourcePaths"}
+            compact["sourcePathStorage"] = "rows"
+            conn.execute(
+                """
+                INSERT INTO meta(key, value)
+                VALUES(?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (key, self._clean_json_dict(compact)),
+            )
+        return legacy
+
+    def photo_smart_album_materialization_cache_header(
+        self,
+        album_id: str,
+        library_root: str = "",
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_smart_album_materialization_cache_header(album_id, library_root, local_conn)
+        clean_album_id = str(album_id or "").strip()
+        if not clean_album_id:
+            return self._clean_photo_smart_album_materialization_cache(None, source_paths=[], parse_body_paths=False)
+        key = self._photo_smart_album_materialization_cache_key(clean_album_id, library_root)
+        row = conn.execute("SELECT value FROM meta WHERE key = ? LIMIT 1", (key,)).fetchone()
+        raw_value = str(row["value"] if row is not None else "{}") or "{}"
+        if "sourcePaths" in raw_value or "source_paths" in raw_value:
+            migrated = self.photo_smart_album_materialization_cache(clean_album_id, library_root, conn)
+            header = dict(migrated)
+            header["sourcePaths"] = []
+            return header
+        try:
+            parsed = json.loads(raw_value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = {}
+        body = self._clean_photo_smart_album_materialization_cache(
+            parsed if isinstance(parsed, dict) else {},
+            source_paths=[],
+            parse_body_paths=False,
+        )
+        count_row = conn.execute(
+            "SELECT COUNT(*) AS n FROM photo_smart_album_materialized_items WHERE cache_key = ?",
+            (key,),
+        ).fetchone()
+        row_count = int(count_row["n"] if count_row else 0)
+        if row_count or body.get("sourcePathStorage") == "rows":
+            body["assetCount"] = row_count
+            body["sourcePathStorage"] = "rows"
+        body["sourcePaths"] = []
+        return body
+
+    def _replace_photo_smart_album_materialization_paths(
+        self,
+        conn: sqlite3.Connection,
+        cache_key: str,
+        album_id: str,
+        library_root: str,
+        source_paths: Iterable[str],
+    ) -> None:
+        conn.execute("DELETE FROM photo_smart_album_materialized_items WHERE cache_key = ?", (cache_key,))
+        timestamp = now_iso()
+        conn.executemany(
+            """
+            INSERT INTO photo_smart_album_materialized_items(
+                cache_key, album_id, library_root, source_path, position, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (
+                (cache_key, album_id, str(library_root or ""), str(source_path or ""), position, timestamp)
+                for position, source_path in enumerate(source_paths)
+                if str(source_path or "").strip()
+            ),
+        )
+
+    def photo_smart_album_materialization_source_paths(
+        self,
+        album_id: str,
+        library_root: str = "",
+        *,
+        offset: int = 0,
+        limit: int = 0,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[str]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_smart_album_materialization_source_paths(
+                    album_id,
+                    library_root,
+                    offset=offset,
+                    limit=limit,
+                    conn=local_conn,
+                )
+        clean_album_id = str(album_id or "").strip()
+        if not clean_album_id:
+            return []
+        key = self._photo_smart_album_materialization_cache_key(clean_album_id, library_root)
+        clean_offset = max(0, int(offset or 0))
+        clean_limit = max(0, int(limit or 0))
+        limit_sql = " LIMIT ? OFFSET ?" if clean_limit else ""
+        params: list[Any] = [key]
+        if clean_limit:
+            params.extend([clean_limit, clean_offset])
+        rows = conn.execute(
+            f"""
+            SELECT source_path
+            FROM photo_smart_album_materialized_items
+            WHERE cache_key = ?
+            ORDER BY position ASC, source_path ASC
+            {limit_sql}
+            """,
+            params,
+        ).fetchall()
+        return [str(row["source_path"] or "") for row in rows if str(row["source_path"] or "")]
+
+    def photo_smart_album_materialization_summary(
+        self,
+        album_id: str,
+        library_root: str = "",
+        *,
+        cover_source_path: str = "",
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_smart_album_materialization_summary(
+                    album_id,
+                    library_root,
+                    cover_source_path=cover_source_path,
+                    conn=local_conn,
+                )
+        clean_album_id = str(album_id or "").strip()
+        header = self.photo_smart_album_materialization_cache_header(clean_album_id, library_root, conn)
+        key = self._photo_smart_album_materialization_cache_key(clean_album_id, library_root)
+        count_row = conn.execute(
+            "SELECT COUNT(*) AS n FROM photo_smart_album_materialized_items WHERE cache_key = ?",
+            (key,),
+        ).fetchone()
+        count = int(count_row["n"] if count_row else 0)
+        first_row = conn.execute(
+            """
+            SELECT source_path
+            FROM photo_smart_album_materialized_items
+            WHERE cache_key = ?
+            ORDER BY position ASC, source_path ASC
+            LIMIT 1
+            """,
+            (key,),
+        ).fetchone()
+        first_source = str(first_row["source_path"] or "") if first_row else ""
+        selected_cover = str(cover_source_path or "").strip()
+        cover_matches = False
+        if selected_cover:
+            cover_row = conn.execute(
+                """
+                SELECT 1
+                FROM photo_smart_album_materialized_items
+                WHERE cache_key = ? AND source_path = ?
+                LIMIT 1
+                """,
+                (key, selected_cover),
+            ).fetchone()
+            cover_matches = cover_row is not None
+        return {
+            **header,
+            "assetCount": count,
+            "sourcePaths": [],
+            "count": count,
+            "coverSourcePath": selected_cover if cover_matches else first_source,
+            "coverMatches": cover_matches,
+            "materialized": True,
+        }
 
     def save_photo_smart_album_materialization_cache(
         self,
@@ -4325,15 +6387,26 @@ class WorkspaceDb:
             "generatedAt": str((payload if isinstance(payload, dict) else {}).get("generatedAt", "") or now_iso()),
         })
         key = self._photo_smart_album_materialization_cache_key(clean_album_id, library_root)
+        source_paths = list(body.get("sourcePaths", []))
+        self._replace_photo_smart_album_materialization_paths(
+            conn,
+            key,
+            clean_album_id,
+            str(library_root or ""),
+            source_paths,
+        )
+        compact_body = {key_name: value for key_name, value in body.items() if key_name != "sourcePaths"}
+        compact_body["assetCount"] = len(source_paths)
+        compact_body["sourcePathStorage"] = "rows"
         conn.execute(
             """
             INSERT INTO meta(key, value)
             VALUES(?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
             """,
-            (key, self._clean_json_dict(body)),
+            (key, self._clean_json_dict(compact_body)),
         )
-        return body
+        return {**compact_body, "sourcePaths": source_paths}
 
     def photo_smart_album_materialization_revision(self, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
         if conn is None:
@@ -4367,6 +6440,148 @@ class WorkspaceDb:
             "photoMediaPairs": table_summary("photo_media_pairs"),
         }
 
+    def photo_folder_fast_summaries(
+        self,
+        *,
+        confident_threshold: float,
+        library_root: str = "",
+        source_text_filters: Iterable[tuple[str, str]] = (),
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_folder_fast_summaries(
+                    confident_threshold=confident_threshold,
+                    library_root=library_root,
+                    source_text_filters=source_text_filters,
+                    conn=local_conn,
+                )
+        source_where, source_args = self._photo_source_text_filter_sql_parts(source_text_filters)
+        source_clause = " AND " + " AND ".join(source_where) if source_where else ""
+        aggregate = conn.execute(
+            f"""
+            SELECT
+                SUM(CASE WHEN COALESCE(m.hidden, 0) = 0 AND m.deleted_at IS NULL THEN 1 ELSE 0 END) AS visible_count,
+                SUM(CASE WHEN COALESCE(m.hidden, 0) = 0 AND m.deleted_at IS NULL AND COALESCE(m.favorite, 0) != 0 THEN 1 ELSE 0 END) AS favorite_count,
+                SUM(CASE WHEN COALESCE(m.hidden, 0) = 0 AND m.deleted_at IS NULL AND (COALESCE(m.edited, 0) != 0 OR EXISTS(SELECT 1 FROM photo_edit_stacks AS es WHERE es.asset_id = a.asset_id)) THEN 1 ELSE 0 END) AS edited_count,
+                SUM(CASE WHEN COALESCE(m.hidden, 0) != 0 AND m.deleted_at IS NULL THEN 1 ELSE 0 END) AS hidden_count,
+                SUM(CASE WHEN m.deleted_at IS NOT NULL THEN 1 ELSE 0 END) AS deleted_count,
+                MIN(CASE WHEN COALESCE(m.hidden, 0) = 0 AND m.deleted_at IS NULL THEN a.source_path END) AS visible_cover,
+                MIN(CASE WHEN COALESCE(m.hidden, 0) = 0 AND m.deleted_at IS NULL AND COALESCE(m.favorite, 0) != 0 THEN a.source_path END) AS favorite_cover,
+                MIN(CASE WHEN COALESCE(m.hidden, 0) = 0 AND m.deleted_at IS NULL AND (COALESCE(m.edited, 0) != 0 OR EXISTS(SELECT 1 FROM photo_edit_stacks AS es WHERE es.asset_id = a.asset_id)) THEN a.source_path END) AS edited_cover,
+                MIN(CASE WHEN COALESCE(m.hidden, 0) != 0 AND m.deleted_at IS NULL THEN a.source_path END) AS hidden_cover,
+                MIN(CASE WHEN m.deleted_at IS NOT NULL THEN a.source_path END) AS deleted_cover
+            FROM photo_assets AS a
+            LEFT JOIN photo_asset_metadata AS m ON m.asset_id = a.asset_id
+            WHERE 1 = 1 {source_clause}
+            """,
+            tuple(source_args),
+        ).fetchone()
+        media_rows = conn.execute(
+            f"""
+            SELECT LOWER(COALESCE(NULLIF(a.media_kind, ''), 'image')) AS media_kind,
+                COUNT(*) AS n,
+                MIN(a.source_path) AS cover_source_path
+            FROM photo_assets AS a
+            LEFT JOIN photo_asset_metadata AS m ON m.asset_id = a.asset_id
+            WHERE COALESCE(m.hidden, 0) = 0 AND m.deleted_at IS NULL {source_clause}
+            GROUP BY LOWER(COALESCE(NULLIF(a.media_kind, ''), 'image'))
+            """,
+            tuple(source_args),
+        ).fetchall()
+        people_rows = conn.execute(
+            f"""
+            SELECT p.person_name,
+                COUNT(DISTINCT p.asset_id) AS n,
+                MIN(a.source_path) AS cover_source_path,
+                MAX(p.score) AS best_score
+            FROM photo_asset_people AS p
+            JOIN photo_assets AS a ON a.asset_id = p.asset_id
+            LEFT JOIN photo_asset_metadata AS m ON m.asset_id = a.asset_id
+            WHERE COALESCE(m.hidden, 0) = 0
+                AND m.deleted_at IS NULL
+                AND (
+                    p.person_name LIKE 'Unmatched cluster%'
+                    OR p.status = 'accepted'
+                    OR (p.status != 'rejected' AND (LOWER(COALESCE(p.band, '')) = 'manual assignment' OR p.score >= ?))
+                )
+                {source_clause}
+            GROUP BY p.person_name
+            ORDER BY n DESC, LOWER(p.person_name) ASC
+            LIMIT 500
+            """,
+            (float(confident_threshold), *source_args),
+        ).fetchall()
+        manual_album_rows = conn.execute(
+            f"""
+            SELECT ai.album_id,
+                COUNT(DISTINCT ai.asset_id) AS n,
+                MIN(a.source_path) AS cover_source_path
+            FROM photo_album_items AS ai
+            JOIN photo_assets AS a ON a.asset_id = ai.asset_id
+            LEFT JOIN photo_asset_metadata AS m ON m.asset_id = a.asset_id
+            WHERE COALESCE(m.hidden, 0) = 0 AND m.deleted_at IS NULL {source_clause}
+            GROUP BY ai.album_id
+            """,
+            tuple(source_args),
+        ).fetchall()
+        smart_album_rows = conn.execute(
+            """
+            SELECT album_id, COUNT(*) AS n, MIN(source_path) AS cover_source_path
+            FROM photo_smart_album_materialized_items
+            WHERE library_root = ?
+            GROUP BY album_id
+            """,
+            (str(library_root or ""),),
+        ).fetchall()
+
+        def count_value(key: str) -> int:
+            return int(aggregate[key] or 0) if aggregate is not None else 0
+
+        def cover_value(key: str) -> str:
+            return str(aggregate[key] or "") if aggregate is not None else ""
+
+        return {
+            "visible": {"count": count_value("visible_count"), "coverSourcePath": cover_value("visible_cover")},
+            "favorites": {"count": count_value("favorite_count"), "coverSourcePath": cover_value("favorite_cover")},
+            "edited": {"count": count_value("edited_count"), "coverSourcePath": cover_value("edited_cover")},
+            "hidden": {"count": count_value("hidden_count"), "coverSourcePath": cover_value("hidden_cover")},
+            "deleted": {"count": count_value("deleted_count"), "coverSourcePath": cover_value("deleted_cover")},
+            "media": {
+                str(row["media_kind"] or "image"): {
+                    "count": int(row["n"] or 0),
+                    "coverSourcePath": str(row["cover_source_path"] or ""),
+                }
+                for row in media_rows
+            },
+            "people": [
+                {
+                    "personName": str(row["person_name"] or ""),
+                    "count": int(row["n"] or 0),
+                    "coverSourcePath": str(row["cover_source_path"] or ""),
+                    "bestScore": float(row["best_score"] or 0.0),
+                }
+                for row in people_rows
+                if str(row["person_name"] or "")
+            ],
+            "manualAlbums": {
+                str(row["album_id"] or ""): {
+                    "count": int(row["n"] or 0),
+                    "coverSourcePath": str(row["cover_source_path"] or ""),
+                }
+                for row in manual_album_rows
+                if str(row["album_id"] or "")
+            },
+            "smartAlbums": {
+                str(row["album_id"] or ""): {
+                    "count": int(row["n"] or 0),
+                    "coverSourcePath": str(row["cover_source_path"] or ""),
+                }
+                for row in smart_album_rows
+                if str(row["album_id"] or "")
+            },
+        }
+
     def _clean_photo_slideshow_project(self, value: dict[str, Any] | None, *, now: str | None = None) -> dict[str, Any] | None:
         body = value if isinstance(value, dict) else {}
         project_id = re.sub(r"[^a-zA-Z0-9:_-]+", "-", str(body.get("id", body.get("projectId", "")) or "")).strip("-")[:128]
@@ -4375,6 +6590,13 @@ class WorkspaceDb:
         name = re.sub(r"\s+", " ", str(body.get("name", body.get("title", "")) or "")).strip()[:120] or "Slideshow"
         title = re.sub(r"\s+", " ", str(body.get("title", "") or "")).strip()[:160] or name
         source_label = re.sub(r"\s+", " ", str(body.get("sourceLabel", "") or "")).strip()[:160]
+        story_id = re.sub(r"[^a-zA-Z0-9:_-]+", "-", str(body.get("storyId", "") or "")).strip("-")[:128]
+        story_content_sha256 = str(body.get("storyContentSha256", "") or "").strip().lower()
+        story_generation_sha256 = str(body.get("storyGenerationSha256", "") or "").strip().lower()
+        if not re.fullmatch(r"[a-f0-9]{64}", story_content_sha256):
+            story_content_sha256 = ""
+        if not re.fullmatch(r"[a-f0-9]{64}", story_generation_sha256):
+            story_generation_sha256 = ""
         source_paths = self._clean_photo_curation_source_paths(body.get("sourcePaths", []))
         if not source_paths:
             return None
@@ -4960,6 +7182,15 @@ class WorkspaceDb:
                     "motion": clean_motion(raw_item.get("motion", raw_item.get("motionPreset", raw_item.get("keyframeMotion", "auto")))),
                     "keyframes": keyframes,
                 }
+                chapter_id = re.sub(r"[^A-Za-z0-9:_-]+", "-", str(raw_item.get("chapterId", "") or "")).strip("-")[:128]
+                chapter_title = re.sub(r"\s+", " ", str(raw_item.get("chapterTitle", "") or "")).strip()[:100]
+                chapter_narrative = re.sub(r"\s+", " ", str(raw_item.get("chapterNarrative", "") or "")).strip()[:700]
+                if chapter_id:
+                    timeline_item["chapterId"] = chapter_id
+                if chapter_title:
+                    timeline_item["chapterTitle"] = chapter_title
+                if chapter_narrative:
+                    timeline_item["chapterNarrative"] = chapter_narrative
                 if has_focal_x:
                     timeline_item["focalX"] = clean_percent(first_value(raw_item, "focalX", "cropFocusX", "focusX"), 50)
                 if has_focal_y:
@@ -5037,6 +7268,9 @@ class WorkspaceDb:
                 timeline_item["captionWrap"] = raw_timeline_item["captionWrap"]
             if isinstance(raw_timeline_item.get("captions"), list) and raw_timeline_item["captions"]:
                 timeline_item["captions"] = raw_timeline_item["captions"]
+            for key in ("chapterId", "chapterTitle", "chapterNarrative"):
+                if isinstance(raw_timeline_item.get(key), str) and raw_timeline_item[key]:
+                    timeline_item[key] = raw_timeline_item[key]
             transition_item_effect = raw_timeline_item.get("transitionEffect")
             if transition_item_effect in {"auto", "cut", "fade", "dissolve", "zoom"}:
                 timeline_item["transitionEffect"] = transition_item_effect
@@ -5049,6 +7283,9 @@ class WorkspaceDb:
             "name": name,
             "title": title,
             "sourceLabel": source_label,
+            "storyId": story_id,
+            "storyContentSha256": story_content_sha256,
+            "storyGenerationSha256": story_generation_sha256,
             "sourcePaths": source_paths,
             "theme": theme,
             "themeTimelinePreset": theme_timeline_preset,
@@ -5954,9 +8191,6 @@ class WorkspaceDb:
                     }
                 if exif_meta:
                     info["metadata"]["exif"] = exif_meta
-                qr_metadata = self._photo_asset_qr_metadata(path)
-                if qr_metadata:
-                    info["metadata"].update(qr_metadata)
                 return info
         except Exception:
             return {}
@@ -6237,6 +8471,34 @@ class WorkspaceDb:
         ])
         latitude = self._photo_xmp_coordinate(first("gpslatitude", "latitude"))
         longitude = self._photo_xmp_coordinate(first("gpslongitude", "longitude"))
+        raw_rating = first("catalograting", "rating")
+        raw_pick = first("pickstatus", "pick", "pickflag", "flag")
+        raw_color_label = first("colorlabel", "label")
+        pick_status = ""
+        try:
+            rating_number = float(raw_rating) if raw_rating else 0.0
+            if rating_number < 0:
+                pick_status = "reject"
+        except (TypeError, ValueError):
+            pass
+        if raw_pick:
+            try:
+                pick_number = int(float(raw_pick))
+            except (TypeError, ValueError):
+                pick_number = 0
+            if pick_number < 0:
+                pick_status = "reject"
+            elif pick_number > 0:
+                pick_status = "pick"
+            else:
+                try:
+                    pick_status = self._normalize_photo_pick_status(raw_pick)
+                except ValueError:
+                    pass
+        try:
+            color_label = self._normalize_photo_color_label(raw_color_label)
+        except ValueError:
+            color_label = ""
         location: dict[str, Any] = {}
         if location_parts:
             location["label"] = ", ".join(location_parts)
@@ -6260,7 +8522,9 @@ class WorkspaceDb:
             "caption": first("description", "caption", "usercomment"),
             "keywords": keywords,
             "dateCreated": self._photo_xmp_date(first("datecreated", "createdate", "datetimeoriginal")),
-            "rating": first("rating"),
+            "rating": raw_rating,
+            "colorLabel": color_label,
+            "pickStatus": pick_status,
             "location": location,
             "photographicStyle": first(
                 "photographicstyle",
@@ -6374,6 +8638,25 @@ class WorkspaceDb:
         keywords = self._clean_photo_keywords(xmp_metadata.get("keywords", []))
         if keywords and not current.get("keywords"):
             update_kwargs["keywords"] = keywords
+        raw_rating = xmp_metadata.get("rating", "")
+        if (
+            raw_rating not in (None, "")
+            and int(current.get("rating", 0) or 0) == 0
+            and not bool(current.get("ratingExplicit"))
+        ):
+            try:
+                parsed_rating = int(round(float(raw_rating)))
+            except (TypeError, ValueError):
+                parsed_rating = 0
+            if parsed_rating >= 0:
+                update_kwargs["rating"] = max(0, min(5, parsed_rating))
+                update_kwargs["rating_explicit"] = False
+        color_label = str(xmp_metadata.get("colorLabel", "") or "")
+        if color_label and not str(current.get("colorLabel", "") or ""):
+            update_kwargs["color_label"] = color_label
+        pick_status = str(xmp_metadata.get("pickStatus", "") or "")
+        if pick_status and not str(current.get("pickStatus", "") or ""):
+            update_kwargs["pick_status"] = pick_status
         xmp_location = xmp_metadata.get("location", {}) if isinstance(xmp_metadata.get("location", {}), dict) else {}
         current_location = current.get("locationOverride", {}) if isinstance(current.get("locationOverride", {}), dict) else {}
         if xmp_location and not current.get("locationHidden") and not any(str(value or "").strip() for value in current_location.values()):
@@ -6417,6 +8700,36 @@ class WorkspaceDb:
         add_conflict("title", "Title", current.get("title", ""), xmp_metadata.get("title", ""), self._photo_xmp_clean_text(xmp_metadata.get("title", "")))
         add_conflict("caption", "Caption", current.get("caption", ""), xmp_metadata.get("caption", ""), self._photo_xmp_clean_text(xmp_metadata.get("caption", "")))
         add_conflict("dateOverride", "Date", current.get("dateOverride", ""), xmp_metadata.get("dateCreated", ""), self._photo_xmp_clean_text(xmp_metadata.get("dateCreated", "")))
+
+        raw_rating = xmp_metadata.get("rating", "")
+        if raw_rating not in (None, ""):
+            try:
+                sidecar_rating = max(0, min(5, int(round(float(raw_rating)))))
+            except (TypeError, ValueError):
+                sidecar_rating = 0
+            local_rating = max(0, min(5, int(current.get("rating", 0) or 0)))
+            if (local_rating or bool(current.get("ratingExplicit"))) and local_rating != sidecar_rating:
+                conflicts.append({
+                    "field": "rating",
+                    "label": "Rating",
+                    "local": str(local_rating),
+                    "sidecar": str(sidecar_rating),
+                    "sidecarValue": sidecar_rating,
+                })
+        add_conflict(
+            "colorLabel",
+            "Color label",
+            current.get("colorLabel", ""),
+            xmp_metadata.get("colorLabel", ""),
+            str(xmp_metadata.get("colorLabel", "") or ""),
+        )
+        add_conflict(
+            "pickStatus",
+            "Pick status",
+            current.get("pickStatus", ""),
+            xmp_metadata.get("pickStatus", ""),
+            str(xmp_metadata.get("pickStatus", "") or ""),
+        )
 
         local_keywords = self._clean_photo_keywords(current.get("keywords", []))
         sidecar_keywords = self._clean_photo_keywords(xmp_metadata.get("keywords", []))
@@ -6537,6 +8850,22 @@ class WorkspaceDb:
             """,
             (asset_id, source, source),
         ).fetchone()
+        if row is None:
+            # Both branches above are PATH-derived (asset_id is sha256 of the path), so a
+            # moved or renamed file matches neither and would mint a brand-new asset,
+            # stranding the old row's faces, people, albums, keywords, rating, favourite
+            # and edit stacks. Follow the bytes instead: rehome on content hash.
+            rehomed = self._photo_asset_id_for_moved_file(conn, source=source, content_hash=content_hash)
+            if rehomed:
+                asset_id = rehomed
+                row = conn.execute(
+                    """
+                    SELECT asset_id, added_at, width, height, duration_ms, capture_date, mime_type, perceptual_hash, metadata_json
+                    FROM photo_assets
+                    WHERE asset_id = ?
+                    """,
+                    (asset_id,),
+                ).fetchone()
         if row is not None:
             asset_id = str(row["asset_id"] or asset_id)
         created_at = str(row["added_at"]) if row else (str(added_at or "") or now)
@@ -6733,6 +9062,17 @@ class WorkspaceDb:
             conn.executemany(self._upsert_candidate_sql(), rows)
             self._upsert_photo_assets_from_candidate_params(rows, conn)
             total += len(rows)
+        conn.execute(
+            """
+            DELETE FROM candidate_match_context
+            WHERE NOT EXISTS (
+                SELECT 1 FROM review_candidates AS candidate
+                WHERE candidate.candidate_id = candidate_match_context.candidate_id
+                    AND candidate.best_ref_id = candidate_match_context.best_ref_id
+                    AND candidate.model_name = candidate_match_context.model_name
+            )
+            """
+        )
         return total
 
     def upsert_candidates(self, candidates: Iterable[Any], conn: sqlite3.Connection | None = None) -> int:
@@ -6759,6 +9099,189 @@ class WorkspaceDb:
                 payload = {}
             if isinstance(payload, dict):
                 yield payload
+
+    def candidate_payload_by_id(
+        self,
+        candidate_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.candidate_payload_by_id(candidate_id, local_conn)
+        clean_id = str(candidate_id or "").strip()
+        if not clean_id:
+            return None
+        row = conn.execute(
+            "SELECT payload_json FROM review_candidates WHERE candidate_id = ? LIMIT 1",
+            (clean_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def candidate_payloads_by_ids(
+        self,
+        candidate_ids: Iterable[str],
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        ids = list(dict.fromkeys(str(candidate_id or "").strip() for candidate_id in candidate_ids if str(candidate_id or "").strip()))
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.candidate_payloads_by_ids(ids, local_conn)
+        if not ids:
+            return {}
+        found: dict[str, dict[str, Any]] = {}
+        for offset in range(0, len(ids), 800):
+            chunk = ids[offset:offset + 800]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"SELECT candidate_id, payload_json FROM review_candidates WHERE candidate_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                try:
+                    payload = json.loads(row["payload_json"] or "{}")
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    found[str(row["candidate_id"])] = payload
+        return found
+
+    def iter_candidate_payloads_filtered(
+        self,
+        *,
+        statuses: Iterable[str] | None = None,
+        person_name: str = "",
+        order: str = "created",
+        conn: sqlite3.Connection | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        if conn is None:
+            with self.connect() as local_conn:
+                yield from self.iter_candidate_payloads_filtered(
+                    statuses=statuses,
+                    person_name=person_name,
+                    order=order,
+                    conn=local_conn,
+                )
+                return
+        where: list[str] = []
+        args: list[Any] = []
+        status_values = list(dict.fromkeys(str(status or "").strip() for status in (statuses or []) if str(status or "").strip()))
+        if status_values:
+            placeholders = ",".join("?" for _ in status_values)
+            where.append(f"status IN ({placeholders})")
+            args.extend(status_values)
+        clean_person = str(person_name or "").strip()
+        if clean_person:
+            where.append("person_key = ?")
+            args.append(clean_person.casefold())
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        order_sql = {
+            "status": "status ASC, person_key ASC, score DESC, candidate_id ASC",
+            "review": "review_priority DESC, score DESC, quality DESC, created_at DESC, candidate_id DESC",
+            "score": "score DESC, quality DESC, created_at DESC, candidate_id DESC",
+        }.get(str(order or "").strip().lower(), "created_at ASC, candidate_id ASC")
+        cursor = conn.execute(
+            f"""
+            SELECT payload_json FROM review_candidates
+            {where_sql}
+            ORDER BY {order_sql}
+            """,
+            args,
+        )
+        for row in cursor:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                yield payload
+
+    def candidate_ids_filtered(
+        self,
+        *,
+        statuses: Iterable[str] | None = None,
+        person_name: str = "",
+        created_before: str = "",
+        conn: sqlite3.Connection | None = None,
+    ) -> list[str]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.candidate_ids_filtered(
+                    statuses=statuses,
+                    person_name=person_name,
+                    created_before=created_before,
+                    conn=local_conn,
+                )
+        where: list[str] = []
+        args: list[Any] = []
+        status_values = list(dict.fromkeys(str(status or "").strip() for status in (statuses or []) if str(status or "").strip()))
+        if status_values:
+            placeholders = ",".join("?" for _ in status_values)
+            where.append(f"status IN ({placeholders})")
+            args.extend(status_values)
+        clean_person = str(person_name or "").strip()
+        if clean_person:
+            where.append("person_key = ?")
+            args.append(clean_person.casefold())
+        clean_created_before = str(created_before or "").strip()
+        if clean_created_before:
+            where.append("created_at < ?")
+            args.append(clean_created_before)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        rows = conn.execute(
+            f"""
+            SELECT candidate_id FROM review_candidates
+            {where_sql}
+            ORDER BY created_at ASC, candidate_id ASC
+            """,
+            args,
+        ).fetchall()
+        return [str(row["candidate_id"]) for row in rows if str(row["candidate_id"] or "")]
+
+    def rename_review_candidate_person(
+        self,
+        old_name: str,
+        new_name: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[str]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.rename_review_candidate_person(old_name, new_name, local_conn)
+        old_clean = str(old_name or "").strip()
+        new_clean = str(new_name or "").strip()
+        if not old_clean or not new_clean or old_clean.casefold() == new_clean.casefold():
+            return []
+        rows = conn.execute(
+            """
+            SELECT payload_json FROM review_candidates
+            WHERE person_key = ?
+            ORDER BY candidate_id ASC
+            """,
+            (old_clean.casefold(),),
+        ).fetchall()
+        candidates: list[dict[str, Any]] = []
+        candidate_ids: list[str] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            candidate_id = str(payload.get("candidate_id", "") or "").strip()
+            if not candidate_id:
+                continue
+            payload["person_name"] = new_clean
+            candidates.append(payload)
+            candidate_ids.append(candidate_id)
+        if candidates:
+            self.upsert_candidates(candidates, conn)
+        return candidate_ids
 
     def iter_candidate_payloads_for_source_paths(
         self,
@@ -6809,6 +9332,75 @@ class WorkspaceDb:
         finally:
             conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
 
+    def review_candidate_ids_for_source_paths(
+        self,
+        source_paths: Iterable[str],
+        conn: sqlite3.Connection | None = None,
+    ) -> list[str]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.review_candidate_ids_for_source_paths(source_paths, local_conn)
+        clean_paths = [str(path or "").strip() for path in dict.fromkeys(source_paths or []) if str(path or "").strip()]
+        if not clean_paths:
+            return []
+        temp_table = "temp_review_candidate_source_paths"
+        conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
+        conn.execute(f"CREATE TEMP TABLE {temp_table}(source_path TEXT PRIMARY KEY)")
+        try:
+            conn.executemany(
+                f"INSERT OR IGNORE INTO {temp_table}(source_path) VALUES(?)",
+                [(path,) for path in clean_paths],
+            )
+            rows = conn.execute(
+                f"""
+                SELECT candidate_id FROM (
+                    SELECT rc.candidate_id
+                    FROM {temp_table} AS wanted
+                    JOIN review_candidates AS rc INDEXED BY idx_review_candidates_source_path
+                        ON rc.source_path = wanted.source_path
+                    UNION
+                    SELECT rc.candidate_id
+                    FROM {temp_table} AS wanted
+                    JOIN review_candidates AS rc INDEXED BY idx_review_candidates_media_source_path
+                        ON rc.media_source_path = wanted.source_path
+                    UNION
+                    SELECT rc.candidate_id
+                    FROM {temp_table} AS wanted
+                    JOIN review_candidates AS rc INDEXED BY idx_review_candidates_media_path
+                        ON rc.media_path = wanted.source_path
+                )
+                ORDER BY candidate_id ASC
+                """
+            ).fetchall()
+            return [str(row["candidate_id"]) for row in rows if str(row["candidate_id"] or "")]
+        finally:
+            conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
+
+    def delete_review_candidates_for_source_paths(
+        self,
+        source_paths: Iterable[str],
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.delete_review_candidates_for_source_paths(source_paths, local_conn)
+        candidate_ids = self.review_candidate_ids_for_source_paths(source_paths, conn)
+        if not candidate_ids:
+            return {"deleted": 0, "candidateIds": []}
+        deleted = 0
+        for offset in range(0, len(candidate_ids), 800):
+            chunk = candidate_ids[offset:offset + 800]
+            placeholders = ",".join("?" for _ in chunk)
+            conn.execute(f"DELETE FROM photo_asset_people WHERE candidate_id IN ({placeholders})", chunk)
+            conn.execute(f"DELETE FROM candidate_match_context WHERE candidate_id IN ({placeholders})", chunk)
+            deleted += int(
+                conn.execute(
+                    f"DELETE FROM review_candidates WHERE candidate_id IN ({placeholders})",
+                    chunk,
+                ).rowcount or 0
+            )
+        return {"deleted": deleted, "candidateIds": candidate_ids}
+
     def candidate_key_exists(
         self,
         dedupe_source: str,
@@ -6852,8 +9444,29 @@ class WorkspaceDb:
         if not ids:
             return 0
         conn.executemany("DELETE FROM photo_asset_people WHERE candidate_id = ?", [(candidate_id,) for candidate_id in ids])
+        conn.executemany("DELETE FROM candidate_match_context WHERE candidate_id = ?", [(candidate_id,) for candidate_id in ids])
         conn.executemany("DELETE FROM review_candidates WHERE candidate_id = ?", [(candidate_id,) for candidate_id in ids])
         return len(ids)
+
+    def review_candidate_source_paths_in_use(self, source_paths: Iterable[str]) -> set[str]:
+        paths = sorted({str(value) for value in source_paths if str(value)})
+        if not paths:
+            return set()
+        used: set[str] = set()
+        with self.connect() as conn:
+            for start in range(0, len(paths), 700):
+                chunk = paths[start:start + 700]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT source_path
+                    FROM review_candidates
+                    WHERE source_path IN ({placeholders})
+                    """,
+                    tuple(chunk),
+                ).fetchall()
+                used.update(str(row["source_path"] or "") for row in rows if str(row["source_path"] or ""))
+        return used
 
     def clear_candidates(self, conn: sqlite3.Connection | None = None) -> int:
         if conn is None:
@@ -6861,6 +9474,7 @@ class WorkspaceDb:
                 return self.clear_candidates(local_conn)
         row = conn.execute("SELECT COUNT(*) AS n FROM review_candidates").fetchone()
         conn.execute("DELETE FROM photo_asset_people")
+        conn.execute("DELETE FROM candidate_match_context")
         conn.execute("DELETE FROM review_candidates")
         return int(row["n"] if row else 0)
 
@@ -7861,82 +10475,61 @@ class WorkspaceDb:
             return parsed if isinstance(parsed, dict) else {}
 
         previous_session = self._photo_import_session_row(row, conn)
+        previous_kind = str(previous_session.get("sourceKind", "") or "")
+        previous_label = str(previous_session.get("sourceLabel", "") or "")
+        previous_detail = str(previous_session.get("sourceDetail", "") or "")
         next_kind = self._photo_import_source_kind(
-            source_kind if source_kind is not None else previous_session.get("sourceKind", "")
+            source_kind if source_kind is not None else previous_kind
         )
         next_label = re.sub(
             r"\s+",
             " ",
-            str(source_label if source_label is not None else previous_session.get("sourceLabel", "") or "").strip(),
+            str(source_label if source_label is not None else previous_label or "").strip(),
         )[:128]
         if not next_label:
-            next_label = str(previous_session.get("sourceLabel", "") or "").strip() or Path(str(row["root_path"] or "")).name or "Photo import"
+            next_label = previous_label.strip() or Path(str(row["root_path"] or "")).name or "Photo import"
         next_detail = re.sub(
             r"\s+",
             " ",
-            str(source_detail if source_detail is not None else previous_session.get("sourceDetail", "") or "").strip(),
+            str(source_detail if source_detail is not None else previous_detail or "").strip(),
         )[:240]
-        updated_at = now_iso()
-        metadata = parse_json(row["metadata_json"])
-        metadata.update({
-            "sourceKind": next_kind,
-            "sourceLabel": next_label,
-            "sourceDetail": next_detail,
-            "provenanceEditedAt": updated_at,
-        })
-        conn.execute(
-            """
-            UPDATE photo_import_sessions
-            SET source_kind = ?,
-                source_label = ?,
-                metadata_json = ?,
-                updated_at = ?
-            WHERE import_id = ?
-            """,
-            (
-                next_kind,
-                next_label,
-                self._clean_json_dict(metadata),
-                updated_at,
-                clean_import_id,
-            ),
+        provenance_changed = (
+            next_kind != previous_kind
+            or next_label != previous_label
+            or next_detail != previous_detail
         )
-
-        metadata_json = (
-            "CASE WHEN json_valid(COALESCE(metadata_json, '{}')) "
-            "THEN COALESCE(metadata_json, '{}') ELSE '{}' END"
-        )
-        updated_asset_cursor = conn.execute(
-            f"""
-            UPDATE photo_assets
-            SET metadata_json = json_set(
-                    {metadata_json},
-                    '$.importSourceKind', ?,
-                    '$.importSourceLabel', ?,
-                    '$.importSourceDetail', ?,
-                    '$.importProvenanceEditedAt', ?
+        updated_assets = 0
+        if provenance_changed:
+            updated_at = now_iso()
+            metadata = parse_json(row["metadata_json"])
+            metadata.update({
+                "sourceKind": next_kind,
+                "sourceLabel": next_label,
+                "sourceDetail": next_detail,
+                "provenanceEditedAt": updated_at,
+            })
+            conn.execute(
+                """
+                UPDATE photo_import_sessions
+                SET source_kind = ?,
+                    source_label = ?,
+                    metadata_json = ?,
+                    updated_at = ?
+                WHERE import_id = ?
+                """,
+                (
+                    next_kind,
+                    next_label,
+                    self._clean_json_dict(metadata),
+                    updated_at,
+                    clean_import_id,
                 ),
-                updated_at = ?
-            WHERE source_scan_run = ?
-                AND (
-                    COALESCE(CAST(json_extract({metadata_json}, '$.importSourceKind') AS TEXT), '') != ?
-                    OR COALESCE(CAST(json_extract({metadata_json}, '$.importSourceLabel') AS TEXT), '') != ?
-                    OR COALESCE(CAST(json_extract({metadata_json}, '$.importSourceDetail') AS TEXT), '') != ?
-                )
-            """,
-            (
-                next_kind,
-                next_label,
-                next_detail,
-                updated_at,
-                updated_at,
-                clean_import_id,
-                next_kind,
-                next_label,
-                next_detail,
-            ),
-        )
-        updated_assets = max(0, int(updated_asset_cursor.rowcount or 0))
+            )
+            affected_row = conn.execute(
+                "SELECT COUNT(*) AS n FROM photo_assets WHERE source_scan_run = ?",
+                (clean_import_id,),
+            ).fetchone()
+            updated_assets = int(affected_row["n"] if affected_row else 0)
 
         session = self.photo_import_session_by_id(clean_import_id, conn)
         if session is None:
@@ -7946,9 +10539,9 @@ class WorkspaceDb:
             "session": session,
             "updatedAssets": updated_assets,
             "previous": {
-                "sourceKind": str(previous_session.get("sourceKind", "") or ""),
-                "sourceLabel": str(previous_session.get("sourceLabel", "") or ""),
-                "sourceDetail": str(previous_session.get("sourceDetail", "") or ""),
+                "sourceKind": previous_kind,
+                "sourceLabel": previous_label,
+                "sourceDetail": previous_detail,
             },
         }
 
@@ -7970,29 +10563,109 @@ class WorkspaceDb:
                     source_detail=source_detail,
                     conn=local_conn,
                 )
-        seen: set[str] = set()
-        updated: list[dict[str, Any]] = []
-        missing: list[str] = []
-        updated_assets = 0
-        for raw_id in import_ids:
-            import_id = str(raw_id or "").strip()
-            if not import_id or import_id in seen:
-                continue
-            seen.add(import_id)
+        clean_ids = list(dict.fromkeys(str(raw_id or "").strip() for raw_id in import_ids if str(raw_id or "").strip()))
+        if not clean_ids:
+            return {"changed": 0, "updated": [], "missing": [], "updatedAssets": 0}
+
+        def parse_json(value: Any) -> dict[str, Any]:
             try:
-                result = self.update_photo_import_session_provenance(
-                    import_id=import_id,
-                    source_kind=source_kind,
-                    source_label=source_label,
-                    source_detail=source_detail,
-                    conn=conn,
-                )
-            except ValueError:
-                missing.append(import_id)
+                parsed = json.loads(str(value or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parsed = {}
+            return parsed if isinstance(parsed, dict) else {}
+
+        def fetch_session_rows(ids: list[str]) -> dict[str, sqlite3.Row]:
+            rows_by_id: dict[str, sqlite3.Row] = {}
+            for offset in range(0, len(ids), 800):
+                chunk = ids[offset:offset + 800]
+                placeholders = ",".join("?" for _ in chunk)
+                for row in conn.execute(
+                    f"SELECT * FROM photo_import_sessions WHERE import_id IN ({placeholders})",
+                    chunk,
+                ).fetchall():
+                    rows_by_id[str(row["import_id"] or "")] = row
+            return rows_by_id
+
+        rows_by_id = fetch_session_rows(clean_ids)
+        missing = [import_id for import_id in clean_ids if import_id not in rows_by_id]
+        updates: list[tuple[str, str, str, str, str]] = []
+        changed_ids: list[str] = []
+        for import_id in clean_ids:
+            row = rows_by_id.get(import_id)
+            if row is None:
                 continue
-            session = result.get("session", {}) if isinstance(result.get("session", {}), dict) else {}
-            updated.append(session)
-            updated_assets += int(result.get("updatedAssets", 0) or 0)
+            previous_session = self._photo_import_session_row(row, conn)
+            previous_kind = str(previous_session.get("sourceKind", "") or "")
+            previous_label = str(previous_session.get("sourceLabel", "") or "")
+            previous_detail = str(previous_session.get("sourceDetail", "") or "")
+            next_kind = self._photo_import_source_kind(
+                source_kind if source_kind is not None else previous_kind
+            )
+            next_label = re.sub(
+                r"\s+",
+                " ",
+                str(source_label if source_label is not None else previous_label or "").strip(),
+            )[:128]
+            if not next_label:
+                next_label = previous_label.strip() or Path(str(row["root_path"] or "")).name or "Photo import"
+            next_detail = re.sub(
+                r"\s+",
+                " ",
+                str(source_detail if source_detail is not None else previous_detail or "").strip(),
+            )[:240]
+            if next_kind == previous_kind and next_label == previous_label and next_detail == previous_detail:
+                continue
+            updated_at = now_iso()
+            metadata = parse_json(row["metadata_json"])
+            metadata.update({
+                "sourceKind": next_kind,
+                "sourceLabel": next_label,
+                "sourceDetail": next_detail,
+                "provenanceEditedAt": updated_at,
+            })
+            updates.append((
+                next_kind,
+                next_label,
+                self._clean_json_dict(metadata),
+                updated_at,
+                import_id,
+            ))
+            changed_ids.append(import_id)
+        if updates:
+            conn.executemany(
+                """
+                UPDATE photo_import_sessions
+                SET source_kind = ?,
+                    source_label = ?,
+                    metadata_json = ?,
+                    updated_at = ?
+                WHERE import_id = ?
+                """,
+                updates,
+            )
+
+        updated_assets = 0
+        if changed_ids:
+            for offset in range(0, len(changed_ids), 800):
+                chunk = changed_ids[offset:offset + 800]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT source_scan_run, COUNT(*) AS n
+                    FROM photo_assets
+                    WHERE source_scan_run IN ({placeholders})
+                    GROUP BY source_scan_run
+                    """,
+                    chunk,
+                ).fetchall()
+                updated_assets += sum(int(row["n"] or 0) for row in rows)
+
+        refreshed_by_id = fetch_session_rows([import_id for import_id in clean_ids if import_id not in missing])
+        updated = [
+            self._photo_import_session_row(refreshed_by_id[import_id], conn)
+            for import_id in clean_ids
+            if import_id in refreshed_by_id
+        ]
         return {
             "changed": len(updated),
             "updated": updated,
@@ -8536,6 +11209,463 @@ class WorkspaceDb:
             "failures": failures,
         }
 
+    @staticmethod
+    def _photo_tether_json_object(value: Any) -> dict[str, Any]:
+        try:
+            parsed = json.loads(str(value or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _photo_tether_session_row(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        return {
+            "sessionId": str(row["session_id"] or ""),
+            "mode": str(row["mode"] or "watch"),
+            "status": str(row["status"] or "stopped"),
+            "sourcePath": str(row["source_path"] or ""),
+            "destinationPath": str(row["destination_path"] or ""),
+            "storageMode": str(row["storage_mode"] or "referenced"),
+            "managedRoot": str(row["managed_root"] or ""),
+            "namingTemplate": str(row["naming_template"] or "capture_{sequence:04}"),
+            "nextSequence": max(1, int(row["next_sequence"] or 1)),
+            "sourceLabel": str(row["source_label"] or ""),
+            "camera": {
+                "id": str(row["camera_id"] or ""),
+                "model": str(row["camera_model"] or ""),
+                "port": str(row["camera_port"] or ""),
+            },
+            "capabilities": self._photo_tether_json_object(row["capabilities_json"]),
+            "settings": self._photo_tether_json_object(row["settings_json"]),
+            "startedAt": str(row["started_at"] or ""),
+            "stoppedAt": str(row["stopped_at"] or ""),
+            "updatedAt": str(row["updated_at"] or ""),
+            "importedCount": int(row["imported_count"] or 0),
+            "failedCount": int(row["failed_count"] or 0),
+            "lastCaptureId": str(row["last_capture_id"] or ""),
+            "lastError": str(row["last_error"] or ""),
+        }
+
+    def _photo_tether_capture_row(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        return {
+            "captureId": str(row["capture_id"] or ""),
+            "sessionId": str(row["session_id"] or ""),
+            "sequence": int(row["sequence"] or 0),
+            "sourcePath": str(row["source_path"] or ""),
+            "sourceSignature": str(row["source_signature"] or ""),
+            "status": str(row["status"] or "pending"),
+            "targetPath": str(row["target_path"] or ""),
+            "assetId": str(row["asset_id"] or ""),
+            "importId": str(row["import_id"] or ""),
+            "sizeBytes": int(row["size_bytes"] or 0),
+            "capturedAt": str(row["captured_at"] or ""),
+            "importedAt": str(row["imported_at"] or ""),
+            "updatedAt": str(row["updated_at"] or ""),
+            "error": str(row["error"] or ""),
+            "metadata": self._photo_tether_json_object(row["metadata_json"]),
+        }
+
+    def create_photo_tether_session(
+        self,
+        *,
+        mode: str,
+        source_path: str,
+        destination_path: str = "",
+        storage_mode: str = "referenced",
+        managed_root: str = "",
+        naming_template: str = "capture_{sequence:04}",
+        next_sequence: int = 1,
+        source_label: str = "",
+        camera: dict[str, Any] | None = None,
+        capabilities: dict[str, Any] | None = None,
+        settings: dict[str, Any] | None = None,
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        clean_mode = str(mode or "").strip().lower()
+        if clean_mode not in {"watch", "ptp"}:
+            raise ValueError("Photo tether mode must be watch or ptp.")
+        clean_storage = str(storage_mode or "referenced").strip().lower()
+        if clean_storage not in {"referenced", "managed"}:
+            raise ValueError("Photo tether storageMode must be referenced or managed.")
+        source = str(source_path or "").strip()
+        if not source:
+            raise ValueError("Photo tether sourcePath is required.")
+        clean_id = str(session_id or "").strip() or f"tether_{uuid.uuid4().hex}"
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", clean_id):
+            raise ValueError("Photo tether sessionId is invalid.")
+        camera_value = camera if isinstance(camera, dict) else {}
+        timestamp = now_iso()
+        with self.connect() as conn:
+            active = conn.execute(
+                "SELECT session_id FROM photo_tether_sessions WHERE status = 'active' AND session_id <> ? LIMIT 1",
+                (clean_id,),
+            ).fetchone()
+            if active:
+                raise ValueError("Another photo tether session is already active.")
+            conn.execute(
+                """
+                INSERT INTO photo_tether_sessions(
+                    session_id, mode, status, source_path, destination_path,
+                    storage_mode, managed_root, naming_template, next_sequence,
+                    source_label, camera_id, camera_model, camera_port,
+                    capabilities_json, settings_json, started_at, stopped_at,
+                    updated_at, imported_count, failed_count, last_capture_id, last_error
+                ) VALUES(?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, 0, '', '')
+                """,
+                (
+                    clean_id,
+                    clean_mode,
+                    str(Path(source).expanduser().resolve()),
+                    str(Path(destination_path).expanduser().resolve()) if str(destination_path or "").strip() else "",
+                    clean_storage,
+                    str(Path(managed_root).expanduser().resolve()) if str(managed_root or "").strip() else "",
+                    str(naming_template or "capture_{sequence:04}").strip()[:160],
+                    max(1, int(next_sequence or 1)),
+                    str(source_label or "").strip()[:160],
+                    str(camera_value.get("id", "") or "")[:240],
+                    str(camera_value.get("model", "") or "")[:240],
+                    str(camera_value.get("port", "") or "")[:240],
+                    self._clean_json_dict(capabilities if isinstance(capabilities, dict) else {}),
+                    self._clean_json_dict(settings if isinstance(settings, dict) else {}),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            row = conn.execute("SELECT * FROM photo_tether_sessions WHERE session_id = ?", (clean_id,)).fetchone()
+        if not row:
+            raise RuntimeError("Photo tether session could not be created.")
+        return self._photo_tether_session_row(row)
+
+    def list_photo_tether_sessions(
+        self,
+        *,
+        limit: int = 20,
+        statuses: Iterable[str] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.list_photo_tether_sessions(limit=limit, statuses=statuses, conn=local_conn)
+        clean_statuses = [str(value or "").strip().lower() for value in (statuses or []) if str(value or "").strip()]
+        args: list[Any] = []
+        where = ""
+        if clean_statuses:
+            placeholders = ",".join("?" for _ in clean_statuses)
+            where = f"WHERE status IN ({placeholders})"
+            args.extend(clean_statuses)
+        # Cleanup and subject-erasure paths may need to enumerate every active
+        # private artifact. UI callers still pass small limits, while the higher
+        # ceiling prevents orphaned generated files after long-lived workspaces.
+        args.append(max(1, min(5000, int(limit or 20))))
+        rows = conn.execute(
+            f"SELECT * FROM photo_tether_sessions {where} ORDER BY updated_at DESC, started_at DESC LIMIT ?",
+            tuple(args),
+        ).fetchall()
+        return [self._photo_tether_session_row(row) for row in rows]
+
+    def photo_tether_session_by_id(
+        self,
+        session_id: str,
+        *,
+        capture_limit: int = 40,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_tether_session_by_id(session_id, capture_limit=capture_limit, conn=local_conn)
+        row = conn.execute(
+            "SELECT * FROM photo_tether_sessions WHERE session_id = ? LIMIT 1",
+            (str(session_id or "").strip(),),
+        ).fetchone()
+        if not row:
+            return None
+        session = self._photo_tether_session_row(row)
+        captures = conn.execute(
+            """
+            SELECT * FROM photo_tether_captures
+            WHERE session_id = ?
+            ORDER BY sequence DESC, updated_at DESC
+            LIMIT ?
+            """,
+            (session["sessionId"], max(1, min(500, int(capture_limit or 40)))),
+        ).fetchall()
+        session["captures"] = [self._photo_tether_capture_row(capture) for capture in captures]
+        return session
+
+    def update_photo_tether_session_status(
+        self,
+        session_id: str,
+        status: str,
+        *,
+        error: str = "",
+    ) -> dict[str, Any]:
+        clean_id = str(session_id or "").strip()
+        clean_status = str(status or "").strip().lower()
+        transitions = {
+            "active": {"active", "recoverable", "stopped", "error"},
+            "recoverable": {"active", "stopped", "error"},
+            "error": {"active", "stopped", "error"},
+            "stopped": {"active", "stopped"},
+        }
+        if clean_status not in {"active", "recoverable", "stopped", "error"}:
+            raise ValueError("Unknown photo tether session status.")
+        timestamp = now_iso()
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM photo_tether_sessions WHERE session_id = ? LIMIT 1", (clean_id,)).fetchone()
+            if not row:
+                raise ValueError("Photo tether session was not found.")
+            previous = str(row["status"] or "stopped")
+            if clean_status not in transitions.get(previous, set()):
+                raise ValueError(f"Photo tether session cannot move from {previous} to {clean_status}.")
+            if clean_status == "active":
+                other = conn.execute(
+                    "SELECT session_id FROM photo_tether_sessions WHERE status = 'active' AND session_id <> ? LIMIT 1",
+                    (clean_id,),
+                ).fetchone()
+                if other:
+                    raise ValueError("Another photo tether session is already active.")
+            stopped_at = timestamp if clean_status == "stopped" else None
+            conn.execute(
+                """
+                UPDATE photo_tether_sessions
+                SET status = ?, stopped_at = ?, updated_at = ?, last_error = ?
+                WHERE session_id = ?
+                """,
+                (clean_status, stopped_at, timestamp, str(error or "")[:1000], clean_id),
+            )
+            updated = self.photo_tether_session_by_id(clean_id, conn=conn)
+        if not updated:
+            raise RuntimeError("Photo tether session status could not be updated.")
+        return updated
+
+    def reserve_photo_tether_sequence(self, session_id: str) -> dict[str, Any]:
+        clean_id = str(session_id or "").strip()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT status, next_sequence FROM photo_tether_sessions WHERE session_id = ? LIMIT 1",
+                (clean_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError("Photo tether session was not found.")
+            if str(row["status"] or "") != "active":
+                raise ValueError("Photo tether session is not active.")
+            sequence = max(1, int(row["next_sequence"] or 1))
+            conn.execute(
+                "UPDATE photo_tether_sessions SET next_sequence = ?, updated_at = ? WHERE session_id = ?",
+                (sequence + 1, now_iso(), clean_id),
+            )
+        return {"sessionId": clean_id, "sequence": sequence, "nextSequence": sequence + 1}
+
+    def claim_photo_tether_capture(
+        self,
+        *,
+        session_id: str,
+        source_path: str,
+        source_signature: str,
+        size_bytes: int = 0,
+        sequence: int | None = None,
+        captured_at: str = "",
+        metadata: dict[str, Any] | None = None,
+        retry: bool = True,
+    ) -> dict[str, Any]:
+        clean_id = str(session_id or "").strip()
+        clean_source = str(Path(str(source_path or "").strip()).expanduser().resolve()) if str(source_path or "").strip() else ""
+        signature = str(source_signature or "").strip()[:500]
+        if not clean_source or not signature:
+            raise ValueError("Photo tether capture sourcePath and sourceSignature are required.")
+        timestamp = now_iso()
+        with self.connect() as conn:
+            session = conn.execute(
+                "SELECT status, next_sequence FROM photo_tether_sessions WHERE session_id = ? LIMIT 1",
+                (clean_id,),
+            ).fetchone()
+            if not session:
+                raise ValueError("Photo tether session was not found.")
+            if str(session["status"] or "") != "active":
+                raise ValueError("Photo tether session is not active.")
+            existing = conn.execute(
+                """
+                SELECT * FROM photo_tether_captures
+                WHERE session_id = ? AND source_path = ? AND source_signature = ?
+                LIMIT 1
+                """,
+                (clean_id, clean_source, signature),
+            ).fetchone()
+            if existing:
+                existing_status = str(existing["status"] or "")
+                reclaimed = bool(retry and existing_status in {"failed", "interrupted"})
+                if reclaimed:
+                    conn.execute(
+                        """
+                        UPDATE photo_tether_captures
+                        SET status = 'pending', updated_at = ?, error = '', metadata_json = ?
+                        WHERE capture_id = ?
+                        """,
+                        (timestamp, self._clean_json_dict(metadata if isinstance(metadata, dict) else {}), str(existing["capture_id"])),
+                    )
+                    if existing_status == "failed":
+                        conn.execute(
+                            """
+                            UPDATE photo_tether_sessions
+                            SET failed_count = MAX(0, failed_count - 1), updated_at = ?, last_error = ''
+                            WHERE session_id = ?
+                            """,
+                            (timestamp, clean_id),
+                        )
+                    existing = conn.execute(
+                        "SELECT * FROM photo_tether_captures WHERE capture_id = ?",
+                        (str(existing["capture_id"]),),
+                    ).fetchone()
+                return {
+                    "capture": self._photo_tether_capture_row(existing),
+                    "claimed": reclaimed,
+                    "duplicate": True,
+                }
+            if sequence is None:
+                capture_sequence = max(1, int(session["next_sequence"] or 1))
+                next_sequence = capture_sequence + 1
+            else:
+                capture_sequence = max(1, int(sequence))
+                next_sequence = max(int(session["next_sequence"] or 1), capture_sequence + 1)
+            capture_id = f"tether_capture_{uuid.uuid4().hex}"
+            conn.execute(
+                """
+                INSERT INTO photo_tether_captures(
+                    capture_id, session_id, sequence, source_path, source_signature,
+                    status, target_path, asset_id, import_id, size_bytes,
+                    captured_at, imported_at, updated_at, error, metadata_json
+                ) VALUES(?, ?, ?, ?, ?, 'pending', '', '', '', ?, ?, NULL, ?, '', ?)
+                """,
+                (
+                    capture_id,
+                    clean_id,
+                    capture_sequence,
+                    clean_source,
+                    signature,
+                    max(0, int(size_bytes or 0)),
+                    str(captured_at or timestamp),
+                    timestamp,
+                    self._clean_json_dict(metadata if isinstance(metadata, dict) else {}),
+                ),
+            )
+            conn.execute(
+                "UPDATE photo_tether_sessions SET next_sequence = ?, updated_at = ? WHERE session_id = ?",
+                (next_sequence, timestamp, clean_id),
+            )
+            row = conn.execute("SELECT * FROM photo_tether_captures WHERE capture_id = ?", (capture_id,)).fetchone()
+        if not row:
+            raise RuntimeError("Photo tether capture could not be claimed.")
+        return {"capture": self._photo_tether_capture_row(row), "claimed": True, "duplicate": False}
+
+    def complete_photo_tether_capture(
+        self,
+        capture_id: str,
+        *,
+        target_path: str = "",
+        asset_id: str = "",
+        import_id: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        clean_id = str(capture_id or "").strip()
+        timestamp = now_iso()
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM photo_tether_captures WHERE capture_id = ? LIMIT 1", (clean_id,)).fetchone()
+            if not row:
+                raise ValueError("Photo tether capture was not found.")
+            previous = str(row["status"] or "")
+            if previous != "imported":
+                conn.execute(
+                    """
+                    UPDATE photo_tether_captures
+                    SET status = 'imported', target_path = ?, asset_id = ?, import_id = ?,
+                        imported_at = ?, updated_at = ?, error = '', metadata_json = ?
+                    WHERE capture_id = ?
+                    """,
+                    (
+                        str(target_path or ""),
+                        str(asset_id or ""),
+                        str(import_id or ""),
+                        timestamp,
+                        timestamp,
+                        self._clean_json_dict(metadata if isinstance(metadata, dict) else self._photo_tether_json_object(row["metadata_json"])),
+                        clean_id,
+                    ),
+                )
+                conn.execute(
+                    """
+                    UPDATE photo_tether_sessions
+                    SET imported_count = imported_count + 1,
+                        failed_count = MAX(0, failed_count - ?),
+                        last_capture_id = ?, updated_at = ?, last_error = ''
+                    WHERE session_id = ?
+                    """,
+                    (1 if previous == "failed" else 0, clean_id, timestamp, str(row["session_id"])),
+                )
+            updated = conn.execute("SELECT * FROM photo_tether_captures WHERE capture_id = ?", (clean_id,)).fetchone()
+        if not updated:
+            raise RuntimeError("Photo tether capture could not be completed.")
+        return {"capture": self._photo_tether_capture_row(updated), "idempotent": previous == "imported"}
+
+    def fail_photo_tether_capture(self, capture_id: str, error: str) -> dict[str, Any]:
+        clean_id = str(capture_id or "").strip()
+        timestamp = now_iso()
+        detail = str(error or "Photo tether import failed.").strip()[:1000]
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM photo_tether_captures WHERE capture_id = ? LIMIT 1", (clean_id,)).fetchone()
+            if not row:
+                raise ValueError("Photo tether capture was not found.")
+            previous = str(row["status"] or "")
+            if previous != "imported":
+                conn.execute(
+                    "UPDATE photo_tether_captures SET status = 'failed', updated_at = ?, error = ? WHERE capture_id = ?",
+                    (timestamp, detail, clean_id),
+                )
+                conn.execute(
+                    """
+                    UPDATE photo_tether_sessions
+                    SET failed_count = failed_count + ?, last_capture_id = ?, updated_at = ?, last_error = ?
+                    WHERE session_id = ?
+                    """,
+                    (0 if previous == "failed" else 1, clean_id, timestamp, detail, str(row["session_id"])),
+                )
+            updated = conn.execute("SELECT * FROM photo_tether_captures WHERE capture_id = ?", (clean_id,)).fetchone()
+        if not updated:
+            raise RuntimeError("Photo tether capture failure could not be recorded.")
+        return {"capture": self._photo_tether_capture_row(updated), "ignored": previous == "imported"}
+
+    def recover_interrupted_photo_tether_sessions(self) -> dict[str, Any]:
+        timestamp = now_iso()
+        with self.connect() as conn:
+            interrupted = conn.execute(
+                "SELECT COUNT(*) AS total FROM photo_tether_captures WHERE status = 'pending'"
+            ).fetchone()
+            conn.execute(
+                """
+                UPDATE photo_tether_captures
+                SET status = 'interrupted', updated_at = ?,
+                    error = CASE WHEN error = '' THEN 'The app closed before this capture finished importing.' ELSE error END
+                WHERE status = 'pending'
+                """,
+                (timestamp,),
+            )
+            recoverable = conn.execute(
+                "SELECT COUNT(*) AS total FROM photo_tether_sessions WHERE status = 'active'"
+            ).fetchone()
+            conn.execute(
+                """
+                UPDATE photo_tether_sessions
+                SET status = 'recoverable', updated_at = ?,
+                    last_error = CASE WHEN last_error = '' THEN 'Capture session was interrupted and can be resumed.' ELSE last_error END
+                WHERE status = 'active'
+                """,
+                (timestamp,),
+            )
+            sessions = self.list_photo_tether_sessions(limit=20, statuses=["recoverable"], conn=conn)
+        return {
+            "recoveredSessions": int(recoverable["total"] or 0) if recoverable else 0,
+            "interruptedCaptures": int(interrupted["total"] or 0) if interrupted else 0,
+            "sessions": sessions,
+        }
+
     def import_photo_files(
         self,
         source_paths: Iterable[str],
@@ -9012,7 +12142,43 @@ class WorkspaceDb:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def _photo_asset_row(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    def _photo_asset_import_session_provenance(
+        self,
+        source_scan_run: str,
+        conn: sqlite3.Connection | None,
+        import_session_cache: dict[str, dict[str, str]] | None = None,
+    ) -> dict[str, str]:
+        clean_import_id = str(source_scan_run or "").strip()
+        if not clean_import_id or conn is None:
+            return {}
+        if import_session_cache is not None and clean_import_id in import_session_cache:
+            return import_session_cache[clean_import_id]
+        session = self.photo_import_session_by_id(clean_import_id, conn)
+        provenance: dict[str, str] = {}
+        if session:
+            metadata = session.get("metadata", {}) if isinstance(session.get("metadata"), dict) else {}
+            kind = str(session.get("sourceKind", "") or "")
+            label = str(session.get("sourceLabel", "") or "")
+            detail = str(session.get("sourceDetail", "") or "")
+            edited_at = str(metadata.get("provenanceEditedAt", "") or "")
+            if kind:
+                provenance["importSourceKind"] = kind
+            if label:
+                provenance["importSourceLabel"] = label
+            if detail:
+                provenance["importSourceDetail"] = detail
+            if edited_at:
+                provenance["importProvenanceEditedAt"] = edited_at
+        if import_session_cache is not None:
+            import_session_cache[clean_import_id] = provenance
+        return provenance
+
+    def _photo_asset_row(
+        self,
+        row: sqlite3.Row | dict[str, Any],
+        conn: sqlite3.Connection | None = None,
+        import_session_cache: dict[str, dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
         def parse_json(value: Any, fallback: dict[str, Any]) -> dict[str, Any]:
             try:
                 parsed = json.loads(str(value or "{}"))
@@ -9022,6 +12188,11 @@ class WorkspaceDb:
 
         source_path = str(row["source_path"] or "")
         asset_id = str(row["asset_id"] or "") or self._photo_asset_id(source_path)
+        metadata = parse_json(row["metadata_json"], {})
+        source_scan_run = str(row["source_scan_run"] or "")
+        provenance = self._photo_asset_import_session_provenance(source_scan_run, conn, import_session_cache)
+        if provenance:
+            metadata = {**metadata, **provenance}
         return {
             "assetId": asset_id,
             "sourcePath": source_path,
@@ -9038,8 +12209,8 @@ class WorkspaceDb:
             "addedAt": str(row["added_at"] or ""),
             "updatedAt": str(row["updated_at"] or ""),
             "missingAt": str(row["missing_at"] or "") if row["missing_at"] is not None else "",
-            "sourceScanRun": str(row["source_scan_run"] or ""),
-            "metadata": parse_json(row["metadata_json"], {}),
+            "sourceScanRun": source_scan_run,
+            "metadata": metadata,
         }
 
     def _photo_media_pair_row(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -9140,6 +12311,15 @@ class WorkspaceDb:
             "aae": "edit_sidecar",
             "aae-sidecar": "edit_sidecar",
             "aae sidecar": "edit_sidecar",
+            "depth": "depth_sidecar",
+            "depth-map": "depth_sidecar",
+            "depth map": "depth_sidecar",
+            "disparity": "depth_sidecar",
+            "stereo": "stereo_pair",
+            "stereo-pair": "stereo_pair",
+            "stereo pair": "stereo_pair",
+            "right-eye": "stereo_pair",
+            "right eye": "stereo_pair",
             "related": "related_media",
             "related media": "related_media",
         }
@@ -9552,11 +12732,13 @@ class WorkspaceDb:
                 p.asset_id ASC,
                 CASE p.pair_kind
                     WHEN 'live_photo' THEN 0
-                    WHEN 'raw_sidecar' THEN 1
-                    WHEN 'video_still' THEN 2
-                    WHEN 'metadata_sidecar' THEN 3
-                    WHEN 'edit_sidecar' THEN 4
-                    ELSE 5
+                    WHEN 'depth_sidecar' THEN 1
+                    WHEN 'stereo_pair' THEN 2
+                    WHEN 'raw_sidecar' THEN 3
+                    WHEN 'video_still' THEN 4
+                    WHEN 'metadata_sidecar' THEN 5
+                    WHEN 'edit_sidecar' THEN 6
+                    ELSE 7
                 END,
                 p.updated_at DESC,
                 p.pair_id ASC
@@ -9714,6 +12896,60 @@ class WorkspaceDb:
                     text_parts.setdefault(asset_key, []).append(text)
         return {asset_id: self._photo_join_search_text(*parts) for asset_id, parts in text_parts.items()}
 
+    def _photo_audio_search_text_for_asset(self, asset_id: str, conn: sqlite3.Connection) -> dict[str, str]:
+        values = self._photo_audio_search_text_by_asset_ids([asset_id], conn)
+        return values.get(str(asset_id or "").strip(), {"transcript": "", "soundEvents": ""})
+
+    def _photo_audio_search_text_by_asset_ids(
+        self,
+        asset_ids: Iterable[str],
+        conn: sqlite3.Connection,
+    ) -> dict[str, dict[str, str]]:
+        clean_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for value in asset_ids:
+            asset_id = str(value or "").strip()
+            if asset_id and asset_id not in seen_ids:
+                seen_ids.add(asset_id)
+                clean_ids.append(asset_id)
+        parts: dict[str, dict[str, list[str]]] = {
+            asset_id: {"transcript": [], "soundEvents": []}
+            for asset_id in clean_ids
+        }
+        for start in range(0, len(clean_ids), 800):
+            chunk = clean_ids[start:start + 800]
+            if not chunk:
+                continue
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT asset_id, segment_kind, text, label
+                FROM photo_audio_segments
+                WHERE asset_id IN ({placeholders})
+                ORDER BY asset_id ASC, start_ms ASC, segment_id ASC
+                """,
+                tuple(chunk),
+            ).fetchall()
+            for row in rows:
+                asset_key = str(row["asset_id"] or "")
+                if asset_key not in parts:
+                    continue
+                if str(row["segment_kind"] or "") == "speech":
+                    text = str(row["text"] or "").strip()
+                    if text:
+                        parts[asset_key]["transcript"].append(text)
+                else:
+                    label = str(row["label"] or "").strip()
+                    if label:
+                        parts[asset_key]["soundEvents"].append(label)
+        return {
+            asset_id: {
+                "transcript": self._photo_join_search_text(*values["transcript"]),
+                "soundEvents": self._photo_join_search_text(*values["soundEvents"]),
+            }
+            for asset_id, values in parts.items()
+        }
+
     def _photo_object_source_literals(self, sources: Iterable[str]) -> str:
         clean_sources = [
             source
@@ -9786,6 +13022,12 @@ class WorkspaceDb:
         return self._photo_join_search_text(
             *(str(record.get("label", "") or "") for record in self.photo_object_tags_from_metadata(metadata))
         )
+
+    def _photo_local_vision_caption_text(self, metadata: dict[str, Any] | None) -> str:
+        if not isinstance(metadata, dict):
+            return ""
+        local_vision = metadata.get("localVision") if isinstance(metadata.get("localVision"), dict) else {}
+        return re.sub(r"\s+", " ", str(local_vision.get("caption", "") or "")).strip()[:600]
 
     def _photo_asset_style_metadata_text(self, metadata: dict[str, Any]) -> str:
         if not isinstance(metadata, dict):
@@ -10666,6 +13908,9 @@ class WorkspaceDb:
             title=str(source_metadata.get("title", "") or ""),
             caption=str(source_metadata.get("caption", "") or ""),
             favorite=bool(source_metadata.get("favorite", False)),
+            rating=int(source_metadata.get("rating", 0) or 0),
+            color_label=str(source_metadata.get("colorLabel", "") or ""),
+            pick_status=str(source_metadata.get("pickStatus", "") or ""),
             hidden=bool(source_metadata.get("hidden", False)),
             date_override=str(source_metadata.get("dateOverride", "") or ""),
             location_override=source_metadata.get("locationOverride", {}) if isinstance(source_metadata.get("locationOverride", {}), dict) else {},
@@ -10913,6 +14158,9 @@ class WorkspaceDb:
             title=str(source_metadata.get("title", "") or ""),
             caption=str(source_metadata.get("caption", "") or ""),
             favorite=bool(source_metadata.get("favorite", False)),
+            rating=int(source_metadata.get("rating", 0) or 0),
+            color_label=str(source_metadata.get("colorLabel", "") or ""),
+            pick_status=str(source_metadata.get("pickStatus", "") or ""),
             hidden=bool(source_metadata.get("hidden", False)),
             date_override=str(source_metadata.get("dateOverride", "") or ""),
             location_override=source_metadata.get("locationOverride", {}) if isinstance(source_metadata.get("locationOverride", {}), dict) else {},
@@ -11026,6 +14274,10 @@ class WorkspaceDb:
                 "title": "",
                 "caption": "",
                 "favorite": False,
+                "rating": 0,
+                "ratingExplicit": False,
+                "colorLabel": "",
+                "pickStatus": "",
                 "hidden": False,
                 "deletedAt": "",
                 "dateOverride": "",
@@ -11040,10 +14292,19 @@ class WorkspaceDb:
             location = {}
         if not isinstance(location, dict):
             location = {}
+        def optional_row_value(name: str, fallback: Any = "") -> Any:
+            try:
+                return row[name]
+            except (KeyError, IndexError):
+                return fallback
         return {
             "title": str(row["title"] or ""),
             "caption": str(row["caption"] or ""),
             "favorite": bool(row["favorite"]),
+            "rating": max(0, min(5, int(optional_row_value("rating", 0) or 0))),
+            "ratingExplicit": bool(optional_row_value("rating_explicit", 0)),
+            "colorLabel": self._normalize_photo_color_label(optional_row_value("color_label")),
+            "pickStatus": self._normalize_photo_pick_status(optional_row_value("pick_status")),
             "hidden": bool(row["hidden"]),
             "deletedAt": str(row["deleted_at"] or "") if row["deleted_at"] is not None else "",
             "dateOverride": str(row["date_override"] or "") if row["date_override"] is not None else "",
@@ -11053,13 +14314,52 @@ class WorkspaceDb:
             "updatedAt": str(row["updated_at"] or ""),
         }
 
+    @staticmethod
+    def _normalize_photo_color_label(value: Any) -> str:
+        token = re.sub(r"[^a-z]+", "", str(value or "").strip().casefold())
+        aliases = {
+            "": "",
+            "none": "",
+            "unlabeled": "",
+            "unlabelled": "",
+            "red": "red",
+            "yellow": "yellow",
+            "green": "green",
+            "blue": "blue",
+            "purple": "purple",
+            "violet": "purple",
+        }
+        if token not in aliases:
+            raise ValueError("colorLabel must be empty, red, yellow, green, blue, or purple.")
+        return aliases[token]
+
+    @staticmethod
+    def _normalize_photo_pick_status(value: Any) -> str:
+        token = re.sub(r"[^a-z]+", "", str(value or "").strip().casefold())
+        aliases = {
+            "": "",
+            "none": "",
+            "unflagged": "",
+            "clear": "",
+            "pick": "pick",
+            "picked": "pick",
+            "selected": "pick",
+            "keeper": "pick",
+            "reject": "reject",
+            "rejected": "reject",
+            "discard": "reject",
+        }
+        if token not in aliases:
+            raise ValueError("pickStatus must be empty, pick, or reject.")
+        return aliases[token]
+
     def photo_asset_metadata_by_id(self, asset_id: str, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
         if conn is None:
             with self.connect() as local_conn:
                 return self.photo_asset_metadata_by_id(asset_id, local_conn)
         row = conn.execute(
             """
-            SELECT title, caption, favorite, hidden, deleted_at, date_override,
+            SELECT title, caption, favorite, rating, rating_explicit, color_label, pick_status, hidden, deleted_at, date_override,
                 location_override_json, location_hidden, edited, updated_at
             FROM photo_asset_metadata
             WHERE asset_id = ?
@@ -11115,7 +14415,7 @@ class WorkspaceDb:
             placeholders = ",".join("?" for _ in chunk)
             rows = conn.execute(
                 f"""
-                SELECT asset_id, title, caption, favorite, hidden, deleted_at, date_override,
+                SELECT asset_id, title, caption, favorite, rating, rating_explicit, color_label, pick_status, hidden, deleted_at, date_override,
                     location_override_json, location_hidden, edited, updated_at
                 FROM photo_asset_metadata
                 WHERE asset_id IN ({placeholders})
@@ -11166,6 +14466,10 @@ class WorkspaceDb:
             "title": str(metadata.get("title", "") or ""),
             "caption": str(metadata.get("caption", "") or ""),
             "favorite": bool(metadata.get("favorite")),
+            "rating": max(0, min(5, int(metadata.get("rating", 0) or 0))),
+            "ratingExplicit": bool(metadata.get("ratingExplicit")),
+            "colorLabel": self._normalize_photo_color_label(metadata.get("colorLabel", "")),
+            "pickStatus": self._normalize_photo_pick_status(metadata.get("pickStatus", "")),
             "hidden": bool(metadata.get("hidden")),
             "deletedAt": str(metadata.get("deletedAt", "") or ""),
             "dateOverride": str(metadata.get("dateOverride", "") or ""),
@@ -11530,6 +14834,15 @@ class WorkspaceDb:
             """,
             (old_person,),
         ).fetchall()
+        old_key = old_person.casefold()
+        group_rows = [
+            group
+            for group in self.list_photo_people_groups(conn)
+            if any(
+                str(person or "").strip().casefold() == old_key
+                for person in [*group.get("memberPeople", []), *group.get("excludePeople", [])]
+            )
+        ]
         return {
             "oldPersonName": old_person,
             "newPersonName": new_person,
@@ -11550,6 +14863,7 @@ class WorkspaceDb:
             ],
             "oldProfile": self._photo_person_profile_snapshot(old_person, conn),
             "targetProfile": self._photo_person_profile_snapshot(new_person, conn),
+            "groupRows": group_rows,
         }
 
     def record_photo_person_label_operation(
@@ -11562,6 +14876,7 @@ class WorkspaceDb:
         references: list[dict[str, Any]],
         snapshot: dict[str, Any],
         affected_count: int,
+        merged_into_existing: bool | None = None,
         created_at: str = "",
         conn: sqlite3.Connection | None = None,
     ) -> dict[str, Any]:
@@ -11575,6 +14890,7 @@ class WorkspaceDb:
                     references=references,
                     snapshot=snapshot,
                     affected_count=affected_count,
+                    merged_into_existing=merged_into_existing,
                     created_at=created_at,
                     conn=local_conn,
                 )
@@ -11612,6 +14928,10 @@ class WorkspaceDb:
         ]
         old_profile = snapshot.get("oldProfile", {}) if isinstance(snapshot, dict) else {}
         target_profile = snapshot.get("targetProfile", {}) if isinstance(snapshot, dict) else {}
+        group_rows = [
+            row for row in (snapshot.get("groupRows", []) if isinstance(snapshot, dict) else [])
+            if isinstance(row, dict) and str(row.get("groupId", "") or "").strip()
+        ]
         affected_rows: list[dict[str, Any]] = []
         for row in clean_references:
             affected_rows.append({
@@ -11643,13 +14963,26 @@ class WorkspaceDb:
                 "quality": float(row.get("quality", 0.0) or 0.0),
                 "band": str(row.get("band", "") or ""),
             })
+        for row in group_rows:
+            affected_rows.append({
+                "kind": "people_group",
+                "groupId": str(row.get("groupId", "") or ""),
+                "name": str(row.get("name", "") or ""),
+                "memberPeople": list(row.get("memberPeople", []) or []),
+                "excludePeople": list(row.get("excludePeople", []) or []),
+            })
         payload = {
             "oldPersonName": old_person,
             "newPersonName": new_person,
             "references": len(clean_references),
             "candidates": len(candidate_rows),
             "photoPeopleRows": len(photo_people_rows),
-            "mergedIntoExisting": bool(target_profile.get("exists")) if isinstance(target_profile, dict) else False,
+            "groupRows": len(group_rows),
+            "mergedIntoExisting": (
+                bool(merged_into_existing)
+                if merged_into_existing is not None
+                else bool(target_profile.get("exists")) if isinstance(target_profile, dict) else False
+            ),
             "affectedRows": affected_rows[:24],
             "affectedRowsTotal": len(affected_rows),
         }
@@ -11662,6 +14995,7 @@ class WorkspaceDb:
             "photoPeopleRows": photo_people_rows,
             "oldProfile": old_profile if isinstance(old_profile, dict) else {},
             "targetProfile": target_profile if isinstance(target_profile, dict) else {},
+            "groupRows": group_rows,
         }
         now = str(created_at or "") or now_iso()
         operation_id = f"photo_op_{uuid.uuid4().hex}"
@@ -11697,6 +15031,7 @@ class WorkspaceDb:
         new_person = str(undo_payload.get("newPersonName", "") or "").strip()
         candidate_rows = undo_payload.get("candidateRows", [])
         photo_people_rows = undo_payload.get("photoPeopleRows", [])
+        group_rows = undo_payload.get("groupRows", [])
         restored = 0
         missing = 0
         reindex_asset_ids: set[str] = set()
@@ -11791,6 +15126,31 @@ class WorkspaceDb:
                 snapshot=undo_payload.get("targetProfile", {}) if isinstance(undo_payload.get("targetProfile", {}), dict) else {},
                 conn=conn,
             )
+        for item in (group_rows if isinstance(group_rows, list) else []):
+            if not isinstance(item, dict):
+                continue
+            group_id = str(item.get("groupId", "") or "").strip()
+            if not group_id:
+                missing += 1
+                continue
+            try:
+                self.upsert_photo_people_group(
+                    group_id=group_id,
+                    name=str(item.get("name", "") or ""),
+                    member_people=item.get("memberPeople", []),
+                    exclude_people=item.get("excludePeople", []),
+                    member_pets=item.get("memberPets", []),
+                    exclude_pets=item.get("excludePets", []),
+                    key_asset_id=str(item.get("keyAssetId", "") or ""),
+                    favorite=bool(item.get("favorite")),
+                    hidden=bool(item.get("hidden")),
+                    manual_order=item.get("manualOrder"),
+                    conn=conn,
+                )
+            except (ValueError, sqlite3.DatabaseError):
+                missing += 1
+                continue
+            restored += 1
         for asset_id in sorted(reindex_asset_ids):
             self._index_photo_asset(asset_id, conn)
         return {"restored": restored, "missing": missing}
@@ -11854,8 +15214,10 @@ class WorkspaceDb:
                     conn=local_conn,
                 )
         candidate_payload = self._candidate_payload(candidate)
+        candidate_id = str(candidate_payload.get("candidate_id", candidate_payload.get("candidateId", "")) or "")
         return {
             "candidate": candidate_payload,
+            "matchContext": self.candidate_match_context(candidate_id, conn=conn),
             "blockedPairs": [
                 self._blocked_pair_snapshot(
                     file_hash=str(row.get("fileHash", row.get("file_hash", "")) or ""),
@@ -11918,6 +15280,7 @@ class WorkspaceDb:
         undo_payload = {
             "kind": "review_candidate_correction",
             "candidate": candidate_payload,
+            "matchContext": snapshot.get("matchContext") if isinstance(snapshot, dict) else None,
             "blockedPairs": blocked_snapshots,
         }
         now = str(created_at or "") or now_iso()
@@ -11991,6 +15354,19 @@ class WorkspaceDb:
             rows = [self._candidate_params(candidate)]
             conn.executemany(self._upsert_candidate_sql(), rows)
             self._upsert_photo_assets_from_candidate_params(rows, conn)
+            match_context = undo_payload.get("matchContext") if isinstance(undo_payload, dict) else None
+            if isinstance(match_context, dict) and match_context.get("pairCenter"):
+                self.upsert_candidate_match_context(
+                    candidate_id,
+                    str(match_context.get("bestRefId", "") or ""),
+                    str(match_context.get("modelName", "") or ""),
+                    match_context.get("pairCenter"),
+                    match_context.get("cohortZ"),
+                    str(match_context.get("cohortVersion", "") or ""),
+                    conn=conn,
+                )
+            else:
+                self.delete_candidate_match_context(candidate_id, conn=conn)
             restored += 1
         else:
             missing += 1
@@ -12347,15 +15723,23 @@ class WorkspaceDb:
             placeholders = ",".join("?" for _ in keyword_ids)
             keyword_rows = self._row_dicts(conn.execute(f"SELECT * FROM photo_keywords WHERE keyword_id IN ({placeholders})", tuple(keyword_ids)).fetchall())
         scan_file_rows = self._row_dicts(conn.execute("SELECT * FROM scan_files WHERE path = ?", (source_path,)).fetchall())
-        candidate_rows = self._row_dicts(
-            conn.execute(
-                """
-                SELECT * FROM review_candidates
-                WHERE source_path = ? OR media_source_path = ? OR media_path = ?
-                """,
-                (source_path, source_path, source_path),
-            ).fetchall()
-        )
+        candidate_rows: list[dict[str, Any]] = []
+        candidate_ids = self.review_candidate_ids_for_source_paths([source_path], conn)
+        for offset in range(0, len(candidate_ids), 800):
+            chunk = candidate_ids[offset:offset + 800]
+            placeholders = ",".join("?" for _ in chunk)
+            candidate_rows.extend(
+                self._row_dicts(
+                    conn.execute(
+                        f"""
+                        SELECT * FROM review_candidates
+                        WHERE candidate_id IN ({placeholders})
+                        ORDER BY created_at ASC, candidate_id ASC
+                        """,
+                        chunk,
+                    ).fetchall()
+                )
+            )
         edit_stack_rows = self._row_dicts(conn.execute("SELECT * FROM photo_edit_stacks WHERE asset_id = ?", (clean_asset_id,)).fetchall())
         edit_stack_version_rows = self._row_dicts(conn.execute("SELECT * FROM photo_edit_stack_versions WHERE asset_id = ?", (clean_asset_id,)).fetchall())
         return {
@@ -13333,7 +16717,7 @@ class WorkspaceDb:
                 else:
                     missing += 1
             if restored:
-                self.rebuild_photo_duplicate_groups(conn)
+                self._mark_photo_duplicate_groups_stale(conn, reason="undo_asset_state")
         elif undo_kind == "asset_created":
             for item in (items if isinstance(items, list) else []):
                 if not isinstance(item, dict):
@@ -13343,7 +16727,7 @@ class WorkspaceDb:
                 else:
                     missing += 1
             if restored:
-                self.rebuild_photo_duplicate_groups(conn)
+                self._mark_photo_duplicate_groups_stale(conn, reason="undo_asset_created")
         elif undo_kind == "album_items":
             album_id = str(undo_payload.get("albumId", "") or "") if isinstance(undo_payload, dict) else ""
             result = self._restore_photo_album_items_snapshot(
@@ -13399,7 +16783,7 @@ class WorkspaceDb:
                 else:
                     missing += 1
             if restored:
-                self.rebuild_photo_duplicate_groups(conn)
+                self._mark_photo_duplicate_groups_stale(conn, reason="undo_asset_catalog")
         else:
             for item in (items if isinstance(items, list) else []):
                 if not isinstance(item, dict):
@@ -13424,6 +16808,13 @@ class WorkspaceDb:
                     update_kwargs["caption"] = str(metadata.get("caption", "") or "")
                 if "favorite" in metadata:
                     update_kwargs["favorite"] = bool(metadata.get("favorite"))
+                if "rating" in metadata:
+                    update_kwargs["rating"] = int(metadata.get("rating", 0) or 0)
+                    update_kwargs["rating_explicit"] = bool(metadata.get("ratingExplicit"))
+                if "colorLabel" in metadata:
+                    update_kwargs["color_label"] = str(metadata.get("colorLabel", "") or "")
+                if "pickStatus" in metadata:
+                    update_kwargs["pick_status"] = str(metadata.get("pickStatus", "") or "")
                 if "hidden" in metadata:
                     update_kwargs["hidden"] = bool(metadata.get("hidden"))
                 if "deletedAt" in metadata:
@@ -13812,6 +17203,20 @@ class WorkspaceDb:
                 pass
         if not isinstance(asset_metadata, dict):
             asset_metadata = {}
+        external_location = asset_metadata.get("externalLocation") if isinstance(asset_metadata.get("externalLocation"), dict) else {}
+        imported_location = self._photo_place_location(external_location)
+        if imported_location and imported_location.get("latitude") and imported_location.get("longitude"):
+            try:
+                return (
+                    asset_key,
+                    float(imported_location["latitude"]),
+                    float(imported_location["longitude"]),
+                    str(external_location.get("source", "external") or "external"),
+                    str(imported_location.get("label", "") or imported_location.get("name", "") or ""),
+                    timestamp,
+                )
+            except (TypeError, ValueError):
+                pass
         exif = asset_metadata.get("exif") if isinstance(asset_metadata.get("exif"), dict) else {}
         gps = exif.get("gps") if isinstance(exif.get("gps"), dict) else {}
         gps_location = self._photo_place_location(gps)
@@ -14411,6 +17816,7 @@ class WorkspaceDb:
         iptc_text = self._photo_asset_iptc_metadata_text(meta)
         tags_text = self._photo_join_search_text(reviewed_tags_text, structured_tags_text, accessibility_text, style_text, technical_text, depth_text, iptc_text)
         schema_ocr_text = self._photo_ocr_blocks_text_for_asset(asset["assetId"], conn)
+        audio_text = self._photo_audio_search_text_for_asset(asset["assetId"], conn)
         legacy_ocr_text = self._photo_asset_metadata_joined_text(
             meta,
             (
@@ -14442,12 +17848,16 @@ class WorkspaceDb:
             "filename": Path(source_path).name,
             "path": source_path,
             "title": str(metadata.get("title", "") or ""),
-            "caption": str(metadata.get("caption", "") or ""),
+            "caption": self._photo_join_search_text(
+                str(metadata.get("caption", "") or ""),
+                self._photo_local_vision_caption_text(meta),
+                audio_text["transcript"],
+            ),
             "keywords": keywords_text,
             "people": people,
             "location": location_text,
             "ocr_text": ocr_text,
-            "model_tags": tags_text,
+            "model_tags": self._photo_join_search_text(tags_text, audio_text["soundEvents"]),
         }
 
     def _index_photo_asset(self, asset_id: str, conn: sqlite3.Connection) -> None:
@@ -14497,6 +17907,7 @@ class WorkspaceDb:
         metadata_by_asset = self.photo_asset_metadata_by_ids(asset_ids, conn)
         ocr_blocks_by_asset = self._photo_ocr_blocks_text_by_asset_ids(asset_ids, conn)
         object_tags_by_asset = self._photo_object_tags_text_by_asset_ids(asset_ids, conn)
+        audio_text_by_asset = self._photo_audio_search_text_by_asset_ids(asset_ids, conn)
         people_by_asset: dict[str, list[str]] = {asset_id: [] for asset_id in asset_ids}
         for start in range(0, len(asset_ids), 800):
             chunk = asset_ids[start:start + 800]
@@ -14583,12 +17994,19 @@ class WorkspaceDb:
                 Path(source_path).name,
                 source_path,
                 str(metadata.get("title", "") or ""),
-                str(metadata.get("caption", "") or ""),
+                self._photo_join_search_text(
+                    str(metadata.get("caption", "") or ""),
+                    self._photo_local_vision_caption_text(meta),
+                    audio_text_by_asset.get(asset_id, {}).get("transcript", ""),
+                ),
                 keywords_text,
                 " ".join(people_by_asset.get(asset_id, [])),
                 location_text,
                 ocr_text,
-                tags_text,
+                self._photo_join_search_text(
+                    tags_text,
+                    audio_text_by_asset.get(asset_id, {}).get("soundEvents", ""),
+                ),
             ))
         if documents:
             conn.executemany(
@@ -15038,7 +18456,8 @@ class WorkspaceDb:
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY LOWER(a.source_path) ASC, a.asset_id ASC"
-        return [self._photo_asset_row(row) for row in conn.execute(sql, args).fetchall()]
+        import_session_cache: dict[str, dict[str, str]] = {}
+        return [self._photo_asset_row(row, conn, import_session_cache) for row in conn.execute(sql, args).fetchall()]
 
     def _photo_source_text_filter_sql_parts(
         self,
@@ -15090,6 +18509,8 @@ class WorkspaceDb:
         favorite_state: bool | None = None,
         edited_only: bool = False,
         edited_state: bool | None = None,
+        rating_filters: Iterable[tuple[str, float]] = (),
+        curation_text_filters: Iterable[tuple[str, str, str]] = (),
         keyword: str = "",
         excluded_keywords: Iterable[str] = (),
         keyword_text_filters: Iterable[tuple[str, str]] = (),
@@ -15265,6 +18686,29 @@ class WorkspaceDb:
             where.append("(COALESCE(m.edited, 0) = 1 OR s.asset_id IS NOT NULL)")
         elif edited_state is False:
             where.append("NOT (COALESCE(m.edited, 0) = 1 OR s.asset_id IS NOT NULL)")
+        curation_columns = {
+            "colorLabel": "COALESCE(m.color_label, '')",
+            "pickStatus": "COALESCE(m.pick_status, '')",
+        }
+        for item in list(curation_text_filters or ())[:16]:
+            if not isinstance(item, (list, tuple)) or len(item) != 3:
+                continue
+            raw_field, raw_operator, raw_value = item
+            field = str(raw_field or "").strip()
+            operator = str(raw_operator or "").strip()
+            if field not in curation_columns or operator not in {"is", "isNot"}:
+                continue
+            try:
+                value = (
+                    self._normalize_photo_color_label(raw_value)
+                    if field == "colorLabel"
+                    else self._normalize_photo_pick_status(raw_value)
+                )
+            except ValueError:
+                continue
+            comparator = "!=" if operator == "isNot" else "="
+            where.append(f"{curation_columns[field]} {comparator} ?")
+            args.append(value)
         clean_keyword = str(keyword or "").strip().casefold()
         if clean_keyword:
             joins.append("JOIN photo_asset_keywords AS ak ON ak.asset_id = a.asset_id")
@@ -15832,6 +19276,7 @@ class WorkspaceDb:
                     args.extend([expected, expected])
 
         append_asset_number_filters("CAST(a.width AS REAL)", width_filters)
+        append_asset_number_filters("CAST(COALESCE(m.rating, 0) AS REAL)", rating_filters)
         append_asset_number_filters("CAST(a.height AS REAL)", height_filters)
         append_asset_number_filters("(CAST(a.duration_ms AS REAL) / 1000.0)", duration_filters)
         append_asset_number_filters("CAST(a.duration_ms AS REAL)", duration_ms_filters)
@@ -16532,6 +19977,8 @@ class WorkspaceDb:
         favorite_state: bool | None = None,
         edited_only: bool = False,
         edited_state: bool | None = None,
+        rating_filters: Iterable[tuple[str, float]] = (),
+        curation_text_filters: Iterable[tuple[str, str, str]] = (),
         keyword: str = "",
         excluded_keywords: Iterable[str] = (),
         keyword_text_filters: Iterable[tuple[str, str]] = (),
@@ -16618,6 +20065,8 @@ class WorkspaceDb:
                     favorite_state=favorite_state,
                     edited_only=edited_only,
                     edited_state=edited_state,
+                    rating_filters=rating_filters,
+                    curation_text_filters=curation_text_filters,
                     keyword=keyword,
                     excluded_keywords=excluded_keywords,
                     keyword_text_filters=keyword_text_filters,
@@ -16690,297 +20139,6 @@ class WorkspaceDb:
                     sort=sort,
                     conn=local_conn,
                 )
-        clean_query = str(query or "").strip()
-        # The shared filter builder below owns FTS setup for the executed query.
-        match_query = ""
-        joins = [
-            "LEFT JOIN photo_asset_metadata AS m ON m.asset_id = a.asset_id",
-            "LEFT JOIN photo_edit_stacks AS s ON s.asset_id = a.asset_id",
-        ]
-        if match_query:
-            self.ensure_photo_search_index(conn, allow_rebuild=False, enqueue_on_cold=True, repair_limit=1000)
-            joins.append("JOIN photo_search_fts AS f ON f.asset_id = a.asset_id")
-        where: list[str] = []
-        args: list[Any] = []
-        clean_visibility = str(visibility or "visible").strip().lower()
-        if clean_visibility in {"", "visible"}:
-            where.append("COALESCE(m.hidden, 0) = 0")
-            where.append("m.deleted_at IS NULL")
-        elif clean_visibility == "hidden":
-            where.append("COALESCE(m.hidden, 0) = 1")
-            where.append("m.deleted_at IS NULL")
-        elif clean_visibility == "deleted":
-            where.append("m.deleted_at IS NOT NULL")
-        elif clean_visibility != "all":
-            where.append("COALESCE(m.hidden, 0) = 0")
-            where.append("m.deleted_at IS NULL")
-        clean_kind = str(media_kind or "").strip().lower()
-        if clean_kind:
-            where.append("a.media_kind = ?")
-            args.append(clean_kind)
-        if favorite_only:
-            where.append("COALESCE(m.favorite, 0) = 1")
-        if edited_only:
-            where.append("(COALESCE(m.edited, 0) = 1 OR s.asset_id IS NOT NULL)")
-        clean_keyword = str(keyword or "").strip().casefold()
-        if clean_keyword:
-            joins.append("JOIN photo_asset_keywords AS ak ON ak.asset_id = a.asset_id")
-            joins.append("JOIN photo_keywords AS pk ON pk.keyword_id = ak.keyword_id")
-            where.append("LOWER(pk.name) = ?")
-            args.append(clean_keyword)
-        if match_query:
-            where.append("photo_search_fts MATCH ?")
-            args.append(match_query)
-        date_expr = "SUBSTR(COALESCE(NULLIF(m.date_override, ''), NULLIF(a.capture_date, ''), NULLIF(a.added_at, '')), 1, 10)"
-        if date_from:
-            where.append(f"{date_expr} >= ?")
-            args.append(str(date_from)[:10])
-        if date_to:
-            where.append(f"{date_expr} <= ?")
-            args.append(str(date_to)[:10])
-        bucket_mode = str(date_bucket_mode or "").strip()
-        bucket_key = str(date_bucket_key or "").strip()
-        if bucket_mode in {"years", "months", "days", "recentDays"} and bucket_key:
-            bucket_len = 4 if bucket_mode == "years" else 7 if bucket_mode == "months" else 10
-            where.append(f"SUBSTR({date_expr}, 1, {bucket_len}) = ?")
-            args.append(bucket_key[:bucket_len])
-        clean_source = str(source or "").strip().casefold()
-        if clean_source:
-            where.append("LOWER(a.source_path) LIKE ?")
-            args.append(f"%{clean_source}%")
-        clean_scan_runs = [
-            str(value or "").strip()
-            for value in source_scan_runs
-            if str(value or "").strip()
-        ][:800]
-        if clean_scan_runs:
-            where.append("a.source_scan_run IN (" + ",".join("?" for _ in clean_scan_runs) + ")")
-            args.extend(clean_scan_runs)
-        clean_required_asset_ids: list[str] = []
-        seen_required_asset_ids: set[str] = set()
-        for value in required_asset_ids:
-            asset_id = str(value or "").strip()
-            if asset_id and asset_id not in seen_required_asset_ids:
-                seen_required_asset_ids.add(asset_id)
-                clean_required_asset_ids.append(asset_id)
-        if clean_required_asset_ids:
-            conn.execute("DROP TABLE IF EXISTS temp_photo_required_asset_filter")
-            conn.execute("CREATE TEMP TABLE temp_photo_required_asset_filter(asset_id TEXT PRIMARY KEY)")
-            conn.executemany(
-                "INSERT OR IGNORE INTO temp_photo_required_asset_filter(asset_id) VALUES (?)",
-                [(asset_id,) for asset_id in clean_required_asset_ids],
-            )
-            where.append(
-                "EXISTS (SELECT 1 FROM temp_photo_required_asset_filter AS raf WHERE raf.asset_id = a.asset_id)"
-            )
-        clean_file_types = [
-            str(value or "").strip().lower().lstrip(".")
-            for value in file_type_aliases
-            if str(value or "").strip()
-        ]
-        if clean_file_types:
-            where.append("(" + " OR ".join("LOWER(a.source_path) LIKE ?" for _ in clean_file_types) + ")")
-            args.extend(f"%.{value}" for value in clean_file_types)
-        clean_location = str(location or "").strip().casefold()
-        clean_location_asset_ids: list[str] = []
-        seen_location_asset_ids: set[str] = set()
-        for value in location_asset_ids:
-            asset_id = str(value or "").strip()
-            if asset_id and asset_id not in seen_location_asset_ids:
-                seen_location_asset_ids.add(asset_id)
-                clean_location_asset_ids.append(asset_id)
-        if clean_location or clean_location_asset_ids:
-            location_terms = [
-                "LOWER(COALESCE(CAST(json_extract(COALESCE(m.location_override_json, '{}'), '$.label') AS TEXT), '')) LIKE ?",
-                "LOWER(COALESCE(CAST(json_extract(COALESCE(m.location_override_json, '{}'), '$.latitude') AS TEXT), '')) LIKE ?",
-                "LOWER(COALESCE(CAST(json_extract(COALESCE(m.location_override_json, '{}'), '$.longitude') AS TEXT), '')) LIKE ?",
-                "LOWER(COALESCE(CAST(json_extract(COALESCE(a.metadata_json, '{}'), '$.exif.gps.latitude') AS TEXT), '')) LIKE ?",
-                "LOWER(COALESCE(CAST(json_extract(COALESCE(a.metadata_json, '{}'), '$.exif.gps.longitude') AS TEXT), '')) LIKE ?",
-                "LOWER(COALESCE(CAST(json_extract(COALESCE(a.metadata_json, '{}'), '$.exif.gps.source') AS TEXT), '')) LIKE ?",
-            ] if clean_location else []
-            if clean_location:
-                args.extend(f"%{clean_location}%" for _ in location_terms)
-            if clean_location_asset_ids:
-                conn.execute("DROP TABLE IF EXISTS temp_photo_location_asset_filter")
-                conn.execute("CREATE TEMP TABLE temp_photo_location_asset_filter(asset_id TEXT PRIMARY KEY)")
-                conn.executemany(
-                    "INSERT OR IGNORE INTO temp_photo_location_asset_filter(asset_id) VALUES (?)",
-                    [(asset_id,) for asset_id in clean_location_asset_ids],
-                )
-                location_terms.append(
-                    "EXISTS (SELECT 1 FROM temp_photo_location_asset_filter AS laf WHERE laf.asset_id = a.asset_id)"
-                )
-            where.append("(COALESCE(m.location_hidden, 0) = 0 AND (" + " OR ".join(location_terms) + "))")
-        clean_camera = str(camera or "").strip().casefold()
-        if clean_camera:
-            camera_terms = [
-                "LOWER(COALESCE(CAST(json_extract(COALESCE(a.metadata_json, '{}'), '$.exif.cameraMake') AS TEXT), '')) LIKE ?",
-                "LOWER(COALESCE(CAST(json_extract(COALESCE(a.metadata_json, '{}'), '$.exif.cameraModel') AS TEXT), '')) LIKE ?",
-                "LOWER(COALESCE(CAST(json_extract(COALESCE(a.metadata_json, '{}'), '$.exif.lensModel') AS TEXT), '')) LIKE ?",
-                "LOWER(COALESCE(CAST(json_extract(COALESCE(a.metadata_json, '{}'), '$.exif.software') AS TEXT), '')) LIKE ?",
-            ]
-            where.append("(" + " OR ".join(camera_terms) + ")")
-            args.extend(f"%{clean_camera}%" for _ in camera_terms)
-        if duplicate_state is True:
-            where.append("EXISTS (SELECT 1 FROM photo_duplicate_group_items AS d WHERE d.asset_id = a.asset_id)")
-        elif duplicate_state is False:
-            where.append("NOT EXISTS (SELECT 1 FROM photo_duplicate_group_items AS d WHERE d.asset_id = a.asset_id)")
-        clean_manual_album_ids = [
-            str(value or "").strip()
-            for value in manual_album_ids
-            if str(value or "").strip()
-        ][:800]
-        if clean_manual_album_ids:
-            where.append(
-                "EXISTS (SELECT 1 FROM photo_album_items AS ai WHERE ai.asset_id = a.asset_id "
-                "AND ai.album_id IN (" + ",".join("?" for _ in clean_manual_album_ids) + "))"
-            )
-            args.extend(clean_manual_album_ids)
-        clean_excluded_manual_album_ids = [
-            str(value or "").strip()
-            for value in excluded_manual_album_ids
-            if str(value or "").strip()
-        ][:800]
-        if clean_excluded_manual_album_ids:
-            where.append(
-                "NOT EXISTS (SELECT 1 FROM photo_album_items AS ax WHERE ax.asset_id = a.asset_id "
-                "AND ax.album_id IN (" + ",".join("?" for _ in clean_excluded_manual_album_ids) + "))"
-            )
-            args.extend(clean_excluded_manual_album_ids)
-        if manual_album_membership_state is True:
-            where.append("EXISTS (SELECT 1 FROM photo_album_items AS am WHERE am.asset_id = a.asset_id)")
-        elif manual_album_membership_state is False:
-            where.append("NOT EXISTS (SELECT 1 FROM photo_album_items AS am WHERE am.asset_id = a.asset_id)")
-        person_presence_sql = """
-            p.person_name NOT LIKE 'Unmatched cluster%'
-            AND (
-                LOWER(COALESCE(p.status, '')) = 'accepted'
-                OR (
-                    LOWER(COALESCE(p.status, '')) != 'rejected'
-                    AND (
-                        LOWER(COALESCE(p.band, '')) = 'manual assignment'
-                        OR COALESCE(p.score, 0) >= ?
-                    )
-                )
-            )
-        """
-        person_threshold = float(person_score_threshold or 0.0)
-        clean_person_names = [
-            str(value or "").strip().casefold()
-            for value in person_names
-            if str(value or "").strip()
-        ][:800]
-        if clean_person_names:
-            where.append(
-                "EXISTS (SELECT 1 FROM photo_asset_people AS p WHERE p.asset_id = a.asset_id "
-                "AND LOWER(p.person_name) IN (" + ",".join("?" for _ in clean_person_names) + f") AND {person_presence_sql})"
-            )
-            args.extend(clean_person_names)
-            args.append(person_threshold)
-        clean_excluded_person_names = [
-            str(value or "").strip().casefold()
-            for value in excluded_person_names
-            if str(value or "").strip()
-        ][:800]
-        if clean_excluded_person_names:
-            where.append(
-                "NOT EXISTS (SELECT 1 FROM photo_asset_people AS p WHERE p.asset_id = a.asset_id "
-                "AND LOWER(p.person_name) IN (" + ",".join("?" for _ in clean_excluded_person_names) + f") AND {person_presence_sql})"
-            )
-            args.extend(clean_excluded_person_names)
-            args.append(person_threshold)
-        clean_person_statuses = [
-            str(value or "").strip().lower()
-            for value in person_statuses
-            if str(value or "").strip()
-        ][:800]
-        if clean_person_statuses:
-            where.append(
-                "EXISTS (SELECT 1 FROM photo_asset_people AS ps WHERE ps.asset_id = a.asset_id "
-                "AND LOWER(COALESCE(ps.status, '')) IN (" + ",".join("?" for _ in clean_person_statuses) + "))"
-            )
-            args.extend(clean_person_statuses)
-        clean_excluded_person_statuses = [
-            str(value or "").strip().lower()
-            for value in excluded_person_statuses
-            if str(value or "").strip()
-        ][:800]
-        if clean_excluded_person_statuses:
-            where.append(
-                "NOT EXISTS (SELECT 1 FROM photo_asset_people AS px WHERE px.asset_id = a.asset_id "
-                "AND LOWER(COALESCE(px.status, '')) IN (" + ",".join("?" for _ in clean_excluded_person_statuses) + "))"
-            )
-            args.extend(clean_excluded_person_statuses)
-
-        def append_person_number_filter(column: str, filter_value: tuple[str, float] | None) -> None:
-            if not filter_value or len(filter_value) != 2:
-                return
-            operator, raw_expected = filter_value
-            operator = str(operator or "")
-            try:
-                expected = float(raw_expected)
-            except (TypeError, ValueError):
-                return
-            if not math.isfinite(expected):
-                return
-            value_sql = (
-                f"COALESCE((SELECT MAX(COALESCE(pn.{column}, 0)) "
-                "FROM photo_asset_people AS pn WHERE pn.asset_id = a.asset_id), 0)"
-            )
-            if operator == "greaterThan":
-                where.append(f"{value_sql} > ?")
-                args.append(expected)
-            elif operator in {"atLeast", "onOrAfter"}:
-                where.append(f"{value_sql} >= ?")
-                args.append(expected)
-            elif operator == "lessThan":
-                where.append(f"{value_sql} < ?")
-                args.append(expected)
-            elif operator in {"atMost", "onOrBefore"}:
-                where.append(f"{value_sql} <= ?")
-                args.append(expected)
-            elif operator in {"is", "isNot"}:
-                comparator = "<=" if operator == "is" else ">"
-                where.append(
-                    f"ABS({value_sql} - ?) {comparator} "
-                    f"(1e-9 * MAX(ABS({value_sql}), ABS(?)))"
-                )
-                args.extend([expected, expected])
-
-        append_person_number_filter("score", person_score_filter)
-        append_person_number_filter("quality", person_quality_filter)
-        clean_candidate_person = str(candidate_person_name or "").strip().casefold()
-        clean_candidate_status = str(candidate_status or "").strip().lower()
-        if clean_candidate_status not in {"", "pending", "accepted", "rejected", "uncertain"}:
-            clean_candidate_status = ""
-        try:
-            clean_candidate_min_quality = max(0.0, min(1.0, float(candidate_min_quality or 0.0)))
-        except (TypeError, ValueError):
-            clean_candidate_min_quality = 0.0
-        if clean_candidate_person or clean_candidate_status or clean_candidate_min_quality:
-            candidate_where = ["pc.asset_id = a.asset_id"]
-            if clean_candidate_person:
-                candidate_where.append("LOWER(pc.person_name) = ?")
-                args.append(clean_candidate_person)
-            if clean_candidate_status:
-                candidate_where.append("LOWER(COALESCE(pc.status, '')) = ?")
-                args.append(clean_candidate_status)
-            if clean_candidate_min_quality:
-                candidate_where.append("COALESCE(pc.quality, 0) >= ?")
-                args.append(clean_candidate_min_quality)
-            where.append(
-                "EXISTS (SELECT 1 FROM photo_asset_people AS pc WHERE "
-                + " AND ".join(candidate_where)
-                + ")"
-            )
-        if hidden_state is not None:
-            where.append("COALESCE(m.hidden, 0) = ?")
-            args.append(1 if hidden_state else 0)
-        if deleted_state is True:
-            where.append("m.deleted_at IS NOT NULL")
-        elif deleted_state is False:
-            where.append("m.deleted_at IS NULL")
-        where_sql = " AND ".join(where) if where else "1 = 1"
         filter_parts = self._photo_asset_filter_sql_parts(
             query=query,
             query_text_filters=query_text_filters,
@@ -16991,6 +20149,8 @@ class WorkspaceDb:
             favorite_state=favorite_state,
             edited_only=edited_only,
             edited_state=edited_state,
+            rating_filters=rating_filters,
+            curation_text_filters=curation_text_filters,
             keyword=keyword,
             excluded_keywords=excluded_keywords,
             keyword_text_filters=keyword_text_filters,
@@ -17161,9 +20321,10 @@ class WorkspaceDb:
                 """,
                 (max(1, int(limit)), max(0, int(offset))),
             ).fetchall()
+            import_session_cache: dict[str, dict[str, str]] = {}
             return {
                 "total": int(total_row["n"] if total_row else 0),
-                "assets": [self._photo_asset_row(row) for row in rows],
+                "assets": [self._photo_asset_row(row, conn, import_session_cache) for row in rows],
             }
         finally:
             conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
@@ -17181,6 +20342,8 @@ class WorkspaceDb:
         favorite_state: bool | None = None,
         edited_only: bool = False,
         edited_state: bool | None = None,
+        rating_filters: Iterable[tuple[str, float]] = (),
+        curation_text_filters: Iterable[tuple[str, str, str]] = (),
         keyword: str = "",
         excluded_keywords: Iterable[str] = (),
         keyword_text_filters: Iterable[tuple[str, str]] = (),
@@ -17262,6 +20425,8 @@ class WorkspaceDb:
                     favorite_state=favorite_state,
                     edited_only=edited_only,
                     edited_state=edited_state,
+                    rating_filters=rating_filters,
+                    curation_text_filters=curation_text_filters,
                     keyword=keyword,
                     excluded_keywords=excluded_keywords,
                     keyword_text_filters=keyword_text_filters,
@@ -17338,6 +20503,8 @@ class WorkspaceDb:
             favorite_state=favorite_state,
             edited_only=edited_only,
             edited_state=edited_state,
+            rating_filters=rating_filters,
+            curation_text_filters=curation_text_filters,
             keyword=keyword,
             excluded_keywords=excluded_keywords,
             keyword_text_filters=keyword_text_filters,
@@ -17547,7 +20714,7 @@ class WorkspaceDb:
             """,
             (str(source_path or ""),),
         ).fetchone()
-        return self._photo_asset_row(row) if row else None
+        return self._photo_asset_row(row, conn, {}) if row else None
 
     def photo_assets_by_paths(
         self,
@@ -17578,8 +20745,9 @@ class WorkspaceDb:
                 """,
                 tuple(chunk),
             ).fetchall()
+            import_session_cache: dict[str, dict[str, str]] = {}
             for row in rows:
-                asset = self._photo_asset_row(row)
+                asset = self._photo_asset_row(row, conn, import_session_cache)
                 assets_by_path[str(asset.get("sourcePath", "") or "")] = asset
         return [assets_by_path[path] for path in clean_paths if path in assets_by_path]
 
@@ -17595,7 +20763,7 @@ class WorkspaceDb:
             """,
             (str(asset_id or ""),),
         ).fetchone()
-        return self._photo_asset_row(row) if row else None
+        return self._photo_asset_row(row, conn, {}) if row else None
 
     def photo_assets_by_ids(
         self,
@@ -17626,8 +20794,9 @@ class WorkspaceDb:
                 """,
                 tuple(chunk),
             ).fetchall()
+            import_session_cache: dict[str, dict[str, str]] = {}
             for row in rows:
-                asset = self._photo_asset_row(row)
+                asset = self._photo_asset_row(row, conn, import_session_cache)
                 assets_by_id[str(asset.get("assetId", "") or "")] = asset
         return [assets_by_id[asset_id] for asset_id in clean_ids if asset_id in assets_by_id]
 
@@ -17638,6 +20807,12 @@ class WorkspaceDb:
             bounds = {}
         if not isinstance(bounds, (dict, list)):
             bounds = {}
+        try:
+            metadata = json.loads(str(row["metadata_json"] or "{}"))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, IndexError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
         confidence: float | None
         try:
             raw_confidence = row["confidence"]
@@ -17653,6 +20828,8 @@ class WorkspaceDb:
             "language": str(row["language"] or ""),
             "confidence": confidence,
             "bounds": bounds,
+            "source": str(row["source"] or ""),
+            "metadata": metadata,
             "createdAt": str(row["created_at"] or ""),
         }
 
@@ -17664,12 +20841,18 @@ class WorkspaceDb:
         *,
         default_language: str = "",
         default_confidence: float | None = None,
+        default_source: str = "",
+        default_metadata: dict[str, Any] | None = None,
         created_at: str = "",
     ) -> dict[str, Any] | None:
         if isinstance(value, dict):
             raw_text = value.get("text", value.get("value", ""))
             raw_language = value.get("language", value.get("lang", default_language))
             raw_confidence = value.get("confidence", value.get("score", default_confidence))
+            raw_source = value.get("source", default_source)
+            raw_metadata = value.get("metadata", default_metadata)
+            if not isinstance(raw_metadata, dict) and isinstance(value.get("model"), dict):
+                raw_metadata = {"model": value["model"]}
             raw_bounds = value.get("bounds", value.get("bbox", value.get("box")))
             if not isinstance(raw_bounds, (dict, list)):
                 raw_bounds = {}
@@ -17688,6 +20871,8 @@ class WorkspaceDb:
             raw_text = value
             raw_language = default_language
             raw_confidence = default_confidence
+            raw_source = default_source
+            raw_metadata = default_metadata
             raw_bounds = {}
         text = re.sub(r"\s+", " ", str(raw_text or "")).strip()
         if not text:
@@ -17702,6 +20887,9 @@ class WorkspaceDb:
             confidence = None
         bounds_body = raw_bounds if isinstance(raw_bounds, (dict, list)) else {}
         bounds_json = json.dumps(bounds_body, separators=(",", ":"), sort_keys=True, default=str)
+        source = re.sub(r"[^A-Za-z0-9_.:-]+", "-", str(raw_source or default_source or "")).strip("-")[:80]
+        metadata_body = raw_metadata if isinstance(raw_metadata, dict) else {}
+        metadata_json = json.dumps(metadata_body, separators=(",", ":"), sort_keys=True, default=str)
         digest = hashlib.sha256(f"{asset_id}\n{index}\n{text}\n{bounds_json}".encode("utf-8")).hexdigest()
         asset_digest = hashlib.sha256(str(asset_id or "").encode("utf-8")).hexdigest()[:16]
         return {
@@ -17711,6 +20899,8 @@ class WorkspaceDb:
             "language": language,
             "confidence": confidence,
             "boundsJson": bounds_json,
+            "source": source,
+            "metadataJson": metadata_json,
             "createdAt": created_at or now_iso(),
         }
 
@@ -17722,6 +20912,8 @@ class WorkspaceDb:
         *,
         default_language: str = "",
         default_confidence: float | None = None,
+        default_source: str = "",
+        default_metadata: dict[str, Any] | None = None,
         refresh_index: bool = True,
     ) -> dict[str, Any]:
         if conn is None:
@@ -17732,6 +20924,8 @@ class WorkspaceDb:
                     local_conn,
                     default_language=default_language,
                     default_confidence=default_confidence,
+                    default_source=default_source,
+                    default_metadata=default_metadata,
                     refresh_index=refresh_index,
                 )
         asset_key = str(asset_id or "").strip()
@@ -17749,6 +20943,8 @@ class WorkspaceDb:
                 index,
                 default_language=default_language,
                 default_confidence=default_confidence,
+                default_source=default_source,
+                default_metadata=default_metadata,
                 created_at=created_at,
             )
             if clean is not None:
@@ -17757,8 +20953,9 @@ class WorkspaceDb:
         if clean_blocks:
             conn.executemany(
                 """
-                INSERT INTO photo_ocr_blocks(block_id, asset_id, text, language, confidence, bounds_json, created_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO photo_ocr_blocks(
+                    block_id, asset_id, text, language, confidence, bounds_json, source, metadata_json, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -17768,6 +20965,8 @@ class WorkspaceDb:
                         block["language"],
                         block["confidence"],
                         block["boundsJson"],
+                        block["source"],
+                        block["metadataJson"],
                         block["createdAt"],
                     )
                     for block in clean_blocks
@@ -17873,30 +21072,13 @@ class WorkspaceDb:
                     counts[asset_key] = int(row["n"] or 0)
         return counts
 
-    def photo_local_index_status_counts(
-        self,
-        kind: str,
-        *,
-        limit: int = 100_000,
-        failure_limit: int = 25,
-        conn: sqlite3.Connection | None = None,
-    ) -> dict[str, Any]:
-        if conn is None:
-            with self.connect() as local_conn:
-                return self.photo_local_index_status_counts(kind, limit=limit, failure_limit=failure_limit, conn=local_conn)
+    def _photo_local_index_sql_parts(self, kind: str) -> dict[str, Any]:
         clean_kind = str(kind or "").strip().lower()
         if clean_kind not in {"ocr", "barcode", "objects"}:
             raise ValueError("Photo local index status kind must be ocr, barcode, or objects.")
-        try:
-            clean_limit = max(1, min(100_000, int(limit or 100_000)))
-        except (TypeError, ValueError):
-            clean_limit = 100_000
-        try:
-            clean_failure_limit = max(0, min(100, int(failure_limit or 25)))
-        except (TypeError, ValueError):
-            clean_failure_limit = 25
-        suffix_clauses = " OR ".join("LOWER(a.source_path) LIKE ?" for _ in self._IMAGE_ASSET_EXTENSIONS)
-        suffix_args = [f"%{suffix}" for suffix in self._IMAGE_ASSET_EXTENSIONS]
+        suffixes = sorted(self._IMAGE_ASSET_EXTENSIONS)
+        suffix_clauses = " OR ".join("LOWER(a.source_path) LIKE ?" for _ in suffixes)
+        suffix_args = [f"%{suffix}" for suffix in suffixes]
         metadata_json = "COALESCE(a.metadata_json, '{}')"
         if clean_kind == "ocr":
             local_status = f"LOWER(COALESCE(CAST(json_extract({metadata_json}, '$.localOcr.status') AS TEXT), ''))"
@@ -17936,6 +21118,114 @@ class WorkspaceDb:
                 ELSE 'pending'
             END
         """
+        return {
+            "suffixClauses": suffix_clauses,
+            "suffixArgs": suffix_args,
+            "statusExpr": status_expr,
+            "localError": local_error,
+            "failureStatuses": failure_statuses,
+        }
+
+    def photo_local_index_scope_assets(
+        self,
+        kind: str,
+        *,
+        failed_only: bool = False,
+        pending_only: bool = False,
+        limit: int = 100,
+        total_limit: int = 100_000,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_local_index_scope_assets(
+                    kind,
+                    failed_only=failed_only,
+                    pending_only=pending_only,
+                    limit=limit,
+                    total_limit=total_limit,
+                    conn=local_conn,
+                )
+        parts = self._photo_local_index_sql_parts(kind)
+        try:
+            clean_limit = max(1, min(5000, int(limit or 100)))
+        except (TypeError, ValueError):
+            clean_limit = 100
+        try:
+            clean_total_limit = max(1, min(100_000, int(total_limit or 100_000)))
+        except (TypeError, ValueError):
+            clean_total_limit = 100_000
+        clean_limit = min(clean_limit, clean_total_limit)
+        where_parts = [f"({parts['suffixClauses']})"]
+        args: list[Any] = [*parts["suffixArgs"]]
+        status_expr = str(parts["statusExpr"])
+        failure_statuses = tuple(parts["failureStatuses"])
+        if failed_only and pending_only:
+            where_parts.append("0")
+        elif failed_only:
+            placeholders = ",".join("?" for _ in failure_statuses)
+            where_parts.append(f"({status_expr}) IN ({placeholders})")
+            args.extend(failure_statuses)
+        elif pending_only:
+            where_parts.append(f"({status_expr}) = ?")
+            args.append("pending")
+        where_sql = " AND ".join(where_parts)
+        count_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS n
+            FROM (
+                SELECT 1
+                FROM photo_assets AS a
+                WHERE {where_sql}
+                LIMIT ?
+            ) AS scoped
+            """,
+            (*args, clean_total_limit),
+        ).fetchone()
+        rows = conn.execute(
+            f"""
+            SELECT a.*
+            FROM photo_assets AS a
+            WHERE {where_sql}
+            ORDER BY LOWER(a.source_path) ASC, a.asset_id ASC
+            LIMIT ?
+            """,
+            (*args, clean_limit),
+        ).fetchall()
+        import_session_cache: dict[str, dict[str, str]] = {}
+        return {
+            "total": int(count_row["n"] if count_row else 0),
+            "assets": [self._photo_asset_row(row, conn, import_session_cache) for row in rows],
+        }
+
+    def photo_local_index_status_counts(
+        self,
+        kind: str,
+        *,
+        limit: int = 100_000,
+        failure_limit: int = 25,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_local_index_status_counts(kind, limit=limit, failure_limit=failure_limit, conn=local_conn)
+        clean_kind = str(kind or "").strip().lower()
+        if clean_kind not in {"ocr", "barcode", "objects"}:
+            raise ValueError("Photo local index status kind must be ocr, barcode, or objects.")
+        try:
+            clean_limit = max(1, min(100_000, int(limit or 100_000)))
+        except (TypeError, ValueError):
+            clean_limit = 100_000
+        try:
+            clean_failure_limit = max(0, min(100, int(failure_limit or 25)))
+        except (TypeError, ValueError):
+            clean_failure_limit = 25
+        parts = self._photo_local_index_sql_parts(clean_kind)
+        suffix_clauses = str(parts["suffixClauses"])
+        suffix_args = list(parts["suffixArgs"])
+        status_expr = str(parts["statusExpr"])
+        local_error = str(parts["localError"])
+        failure_statuses = tuple(parts["failureStatuses"])
         limited_sql = f"""
             SELECT a.asset_id, a.source_path, a.metadata_json,
                 {status_expr} AS status,
@@ -18350,6 +21640,11 @@ class WorkspaceDb:
                 for record in self._photo_object_tag_records_from_value(metadata.get(key), source=source):
                     if append_record(record):
                         return records
+        local_vision = metadata.get("localVision") if isinstance(metadata.get("localVision"), dict) else {}
+        local_source = re.sub(r"[^A-Za-z0-9_-]", "", str(local_vision.get("source", "") or "vlm"))[:40] or "vlm"
+        for record in self._photo_object_tag_records_from_value(local_vision.get("tags"), source=local_source):
+            if append_record(record):
+                return records
         for entry in review_entries:
             if str(entry.get("action", "") or "") != "confirmed":
                 continue
@@ -18641,6 +21936,7 @@ class WorkspaceDb:
         self.replace_photo_object_tags_from_metadata(asset_key, next_metadata, conn, refresh_index=False)
         if refresh_index:
             self._index_photo_asset(asset_key, conn)
+        self._bump_photo_smart_album_materialization_revision(conn, reason="photo_asset_metadata_json")
         updated = self.photo_asset_by_id(asset_key, conn)
         if updated is None:
             raise ValueError("Photo asset metadata could not be updated.")
@@ -18804,6 +22100,37 @@ class WorkspaceDb:
             return {str(row["asset_id"] or "") for row in rows if str(row["asset_id"] or "")}
         finally:
             conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
+
+    def photo_edit_stacks_for_assets(
+        self,
+        asset_ids: Iterable[str],
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        clean_ids = [str(asset_id or "").strip() for asset_id in dict.fromkeys(asset_ids or []) if str(asset_id or "").strip()]
+        if not clean_ids:
+            return {}
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_edit_stacks_for_assets(clean_ids, conn=local_conn)
+        result: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(clean_ids), 800):
+            chunk = clean_ids[start:start + 800]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT s.*, a.source_path
+                FROM photo_edit_stacks AS s
+                JOIN photo_assets AS a ON a.asset_id = s.asset_id
+                WHERE s.asset_id IN ({placeholders})
+                """,
+                tuple(chunk),
+            ).fetchall()
+            for row in rows:
+                stack = self._photo_edit_stack_row(row)
+                asset_id = str(row["asset_id"] or "")
+                if asset_id and stack is not None:
+                    result[asset_id] = stack
+        return result
 
     def photo_edit_stack_version_by_id(
         self,
@@ -19064,6 +22391,64 @@ class WorkspaceDb:
             "metadata": parsed_metadata if isinstance(parsed_metadata, dict) else {},
         }
 
+    def photo_catalog_change_page(
+        self,
+        *,
+        after_seq: int = 0,
+        limit: int = 100,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_catalog_change_page(after_seq=after_seq, limit=limit, conn=local_conn)
+        clean_after = max(0, int(after_seq or 0))
+        clean_limit = max(1, min(500, int(limit or 100)))
+        bounds = conn.execute(
+            """
+            SELECT
+                COALESCE(MIN(change_seq), 0) AS oldest_seq,
+                COALESCE(MAX(change_seq), 0) AS latest_seq
+            FROM photo_catalog_changes
+            """
+        ).fetchone()
+        oldest_seq = int(bounds["oldest_seq"] if bounds else 0)
+        latest_seq = int(bounds["latest_seq"] if bounds else 0)
+        rows = conn.execute(
+            """
+            SELECT
+                change_seq, asset_id, content_hash, change_kind,
+                change_scope, changed_at, origin
+            FROM photo_catalog_changes
+            WHERE change_seq > ? AND change_seq <= ?
+            ORDER BY change_seq ASC
+            LIMIT ?
+            """,
+            (clean_after, latest_seq, clean_limit),
+        ).fetchall()
+        items = [
+            {
+                "seq": int(row["change_seq"]),
+                "eventId": f"catalog_{int(row['change_seq'])}",
+                "assetId": str(row["asset_id"] or ""),
+                "contentHash": str(row["content_hash"] or ""),
+                "changeKind": str(row["change_kind"] or "upsert"),
+                "scope": str(row["change_scope"] or "asset"),
+                "changedAt": str(row["changed_at"] or ""),
+                "origin": str(row["origin"] or "local"),
+            }
+            for row in rows
+        ]
+        next_after = int(items[-1]["seq"]) if items else clean_after
+        return {
+            "items": items,
+            "afterSeq": clean_after,
+            "nextAfterSeq": next_after,
+            "oldestSeq": oldest_seq,
+            "latestSeq": latest_seq,
+            "returned": len(items),
+            "hasMore": next_after < latest_seq,
+        }
+
     def record_photo_asset_events(
         self,
         event_type: str,
@@ -19253,7 +22638,8 @@ class WorkspaceDb:
             """,
             [*args, max(1, int(limit)), max(0, int(offset))],
         ).fetchall()
-        return [self._photo_asset_row(row) for row in rows]
+        import_session_cache: dict[str, dict[str, str]] = {}
+        return [self._photo_asset_row(row, conn, import_session_cache) for row in rows]
 
     def list_photo_semantic_candidate_assets(
         self,
@@ -19281,7 +22667,8 @@ class WorkspaceDb:
                     FROM {temp_table} AS wanted
                     JOIN photo_assets AS a ON a.source_path = wanted.source_path
                     LEFT JOIN photo_asset_metadata AS m ON m.asset_id = a.asset_id
-                    WHERE COALESCE(m.hidden, 0) = 0
+                    WHERE a.media_kind = 'image'
+                        AND COALESCE(m.hidden, 0) = 0
                         AND m.deleted_at IS NULL
                     ORDER BY a.source_path ASC
                     """
@@ -19311,6 +22698,77 @@ class WorkspaceDb:
                     "mediaKind": str(row["media_kind"] or "image"),
                 })
         return assets
+
+    def list_video_semantic_candidate_assets(
+        self,
+        *,
+        source_paths: Iterable[str] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.list_video_semantic_candidate_assets(source_paths=source_paths, conn=local_conn)
+        clean_paths = [str(path or "").strip() for path in dict.fromkeys(source_paths or []) if str(path or "").strip()]
+        rows: list[sqlite3.Row]
+        if clean_paths:
+            temp_table = "temp_video_semantic_source_paths"
+            conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
+            conn.execute(f"CREATE TEMP TABLE {temp_table}(source_path TEXT PRIMARY KEY)")
+            try:
+                conn.executemany(
+                    f"INSERT OR IGNORE INTO {temp_table}(source_path) VALUES(?)",
+                    [(path,) for path in clean_paths],
+                )
+                rows = conn.execute(
+                    f"""
+                    SELECT a.asset_id, a.source_path, a.content_hash, a.duration_ms
+                    FROM {temp_table} AS wanted
+                    JOIN photo_assets AS a ON a.source_path = wanted.source_path
+                    LEFT JOIN photo_asset_metadata AS m ON m.asset_id = a.asset_id
+                    WHERE a.media_kind = 'video'
+                        AND COALESCE(m.hidden, 0) = 0
+                        AND m.deleted_at IS NULL
+                    ORDER BY a.source_path ASC
+                    """
+                ).fetchall()
+            finally:
+                conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
+        else:
+            rows = conn.execute(
+                """
+                SELECT a.asset_id, a.source_path, a.content_hash, a.duration_ms
+                FROM photo_assets AS a
+                LEFT JOIN photo_asset_metadata AS m ON m.asset_id = a.asset_id
+                WHERE a.media_kind = 'video'
+                    AND COALESCE(m.hidden, 0) = 0
+                    AND m.deleted_at IS NULL
+                ORDER BY COALESCE(NULLIF(a.capture_date, ''), a.added_at) DESC, a.source_path ASC
+                """
+            ).fetchall()
+        assets: list[dict[str, Any]] = []
+        for row in rows:
+            asset_id = str(row["asset_id"] or "").strip()
+            source_path = str(row["source_path"] or "").strip()
+            if not asset_id or not source_path:
+                continue
+            assets.append(
+                {
+                    "assetId": asset_id,
+                    "sourcePath": source_path,
+                    "contentHash": str(row["content_hash"] or ""),
+                    "durationMs": max(0, int(row["duration_ms"] or 0)),
+                    "mediaKind": "video",
+                }
+            )
+        return assets
+
+    def list_photo_audio_candidate_assets(
+        self,
+        *,
+        source_paths: Iterable[str] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.list_video_semantic_candidate_assets(source_paths=source_paths, conn=conn)
 
     def photo_semantic_embedding_for_asset(
         self,
@@ -19360,6 +22818,108 @@ class WorkspaceDb:
                 return None
             vector.append(number)
         return vector or None
+
+    def photo_semantic_index_generation(self, conn: sqlite3.Connection | None = None) -> int:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_semantic_index_generation(local_conn)
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = ? LIMIT 1",
+            (PHOTO_SEMANTIC_INDEX_GENERATION_META_KEY,),
+        ).fetchone()
+        try:
+            return max(0, int(row["value"] if row is not None else 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def video_semantic_index_generation(self, conn: sqlite3.Connection | None = None) -> int:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.video_semantic_index_generation(local_conn)
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = ? LIMIT 1",
+            (VIDEO_SEMANTIC_INDEX_GENERATION_META_KEY,),
+        ).fetchone()
+        try:
+            return max(0, int(row["value"] if row is not None else 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def photo_semantic_index_snapshot(
+        self,
+        *,
+        model_name: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_semantic_index_snapshot(model_name=model_name, conn=local_conn)
+        clean_model = str(model_name or "").strip()
+        rows = conn.execute(
+            """
+            SELECT
+                e.asset_id,
+                a.source_path,
+                e.file_size,
+                e.file_mtime_ns,
+                e.vector_json,
+                e.updated_at
+            FROM photo_semantic_embeddings AS e
+            JOIN photo_assets AS a ON a.asset_id = e.asset_id
+            LEFT JOIN photo_asset_metadata AS m ON m.asset_id = a.asset_id
+            WHERE e.model_name = ?
+                AND a.media_kind = 'image'
+                AND COALESCE(m.hidden, 0) = 0
+                AND m.deleted_at IS NULL
+            ORDER BY e.asset_id ASC
+            """,
+            (clean_model,),
+        ).fetchall()
+        items: list[dict[str, Any]] = []
+        invalid_rows = 0
+        for row in rows:
+            try:
+                raw_values = json.loads(str(row["vector_json"] or "[]"))
+            except json.JSONDecodeError:
+                invalid_rows += 1
+                continue
+            if not isinstance(raw_values, list) or not raw_values:
+                invalid_rows += 1
+                continue
+            vector: list[float] = []
+            valid = True
+            for value in raw_values:
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    valid = False
+                    break
+                if not math.isfinite(number):
+                    valid = False
+                    break
+                vector.append(number)
+            asset_id = str(row["asset_id"] or "").strip()
+            source_path = str(row["source_path"] or "").strip()
+            if not valid or not vector or not asset_id or not source_path:
+                invalid_rows += 1
+                continue
+            items.append(
+                {
+                    "assetId": asset_id,
+                    "sourcePath": source_path,
+                    "fileSize": int(row["file_size"]),
+                    "fileMtimeNs": int(row["file_mtime_ns"]),
+                    "updatedAt": str(row["updated_at"] or ""),
+                    "vector": vector,
+                }
+            )
+        return {
+            "generation": self.photo_semantic_index_generation(conn),
+            "modelName": clean_model,
+            "items": items,
+            "invalidRows": invalid_rows,
+            "rowCount": len(rows),
+        }
 
     def upsert_photo_semantic_embedding(
         self,
@@ -19422,6 +22982,598 @@ class WorkspaceDb:
                 now_iso(),
             ),
         )
+
+    def photo_audio_index_is_current(
+        self,
+        *,
+        asset_id: str,
+        index_version: str,
+        source_fingerprint: str,
+        file_size: int,
+        file_mtime_ns: int,
+        transcription_enabled: bool,
+        sound_events_enabled: bool,
+        language: str = "",
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_audio_index_is_current(
+                    asset_id=asset_id,
+                    index_version=index_version,
+                    source_fingerprint=source_fingerprint,
+                    file_size=file_size,
+                    file_mtime_ns=file_mtime_ns,
+                    transcription_enabled=transcription_enabled,
+                    sound_events_enabled=sound_events_enabled,
+                    language=language,
+                    conn=local_conn,
+                )
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM photo_audio_index_state
+            WHERE asset_id = ?
+                AND index_version = ?
+                AND source_fingerprint = ?
+                AND file_size = ?
+                AND file_mtime_ns = ?
+                AND transcription_enabled = ?
+                AND sound_events_enabled = ?
+                AND language = ?
+            LIMIT 1
+            """,
+            (
+                str(asset_id or "").strip(),
+                str(index_version or "").strip(),
+                str(source_fingerprint or "").strip().lower(),
+                int(file_size),
+                int(file_mtime_ns),
+                1 if transcription_enabled else 0,
+                1 if sound_events_enabled else 0,
+                re.sub(r"[^A-Za-z0-9_-]", "", str(language or "").strip().lower())[:16],
+            ),
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _photo_audio_segment_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            metadata = json.loads(str(row["metadata_json"] or "{}"))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            metadata = {}
+        confidence_value = row["confidence"]
+        try:
+            confidence = float(confidence_value) if confidence_value is not None else None
+        except (TypeError, ValueError):
+            confidence = None
+        if confidence is not None and not math.isfinite(confidence):
+            confidence = None
+        return {
+            "segmentId": str(row["segment_id"] or ""),
+            "assetId": str(row["asset_id"] or ""),
+            "segmentKind": str(row["segment_kind"] or ""),
+            "startMs": max(0, int(row["start_ms"] or 0)),
+            "endMs": max(0, int(row["end_ms"] or 0)),
+            "timestampMs": max(0, int(row["timestamp_ms"] or 0)),
+            "text": str(row["text"] or ""),
+            "label": str(row["label"] or ""),
+            "confidence": confidence,
+            "language": str(row["language"] or ""),
+            "modelName": str(row["model_name"] or ""),
+            "modelVersion": str(row["model_version"] or ""),
+            "indexVersion": str(row["index_version"] or ""),
+            "sourceFingerprint": str(row["source_fingerprint"] or ""),
+            "fileSize": int(row["file_size"] or -1),
+            "fileMtimeNs": int(row["file_mtime_ns"] or -1),
+            "metadata": metadata if isinstance(metadata, dict) else {},
+            "updatedAt": str(row["updated_at"] or ""),
+        }
+
+    def replace_photo_audio_segments(
+        self,
+        *,
+        asset_id: str,
+        index_version: str,
+        source_path: str,
+        source_fingerprint: str,
+        file_size: int,
+        file_mtime_ns: int,
+        transcription_enabled: bool,
+        sound_events_enabled: bool,
+        language: str,
+        segments: Iterable[dict[str, Any]],
+        conn: sqlite3.Connection | None = None,
+    ) -> int:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.replace_photo_audio_segments(
+                    asset_id=asset_id,
+                    index_version=index_version,
+                    source_path=source_path,
+                    source_fingerprint=source_fingerprint,
+                    file_size=file_size,
+                    file_mtime_ns=file_mtime_ns,
+                    transcription_enabled=transcription_enabled,
+                    sound_events_enabled=sound_events_enabled,
+                    language=language,
+                    segments=segments,
+                    conn=local_conn,
+                )
+        clean_asset_id = str(asset_id or "").strip()
+        clean_version = str(index_version or "").strip()
+        clean_source = str(source_path or "").strip()
+        clean_fingerprint = str(source_fingerprint or "").strip().lower()
+        clean_language = re.sub(r"[^A-Za-z0-9_-]", "", str(language or "").strip().lower())[:16]
+        if not clean_asset_id or not clean_version or not clean_source or not re.fullmatch(r"[a-f0-9]{64}", clean_fingerprint):
+            raise ValueError("Photo audio index identity is incomplete.")
+        now = now_iso()
+        rows: list[tuple[Any, ...]] = []
+        for raw in segments:
+            if not isinstance(raw, dict):
+                raise ValueError("Photo audio segment must be an object.")
+            segment_id = re.sub(r"[^A-Za-z0-9_.:-]", "", str(raw.get("segmentId", "") or ""))[:160]
+            segment_kind = str(raw.get("segmentKind", raw.get("kind", "")) or "").strip().lower()
+            start_ms = max(0, int(raw.get("startMs", 0) or 0))
+            end_ms = max(0, int(raw.get("endMs", 0) or 0))
+            timestamp_ms = max(0, int(raw.get("timestampMs", start_ms) or start_ms))
+            text = re.sub(r"\s+", " ", str(raw.get("text", "") or "")).strip()[:4_000]
+            label = re.sub(r"\s+", " ", str(raw.get("label", "") or "")).strip()[:200]
+            model_name = re.sub(r"\s+", " ", str(raw.get("modelName", raw.get("model", "")) or "")).strip()[:160]
+            model_version = re.sub(r"\s+", " ", str(raw.get("modelVersion", "") or "")).strip()[:80]
+            segment_language = re.sub(r"[^A-Za-z0-9_-]", "", str(raw.get("language", "") or "").strip().lower())[:16]
+            if (
+                not segment_id
+                or segment_kind not in {"speech", "sound"}
+                or end_ms <= start_ms
+                or not start_ms <= timestamp_ms < end_ms
+                or not model_name
+                or not model_version
+                or (segment_kind == "speech" and not text)
+                or (segment_kind == "sound" and not label)
+            ):
+                raise ValueError("Photo audio segment is invalid.")
+            confidence_raw = raw.get("confidence")
+            confidence: float | None = None
+            if confidence_raw is not None:
+                confidence = float(confidence_raw)
+                if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+                    raise ValueError("Photo audio segment confidence is invalid.")
+            raw_metadata = raw.get("metadata", {})
+            metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+            rows.append(
+                (
+                    segment_id,
+                    clean_asset_id,
+                    segment_kind,
+                    start_ms,
+                    end_ms,
+                    timestamp_ms,
+                    text,
+                    label,
+                    confidence,
+                    segment_language,
+                    model_name,
+                    model_version,
+                    clean_version,
+                    clean_fingerprint,
+                    int(file_size),
+                    int(file_mtime_ns),
+                    self._clean_json_dict(metadata),
+                    now,
+                )
+            )
+        conn.execute("DELETE FROM photo_audio_segments WHERE asset_id = ?", (clean_asset_id,))
+        if rows:
+            conn.executemany(
+                """
+                INSERT INTO photo_audio_segments(
+                    segment_id, asset_id, segment_kind, start_ms, end_ms, timestamp_ms,
+                    text, label, confidence, language, model_name, model_version,
+                    index_version, source_fingerprint, file_size, file_mtime_ns,
+                    metadata_json, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        conn.execute(
+            """
+            INSERT INTO photo_audio_index_state(
+                asset_id, index_version, source_path, source_fingerprint, file_size,
+                file_mtime_ns, transcription_enabled, sound_events_enabled, language,
+                segment_count, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(asset_id) DO UPDATE SET
+                index_version=excluded.index_version,
+                source_path=excluded.source_path,
+                source_fingerprint=excluded.source_fingerprint,
+                file_size=excluded.file_size,
+                file_mtime_ns=excluded.file_mtime_ns,
+                transcription_enabled=excluded.transcription_enabled,
+                sound_events_enabled=excluded.sound_events_enabled,
+                language=excluded.language,
+                segment_count=excluded.segment_count,
+                updated_at=excluded.updated_at
+            """,
+            (
+                clean_asset_id,
+                clean_version,
+                clean_source,
+                clean_fingerprint,
+                int(file_size),
+                int(file_mtime_ns),
+                1 if transcription_enabled else 0,
+                1 if sound_events_enabled else 0,
+                clean_language,
+                len(rows),
+                now,
+            ),
+        )
+        self._index_photo_asset(clean_asset_id, conn)
+        return len(rows)
+
+    def list_photo_audio_segments(
+        self,
+        *,
+        asset_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[dict[str, Any]]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.list_photo_audio_segments(asset_id=asset_id, conn=local_conn)
+        rows = conn.execute(
+            """
+            SELECT s.*
+            FROM photo_audio_segments AS s
+            JOIN photo_assets AS a ON a.asset_id = s.asset_id
+            LEFT JOIN photo_asset_metadata AS m ON m.asset_id = a.asset_id
+            WHERE s.asset_id = ?
+                AND a.media_kind = 'video'
+                AND COALESCE(m.hidden, 0) = 0
+                AND m.deleted_at IS NULL
+            ORDER BY s.start_ms ASC, s.segment_kind ASC, s.segment_id ASC
+            """,
+            (str(asset_id or "").strip(),),
+        ).fetchall()
+        return [self._photo_audio_segment_from_row(row) for row in rows]
+
+    def best_photo_audio_segments_for_assets(
+        self,
+        asset_ids: Iterable[str],
+        query: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.best_photo_audio_segments_for_assets(asset_ids, query, conn=local_conn)
+        clean_ids = [str(value or "").strip() for value in dict.fromkeys(asset_ids) if str(value or "").strip()]
+        clean_query = re.sub(r"\s+", " ", str(query or "")).strip().casefold()
+        terms = [term for term in re.findall(r"[\w'-]+", clean_query, flags=re.UNICODE) if len(term) > 1][:12]
+        if not clean_ids or not clean_query:
+            return {}
+        candidates: dict[str, list[dict[str, Any]]] = {asset_id: [] for asset_id in clean_ids}
+        for start in range(0, len(clean_ids), 800):
+            chunk = clean_ids[start:start + 800]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM photo_audio_segments
+                WHERE asset_id IN ({placeholders})
+                ORDER BY asset_id ASC, start_ms ASC, segment_kind ASC, segment_id ASC
+                """,
+                tuple(chunk),
+            ).fetchall()
+            for row in rows:
+                item = self._photo_audio_segment_from_row(row)
+                haystack = self._photo_join_search_text(item["text"], item["label"]).casefold()
+                if clean_query in haystack or any(term in haystack for term in terms):
+                    candidates.setdefault(item["assetId"], []).append(item)
+
+        def rank(item: dict[str, Any]) -> tuple[Any, ...]:
+            haystack = self._photo_join_search_text(item.get("text", ""), item.get("label", "")).casefold()
+            all_terms = bool(terms) and all(term in haystack for term in terms)
+            return (
+                0 if clean_query in haystack else 1 if all_terms else 2,
+                0 if item.get("segmentKind") == "speech" else 1,
+                -float(item.get("confidence") or 0.0),
+                int(item.get("startMs", 0) or 0),
+                str(item.get("segmentId", "") or ""),
+            )
+
+        return {
+            asset_id: min(rows, key=rank)
+            for asset_id, rows in candidates.items()
+            if rows
+        }
+
+    def photo_audio_index_summary(
+        self,
+        *,
+        index_version: str = "",
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, int]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_audio_index_summary(index_version=index_version, conn=local_conn)
+        clean_version = str(index_version or "").strip()
+        version_sql = "AND s.index_version = ?" if clean_version else ""
+        args: tuple[Any, ...] = (clean_version,) if clean_version else ()
+        row = conn.execute(
+            f"""
+            SELECT
+                (SELECT COUNT(*)
+                 FROM photo_assets AS a
+                 LEFT JOIN photo_asset_metadata AS m ON m.asset_id = a.asset_id
+                 WHERE a.media_kind = 'video' AND COALESCE(m.hidden, 0) = 0 AND m.deleted_at IS NULL) AS candidate_count,
+                COUNT(DISTINCT s.asset_id) AS indexed_count,
+                COALESCE(SUM(s.segment_count), 0) AS segment_count,
+                COALESCE(SUM((SELECT COUNT(*) FROM photo_audio_segments AS x WHERE x.asset_id = s.asset_id AND x.segment_kind = 'speech')), 0) AS transcript_count,
+                COALESCE(SUM((SELECT COUNT(*) FROM photo_audio_segments AS x WHERE x.asset_id = s.asset_id AND x.segment_kind = 'sound')), 0) AS sound_event_count
+            FROM photo_audio_index_state AS s
+            JOIN photo_assets AS a ON a.asset_id = s.asset_id
+            LEFT JOIN photo_asset_metadata AS m ON m.asset_id = a.asset_id
+            WHERE a.media_kind = 'video'
+                AND COALESCE(m.hidden, 0) = 0
+                AND m.deleted_at IS NULL
+                {version_sql}
+            """,
+            args,
+        ).fetchone()
+        return {
+            "candidateCount": int(row["candidate_count"] or 0) if row else 0,
+            "indexedCount": int(row["indexed_count"] or 0) if row else 0,
+            "segmentCount": int(row["segment_count"] or 0) if row else 0,
+            "transcriptCount": int(row["transcript_count"] or 0) if row else 0,
+            "soundEventCount": int(row["sound_event_count"] or 0) if row else 0,
+        }
+
+    def video_semantic_segments_are_current(
+        self,
+        *,
+        asset_id: str,
+        model_name: str,
+        index_version: str,
+        source_fingerprint: str,
+        file_size: int,
+        file_mtime_ns: int,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.video_semantic_segments_are_current(
+                    asset_id=asset_id,
+                    model_name=model_name,
+                    index_version=index_version,
+                    source_fingerprint=source_fingerprint,
+                    file_size=file_size,
+                    file_mtime_ns=file_mtime_ns,
+                    conn=local_conn,
+                )
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS segment_count
+            FROM video_semantic_segments
+            WHERE asset_id = ?
+                AND model_name = ?
+                AND index_version = ?
+                AND source_fingerprint = ?
+                AND file_size = ?
+                AND file_mtime_ns = ?
+            """,
+            (
+                str(asset_id or ""),
+                str(model_name or ""),
+                str(index_version or ""),
+                str(source_fingerprint or ""),
+                int(file_size),
+                int(file_mtime_ns),
+            ),
+        ).fetchone()
+        return bool(row is not None and int(row["segment_count"] or 0) > 0)
+
+    def replace_video_semantic_segments(
+        self,
+        *,
+        asset_id: str,
+        model_name: str,
+        index_version: str,
+        source_path: str,
+        source_fingerprint: str,
+        file_size: int,
+        file_mtime_ns: int,
+        segments: Iterable[dict[str, Any]],
+        conn: sqlite3.Connection | None = None,
+    ) -> int:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.replace_video_semantic_segments(
+                    asset_id=asset_id,
+                    model_name=model_name,
+                    index_version=index_version,
+                    source_path=source_path,
+                    source_fingerprint=source_fingerprint,
+                    file_size=file_size,
+                    file_mtime_ns=file_mtime_ns,
+                    segments=segments,
+                    conn=local_conn,
+                )
+        clean_asset_id = str(asset_id or "").strip()
+        clean_model = str(model_name or "").strip()
+        clean_version = str(index_version or "").strip()
+        clean_source = str(source_path or "").strip()
+        clean_fingerprint = str(source_fingerprint or "").strip().lower()
+        if not all((clean_asset_id, clean_model, clean_version, clean_source, clean_fingerprint)):
+            raise ValueError("Video semantic segment identity is incomplete.")
+        now = now_iso()
+        rows: list[tuple[Any, ...]] = []
+        for raw in segments:
+            if not isinstance(raw, dict):
+                raise ValueError("Video semantic segment must be an object.")
+            segment_id = str(raw.get("segmentId", "") or "").strip()
+            preview_path = str(raw.get("previewPath", "") or "").strip()
+            start_ms = max(0, int(raw.get("startMs", 0) or 0))
+            end_ms = max(0, int(raw.get("endMs", 0) or 0))
+            timestamp_ms = max(0, int(raw.get("timestampMs", 0) or 0))
+            if not segment_id or not preview_path or end_ms <= start_ms or not start_ms <= timestamp_ms < end_ms:
+                raise ValueError("Video semantic segment timeline is invalid.")
+            vector_values = raw.get("vector")
+            if not isinstance(vector_values, (list, tuple)) or not vector_values:
+                raise ValueError("Video semantic segment vector is missing.")
+            vector: list[float] = []
+            for value in vector_values:
+                number = float(value)
+                if not math.isfinite(number):
+                    raise ValueError("Video semantic segment vector is invalid.")
+                vector.append(number)
+            rows.append(
+                (
+                    segment_id,
+                    clean_asset_id,
+                    clean_model,
+                    clean_version,
+                    clean_source,
+                    clean_fingerprint,
+                    int(file_size),
+                    int(file_mtime_ns),
+                    start_ms,
+                    end_ms,
+                    timestamp_ms,
+                    max(0, int(raw.get("frameIndex", 0) or 0)),
+                    max(end_ms, int(raw.get("durationMs", end_ms) or end_ms)),
+                    preview_path,
+                    max(1, int(raw.get("sampleCount", 1) or 1)),
+                    json.dumps(vector, separators=(",", ":")),
+                    now,
+                )
+            )
+        if not rows:
+            raise ValueError("At least one video semantic segment is required.")
+        conn.execute(
+            "DELETE FROM video_semantic_segments WHERE asset_id = ? AND model_name = ?",
+            (clean_asset_id, clean_model),
+        )
+        conn.executemany(
+            """
+            INSERT INTO video_semantic_segments(
+                segment_id, asset_id, model_name, index_version, source_path,
+                source_fingerprint, file_size, file_mtime_ns, start_ms, end_ms,
+                timestamp_ms, frame_index, duration_ms, preview_path, sample_count,
+                vector_json, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        return len(rows)
+
+    def video_semantic_index_snapshot(
+        self,
+        *,
+        model_name: str,
+        index_version: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.video_semantic_index_snapshot(
+                    model_name=model_name,
+                    index_version=index_version,
+                    conn=local_conn,
+                )
+        clean_model = str(model_name or "").strip()
+        clean_version = str(index_version or "").strip()
+        rows = conn.execute(
+            """
+            SELECT
+                s.segment_id,
+                s.asset_id,
+                a.source_path,
+                s.source_fingerprint,
+                s.file_size,
+                s.file_mtime_ns,
+                s.start_ms,
+                s.end_ms,
+                s.timestamp_ms,
+                s.frame_index,
+                s.duration_ms,
+                s.preview_path,
+                s.sample_count,
+                s.vector_json,
+                s.updated_at
+            FROM video_semantic_segments AS s
+            JOIN photo_assets AS a ON a.asset_id = s.asset_id
+            LEFT JOIN photo_asset_metadata AS m ON m.asset_id = a.asset_id
+            WHERE s.model_name = ?
+                AND s.index_version = ?
+                AND a.media_kind = 'video'
+                AND COALESCE(m.hidden, 0) = 0
+                AND m.deleted_at IS NULL
+            ORDER BY s.segment_id ASC
+            """,
+            (clean_model, clean_version),
+        ).fetchall()
+        items: list[dict[str, Any]] = []
+        invalid_rows = 0
+        for row in rows:
+            try:
+                raw_values = json.loads(str(row["vector_json"] or "[]"))
+            except json.JSONDecodeError:
+                invalid_rows += 1
+                continue
+            if not isinstance(raw_values, list) or not raw_values:
+                invalid_rows += 1
+                continue
+            try:
+                vector = [float(value) for value in raw_values]
+            except (TypeError, ValueError):
+                invalid_rows += 1
+                continue
+            segment_id = str(row["segment_id"] or "").strip()
+            asset_id = str(row["asset_id"] or "").strip()
+            source_path = str(row["source_path"] or "").strip()
+            preview_path = str(row["preview_path"] or "").strip()
+            start_ms = max(0, int(row["start_ms"] or 0))
+            end_ms = max(0, int(row["end_ms"] or 0))
+            timestamp_ms = max(0, int(row["timestamp_ms"] or 0))
+            if (
+                not segment_id
+                or not asset_id
+                or not source_path
+                or not preview_path
+                or end_ms <= start_ms
+                or not start_ms <= timestamp_ms < end_ms
+                or not all(math.isfinite(value) for value in vector)
+            ):
+                invalid_rows += 1
+                continue
+            items.append(
+                {
+                    "segmentId": segment_id,
+                    "assetId": asset_id,
+                    "sourcePath": source_path,
+                    "sourceFingerprint": str(row["source_fingerprint"] or ""),
+                    "fileSize": int(row["file_size"]),
+                    "fileMtimeNs": int(row["file_mtime_ns"]),
+                    "startMs": start_ms,
+                    "endMs": end_ms,
+                    "timestampMs": timestamp_ms,
+                    "frameIndex": max(0, int(row["frame_index"] or 0)),
+                    "durationMs": max(end_ms, int(row["duration_ms"] or end_ms)),
+                    "previewPath": preview_path,
+                    "sampleCount": max(1, int(row["sample_count"] or 1)),
+                    "updatedAt": str(row["updated_at"] or ""),
+                    "vector": vector,
+                }
+            )
+        return {
+            "generation": self.video_semantic_index_generation(conn),
+            "modelName": clean_model,
+            "indexVersion": clean_version,
+            "items": items,
+            "invalidRows": invalid_rows,
+            "rowCount": len(rows),
+        }
 
     def _photo_duplicate_input_signature(self, conn: sqlite3.Connection) -> dict[str, Any]:
         asset_row = conn.execute(
@@ -19511,6 +23663,18 @@ class WorkspaceDb:
             (json.dumps(signature, separators=(",", ":"), sort_keys=True),),
         )
 
+    def _mark_photo_duplicate_groups_stale(self, conn: sqlite3.Connection, *, reason: str = "") -> None:
+        body = {
+            "version": -1,
+            "stale": True,
+            "reason": str(reason or "")[:80],
+            "updatedAt": now_iso(),
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('photoDuplicateGroupsInputSignature', ?)",
+            (json.dumps(body, separators=(",", ":"), sort_keys=True),),
+        )
+
     def ensure_photo_duplicate_groups(self, conn: sqlite3.Connection | None = None) -> dict[str, int | bool]:
         if conn is None:
             with self.connect() as local_conn:
@@ -19521,12 +23685,22 @@ class WorkspaceDb:
         item_row = conn.execute("SELECT COUNT(*) AS n FROM photo_duplicate_group_items").fetchone()
         group_count = int(group_row["n"] or 0) if group_row else 0
         item_count = int(item_row["n"] or 0) if item_row else 0
-        if stored == signature or (not stored and group_count > 0 and item_count > 0):
+        if stored == signature:
+            return {
+                "rebuilt": False,
+                "groups": group_count,
+                "items": item_count,
+            }
+        if not stored and group_count > 0 and item_count > 0:
+            # Legacy databases may have group rows without the denormalized
+            # count/primary summaries. Repair that shape once when adopting the
+            # input signature. Stable reads must remain read-only: previously
+            # this loop issued one UPDATE per group on every duplicates page and
+            # rail refresh even when the signature was unchanged.
             self._repair_photo_duplicate_group_summaries(conn)
             group_row = conn.execute("SELECT COUNT(*) AS n FROM photo_duplicate_groups").fetchone()
             item_row = conn.execute("SELECT COUNT(*) AS n FROM photo_duplicate_group_items").fetchone()
-            if stored != signature:
-                self._store_photo_duplicate_input_signature(conn, signature)
+            self._store_photo_duplicate_input_signature(conn, signature)
             return {
                 "rebuilt": False,
                 "groups": int(group_row["n"] or 0) if group_row else 0,
@@ -19794,7 +23968,7 @@ class WorkspaceDb:
         clean_group_id = str(group_id or "").strip()
         if not clean_group_id:
             raise ValueError("groupId is required.")
-        self.rebuild_photo_duplicate_groups(conn)
+        self.ensure_photo_duplicate_groups(conn)
         group = self.photo_duplicate_group_by_id(clean_group_id, conn)
         if group is None:
             return {"dismissed": False, "groupId": clean_group_id}
@@ -19932,7 +24106,7 @@ class WorkspaceDb:
         ).fetchall()
         items: list[dict[str, Any]] = []
         for item_row in item_rows:
-            asset = self._photo_asset_row(item_row)
+            asset = self._photo_asset_row(item_row, conn, {})
             items.append(
                 {
                     **asset,
@@ -20041,6 +24215,113 @@ class WorkspaceDb:
             return None
         return self.photo_duplicate_group_by_id(str(row["group_id"] or ""), conn)
 
+    def photo_duplicate_groups_for_assets(
+        self,
+        asset_ids: Iterable[str],
+        conn: sqlite3.Connection | None = None,
+        *,
+        ensure_current: bool = True,
+    ) -> dict[str, dict[str, Any]]:
+        clean_ids = [str(value or "").strip() for value in dict.fromkeys(asset_ids or []) if str(value or "").strip()]
+        if not clean_ids:
+            return {}
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_duplicate_groups_for_assets(
+                    clean_ids,
+                    conn=local_conn,
+                    ensure_current=ensure_current,
+                )
+        if ensure_current:
+            self.ensure_photo_duplicate_groups(conn)
+        chosen_group_by_asset: dict[str, str] = {}
+        for start in range(0, len(clean_ids), 800):
+            chunk = clean_ids[start:start + 800]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT i.asset_id, i.group_id
+                FROM photo_duplicate_group_items AS i
+                JOIN photo_duplicate_groups AS g ON g.group_id = i.group_id
+                WHERE i.asset_id IN ({placeholders})
+                ORDER BY i.asset_id ASC,
+                    CASE g.algorithm WHEN 'exact_hash' THEN 0 ELSE 1 END,
+                    g.item_count DESC,
+                    g.updated_at DESC,
+                    g.group_id ASC
+                """,
+                tuple(chunk),
+            ).fetchall()
+            for row in rows:
+                asset_id = str(row["asset_id"] or "")
+                group_id = str(row["group_id"] or "")
+                if asset_id and group_id:
+                    chosen_group_by_asset.setdefault(asset_id, group_id)
+        group_ids = list(dict.fromkeys(chosen_group_by_asset.values()))
+        if not group_ids:
+            return {}
+        placeholders = ",".join("?" for _ in group_ids)
+        group_rows = conn.execute(
+            f"""
+            SELECT group_id, algorithm, signature, item_count, primary_asset_id, created_at, updated_at
+            FROM photo_duplicate_groups
+            WHERE group_id IN ({placeholders})
+            """,
+            tuple(group_ids),
+        ).fetchall()
+        item_rows = conn.execute(
+            f"""
+            SELECT group_id, asset_id, position, reason
+            FROM photo_duplicate_group_items
+            WHERE group_id IN ({placeholders})
+            ORDER BY group_id ASC, position ASC, asset_id ASC
+            """,
+            tuple(group_ids),
+        ).fetchall()
+        item_asset_ids = [str(row["asset_id"] or "") for row in item_rows if str(row["asset_id"] or "")]
+        assets_by_id = {
+            str(asset.get("assetId", "") or ""): asset
+            for asset in self.photo_assets_by_ids(item_asset_ids, conn=conn)
+            if str(asset.get("assetId", "") or "")
+        }
+        metadata_by_id = self.photo_asset_metadata_by_ids(item_asset_ids, conn=conn)
+        items_by_group: dict[str, list[dict[str, Any]]] = {group_id: [] for group_id in group_ids}
+        for row in item_rows:
+            group_id = str(row["group_id"] or "")
+            asset_id = str(row["asset_id"] or "")
+            asset = assets_by_id.get(asset_id)
+            if not group_id or not asset:
+                continue
+            items_by_group.setdefault(group_id, []).append({
+                **asset,
+                "position": int(row["position"] or 0),
+                "reason": str(row["reason"] or ""),
+                "metadata": {
+                    **(asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}),
+                    **metadata_by_id.get(asset_id, {}),
+                },
+            })
+        groups: dict[str, dict[str, Any]] = {}
+        for row in group_rows:
+            group_id = str(row["group_id"] or "")
+            items = items_by_group.get(group_id, [])
+            groups[group_id] = {
+                "groupId": group_id,
+                "algorithm": str(row["algorithm"] or ""),
+                "signature": str(row["signature"] or ""),
+                "itemCount": int(row["item_count"] or 0),
+                "primaryAssetId": str(row["primary_asset_id"] or ""),
+                **self._photo_duplicate_recommendation(items),
+                "createdAt": str(row["created_at"] or ""),
+                "updatedAt": str(row["updated_at"] or ""),
+                "items": items,
+            }
+        return {
+            asset_id: groups[group_id]
+            for asset_id, group_id in chosen_group_by_asset.items()
+            if group_id in groups
+        }
+
     def merge_photo_duplicate_group(
         self,
         group_id: str,
@@ -20052,7 +24333,7 @@ class WorkspaceDb:
         if conn is None:
             with self.connect() as local_conn:
                 return self.merge_photo_duplicate_group(group_id, keep_asset_id=keep_asset_id, deleted_at=deleted_at, conn=local_conn)
-        self.rebuild_photo_duplicate_groups(conn)
+        self.ensure_photo_duplicate_groups(conn)
         group = self.photo_duplicate_group_by_id(group_id, conn)
         if group is None:
             raise ValueError("Unknown duplicate group id.")
@@ -20082,7 +24363,7 @@ class WorkspaceDb:
                         },
                     }
                 )
-        self.rebuild_photo_duplicate_groups(conn)
+        self._mark_photo_duplicate_groups_stale(conn, reason="duplicate_merge")
         operation = self.record_photo_operation(
             operation_type="duplicate_merge",
             label=f"Merged {len(operation_items)} duplicate photo{'s' if len(operation_items) != 1 else ''}",
@@ -20173,6 +24454,306 @@ class WorkspaceDb:
                     }
                 )
         return people_by_asset_id
+
+    def photo_person_presence_count(
+        self,
+        person_name: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> int:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_person_presence_count(person_name, local_conn)
+        person = str(person_name or "").strip()
+        if not person:
+            return 0
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM photo_asset_people WHERE LOWER(person_name) = LOWER(?)",
+            (person,),
+        ).fetchone()
+        return int(row["n"] or 0) if row else 0
+
+    def photo_relationship_graph(
+        self,
+        *,
+        confident_threshold: float,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_relationship_graph(
+                    confident_threshold=confident_threshold,
+                    conn=local_conn,
+                )
+        threshold = max(0.0, min(1.0, float(confident_threshold)))
+        rows = conn.execute(
+            """
+            WITH raw_valid AS (
+                SELECT DISTINCT
+                    p.asset_id AS asset_id,
+                    TRIM(p.person_name) AS person_name,
+                    LOWER(TRIM(p.person_name)) AS person_key
+                FROM photo_asset_people AS p
+                INNER JOIN photo_assets AS a ON a.asset_id = p.asset_id
+                LEFT JOIN photo_asset_metadata AS m ON m.asset_id = a.asset_id
+                WHERE TRIM(COALESCE(p.person_name, '')) != ''
+                    AND COALESCE(a.missing_at, '') = ''
+                    AND COALESCE(m.hidden, 0) = 0
+                    AND COALESCE(m.deleted_at, '') = ''
+                    AND LOWER(COALESCE(p.status, 'pending')) != 'rejected'
+                    AND (
+                        (
+                            LOWER(TRIM(p.person_name)) LIKE 'unmatched cluster%'
+                        )
+                        OR (
+                            LOWER(TRIM(p.person_name)) NOT LIKE 'unmatched cluster%'
+                            AND (
+                                LOWER(COALESCE(p.status, '')) = 'accepted'
+                                OR LOWER(TRIM(COALESCE(p.band, ''))) = 'manual assignment'
+                                OR COALESCE(p.score, 0) >= ?
+                            )
+                        )
+                    )
+            ),
+            valid AS (
+                SELECT asset_id, person_key, MIN(person_name) AS person_name
+                FROM raw_valid
+                GROUP BY asset_id, person_key
+            ),
+            nodes AS (
+                SELECT
+                    'node' AS row_kind,
+                    person_key AS key_a,
+                    '' AS key_b,
+                    MIN(person_name) AS person_a,
+                    '' AS person_b,
+                    COUNT(*) AS item_count
+                FROM valid
+                GROUP BY person_key
+            ),
+            edges AS (
+                SELECT
+                    'edge' AS row_kind,
+                    left_person.person_key AS key_a,
+                    right_person.person_key AS key_b,
+                    MIN(left_person.person_name) AS person_a,
+                    MIN(right_person.person_name) AS person_b,
+                    COUNT(*) AS item_count
+                FROM valid AS left_person
+                INNER JOIN valid AS right_person
+                    ON right_person.asset_id = left_person.asset_id
+                    AND right_person.person_key > left_person.person_key
+                GROUP BY left_person.person_key, right_person.person_key
+            )
+            SELECT row_kind, key_a, key_b, person_a, person_b, item_count FROM nodes
+            UNION ALL
+            SELECT row_kind, key_a, key_b, person_a, person_b, item_count FROM edges
+            ORDER BY row_kind DESC, key_a ASC, key_b ASC
+            """,
+            (threshold,),
+        ).fetchall()
+        nodes: list[dict[str, Any]] = []
+        edges: list[dict[str, Any]] = []
+        for row in rows:
+            if str(row["row_kind"] or "") == "node":
+                nodes.append({
+                    "personName": str(row["person_a"] or ""),
+                    "assetCount": int(row["item_count"] or 0),
+                })
+            else:
+                edges.append({
+                    "personA": str(row["person_a"] or ""),
+                    "personB": str(row["person_b"] or ""),
+                    "cooccurrenceCount": int(row["item_count"] or 0),
+                })
+        return {"nodes": nodes, "edges": edges}
+
+    def photo_relationship_name_review(
+        self,
+        suggestion_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_relationship_name_review(suggestion_id, local_conn)
+        row = conn.execute(
+            """
+            SELECT suggestion_id, source_cluster, target_person, evidence_hash, decision,
+                   idempotency_key, operation_id, result_json, reviewed_at
+            FROM photo_relationship_name_reviews
+            WHERE suggestion_id = ?
+            LIMIT 1
+            """,
+            (str(suggestion_id or "").strip(),),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            result = json.loads(str(row["result_json"] or "{}"))
+        except (TypeError, ValueError):
+            result = {}
+        return {
+            "suggestionId": str(row["suggestion_id"] or ""),
+            "sourceCluster": str(row["source_cluster"] or ""),
+            "targetPerson": str(row["target_person"] or ""),
+            "evidenceHash": str(row["evidence_hash"] or ""),
+            "decision": str(row["decision"] or ""),
+            "idempotencyKey": str(row["idempotency_key"] or ""),
+            "operationId": str(row["operation_id"] or ""),
+            "result": result if isinstance(result, dict) else {},
+            "reviewedAt": str(row["reviewed_at"] or ""),
+        }
+
+    def photo_relationship_name_review_by_idempotency_key(
+        self,
+        idempotency_key: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_relationship_name_review_by_idempotency_key(idempotency_key, local_conn)
+        clean_key = str(idempotency_key or "").strip()[:200]
+        if not clean_key:
+            return None
+        row = conn.execute(
+            """
+            SELECT suggestion_id
+            FROM photo_relationship_name_reviews
+            WHERE idempotency_key = ?
+            LIMIT 1
+            """,
+            (clean_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self.photo_relationship_name_review(str(row["suggestion_id"] or ""), conn)
+
+    def photo_relationship_name_reviewed_ids(
+        self,
+        *,
+        decisions: Iterable[str] = ("dismissed", "applied"),
+        conn: sqlite3.Connection | None = None,
+    ) -> set[str]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_relationship_name_reviewed_ids(decisions=decisions, conn=local_conn)
+        clean = sorted({str(value or "").strip().lower() for value in decisions if str(value or "").strip()})
+        if not clean:
+            return set()
+        placeholders = ",".join("?" for _ in clean)
+        rows = conn.execute(
+            f"SELECT suggestion_id FROM photo_relationship_name_reviews WHERE LOWER(decision) IN ({placeholders})",
+            tuple(clean),
+        ).fetchall()
+        return {str(row["suggestion_id"] or "") for row in rows if str(row["suggestion_id"] or "")}
+
+    def delete_photo_relationship_name_reviews_for_people(
+        self,
+        person_names: Iterable[str],
+        conn: sqlite3.Connection | None = None,
+    ) -> int:
+        clean = sorted({
+            " ".join(str(value or "").strip().split()).casefold()
+            for value in person_names
+            if str(value or "").strip()
+        })
+        if not clean:
+            return 0
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.delete_photo_relationship_name_reviews_for_people(clean, local_conn)
+        rows = conn.execute(
+            "SELECT suggestion_id, source_cluster, target_person FROM photo_relationship_name_reviews"
+        ).fetchall()
+        suggestion_ids = [
+            str(row["suggestion_id"] or "")
+            for row in rows
+            if (
+                " ".join(str(row["source_cluster"] or "").strip().split()).casefold() in clean
+                or " ".join(str(row["target_person"] or "").strip().split()).casefold() in clean
+            )
+        ]
+        deleted = 0
+        for start in range(0, len(suggestion_ids), 800):
+            chunk = suggestion_ids[start:start + 800]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = conn.execute(
+                f"DELETE FROM photo_relationship_name_reviews WHERE suggestion_id IN ({placeholders})",
+                tuple(chunk),
+            )
+            deleted += int(cursor.rowcount or 0)
+        return deleted
+
+    def save_photo_relationship_name_review(
+        self,
+        *,
+        suggestion_id: str,
+        source_cluster: str,
+        target_person: str,
+        evidence_hash: str,
+        decision: str,
+        idempotency_key: str = "",
+        operation_id: str = "",
+        result: dict[str, Any] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.save_photo_relationship_name_review(
+                    suggestion_id=suggestion_id,
+                    source_cluster=source_cluster,
+                    target_person=target_person,
+                    evidence_hash=evidence_hash,
+                    decision=decision,
+                    idempotency_key=idempotency_key,
+                    operation_id=operation_id,
+                    result=result,
+                    conn=local_conn,
+                )
+        suggestion = str(suggestion_id or "").strip()[:120]
+        source = " ".join(str(source_cluster or "").strip().split())[:200]
+        target = " ".join(str(target_person or "").strip().split())[:200]
+        evidence = str(evidence_hash or "").strip().lower()[:64]
+        decision_key = str(decision or "").strip().lower()
+        idempotency = str(idempotency_key or "").strip()[:200]
+        if not suggestion or not source or not target or len(evidence) != 64:
+            raise ValueError("A complete relationship suggestion identity is required.")
+        if decision_key not in {"dismissed", "applied"}:
+            raise ValueError("Relationship suggestion decision must be dismissed or applied.")
+        if decision_key == "applied" and not idempotency:
+            raise ValueError("Applied relationship suggestions require an idempotency key.")
+        reviewed_at = now_iso()
+        conn.execute(
+            """
+            INSERT INTO photo_relationship_name_reviews(
+                suggestion_id, source_cluster, target_person, evidence_hash, decision,
+                idempotency_key, operation_id, result_json, reviewed_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(suggestion_id) DO UPDATE SET
+                source_cluster=excluded.source_cluster,
+                target_person=excluded.target_person,
+                evidence_hash=excluded.evidence_hash,
+                decision=excluded.decision,
+                idempotency_key=excluded.idempotency_key,
+                operation_id=excluded.operation_id,
+                result_json=excluded.result_json,
+                reviewed_at=excluded.reviewed_at
+            """,
+            (
+                suggestion,
+                source,
+                target,
+                evidence,
+                decision_key,
+                idempotency,
+                str(operation_id or "").strip()[:120],
+                json.dumps(result or {}, sort_keys=True, separators=(",", ":")),
+                reviewed_at,
+            ),
+        )
+        saved = self.photo_relationship_name_review(suggestion, conn)
+        if saved is None:
+            raise sqlite3.DatabaseError("Relationship suggestion review was not saved.")
+        return saved
 
     def _photo_person_profile_row(self, row: sqlite3.Row | dict[str, Any] | None, person_name: str = "") -> dict[str, Any]:
         if row is None:
@@ -20553,7 +25134,7 @@ class WorkspaceDb:
         if not old_person or not new_person:
             raise ValueError("Both current and new person names are required.")
         if old_person.casefold() == new_person.casefold():
-            return {"peopleRows": 0, "profileMoved": False, "profileMerged": False}
+            return {"peopleRows": 0, "groupRows": 0, "profileMoved": False, "profileMerged": False}
 
         now = now_iso()
         affected_asset_ids = [
@@ -20575,14 +25156,78 @@ class WorkspaceDb:
         for asset_id in affected_asset_ids:
             self._index_photo_asset(asset_id, conn)
 
+        def rewrite_people(values: Iterable[str]) -> tuple[list[str], bool]:
+            rewritten: list[str] = []
+            seen: set[str] = set()
+            changed = False
+            for value in values:
+                person = str(value or "").strip()
+                if not person:
+                    continue
+                next_person = new_person if person.casefold() == old_person.casefold() else person
+                changed = changed or next_person != person
+                key = next_person.casefold()
+                if key in seen:
+                    changed = True
+                    continue
+                seen.add(key)
+                rewritten.append(next_person)
+            return rewritten, changed
+
+        def default_group_name(people: Iterable[str], pets: Iterable[str]) -> str:
+            names = [
+                str(value or "").strip()
+                for value in [*list(people), *list(pets)]
+                if str(value or "").strip()
+            ]
+            if len(names) <= 2:
+                return " & ".join(names)
+            return f"{', '.join(names[:-1])} & {names[-1]}"
+
+        group_rows = 0
+        for group in self.list_photo_people_groups(conn):
+            member_people, changed_members = rewrite_people(group.get("memberPeople", []))
+            exclude_people, changed_excluded = rewrite_people(group.get("excludePeople", []))
+            if not changed_members and not changed_excluded:
+                continue
+            group_id = str(group.get("groupId", "") or "")
+            member_pets = group.get("memberPets", [])
+            if len(member_people) + len(member_pets) < 2:
+                self.delete_photo_people_group(group_id, conn=conn)
+                group_rows += 1
+                continue
+            old_default_name = default_group_name(group.get("memberPeople", []), member_pets)
+            next_name = str(group.get("name", "") or "")
+            if next_name.strip() == old_default_name:
+                next_name = default_group_name(member_people, member_pets)
+            self.upsert_photo_people_group(
+                group_id=group_id,
+                name=next_name,
+                member_people=member_people,
+                exclude_people=exclude_people,
+                member_pets=member_pets,
+                exclude_pets=group.get("excludePets", []),
+                key_asset_id=str(group.get("keyAssetId", "") or ""),
+                favorite=bool(group.get("favorite")),
+                hidden=bool(group.get("hidden")),
+                manual_order=group.get("manualOrder"),
+                conn=conn,
+            )
+            group_rows += 1
+
         old_profile = self.photo_person_profile(old_person, conn)
         target_profile = self.photo_person_profile(new_person, conn)
         old_exists = bool(old_profile.get("createdAt") or old_profile.get("keyAssetId") or old_profile.get("favorite") or old_profile.get("hidden") or old_profile.get("manualOrder") is not None)
         target_exists = bool(target_profile.get("createdAt") or target_profile.get("keyAssetId") or target_profile.get("favorite") or target_profile.get("hidden") or target_profile.get("manualOrder") is not None)
         if not old_exists:
-            if updated_people:
+            if updated_people or group_rows:
                 self._bump_photo_smart_album_materialization_revision(conn, reason="rename_photo_person_rows")
-            return {"peopleRows": int(updated_people or 0), "profileMoved": False, "profileMerged": False}
+            return {
+                "peopleRows": int(updated_people or 0),
+                "groupRows": group_rows,
+                "profileMoved": False,
+                "profileMerged": False,
+            }
 
         target_key_asset_id = str(target_profile.get("keyAssetId", "") or "")
         old_key_asset_id = str(old_profile.get("keyAssetId", "") or "")
@@ -20622,6 +25267,7 @@ class WorkspaceDb:
         self._bump_photo_smart_album_materialization_revision(conn, reason="rename_photo_person_profile")
         return {
             "peopleRows": int(updated_people or 0),
+            "groupRows": group_rows,
             "profileMoved": not target_exists,
             "profileMerged": target_exists,
         }
@@ -21043,6 +25689,10 @@ class WorkspaceDb:
         title: str | None = None,
         caption: str | None = None,
         favorite: bool | None = None,
+        rating: int | None = None,
+        rating_explicit: bool | None = None,
+        color_label: str | None = None,
+        pick_status: str | None = None,
         hidden: bool | None = None,
         deleted_at: str | None = None,
         clear_deleted: bool = False,
@@ -21063,6 +25713,10 @@ class WorkspaceDb:
                     title=title,
                     caption=caption,
                     favorite=favorite,
+                    rating=rating,
+                    rating_explicit=rating_explicit,
+                    color_label=color_label,
+                    pick_status=pick_status,
                     hidden=hidden,
                     deleted_at=deleted_at,
                     clear_deleted=clear_deleted,
@@ -21079,7 +25733,7 @@ class WorkspaceDb:
         asset: dict[str, Any] | None = None
         if asset_key:
             row = conn.execute("SELECT * FROM photo_assets WHERE asset_id = ? LIMIT 1", (asset_key,)).fetchone()
-            asset = self._photo_asset_row(row) if row else None
+            asset = self._photo_asset_row(row, conn, {}) if row else None
         if asset is None and source_path:
             asset = self.photo_asset_by_path(source_path, conn)
         if asset is None:
@@ -21092,6 +25746,28 @@ class WorkspaceDb:
         now = now_iso()
         next_title = str(title if title is not None else current.get("title", ""))[:300]
         next_caption = str(caption if caption is not None else current.get("caption", ""))[:4000]
+        raw_next_rating = rating if rating is not None else current.get("rating", 0)
+        if isinstance(raw_next_rating, bool):
+            raise ValueError("rating must be an integer from 0 to 5.")
+        if isinstance(raw_next_rating, int):
+            next_rating = raw_next_rating
+        elif isinstance(raw_next_rating, str) and re.fullmatch(r"[0-5]", raw_next_rating.strip()):
+            next_rating = int(raw_next_rating.strip())
+        else:
+            raise ValueError("rating must be an integer from 0 to 5.")
+        if next_rating < 0 or next_rating > 5:
+            raise ValueError("rating must be an integer from 0 to 5.")
+        next_rating_explicit = (
+            bool(rating_explicit)
+            if rating_explicit is not None
+            else (True if rating is not None else bool(current.get("ratingExplicit")))
+        )
+        next_color_label = self._normalize_photo_color_label(
+            color_label if color_label is not None else current.get("colorLabel", "")
+        )
+        next_pick_status = self._normalize_photo_pick_status(
+            pick_status if pick_status is not None else current.get("pickStatus", "")
+        )
         next_location = location_override if isinstance(location_override, dict) else current.get("locationOverride", {})
         if not isinstance(next_location, dict):
             next_location = {}
@@ -21134,13 +25810,17 @@ class WorkspaceDb:
         conn.execute(
             """
             INSERT INTO photo_asset_metadata(
-                asset_id, title, caption, favorite, hidden, deleted_at, date_override,
+                asset_id, title, caption, favorite, rating, rating_explicit, color_label, pick_status, hidden, deleted_at, date_override,
                 location_override_json, location_hidden, edited, updated_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(asset_id) DO UPDATE SET
                 title=excluded.title,
                 caption=excluded.caption,
                 favorite=excluded.favorite,
+                rating=excluded.rating,
+                rating_explicit=excluded.rating_explicit,
+                color_label=excluded.color_label,
+                pick_status=excluded.pick_status,
                 hidden=excluded.hidden,
                 deleted_at=excluded.deleted_at,
                 date_override=excluded.date_override,
@@ -21154,6 +25834,10 @@ class WorkspaceDb:
                 next_title,
                 next_caption,
                 int(bool(favorite if favorite is not None else current.get("favorite", False))),
+                next_rating,
+                int(next_rating_explicit),
+                next_color_label,
+                next_pick_status,
                 int(bool(hidden if hidden is not None else current.get("hidden", False))),
                 next_deleted_at,
                 next_date_override or None,
@@ -21175,6 +25859,7 @@ class WorkspaceDb:
             self._refresh_photo_xmp_conflicts(asset_key, xmp_metadata, {**updated_metadata, "keywords": next_keywords}, conn)
         if refresh_index:
             self._index_photo_asset(asset_key, conn)
+        self._bump_photo_smart_album_materialization_revision(conn, reason="photo_asset_metadata")
         return {
             **updated_metadata,
             "keywords": next_keywords,
@@ -21290,26 +25975,17 @@ class WorkspaceDb:
                 snapshot["managedOriginalTrash"] = plan
                 managed_originals_trashed.append(plan)
 
+            candidate_cleanup = self.delete_review_candidates_for_source_paths(
+                (target["sourcePath"] for target in targets),
+                conn,
+            )
+            candidate_rows += int(candidate_cleanup.get("deleted", 0) or 0)
+            candidate_ids.update(str(candidate_id) for candidate_id in candidate_cleanup.get("candidateIds", []) if str(candidate_id))
+
             for target in targets:
                 source = target["sourcePath"]
                 asset_key = target["assetId"]
-                for row in conn.execute(
-                    """
-                    SELECT candidate_id FROM review_candidates
-                    WHERE source_path = ? OR media_source_path = ? OR media_path = ?
-                    """,
-                    (source, source, source),
-                ).fetchall():
-                    candidate_id = str(row["candidate_id"] or "")
-                    if candidate_id:
-                        candidate_ids.add(candidate_id)
                 scan_file_rows += int(conn.execute("DELETE FROM scan_files WHERE path = ?", (source,)).rowcount or 0)
-                candidate_rows += int(
-                    conn.execute(
-                        "DELETE FROM review_candidates WHERE source_path = ? OR media_source_path = ? OR media_path = ?",
-                        (source, source, source),
-                    ).rowcount or 0
-                )
                 conn.execute("DELETE FROM photo_search_fts WHERE asset_id = ?", (asset_key,))
                 conn.execute("DELETE FROM photo_ocr_blocks WHERE asset_id = ?", (asset_key,))
                 conn.execute("DELETE FROM photo_object_tags WHERE asset_id = ?", (asset_key,))
@@ -22639,11 +27315,47 @@ class WorkspaceDb:
         ).fetchall()
         assets: list[dict[str, Any]] = []
         for row in rows:
-            asset = self._photo_asset_row(row)
+            asset = self._photo_asset_row(row, conn, {})
             asset["albumPosition"] = int(row["album_position"] or 0)
             asset["albumAddedAt"] = str(row["album_added_at"] or "")
             assets.append(asset)
         return assets
+
+    def list_photo_album_source_paths(
+        self,
+        album_id: str,
+        *,
+        include_hidden: bool = False,
+        include_deleted: bool = False,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[str]:
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.list_photo_album_source_paths(
+                    album_id,
+                    include_hidden=include_hidden,
+                    include_deleted=include_deleted,
+                    conn=local_conn,
+                )
+        self._require_manual_album(album_id, conn)
+        visibility_sql = ""
+        if not include_hidden:
+            visibility_sql += " AND COALESCE(m.hidden, 0) = 0"
+        if not include_deleted:
+            visibility_sql += " AND m.deleted_at IS NULL"
+        rows = conn.execute(
+            f"""
+            SELECT a.source_path
+            FROM photo_album_items AS i
+            JOIN photo_assets AS a ON a.asset_id = i.asset_id
+            LEFT JOIN photo_asset_metadata AS m ON m.asset_id = a.asset_id
+            WHERE i.album_id = ?
+                {visibility_sql}
+            ORDER BY i.position ASC, i.added_at ASC, a.source_path ASC
+            """,
+            (str(album_id or ""),),
+        ).fetchall()
+        return [str(row["source_path"] or "") for row in rows if str(row["source_path"] or "")]
 
     def photo_manual_album_summary(
         self,
@@ -22816,6 +27528,43 @@ class WorkspaceDb:
             }
             for row in rows
         ]
+
+    def photo_asset_album_memberships_by_ids(
+        self,
+        asset_ids: Iterable[str],
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        clean_ids = [str(value or "").strip() for value in dict.fromkeys(asset_ids or []) if str(value or "").strip()]
+        if not clean_ids:
+            return {}
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.photo_asset_album_memberships_by_ids(clean_ids, conn=local_conn)
+        result: dict[str, list[dict[str, Any]]] = {asset_id: [] for asset_id in clean_ids}
+        for start in range(0, len(clean_ids), 800):
+            chunk = clean_ids[start:start + 800]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT i.asset_id, a.album_id, a.name, a.album_kind, i.position, i.added_at
+                FROM photo_album_items AS i
+                JOIN photo_albums AS a ON a.album_id = i.album_id
+                WHERE i.asset_id IN ({placeholders})
+                ORDER BY i.asset_id ASC, a.name ASC, a.album_id ASC
+                """,
+                tuple(chunk),
+            ).fetchall()
+            for row in rows:
+                asset_id = str(row["asset_id"] or "")
+                result.setdefault(asset_id, []).append({
+                    "albumId": str(row["album_id"] or ""),
+                    "name": str(row["name"] or ""),
+                    "albumKind": str(row["album_kind"] or "manual"),
+                    "position": int(row["position"] or 0),
+                    "addedAt": str(row["added_at"] or ""),
+                    "derived": False,
+                })
+        return result
 
     def photo_asset_ids_with_album_memberships(
         self,
@@ -23103,14 +27852,15 @@ class WorkspaceDb:
         offset = max(0, int(offset or 0))
         where = "sc.sensitive = 1 OR smo.override_sensitive IS NOT NULL"
         latest = (
-            "SELECT file_hash, sensitive, score, reason, model_name, MAX(created_at) AS created_at "
+            "SELECT file_hash, sensitive, score, reason, model_name, labels_json, MAX(created_at) AS created_at "
             "FROM safety_cache GROUP BY file_hash"
         )
         rows = conn.execute(
             f"""
             SELECT pa.asset_id AS asset_id, pa.source_path AS source_path,
                    sc.sensitive AS sensitive, sc.score AS score, sc.reason AS reason,
-                   sc.model_name AS model_name, smo.override_sensitive AS override_sensitive
+                   sc.model_name AS model_name, sc.labels_json AS labels_json,
+                   smo.override_sensitive AS override_sensitive
             FROM photo_assets pa
             JOIN ({latest}) sc ON sc.file_hash = pa.content_hash
             LEFT JOIN safe_mode_overrides smo ON smo.content_hash = pa.content_hash
@@ -23133,6 +27883,12 @@ class WorkspaceDb:
             stored = bool(row["sensitive"])
             raw_override = row["override_sensitive"]
             override = None if raw_override is None else bool(raw_override)
+            try:
+                labels = json.loads(row["labels_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                labels = {}
+            if not isinstance(labels, dict):
+                labels = {}
             items.append({
                 "assetId": str(row["asset_id"]),
                 "sourcePath": str(row["source_path"]),
@@ -23142,6 +27898,11 @@ class WorkspaceDb:
                 "score": float(row["score"] or 0.0),
                 "reason": str(row["reason"] or ""),
                 "modelName": str(row["model_name"] or ""),
+                "categoryScores": {
+                    str(key).removeprefix("policy:"): float(value)
+                    for key, value in labels.items()
+                    if str(key).startswith("policy:") and isinstance(value, (int, float))
+                },
             })
         return {
             "items": items,
@@ -23200,6 +27961,223 @@ class WorkspaceDb:
             ),
         )
 
+    @staticmethod
+    def _encode_pair_center(value: Any) -> sqlite3.Binary | None:
+        if value is None:
+            return None
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("Adaptive calibration pair centers must be numeric vectors.")
+        if not value:
+            return None
+        if len(value) != 512:
+            raise ValueError("Adaptive calibration pair centers must contain exactly 512 values.")
+        try:
+            values = [float(item) for item in value]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Adaptive calibration pair centers must contain only numbers.") from exc
+        if not all(math.isfinite(item) for item in values):
+            raise ValueError("Adaptive calibration pair centers must contain only finite values.")
+        norm = math.sqrt(sum(item * item for item in values))
+        if not math.isfinite(norm) or norm <= 1e-12:
+            raise ValueError("Adaptive calibration pair centers must have a non-zero norm.")
+        unit = [item / norm for item in values]
+        return sqlite3.Binary(struct.pack("<512f", *unit))
+
+    @staticmethod
+    def _decode_pair_center(value: Any) -> list[float]:
+        if value is None:
+            return []
+        try:
+            payload = bytes(value)
+        except (TypeError, ValueError):
+            return []
+        if len(payload) != 512 * 4:
+            return []
+        try:
+            values = [float(item) for item in struct.unpack("<512f", payload)]
+        except struct.error:
+            return []
+        if not all(math.isfinite(item) for item in values):
+            return []
+        norm = math.sqrt(sum(item * item for item in values))
+        if not math.isfinite(norm) or norm <= 1e-12:
+            return []
+        return [item / norm for item in values]
+
+    def upsert_candidate_match_context(
+        self,
+        candidate_id: str,
+        best_ref_id: str,
+        model_name: str,
+        pair_center: Any,
+        cohort_z: float | None,
+        cohort_version: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
+        candidate_key = str(candidate_id or "").strip()
+        reference_key = str(best_ref_id or "").strip()
+        model_key = str(model_name or "").strip()
+        if not candidate_key or not reference_key or not model_key:
+            raise ValueError("Candidate match context requires candidate, reference, and model identifiers.")
+        encoded_center = self._encode_pair_center(pair_center)
+        if encoded_center is None:
+            raise ValueError("Candidate match context requires a pair center.")
+        normalized_cohort_z: float | None = None
+        if cohort_z is not None:
+            normalized_cohort_z = float(cohort_z)
+            if not math.isfinite(normalized_cohort_z):
+                raise ValueError("Candidate match context cohort scores must be finite.")
+        if conn is None:
+            with self.connect() as local_conn:
+                self.upsert_candidate_match_context(
+                    candidate_key,
+                    reference_key,
+                    model_key,
+                    pair_center,
+                    normalized_cohort_z,
+                    cohort_version,
+                    local_conn,
+                )
+            return
+        conn.execute(
+            """
+            INSERT INTO candidate_match_context(
+                candidate_id, best_ref_id, model_name, pair_center, cohort_z,
+                cohort_version, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(candidate_id) DO UPDATE SET
+                best_ref_id=excluded.best_ref_id,
+                model_name=excluded.model_name,
+                pair_center=excluded.pair_center,
+                cohort_z=excluded.cohort_z,
+                cohort_version=excluded.cohort_version,
+                created_at=excluded.created_at
+            """,
+            (
+                candidate_key,
+                reference_key,
+                model_key,
+                encoded_center,
+                normalized_cohort_z,
+                str(cohort_version or "")[:160],
+                now_iso(),
+            ),
+        )
+
+    def candidate_match_context(
+        self,
+        candidate_id: str,
+        *,
+        best_ref_id: str = "",
+        model_name: str = "",
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        candidate_key = str(candidate_id or "").strip()
+        if not candidate_key:
+            return None
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.candidate_match_context(
+                    candidate_key,
+                    best_ref_id=best_ref_id,
+                    model_name=model_name,
+                    conn=local_conn,
+                )
+        row = conn.execute(
+            """
+            SELECT candidate_id, best_ref_id, model_name, pair_center, cohort_z,
+                cohort_version, created_at
+            FROM candidate_match_context
+            WHERE candidate_id = ?
+            LIMIT 1
+            """,
+            (candidate_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        stored_reference = str(row["best_ref_id"] or "")
+        stored_model = str(row["model_name"] or "")
+        if best_ref_id and stored_reference != str(best_ref_id):
+            return None
+        if model_name and stored_model != str(model_name):
+            return None
+        center = self._decode_pair_center(row["pair_center"])
+        if not center:
+            return None
+        cohort_z = row["cohort_z"]
+        if cohort_z is not None and not math.isfinite(float(cohort_z)):
+            return None
+        return {
+            "candidateId": str(row["candidate_id"] or ""),
+            "bestRefId": stored_reference,
+            "modelName": stored_model,
+            "pairCenter": center,
+            "cohortZ": None if cohort_z is None else float(cohort_z),
+            "cohortVersion": str(row["cohort_version"] or ""),
+            "createdAt": str(row["created_at"] or ""),
+        }
+
+    def candidate_match_contexts(
+        self,
+        candidate_ids: Iterable[str],
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        ids = [str(value or "").strip() for value in dict.fromkeys(candidate_ids or []) if str(value or "").strip()]
+        if not ids:
+            return {}
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.candidate_match_contexts(ids, local_conn)
+        result: dict[str, dict[str, Any]] = {}
+        for offset in range(0, len(ids), 800):
+            chunk = ids[offset:offset + 800]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                f"""
+                SELECT candidate_id, best_ref_id, model_name, pair_center, cohort_z,
+                    cohort_version, created_at
+                FROM candidate_match_context
+                WHERE candidate_id IN ({placeholders})
+                """,
+                chunk,
+            ).fetchall()
+            for row in rows:
+                center = self._decode_pair_center(row["pair_center"])
+                cohort_z = row["cohort_z"]
+                if not center or (cohort_z is not None and not math.isfinite(float(cohort_z))):
+                    continue
+                candidate_id = str(row["candidate_id"] or "")
+                result[candidate_id] = {
+                    "candidateId": candidate_id,
+                    "bestRefId": str(row["best_ref_id"] or ""),
+                    "modelName": str(row["model_name"] or ""),
+                    "pairCenter": center,
+                    "cohortZ": None if cohort_z is None else float(cohort_z),
+                    "cohortVersion": str(row["cohort_version"] or ""),
+                    "createdAt": str(row["created_at"] or ""),
+                }
+        return result
+
+    def delete_candidate_match_context(
+        self,
+        candidate_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> int:
+        candidate_key = str(candidate_id or "").strip()
+        if not candidate_key:
+            return 0
+        if conn is None:
+            with self.connect() as local_conn:
+                return self.delete_candidate_match_context(candidate_key, local_conn)
+        return int(
+            conn.execute(
+                "DELETE FROM candidate_match_context WHERE candidate_id = ?",
+                (candidate_key,),
+            ).rowcount or 0
+        )
+
     def add_calibration_label(
         self,
         label_id: str,
@@ -23208,9 +28186,12 @@ class WorkspaceDb:
     ) -> None:
         def _opt_float(value: Any) -> float | None:
             try:
-                return None if value is None else float(value)
+                result = None if value is None else float(value)
             except (TypeError, ValueError):
                 return None
+            return result if result is None or math.isfinite(result) else None
+
+        pair_center = self._encode_pair_center(row.get("pairCenter"))
 
         if conn is None:
             with self.connect() as local_conn:
@@ -23220,9 +28201,10 @@ class WorkspaceDb:
             """
             INSERT OR REPLACE INTO calibration_labels(
                 label_id, source_path, file_hash, expected_person, actual_person,
-                match_score, is_match, safe_label, pose_bucket, age_gap_years,
-                raw_cosine, model_name, created_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                match_score, is_match, safe_label, pose_bucket, media_kind, age_gap_years,
+                raw_cosine, model_name, best_ref_id, pair_center, cohort_z,
+                context_version, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 label_id,
@@ -23234,9 +28216,14 @@ class WorkspaceDb:
                 None if row.get("isMatch") is None else (1 if bool(row.get("isMatch")) else 0),
                 str(row.get("safeLabel", "")),
                 str(row.get("poseBucket", "") or ""),
+                str(row.get("mediaKind", "") or "")[:40],
                 _opt_float(row.get("ageGapYears")),
                 _opt_float(row.get("rawCosine")),
                 str(row.get("modelName", "") or ""),
+                str(row.get("bestRefId", "") or ""),
+                pair_center,
+                _opt_float(row.get("cohortZ")),
+                str(row.get("contextVersion", "") or "")[:100],
                 now_iso(),
             )
         )
@@ -23250,7 +28237,9 @@ class WorkspaceDb:
         with self.connect() as conn:
             cursor = conn.execute(
                 """
-                SELECT match_score, raw_cosine, is_match, pose_bucket, age_gap_years, model_name, expected_person
+                SELECT match_score, raw_cosine, is_match, pose_bucket, age_gap_years,
+                    media_kind, model_name, expected_person, best_ref_id, pair_center, cohort_z,
+                    context_version
                 FROM calibration_labels
                 WHERE is_match IS NOT NULL AND match_score IS NOT NULL
                 ORDER BY created_at ASC
@@ -23266,9 +28255,14 @@ class WorkspaceDb:
                         "rawCosine": match_score if raw is None else float(raw),
                         "isMatch": bool(record["is_match"]),
                         "poseBucket": str(record["pose_bucket"] or ""),
+                        "mediaKind": str(record["media_kind"] or ""),
                         "ageGapYears": None if record["age_gap_years"] is None else float(record["age_gap_years"]),
                         "modelName": str(record["model_name"] or ""),
                         "expectedPerson": str(record["expected_person"] or ""),
+                        "bestRefId": str(record["best_ref_id"] or ""),
+                        "pairCenter": self._decode_pair_center(record["pair_center"]),
+                        "cohortZ": None if record["cohort_z"] is None else float(record["cohort_z"]),
+                        "contextVersion": str(record["context_version"] or ""),
                     }
                 )
             return rows
@@ -23445,8 +28439,15 @@ class WorkspaceDb:
                 return self.delete_training_examples_for_candidates(ids, local_conn)
         if not ids:
             return 0
-        cursor = conn.executemany("DELETE FROM training_examples WHERE candidate_id = ?", [(candidate_id,) for candidate_id in ids])
-        return int(cursor.rowcount if cursor.rowcount is not None else 0)
+        placeholders = ",".join("?" for _ in ids)
+        count = int(
+            conn.execute(
+                f"SELECT COUNT(*) AS n FROM training_examples WHERE candidate_id IN ({placeholders})",
+                tuple(ids),
+            ).fetchone()["n"]
+        )
+        conn.executemany("DELETE FROM training_examples WHERE candidate_id = ?", [(candidate_id,) for candidate_id in ids])
+        return count
 
     def _artifact_hash(self, row: dict[str, Any], metrics: dict[str, Any], payload: dict[str, Any]) -> str:
         body = {
@@ -23528,6 +28529,28 @@ class WorkspaceDb:
             result.append(item)
         return result
 
+    def all_learned_artifact_rows(self, artifact_type: str = "", status: str = "") -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        args: list[Any] = []
+        if artifact_type:
+            clauses.append("artifact_type = ?")
+            args.append(str(artifact_type))
+        if status:
+            clauses.append("status = ?")
+            args.append(str(status))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM learned_artifacts
+                {where}
+                ORDER BY created_at DESC, artifact_id DESC
+                """,
+                tuple(args),
+            ).fetchall()
+        return [self._decode_artifact_row(row) for row in rows]
+
     def _decode_artifact_row(self, row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
         for key in ("metrics_json", "payload_json"):
@@ -23570,16 +28593,28 @@ class WorkspaceDb:
                 (status, promoted_at, str(artifact_id)),
             )
 
+    def delete_learned_artifacts(self, artifact_ids: Iterable[str]) -> int:
+        ids = list(dict.fromkeys(str(item) for item in artifact_ids if str(item)))
+        if not ids:
+            return 0
+        with self.connect() as conn:
+            cursor = conn.executemany(
+                "DELETE FROM learned_artifacts WHERE artifact_id = ?",
+                [(artifact_id,) for artifact_id in ids],
+            )
+        return int(cursor.rowcount or 0)
+
     def delete_suggested_reference_artifacts(
         self,
         candidate_ids: Iterable[str] | None = None,
         person_names: Iterable[str] | None = None,
         statuses: Iterable[str] | None = None,
+        all_candidates: bool = False,
     ) -> int:
         candidate_set = {str(item) for item in (candidate_ids or []) if str(item)}
         person_set = {str(item).strip().casefold() for item in (person_names or []) if str(item).strip()}
         status_set = {str(item) for item in (statuses or []) if str(item)}
-        if not candidate_set and not person_set:
+        if not candidate_set and not person_set and not all_candidates:
             return 0
         with self.connect() as conn:
             rows = conn.execute(
@@ -23601,7 +28636,7 @@ class WorkspaceDb:
                     payload = {}
                 candidate_id = str(payload.get("candidateId", payload.get("candidate_id", "")) or "")
                 person_name = str(payload.get("personName", payload.get("person_name", "")) or "").strip().casefold()
-                if candidate_id in candidate_set or person_name in person_set:
+                if all_candidates or candidate_id in candidate_set or person_name in person_set:
                     delete_ids.append(str(row["artifact_id"]))
             if not delete_ids:
                 return 0
@@ -23651,27 +28686,30 @@ class WorkspaceDb:
             "learnedArtifacts": learned,
         }
 
-    def add_blocked_pair(self, row: dict[str, Any]) -> None:
+    def add_blocked_pair(self, row: dict[str, Any], conn: sqlite3.Connection | None = None) -> None:
         file_hash = str(row.get("fileHash", "")).strip()
         person_name = str(row.get("personName", "")).strip()
         if not file_hash or not person_name:
             raise ValueError("Blocked false-match pairs require a file hash and person name.")
-        with self.connect() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO blocked_pairs(
-                    file_hash, person_name, best_ref_id, source_path, note, created_at
-                ) VALUES(?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    file_hash,
-                    person_name.casefold(),
-                    str(row.get("bestRefId", "") or ""),
-                    str(row.get("sourcePath", "")),
-                    str(row.get("note", ""))[:600],
-                    now_iso(),
-                ),
-            )
+        if conn is None:
+            with self.connect() as local_conn:
+                self.add_blocked_pair(row, local_conn)
+            return
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO blocked_pairs(
+                file_hash, person_name, best_ref_id, source_path, note, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (
+                file_hash,
+                person_name.casefold(),
+                str(row.get("bestRefId", "") or ""),
+                str(row.get("sourcePath", "")),
+                str(row.get("note", ""))[:600],
+                now_iso(),
+            ),
+        )
 
     def blocked_pair_exists(
         self,
@@ -23754,9 +28792,11 @@ class WorkspaceDb:
             "photo_asset_events",
             "embedding_cache",
             "calibration_labels",
+            "candidate_match_context",
             "training_examples",
             "learned_artifacts",
             "blocked_pairs",
+            "photo_relationship_name_reviews",
             "review_candidates",
         ]
         if include_scan_history:
@@ -23766,6 +28806,269 @@ class WorkspaceDb:
             for table in tables:
                 cursor = conn.execute(f"DELETE FROM {table}")
                 deleted[table] = int(cursor.rowcount if cursor.rowcount is not None else 0)
+        return deleted
+
+    def subject_private_person_names(self) -> list[str]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT person_name AS person FROM review_candidates WHERE TRIM(person_name) != ''
+                UNION
+                SELECT person_name AS person FROM photo_asset_people WHERE TRIM(person_name) != ''
+                UNION
+                SELECT person_name AS person FROM photo_people_profiles WHERE TRIM(person_name) != ''
+                UNION
+                SELECT person_name AS person FROM photo_external_people_hints WHERE TRIM(person_name) != ''
+                UNION
+                SELECT expected_person AS person FROM calibration_labels WHERE TRIM(expected_person) != ''
+                UNION
+                SELECT actual_person AS person FROM calibration_labels WHERE TRIM(actual_person) != ''
+                UNION
+                SELECT expected_person AS person FROM training_examples WHERE TRIM(expected_person) != ''
+                UNION
+                SELECT actual_person AS person FROM training_examples WHERE TRIM(actual_person) != ''
+                UNION
+                SELECT person_name AS person FROM blocked_pairs WHERE TRIM(person_name) != ''
+                ORDER BY person COLLATE NOCASE
+                """
+            ).fetchall()
+        return [str(row["person"] or "").strip() for row in rows if str(row["person"] or "").strip()]
+
+    def delete_subject_private_data(
+        self,
+        person_name: str,
+        *,
+        candidate_ids: Iterable[str] = (),
+    ) -> dict[str, int]:
+        person = " ".join(str(person_name or "").strip().split())
+        if not person:
+            raise ValueError("A person name is required.")
+        person_key = person.casefold()
+        person_pattern = re.compile(re.escape(person), re.IGNORECASE)
+        explicit_candidate_ids = {str(value) for value in candidate_ids if str(value)}
+
+        def remove_person(value: Any) -> tuple[Any, bool]:
+            if isinstance(value, str):
+                if value.strip().casefold() == person_key:
+                    return None, True
+                if person_key in value.casefold():
+                    return person_pattern.sub("[redacted subject]", value), True
+                return value, False
+            if isinstance(value, list):
+                result: list[Any] = []
+                changed = False
+                for item in value:
+                    cleaned, item_changed = remove_person(item)
+                    changed = changed or item_changed
+                    if cleaned is not None:
+                        result.append(cleaned)
+                return result, changed
+            if isinstance(value, dict):
+                field = str(value.get("field", "")).strip().casefold()
+                if field in {"person", "people", "personname", "person_name"}:
+                    cleaned_value, value_changed = remove_person(value.get("value"))
+                    if value_changed and cleaned_value in (None, [], ""):
+                        return None, True
+                result: dict[str, Any] = {}
+                changed = False
+                for key, item in value.items():
+                    cleaned, item_changed = remove_person(item)
+                    changed = changed or item_changed
+                    if cleaned is not None:
+                        result[str(key)] = cleaned
+                return result, changed
+            return value, False
+
+        def rewrite_json_column(
+            conn: sqlite3.Connection,
+            table: str,
+            key_column: str,
+            json_columns: tuple[str, ...],
+            updated_keys: set[str] | None = None,
+        ) -> int:
+            rows = conn.execute(
+                f"SELECT {key_column}, {', '.join(json_columns)} FROM {table}"
+            ).fetchall()
+            updated = 0
+            for row in rows:
+                replacements: dict[str, str] = {}
+                for column in json_columns:
+                    try:
+                        parsed = json.loads(str(row[column] or "{}"))
+                    except json.JSONDecodeError:
+                        continue
+                    cleaned, changed = remove_person(parsed)
+                    if changed:
+                        replacements[column] = json.dumps(
+                            {} if cleaned is None else cleaned,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                if not replacements:
+                    continue
+                assignments = ", ".join(f"{column} = ?" for column in replacements)
+                conn.execute(
+                    f"UPDATE {table} SET {assignments} WHERE {key_column} = ?",
+                    (*replacements.values(), row[key_column]),
+                )
+                if updated_keys is not None:
+                    updated_keys.add(str(row[key_column]))
+                updated += 1
+            return updated
+
+        deleted: dict[str, int] = {}
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT candidate_id FROM review_candidates WHERE person_key = ?",
+                (person_key,),
+            ).fetchall()
+            all_candidate_ids = explicit_candidate_ids | {
+                str(row["candidate_id"] or "") for row in rows if str(row["candidate_id"] or "")
+            }
+            affected_assets = {
+                str(row["asset_id"] or "")
+                for row in conn.execute(
+                    "SELECT DISTINCT asset_id FROM photo_asset_people WHERE LOWER(person_name) = ?",
+                    (person_key,),
+                ).fetchall()
+                if str(row["asset_id"] or "")
+            }
+            photo_people_rows = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS n FROM photo_asset_people WHERE LOWER(person_name) = ?",
+                    (person_key,),
+                ).fetchone()["n"]
+            )
+
+            if all_candidate_ids:
+                deleted["trainingExamples"] = self.delete_training_examples_for_candidates(all_candidate_ids, conn)
+                deleted["reviewCandidates"] = self.delete_candidates(all_candidate_ids, conn)
+            else:
+                deleted["trainingExamples"] = 0
+                deleted["reviewCandidates"] = 0
+
+            cursor = conn.execute(
+                """
+                DELETE FROM training_examples
+                WHERE LOWER(expected_person) = ? OR LOWER(actual_person) = ?
+                """,
+                (person_key, person_key),
+            )
+            deleted["trainingExamples"] += int(cursor.rowcount or 0)
+            cursor = conn.execute(
+                """
+                DELETE FROM calibration_labels
+                WHERE LOWER(expected_person) = ? OR LOWER(actual_person) = ?
+                """,
+                (person_key, person_key),
+            )
+            deleted["calibrationLabels"] = int(cursor.rowcount or 0)
+            deleted["blockedPairs"] = int(
+                conn.execute("DELETE FROM blocked_pairs WHERE LOWER(person_name) = ?", (person_key,)).rowcount or 0
+            )
+
+            conn.execute("DELETE FROM photo_asset_people WHERE LOWER(person_name) = ?", (person_key,))
+            deleted["photoPeopleRows"] = photo_people_rows
+            deleted["photoPeopleProfiles"] = int(
+                conn.execute("DELETE FROM photo_people_profiles WHERE LOWER(person_name) = ?", (person_key,)).rowcount or 0
+            )
+            deleted["externalPeopleHints"] = int(
+                conn.execute("DELETE FROM photo_external_people_hints WHERE LOWER(person_name) = ?", (person_key,)).rowcount or 0
+            )
+            deleted["relationshipNameReviews"] = self.delete_photo_relationship_name_reviews_for_people([person], conn)
+
+            group_rows = conn.execute(
+                """
+                SELECT group_id, member_people_json, excluded_people_json,
+                       member_pets_json, excluded_pets_json
+                FROM photo_people_groups
+                """
+            ).fetchall()
+            groups_updated = 0
+            groups_deleted = 0
+            for row in group_rows:
+                try:
+                    member_people = json.loads(str(row["member_people_json"] or "[]"))
+                    excluded_people = json.loads(str(row["excluded_people_json"] or "[]"))
+                    member_pets = json.loads(str(row["member_pets_json"] or "[]"))
+                except json.JSONDecodeError:
+                    continue
+                next_members, members_changed = remove_person(member_people)
+                next_excluded, excluded_changed = remove_person(excluded_people)
+                if not members_changed and not excluded_changed:
+                    continue
+                if len(next_members or []) + len(member_pets if isinstance(member_pets, list) else []) < 2:
+                    conn.execute("DELETE FROM photo_people_groups WHERE group_id = ?", (row["group_id"],))
+                    groups_deleted += 1
+                else:
+                    conn.execute(
+                        """
+                        UPDATE photo_people_groups
+                        SET member_people_json = ?, excluded_people_json = ?, updated_at = ?
+                        WHERE group_id = ?
+                        """,
+                        (
+                            json.dumps(next_members or [], separators=(",", ":")),
+                            json.dumps(next_excluded or [], separators=(",", ":")),
+                            now_iso(),
+                            row["group_id"],
+                        ),
+                    )
+                    groups_updated += 1
+            deleted["peopleGroupsUpdated"] = groups_updated
+            deleted["peopleGroupsDeleted"] = groups_deleted
+
+            deleted["photoAlbumsUpdated"] = rewrite_json_column(
+                conn,
+                "photo_albums",
+                "album_id",
+                ("include_people_json", "exclude_people_json", "rules_json"),
+            )
+            deleted["savedFiltersUpdated"] = rewrite_json_column(
+                conn,
+                "photo_saved_filters",
+                "filter_id",
+                ("filters_json", "rules_json"),
+            )
+            deleted["operationRowsPseudonymized"] = rewrite_json_column(
+                conn,
+                "photo_operation_journal",
+                "operation_id",
+                ("payload_json", "undo_payload_json"),
+            )
+            deleted["assetEventsPseudonymized"] = rewrite_json_column(
+                conn,
+                "photo_asset_events",
+                "event_id",
+                ("metadata_json",),
+            )
+            deleted["assetMetadataPseudonymized"] = rewrite_json_column(
+                conn,
+                "photo_assets",
+                "asset_id",
+                ("metadata_json",),
+                affected_assets,
+            )
+
+            # Aggregate local models cannot reliably subtract one subject. Remove
+            # them and let the operator retrain from the remaining consented rows.
+            # Per-subject synthetic age-image reviews are erased selectively by
+            # ProjectState so another person's reviewed reference is not orphaned.
+            deleted["learnedArtifacts"] = int(
+                conn.execute(
+                    "DELETE FROM learned_artifacts WHERE artifact_type != 'synthetic_age_image_review'"
+                ).rowcount
+                or 0
+            )
+            deleted["embeddingCache"] = int(conn.execute("DELETE FROM embedding_cache").rowcount or 0)
+            deleted["safetyCache"] = int(conn.execute("DELETE FROM safety_cache").rowcount or 0)
+            deleted["safeModeOverrides"] = int(conn.execute("DELETE FROM safe_mode_overrides").rowcount or 0)
+            deleted["smartAlbumMaterializedRows"] = int(
+                conn.execute("DELETE FROM photo_smart_album_materialized_items").rowcount or 0
+            )
+            self._bump_photo_smart_album_materialization_revision(conn, reason="delete_subject_private_data")
+            for asset_id in sorted(affected_assets):
+                self._index_photo_asset(asset_id, conn)
         return deleted
 
     def prune_scan_manifests(self, keep_runs: int = 20) -> dict[str, int]:
@@ -23828,13 +29131,13 @@ class WorkspaceDb:
         if target.exists():
             target.unlink()
         target.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.path), timeout=30, isolation_level=None)
+        conn = self._open_connection(timeout=30, isolation_level=None)
         try:
             conn.execute("PRAGMA busy_timeout=30000")
             conn.execute("VACUUM INTO ?", (str(target),))
         finally:
             conn.close()
-        verify = sqlite3.connect(str(target), timeout=30)
+        verify = self._open_connection(target, timeout=30)
         try:
             integrity = [str(row[0]) for row in verify.execute("PRAGMA integrity_check").fetchall()]
             foreign_key_errors = verify.execute("PRAGMA foreign_key_check").fetchmany(1)
@@ -23842,6 +29145,47 @@ class WorkspaceDb:
                 raise sqlite3.DatabaseError("Snapshot failed SQLite integrity verification.")
         finally:
             verify.close()
+
+    def rekey(self, new_key: bytes) -> dict[str, Any]:
+        parsed = WorkspaceEncryption(self.path.parent, new_key, required=True).key
+        assert parsed is not None
+        if self._key is None:
+            raise WorkspaceEncryptionError("A plaintext development database cannot be rotated in place; migrate it first.")
+        old_key = self._key
+        conn = self._open_connection(timeout=30, isolation_level=None)
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.execute(f"PRAGMA rekey=\"x'{parsed.hex()}'\"")
+        except Exception:
+            self._key = old_key
+            raise
+        finally:
+            conn.close()
+        self._key = parsed
+        self.encryption.set_primary_key(parsed, retain=[old_key, *self.encryption.key_candidates])
+        self._verify_encrypted_database(self.path, parsed)
+        return self.encryption_status()
+
+    def encryption_status(self) -> dict[str, Any]:
+        encrypted_header = bool(self.path.exists() and not self._is_plaintext_database(self.path))
+        cipher_integrity: list[str] = []
+        if self._key is not None and self.path.exists():
+            conn = self._open_connection(timeout=30, isolation_level=None)
+            try:
+                cipher_integrity = [str(row[0]) for row in conn.execute("PRAGMA cipher_integrity_check").fetchall()]
+            finally:
+                conn.close()
+        return {
+            "required": self.encryption.required,
+            "enabled": self._key is not None,
+            "encryptedHeader": encrypted_header,
+            "keyId": workspace_key_id(self._key),
+            "cipherVersion": self._cipher_version,
+            "cipherIntegrity": cipher_integrity,
+            "plaintextHeader": self._is_plaintext_database(self.path) if self.path.exists() else False,
+            "walEncryptedByDatabaseCodec": self._key is not None,
+            "temporaryStorage": "memory" if self._key is not None else "default",
+        }
 
     def integrity_report(self) -> dict[str, Any]:
         wal_path = Path(str(self.path) + "-wal")
@@ -23875,6 +29219,7 @@ class WorkspaceDb:
                     "blocked_pairs",
                     "benchmark_runs",
                     "review_candidates",
+                    "photo_relationship_name_reviews",
                 ):
                     try:
                         counts[table] = int(conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"])
@@ -23928,6 +29273,19 @@ class WorkspaceDb:
             training_examples = int(conn.execute("SELECT COUNT(*) AS n FROM training_examples").fetchone()["n"])
             learned_artifacts = int(conn.execute("SELECT COUNT(*) AS n FROM learned_artifacts").fetchone()["n"])
             review_candidates = int(conn.execute("SELECT COUNT(*) AS n FROM review_candidates").fetchone()["n"])
+            relationship_name_reviews = int(conn.execute("SELECT COUNT(*) AS n FROM photo_relationship_name_reviews").fetchone()["n"])
+            photo_assets = int(conn.execute("SELECT COUNT(*) AS n FROM photo_assets").fetchone()["n"])
+            photo_metadata_rows = int(conn.execute("SELECT COUNT(*) AS n FROM photo_asset_metadata").fetchone()["n"])
+            photo_albums = int(conn.execute("SELECT COUNT(*) AS n FROM photo_albums").fetchone()["n"])
+            photo_edit_versions = int(conn.execute("SELECT COUNT(*) AS n FROM photo_edit_stack_versions").fetchone()["n"])
+            photo_media_pairs = int(conn.execute("SELECT COUNT(*) AS n FROM photo_media_pairs").fetchone()["n"])
+            photo_external_sources = int(conn.execute("SELECT COUNT(*) AS n FROM photo_external_sources").fetchone()["n"])
+            photo_external_asset_links = int(conn.execute("SELECT COUNT(*) AS n FROM photo_asset_external_ids").fetchone()["n"])
+            photo_tether_sessions = int(conn.execute("SELECT COUNT(*) AS n FROM photo_tether_sessions").fetchone()["n"])
+            photo_tether_captures = int(conn.execute("SELECT COUNT(*) AS n FROM photo_tether_captures").fetchone()["n"])
+            photo_curation_preferences = int(conn.execute(
+                "SELECT COUNT(*) AS n FROM meta WHERE key = 'photo_curation_preferences'"
+            ).fetchone()["n"])
             hash_resume_entries = int(conn.execute(
                 "SELECT COUNT(*) AS n FROM scan_files WHERE content_hash != ''"
             ).fetchone()["n"])
@@ -23950,6 +29308,17 @@ class WorkspaceDb:
             "trainingExamples": training_examples,
             "learnedArtifacts": learned_artifacts,
             "reviewCandidateRows": review_candidates,
+            "relationshipNameReviews": relationship_name_reviews,
+            "photoAssets": photo_assets,
+            "photoMetadataRows": photo_metadata_rows,
+            "photoAlbums": photo_albums,
+            "photoEditVersions": photo_edit_versions,
+            "photoMediaPairs": photo_media_pairs,
+            "photoExternalSources": photo_external_sources,
+            "photoExternalAssetLinks": photo_external_asset_links,
+            "photoTetherSessions": photo_tether_sessions,
+            "photoTetherCaptures": photo_tether_captures,
+            "photoCurationPreferences": photo_curation_preferences,
             "latestScan": dict(latest) if latest else None,
         }
         self._scale_summary_cache_key = self._scale_summary_stat_key()

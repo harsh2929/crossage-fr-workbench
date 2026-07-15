@@ -32,6 +32,15 @@ assert.deepStrictEqual(
   "shared literal aliases must not be widened with plain string",
 );
 
+assert.match(
+  typesSource,
+  /export interface PhotoPlace \{[\s\S]*?latitude\?: number \| null;[\s\S]*?longitude\?: number \| null;/,
+  "PhotoPlace coordinates should match backend numeric/null payloads",
+);
+
+assert.doesNotMatch(typesSource, /export interface PhotoAssetPage \{/);
+assert.doesNotMatch(typesSource, /export interface JurisdictionCatalog \{/);
+
 assert.ok(
   (typesSource.match(/ExtensibleStringUnion</g) || []).length >= 90,
   "expected the formerly widened backend enum fields to use ExtensibleStringUnion",

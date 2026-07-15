@@ -25,6 +25,9 @@ _WIDE_GAP_BAND = "very-low"
 # A gap at or beyond this many years earns the cross-age-gap review flag.
 FLAG_THRESHOLD_YEARS = 4.0
 CROSS_AGE_GAP_FLAG = "cross-age-gap"
+AGE_GAP_REVIEW_PROFILE_VERSION = "verified-exif-cross-age-review-v1"
+VERIFIED_AGE_GAP_REVIEW_FLAG = "verified-cross-age-threshold"
+_MIN_CROSS_AGE_REVIEW_THRESHOLD = 0.12
 
 _DATE_FORMATS = ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S")
 
@@ -91,3 +94,21 @@ def compute_age_gap(
     confidence = confidence_for_gap(years)
     flag = CROSS_AGE_GAP_FLAG if years >= FLAG_THRESHOLD_YEARS else None
     return (years, confidence, flag)
+
+
+def review_threshold_for_gap(base_threshold: float, years: float | None, confidence: str | None) -> float:
+    """Return a review-only floor for a verified wide gap.
+
+    The strong and likely operating points never move. Unknown, estimated, or
+    short gaps retain the configured review floor exactly.
+    """
+    try:
+        base = float(base_threshold)
+        gap = abs(float(years)) if years is not None else 0.0
+    except (TypeError, ValueError):
+        return float(base_threshold)
+    if confidence == "very-low" and gap > 6.0:
+        return round(max(_MIN_CROSS_AGE_REVIEW_THRESHOLD, base - 0.04), 6)
+    if confidence == "low" and gap > 4.0:
+        return round(max(_MIN_CROSS_AGE_REVIEW_THRESHOLD, base - 0.02), 6)
+    return round(base, 6)

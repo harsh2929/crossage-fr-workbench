@@ -1,3 +1,5 @@
+import type { PhotoProCurationPatch } from "./photoProCulling";
+
 export type PhotoKeyboardShortcut =
   | "focusSearch"
   | "selectPage"
@@ -116,6 +118,10 @@ export interface PhotoVideoKeyboardContext {
   hasTransform?: boolean;
 }
 
+export interface PhotoCurationKeyboardContext {
+  allowZeroRating?: boolean;
+}
+
 export interface PhotoKeywordShortcutCandidate {
   name: string;
   shortcut?: string | null;
@@ -157,6 +163,22 @@ export function photoShortcutForKeyboardEvent(event: PhotoKeyboardEventLike): Ph
   if (normalized === "f") return "toggleFavorite";
   if (normalized === "h") return "toggleHidden";
   if (key === "Delete" || key === "Backspace") return "delete";
+  return null;
+}
+
+export function photoCurationShortcutForKeyboardEvent(
+  event: PhotoKeyboardEventLike,
+  context: PhotoCurationKeyboardContext = {}
+): PhotoProCurationPatch | null {
+  if (isPhotoShortcutTypingTarget(event.target)) return null;
+  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.repeat) return null;
+  const key = String(event.key || "");
+  const normalized = key.toLowerCase();
+  if (/^[1-5]$/.test(key)) return { rating: Number(key) };
+  if (key === "0" && context.allowZeroRating !== false) return { rating: 0 };
+  if (normalized === "p") return { pickStatus: "pick" };
+  if (normalized === "x") return { pickStatus: "reject" };
+  if (normalized === "u") return { pickStatus: "" };
   return null;
 }
 

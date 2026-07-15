@@ -1,0 +1,222 @@
+{
+  "artifactSha256": "32c8bb112b662e4b46f8d89aa908a9d217699e1b65091cd74009a9e49812e189",
+  "claimBoundary": "Review-only enrollment authenticity triage; never identity proof, liveness, PAD, or automatic rejection.",
+  "combinedRealOod": {
+    "count": 1680,
+    "expectedPositive": false,
+    "flagged": 9,
+    "maxScore": 0.972751,
+    "medianScore": 0.715805,
+    "rate": 0.005357
+  },
+  "generatedAt": "2026-07-12T09:57:37+00:00",
+  "heldOutReal": {
+    "count": 43,
+    "expectedPositive": false,
+    "flagged": 0,
+    "maxScore": 0.157908,
+    "medianScore": 0.02906,
+    "original": {
+      "count": 43,
+      "expectedPositive": false,
+      "flagged": 0,
+      "maxScore": 0.202143,
+      "medianScore": 0.032306,
+      "rate": 0.0
+    },
+    "packDigest": "65dee8d6e40b64b9201d5c5f01737e73626eaaef514b450a3749f665e46f27de",
+    "rate": 0.0,
+    "source": "Wikimedia Commons Public Domain U.S. Congress portrait test split"
+  },
+  "limitations": [
+    "A high score is only a review signal and can be wrong.",
+    "The benchmark covers specific generators and portrait datasets, not all edits, cameras, demographics, or future generators.",
+    "The model does not establish liveness, presentation-attack resistance, provenance, consent, or identity.",
+    "Unavailable or integrity-failed screening must stage enrollment for review instead of silently passing it."
+  ],
+  "manifestSha256": "8b1f2115e1f633b024d6ef84f818db5b9859abba4323474a29ed01c10eb183a0",
+  "modelId": "vintrace-siglip2-linear-synthetic-screen",
+  "performance": {
+    "compressedViewEmbeddingMs": 54359.415,
+    "compressedViewImages": 1850,
+    "meanCompressedViewEmbeddingMs": 29.383
+  },
+  "provenanceSha256": "bc9f618cb6b586d618c05c29423c567e4373e5b6bf85f8277bf358a6fcaa9cfa",
+  "realOod": {
+    "agedb": {
+      "original": {
+        "count": 160,
+        "expectedPositive": false,
+        "flagged": 3,
+        "maxScore": 0.972592,
+        "medianScore": 0.811175,
+        "rate": 0.01875
+      },
+      "packDigest": "78eabb1a8aaed95163825910c7b31145a5518619264c2a2e2eadff59baec3dd4",
+      "stable": {
+        "count": 160,
+        "expectedPositive": false,
+        "flagged": 2,
+        "maxScore": 0.95594,
+        "medianScore": 0.789239,
+        "rate": 0.0125
+      }
+    },
+    "cplfw": {
+      "original": {
+        "count": 240,
+        "expectedPositive": false,
+        "flagged": 10,
+        "maxScore": 0.971195,
+        "medianScore": 0.69587,
+        "rate": 0.041667
+      },
+      "packDigest": "b3a3f33d9db732ed5183a734a792ee7bc4ec1c8133838fca13300101a38fb8e4",
+      "stable": {
+        "count": 240,
+        "expectedPositive": false,
+        "flagged": 3,
+        "maxScore": 0.958481,
+        "medianScore": 0.670699,
+        "rate": 0.0125
+      }
+    },
+    "fiw": {
+      "original": {
+        "count": 640,
+        "expectedPositive": false,
+        "flagged": 1,
+        "maxScore": 0.957465,
+        "medianScore": 0.743336,
+        "rate": 0.001563
+      },
+      "packDigest": "dd94ad5cfd04e71cbd9003d9fee743a15f27d1d6a1a582acffb4382e86ce59f1",
+      "stable": {
+        "count": 640,
+        "expectedPositive": false,
+        "flagged": 0,
+        "maxScore": 0.947097,
+        "medianScore": 0.72677,
+        "rate": 0.0
+      }
+    },
+    "ytf": {
+      "original": {
+        "count": 640,
+        "expectedPositive": false,
+        "flagged": 5,
+        "maxScore": 0.975859,
+        "medianScore": 0.702804,
+        "rate": 0.007812
+      },
+      "packDigest": "db5df50c97d12fa5e73862768aaf8f33027b964c0560dc24545a22702ed24b45",
+      "stable": {
+        "count": 640,
+        "expectedPositive": false,
+        "flagged": 4,
+        "maxScore": 0.972751,
+        "medianScore": 0.676007,
+        "rate": 0.00625
+      }
+    }
+  },
+  "reproducibility": {
+    "numpy": "2.4.6",
+    "onnxruntime": "1.26.0",
+    "platform": "macOS-26.4.1-arm64-arm-64bit-Mach-O",
+    "python": "3.13.12",
+    "scikitLearn": "1.9.0",
+    "splitHashes": {
+      "realCongress": "fe9077d338bf13e5eb78ddf09456fce1ef2a27a605bf76db5b0f7ef0cf79fd92",
+      "sfhq": "454b04e048183dedc31ddcb1ead58201f75e33d16d5d41202557e7b2004002c5",
+      "synVis": "b41b3681019b424d3fdf4856e4a64d4a81bc327bdd51acf1c2e527bc1365b374"
+    }
+  },
+  "schemaVersion": 1,
+  "stableView": {
+    "jpegQuality": 78
+  },
+  "synthetic": {
+    "sfhq-test": {
+      "byGenerator": {
+        "FLUX1_dev": {
+          "count": 10,
+          "expectedPositive": true,
+          "flagged": 10,
+          "maxScore": 0.993412,
+          "medianScore": 0.979842,
+          "rate": 1.0
+        },
+        "FLUX1_pro": {
+          "count": 10,
+          "expectedPositive": true,
+          "flagged": 8,
+          "maxScore": 0.991041,
+          "medianScore": 0.982881,
+          "rate": 0.8
+        },
+        "SDXL": {
+          "count": 10,
+          "expectedPositive": true,
+          "flagged": 9,
+          "maxScore": 0.992483,
+          "medianScore": 0.981308,
+          "rate": 0.9
+        }
+      },
+      "count": 30,
+      "expectedPositive": true,
+      "flagged": 27,
+      "maxScore": 0.993412,
+      "medianScore": 0.980133,
+      "original": {
+        "count": 30,
+        "expectedPositive": true,
+        "flagged": 28,
+        "maxScore": 0.996503,
+        "medianScore": 0.985444,
+        "rate": 0.933333
+      },
+      "packDigest": "8050d3b9813306debd3f6a715a503e5148aec3ffc0c99570da7f42dae4e6fd1f",
+      "rate": 0.9
+    },
+    "syn-vis-test": {
+      "count": 80,
+      "expectedPositive": true,
+      "flagged": 79,
+      "maxScore": 0.997355,
+      "medianScore": 0.989579,
+      "original": {
+        "count": 80,
+        "expectedPositive": true,
+        "flagged": 80,
+        "maxScore": 0.997404,
+        "medianScore": 0.991799,
+        "rate": 1.0
+      },
+      "packDigest": "3befee1fece0be345d6650110248b31d1d3372aae64763bbe0120344fa52eda9",
+      "rate": 0.9875
+    },
+    "wikimedia-ai-ood": {
+      "count": 17,
+      "expectedPositive": true,
+      "flagged": 3,
+      "maxScore": 0.991848,
+      "medianScore": 0.841582,
+      "original": {
+        "count": 17,
+        "expectedPositive": true,
+        "flagged": 3,
+        "maxScore": 0.992469,
+        "medianScore": 0.871814,
+        "rate": 0.176471
+      },
+      "packDigest": "65dc62a2471ba940f111162eee3e2c45afe274a63ec03cca69ff7035f9f9b241",
+      "rate": 0.176471
+    }
+  },
+  "threshold": 0.951046228,
+  "trainingDataHash": "44e89a67e0b422d8fe10bd98c077d1bc3bd19971f844662195c01f4e5f29fa62",
+  "version": "2026-07-12.1",
+  "visionSha256": "f2eb8ccfa3dc0b3761d9ea9a39554fe0f2be71b247ad7f68a80720ec88895650"
+}

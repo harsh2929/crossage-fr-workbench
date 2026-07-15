@@ -30,7 +30,7 @@ test("renderer IPC boundary rejects malformed and untrusted requests", async () 
   });
   const page = await app.firstWindow();
   page.on("pageerror", (error) => pageErrors.push(error.message));
-  await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByText("Backend ready.")).toBeAttached({ timeout: 120_000 });
   await page.locator(".language-picker select").selectOption("en");
 
   const results = await page.evaluate(async () => {

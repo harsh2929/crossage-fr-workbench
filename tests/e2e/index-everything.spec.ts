@@ -42,7 +42,7 @@ test("Index-all: empty-Library CTA opens the scope-consent sheet", async () => {
   const app = await electron.launch({ args: [path.join(root, "desktop/main.cjs")], cwd: root, env });
   const page = await app.firstWindow();
   page.on("pageerror", (e) => pageErrors.push(e.message));
-  await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByText("Backend ready.")).toBeAttached({ timeout: 120_000 });
   await page.locator(".sidebar-footer .language-picker select").selectOption("en").catch(() => undefined);
   await dismissModals(page);
 
@@ -50,8 +50,8 @@ test("Index-all: empty-Library CTA opens the scope-consent sheet", async () => {
   await page.waitForTimeout(500);
   await dismissModals(page);
 
-  // Empty workspace → the prominent "Index all photos on this computer" CTA.
-  const cta = page.getByRole("button", { name: "Index all photos on this computer" });
+  // Empty workspace → the prominent photo-discovery CTA.
+  const cta = page.getByRole("button", { name: "Find photos on this computer" });
   await expect(cta).toBeVisible({ timeout: 30_000 });
   await cta.click();
 

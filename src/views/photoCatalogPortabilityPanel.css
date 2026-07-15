@@ -1,0 +1,336 @@
+.photo-catalog-launcher {
+  justify-content: center;
+  margin: 6px 10px 2px;
+  min-height: 36px;
+  width: calc(100% - 20px);
+}
+
+.photo-catalog-backdrop {
+  align-items: center;
+  background: rgba(18, 20, 24, 0.46);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 24px;
+  position: fixed;
+  z-index: 2410;
+}
+
+.photo-catalog-dialog {
+  background: var(--photo-source-surface);
+  border: 1px solid var(--separator);
+  border-radius: 8px;
+  box-shadow: 0 24px 80px rgba(18, 22, 28, 0.28);
+  color: var(--text);
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  max-height: min(820px, calc(100vh - 48px));
+  overflow: hidden;
+  width: min(760px, calc(100vw - 48px));
+}
+
+.photo-catalog-head,
+.photo-catalog-band-head,
+.photo-catalog-actions,
+.photo-catalog-path-row,
+.photo-catalog-check-row,
+.photo-catalog-result,
+.photo-catalog-inspection,
+.photo-catalog-message,
+.photo-catalog-progress > span {
+  align-items: center;
+  display: flex;
+}
+
+.photo-catalog-head {
+  border-bottom: 1px solid var(--separator-soft);
+  justify-content: space-between;
+  min-height: 66px;
+  padding: 12px 16px;
+}
+
+.photo-catalog-head > div {
+  display: grid;
+  gap: 2px;
+}
+
+.photo-catalog-head h3 {
+  font-size: 17px;
+  letter-spacing: 0;
+  margin: 0;
+}
+
+.photo-catalog-head span,
+.photo-catalog-band-head span {
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.photo-catalog-tabs,
+.photo-catalog-segmented {
+  background: var(--fill);
+  display: grid;
+  gap: 2px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 3px;
+}
+
+.photo-catalog-tabs {
+  border-bottom: 1px solid var(--separator-soft);
+  padding: 7px 16px;
+}
+
+.photo-catalog-tabs button,
+.photo-catalog-segmented button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--secondary);
+  display: flex;
+  font-size: 13px;
+  font-weight: 650;
+  gap: 7px;
+  justify-content: center;
+  min-height: 32px;
+  padding: 6px 10px;
+}
+
+.photo-catalog-tabs button.active,
+.photo-catalog-segmented button.active {
+  background: var(--content-strong);
+  border-color: var(--control-border);
+  color: var(--text);
+  box-shadow: var(--inner-highlight);
+}
+
+.photo-catalog-body {
+  min-height: 0;
+  overflow: auto;
+}
+
+.photo-catalog-band,
+.photo-catalog-status-band {
+  border-bottom: 1px solid var(--separator-soft);
+  display: grid;
+  gap: 11px;
+  padding: 14px 16px;
+}
+
+.photo-catalog-band-head {
+  justify-content: space-between;
+  min-height: 24px;
+}
+
+.photo-catalog-band-head strong {
+  font-size: 13px;
+}
+
+.photo-catalog-counts {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.photo-catalog-counts > span {
+  border-left: 2px solid var(--accent);
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding-left: 8px;
+}
+
+.photo-catalog-counts small,
+.photo-catalog-field > span,
+.photo-catalog-result small,
+.photo-catalog-inspection small,
+.photo-catalog-progress small {
+  color: var(--secondary);
+  font-size: 11px;
+}
+
+.photo-catalog-counts strong {
+  font-size: 15px;
+}
+
+.photo-catalog-security-note {
+  align-items: center;
+  border-left: 3px solid var(--orange);
+  color: var(--secondary);
+  display: flex;
+  font-size: 12px;
+  gap: 7px;
+  min-height: 26px;
+  padding-left: 8px;
+}
+
+.photo-catalog-security-note svg {
+  color: var(--orange);
+  flex: 0 0 auto;
+}
+
+.photo-catalog-path-row {
+  gap: 8px;
+}
+
+.photo-catalog-path-row input,
+.photo-catalog-field input {
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  border-radius: 6px;
+  color: var(--control-text);
+  min-height: 36px;
+  min-width: 0;
+  padding: 7px 10px;
+}
+
+.photo-catalog-path-row input {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.photo-catalog-field {
+  display: grid;
+  gap: 5px;
+}
+
+.photo-catalog-check-row {
+  font-size: 12px;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.photo-catalog-check-row input {
+  height: 15px;
+  margin: 0;
+  width: 15px;
+}
+
+.photo-catalog-result,
+.photo-catalog-inspection {
+  border-bottom: 1px solid var(--separator-soft);
+  gap: 9px;
+  min-height: 58px;
+  padding: 11px 16px;
+}
+
+.photo-catalog-result > svg,
+.photo-catalog-inspection > svg {
+  color: var(--green);
+  flex: 0 0 auto;
+}
+
+.photo-catalog-result > span,
+.photo-catalog-inspection > span:nth-child(2) {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+
+.photo-catalog-inspection > span:last-child {
+  color: var(--secondary);
+  font-size: 12px;
+}
+
+.photo-catalog-progress {
+  border-bottom: 1px solid var(--separator-soft);
+  display: grid;
+  gap: 7px;
+  min-height: 76px;
+  padding: 11px 16px;
+}
+
+.photo-catalog-progress > span {
+  font-size: 12px;
+  gap: 7px;
+}
+
+.photo-catalog-progress > div {
+  background: var(--fill-strong);
+  border-radius: 3px;
+  height: 5px;
+  overflow: hidden;
+}
+
+.photo-catalog-progress > div > i {
+  background: var(--accent);
+  display: block;
+  height: 100%;
+  transition: width 160ms ease;
+}
+
+.photo-catalog-message {
+  border-bottom: 1px solid var(--separator-soft);
+  font-size: 12px;
+  gap: 7px;
+  min-height: 38px;
+  padding: 8px 16px;
+}
+
+.photo-catalog-message.error {
+  color: var(--red);
+}
+
+.photo-catalog-message.ok {
+  color: #1f7836;
+}
+
+.photo-catalog-actions {
+  border-top: 1px solid var(--separator-soft);
+  gap: 8px;
+  justify-content: flex-end;
+  min-height: 62px;
+  padding: 10px 16px;
+}
+
+@media (max-width: 620px) {
+  .photo-catalog-backdrop {
+    padding: 0;
+  }
+
+  .photo-catalog-dialog {
+    border: 0;
+    border-radius: 0;
+    height: 100vh;
+    max-height: 100vh;
+    width: 100vw;
+  }
+
+  .photo-catalog-counts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .photo-catalog-result,
+  .photo-catalog-inspection {
+    align-items: start;
+    flex-wrap: wrap;
+  }
+
+  .photo-catalog-result > button {
+    width: 100%;
+  }
+
+  .photo-catalog-actions {
+    flex-wrap: wrap;
+  }
+
+  .photo-catalog-actions button {
+    flex: 1 1 120px;
+  }
+}
+.photo-catalog-actions .primary:not(:disabled) {
+  background: #004f9f;
+  color: #ffffff;
+}
+
+.photo-catalog-actions .primary:not(:disabled):hover {
+  background: #004486;
+}
+
+@media (prefers-color-scheme: dark) {
+  .photo-catalog-message.ok {
+    color: var(--green);
+  }
+}

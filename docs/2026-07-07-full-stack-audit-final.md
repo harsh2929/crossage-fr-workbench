@@ -42,37 +42,8 @@ Confirmed dimension mix:
 | Completeness | 17 |
 | Principles | 9 |
 
-## July 8 Remediation Update
-
-This report preserves the original July 7 audit findings, but `main` has moved since the audit was written. The following items were re-checked against the current tree on July 8, 2026.
-
-Verification used:
-
-- `npm run test:photo-folders` passed end to end.
-- Source/test inspection covered `crossage_fr/store/workspace_db.py`, `crossage_fr/api_server.py`, `src/App.tsx`, `src/views/PhotosView.tsx`, `src/views/SafeModeReview.tsx`, `crossage_fr/enroll/manager.py`, and `crossage_fr/ingest/image_io.py`.
-
-Current status of the original critical/high set:
-
-| Status | Original item | Current evidence |
-|---|---|---|
-| Fixed and regression-covered | Critical photo-listing backfills on read paths | `photo_asset_people(candidate_id)` exists, read paths no longer invoke the legacy asset backfills, and `test_photo_read_paths_do_not_run_legacy_asset_backfills` passed in `npm run test:photo-folders`. |
-| Fixed and regression-covered | Semantic search 600-photo cap | Semantic embeddings are persisted in `photo_semantic_embeddings`, candidate lookup uses `list_photo_semantic_candidate_assets` without the old cap, and `test_semantic_search_indexes_full_library_without_candidate_cap` covers a 605-image library. |
-| Fixed or substantially bounded | Utility folders, photo-library settings counts, search hydration, duplicate folders, date-bucket covers, smart-album revision fingerprints, edit-stack version counts, and scan-file import-session refreshes | `npm run test:photo-folders` now includes passing scale guards for SQL paging, one-shot date cover queries, cached duplicate summaries, bounded smart-album probes, search scoped context loading, and batched scan/import updates. |
-| Fixed and regression-covered | Phase 0 quality/privacy bugs | `moveSelected` returns on canceled destination selection, `CameraScanner` stops streams that resolve after unmount, Safe Mode review waits for sensitive unlock before listing flagged photos, safety-cache keys include Safe Mode temperature, and EXIF event dates prefer `DateTimeOriginal`/`DateTimeDigitized`. |
-| In progress, ratcheted | Photos i18n coverage | The Photos surface is still broad, but locale bundles now cover the common Photos glossary and `test:localization` enforces at least 90% Photos `uiText` coverage per non-English locale. |
-| Still open | Long image/ML work in the JSON-RPC dispatch path | OCR/barcode/object indexing, Safe Mode calibration, subject/portrait export, and video export still need job-style execution, progress, cancellation, and non-blocking status polling. The old vignette per-pixel loop itself is fixed. |
-| Still open | Backend process supervision and release-channel hardening | The process lifecycle and updater integrity concerns need dedicated tests beyond the photo-library suite. |
-| Ongoing | Renderer decomposition | Several App state hooks and Photos view tests now exist, but `PhotosView.tsx` and `App.tsx` remain large enough that feature work should keep extracting cohesive state owners. |
-
-Recommended next targets after this update:
-
-1. Continue the Photos i18n pass toward exact-string coverage beyond the current glossary and keep localization checks loading every locale bundle.
-2. Convert the remaining long-running ML/image handlers to jobs with progress, cancellation, and status polling.
-3. Add focused backend lifecycle tests for duplicate-start/backoff and pending-request rejection behavior.
-4. Continue Photos/App decomposition around one feature surface at a time, with behavioral tests before each extraction.
-
 ## Executive Summary
-
+o
 Vintrace is feature-rich and has closed a large portion of the Apple Photos gap, but the current architecture is not ready for the stated 50k-100k photo target. The main failure mode is not type unsafety or missing features. It is repeated full-library work on hot paths, performed inside a single-threaded backend dispatch loop, plus a React renderer where very large components own too much state.
 
 The highest-risk confirmed issue is a critical SQLite backfill path that runs on every photo listing and includes an O(candidates x people) correlated probe. At 50k candidates and 50k people rows, this can become billions of comparisons before a page of photos appears.

@@ -1,6 +1,8 @@
 import type { CandidateStatus } from "./types";
 import { recordAppStorageIssue } from "./appStorageDiagnostics";
 
+const LOCAL_STATE_MAX_BYTES = 262144;
+
 export type SavedScanSource = {
   id: string;
   label: string;
@@ -37,6 +39,14 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+function readLocalStateJson(key: string): unknown {
+  const raw = window.localStorage.getItem(key) || "[]";
+  if (raw.length > LOCAL_STATE_MAX_BYTES) {
+    throw new Error("Stored payload exceeded the 256 KiB safety limit.");
+  }
+  return JSON.parse(raw);
+}
+
 export function finiteTimestamp(value: unknown, fallback = Date.now()) {
   const timestamp = Number(value);
   return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : fallback;
@@ -69,7 +79,7 @@ export function normalizeSavedScanSources(rows: unknown, fallbackTime = Date.now
 export function readSavedScanSources(workspace: string | null | undefined): SavedScanSource[] {
   const key = savedScanSourcesKey(workspace);
   try {
-    return normalizeSavedScanSources(JSON.parse(window.localStorage.getItem(key) || "[]"));
+    return normalizeSavedScanSources(readLocalStateJson(key));
   } catch (error) {
     recordAppStorageIssue("savedScanSources", "read", key, error);
     return [];
@@ -117,7 +127,7 @@ export function normalizeScanQueue(rows: unknown, fallbackTime = Date.now()): Sc
 export function readScanQueue(workspace: string | null | undefined): ScanQueueItem[] {
   const key = scanQueueKey(workspace);
   try {
-    return normalizeScanQueue(JSON.parse(window.localStorage.getItem(key) || "[]"));
+    return normalizeScanQueue(readLocalStateJson(key));
   } catch (error) {
     recordAppStorageIssue("scanQueue", "read", key, error);
     return [];
@@ -165,7 +175,7 @@ export function normalizeSavedReviewViews(rows: unknown, fallbackTime = Date.now
 export function readSavedReviewViews(workspace: string | null | undefined): SavedReviewView[] {
   const key = savedReviewViewsKey(workspace);
   try {
-    return normalizeSavedReviewViews(JSON.parse(window.localStorage.getItem(key) || "[]"));
+    return normalizeSavedReviewViews(readLocalStateJson(key));
   } catch (error) {
     recordAppStorageIssue("savedReviewViews", "read", key, error);
     return [];

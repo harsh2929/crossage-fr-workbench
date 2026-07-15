@@ -18,5 +18,5 @@
     "tsBuildInfoFile": "./.tsbuildinfo",
     "jsx": "react-jsx"
   },
-  "include": ["src", "tests"]
+  "include": ["src", "mobile/src", "tests"]
 }

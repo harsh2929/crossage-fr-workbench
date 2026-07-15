@@ -1,3 +1,11 @@
+import type {
+  PhotoBackupRestoreRehearsalValue,
+  PhotoLibraryBackupCheckValue,
+  PhotoLibraryPreviewSweepValue,
+  PhotoRecoveredOrphanScanValue,
+  PhotoRestoreRehearsalValue,
+} from "../types";
+
 export type PhotoRepairIssueSeverity = "error" | "warning" | "info";
 
 export type PhotoRepairIssueAction =
@@ -21,6 +29,75 @@ export interface PhotoRepairIssue {
   action: PhotoRepairIssueAction | null;
   scopeLabel?: string;
   sampleSourcePath?: string;
+}
+
+export type PhotoRootRepairAction = "backup" | "previewSweep" | "orphanPreview" | "orphanScan";
+
+export interface PhotoRootRepairState {
+  busyAction?: PhotoRootRepairAction | "";
+  message?: string;
+  error?: string;
+  updatedAt?: string;
+  backupCheck?: PhotoLibraryBackupCheckValue | null;
+  previewSweep?: PhotoLibraryPreviewSweepValue | null;
+  orphanScan?: PhotoRecoveredOrphanScanValue | null;
+}
+
+export interface PhotoRepairHasScanInput {
+  backupCheck?: unknown;
+  restoreRehearsal?: unknown;
+  backupRestoreRehearsal?: unknown;
+  status?: unknown;
+  recoveredCount?: unknown;
+}
+
+export interface PhotoRepairScopeLabels {
+  allLibraries: string;
+  library: string;
+}
+
+export interface PhotoRepairScopeSummary {
+  path: string;
+  name: string;
+  label: string;
+}
+
+export interface PhotoRestoreRehearsalDetailRow {
+  operationLabel: string;
+  operationType: string;
+  undoKind: string;
+  item: PhotoRestoreRehearsalValue["operations"][number]["items"][number];
+}
+
+export function photoRepairHasScan(input: PhotoRepairHasScanInput): boolean {
+  return Boolean(
+    input.backupCheck ||
+    input.restoreRehearsal ||
+    input.backupRestoreRehearsal ||
+    String(input.status || "").trim() ||
+    Number(input.recoveredCount || 0)
+  );
+}
+
+export function photoRepairScopeSummary(
+  backupCheck: PhotoLibraryBackupCheckValue | null | undefined,
+  activeLibraryRoot: unknown,
+  labels: PhotoRepairScopeLabels,
+): PhotoRepairScopeSummary {
+  const path = String(
+    backupCheck
+      ? (backupCheck.scope?.libraryRoot || backupCheck.libraryRoot || "")
+      : activeLibraryRoot || ""
+  ).trim();
+  const fallbackName = path.split(/[\\/]/).filter(Boolean).pop() || path;
+  const name = path
+    ? String(backupCheck?.scope?.label || "").trim() || fallbackName
+    : labels.allLibraries;
+  return {
+    path,
+    name,
+    label: path ? `${labels.library}: ${name}` : labels.allLibraries,
+  };
 }
 
 interface PhotoRepairBackupLike {
@@ -244,6 +321,46 @@ export function photoRepairIssueActionLabel(action: PhotoRepairIssueAction | nul
   if (action === "openRootProfiles") return "Review roots";
   if (action === "runBackupCheck") return "Backup check";
   return "";
+}
+
+function photoRestoreRehearsalDetailRank(row: PhotoRestoreRehearsalDetailRow): number {
+  const status = String(row.item.status || "").toLowerCase();
+  if (status === "blocked") return 0;
+  if (status === "warning" || row.item.canRestoreOriginal === false || row.item.canRestoreCatalog === false) return 1;
+  return 2;
+}
+
+export function photoRestoreRehearsalDetailRows(
+  value: PhotoRestoreRehearsalValue | null | undefined,
+  fallbackOperationLabel = "Photo action",
+): PhotoRestoreRehearsalDetailRow[] {
+  const operations = Array.isArray(value?.operations) ? value.operations : [];
+  const rows: PhotoRestoreRehearsalDetailRow[] = [];
+  operations.forEach((operation) => {
+    const operationLabel = String(operation.operation?.label || operation.operation?.operationType || fallbackOperationLabel);
+    const operationType = String(operation.operation?.operationType || "");
+    const undoKind = String(operation.undoKind || "");
+    const opItems = Array.isArray(operation.items) ? operation.items : [];
+    opItems.forEach((item) => {
+      rows.push({ operationLabel, operationType, undoKind, item });
+    });
+  });
+  return rows.sort((a, b) => photoRestoreRehearsalDetailRank(a) - photoRestoreRehearsalDetailRank(b));
+}
+
+function photoBackupRestoreCheckRank(check: PhotoBackupRestoreRehearsalValue["checks"][number]): number {
+  const severity = String(check.severity || "").toLowerCase();
+  if (!check.ok && severity === "error") return 0;
+  if (!check.ok && severity === "warning") return 1;
+  if (!check.ok) return 2;
+  return 3;
+}
+
+export function photoBackupRestoreCheckRows(
+  value: PhotoBackupRestoreRehearsalValue | null | undefined,
+): PhotoBackupRestoreRehearsalValue["checks"] {
+  const checks = Array.isArray(value?.checks) ? value.checks : [];
+  return [...checks].sort((a, b) => photoBackupRestoreCheckRank(a) - photoBackupRestoreCheckRank(b));
 }
 
 export interface PhotoRepairHistoryDetail {

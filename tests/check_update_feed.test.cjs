@@ -53,6 +53,40 @@ run("Windows local dist still requires exe and latest metadata", () => {
   assert.deepStrictEqual(artifactCheck.found, ["Vintrace Setup 0.1.0.exe"]);
 });
 
+run("Linux local dist requires AppImage deb rpm and latest-linux metadata", () => {
+  const result = checker.buildUpdateFeedCheckResult({
+    pkg,
+    channel: "stable",
+    packagePlatform: "linux",
+    distFiles: [
+      "Vintrace-0.1.0-linux-x86_64.AppImage",
+      "vintrace_0.1.0_amd64.deb",
+      "vintrace-0.1.0.x86_64.rpm",
+      "latest-linux.yml",
+    ],
+  });
+  assert.strictEqual(result.ok, true, JSON.stringify(result.checks, null, 2));
+  assert.strictEqual(result.expectedMetadata, "latest-linux.yml");
+  const artifactCheck = result.checks.find((check) => check.name === "local installer artifact");
+  assert.deepStrictEqual(artifactCheck.found, [
+    "Vintrace-0.1.0-linux-x86_64.AppImage",
+    "vintrace_0.1.0_amd64.deb",
+    "vintrace-0.1.0.x86_64.rpm",
+  ]);
+});
+
+run("Linux local dist rejects an incomplete package-format set", () => {
+  const result = checker.buildUpdateFeedCheckResult({
+    pkg,
+    channel: "stable",
+    packagePlatform: "linux",
+    distFiles: ["Vintrace-0.1.0-linux-x86_64.AppImage", "latest-linux.yml"],
+  });
+  assert.strictEqual(result.ok, false);
+  assert.strictEqual(result.checks.find((check) => check.name === "local deb artifact").ok, false);
+  assert.strictEqual(result.checks.find((check) => check.name === "local rpm artifact").ok, false);
+});
+
 run("macOS local dist rejects Windows-only metadata instead of false requiring exe", () => {
   const result = checker.buildUpdateFeedCheckResult({
     pkg,

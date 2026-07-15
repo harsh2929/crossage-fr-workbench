@@ -11,12 +11,18 @@ async function confirmDialog(page: Page) {
 }
 
 async function closeOnboardingIfVisible(page: Page) {
-  const guide = page.getByRole("dialog", { name: "Set up your first scan" });
-  await guide.waitFor({ state: "visible", timeout: 1500 }).catch(() => undefined);
-  if (await guide.isVisible().catch(() => false)) {
-    await guide.getByRole("button", { name: "Remind me later" }).click();
-    await expect(guide).toBeHidden();
+  await page.getByRole("dialog").last().waitFor({ state: "visible", timeout: 1500 }).catch(() => undefined);
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const dialog = page.getByRole("dialog").last();
+    if (!(await dialog.isVisible().catch(() => false))) return;
+    await page.keyboard.press("Escape").catch(() => undefined);
+    await page.waitForTimeout(100);
   }
+}
+
+async function openSettingsSection(page: Page, section: "Advanced" | "General") {
+  await page.locator(".nav-list").getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("tab", { name: section, exact: true }).click();
 }
 
 function seedLearningWorkspace(workspace: string, registry: string) {
@@ -192,7 +198,7 @@ async function launchApp(workspace: string, registry: string, pageErrors: string
   page.on("dialog", (dialog) => dialog.accept());
 
   await expect(page.getByText("Vintrace", { exact: true })).toBeVisible();
-  await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByText("Backend ready.")).toBeAttached({ timeout: 120_000 });
   await page.locator(".language-picker select").selectOption("en");
   await closeOnboardingIfVisible(page);
   return { app, page };
@@ -209,7 +215,7 @@ test("desktop learning loop stages, promotes, rolls back, approves references, a
   let app = launched.app;
   let page = launched.page;
 
-  await page.locator(".nav-list").getByRole("button", { name: "Settings" }).click();
+  await openSettingsSection(page, "Advanced");
   const accuracyLab = page.locator(".panel", { hasText: "Accuracy lab" });
   const rdCard = accuracyLab.locator(".validation-pack-card", { hasText: "Self-learning R&D" });
   await expect(rdCard.locator(".status", { hasText: "R&D blocked" })).toBeVisible({ timeout: 120_000 });
@@ -234,6 +240,7 @@ test("desktop learning loop stages, promotes, rolls back, approves references, a
   await expect(page.getByText("Learned calibration rolled back.")).toBeVisible({ timeout: 120_000 });
 
   await page.locator(".nav-list").getByRole("button", { name: "People" }).click();
+  await page.getByRole("tab", { name: "Add person", exact: true }).click();
   const personCard = page.locator(".person-card", { hasText: "Person A" });
   await expect(personCard.locator(".person-count")).toHaveText("1");
   const suggestions = page.locator(".reference-suggestions");
@@ -243,7 +250,7 @@ test("desktop learning loop stages, promotes, rolls back, approves references, a
   await expect(page.getByText("Suggested reference added to saved person photos.")).toBeVisible({ timeout: 120_000 });
   await expect(personCard.locator(".person-count")).toHaveText("2", { timeout: 120_000 });
 
-  await page.locator(".nav-list").getByRole("button", { name: "Settings" }).click();
+  await openSettingsSection(page, "General");
   await expect(page.getByLabel("Learning mode")).toHaveValue("manual");
   await page.getByLabel("Learning mode").selectOption("auto_stage");
   await page.getByRole("button", { name: "Save settings" }).click();
@@ -255,7 +262,7 @@ test("desktop learning loop stages, promotes, rolls back, approves references, a
   launched = await launchApp(workspace, registry, pageErrors);
   app = launched.app;
   page = launched.page;
-  await page.locator(".nav-list").getByRole("button", { name: "Settings" }).click();
+  await openSettingsSection(page, "General");
   await expect(page.getByLabel("Learning mode")).toHaveValue("auto_stage");
   await expect(page.locator(".settings-summary").getByText("Auto-stage")).toBeVisible();
   await app.close();

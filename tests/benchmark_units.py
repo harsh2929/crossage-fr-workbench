@@ -5,6 +5,8 @@ Run: PYTHONPATH=. .venv/bin/python tests/benchmark_units.py
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 import importlib.util
@@ -70,6 +72,25 @@ def test_public_dataset_runner_resolves_prepared_folders_from_repo_root() -> Non
     assert folder == (runner.REPO_ROOT / "benchmarks/public-data/prepared/calfw-40x4").resolve()
 
 
+def test_public_dataset_latest_pointer_matches_newest_run() -> None:
+    root = Path(__file__).resolve().parents[1]
+    results_dir = root / "benchmarks" / "results"
+    dated_json_reports = []
+    for report in results_dir.glob("public-dataset-benchmark-*.json"):
+        match = re.fullmatch(r"public-dataset-benchmark-(\d{8}-\d{6})\.json", report.name)
+        if match:
+            dated_json_reports.append((match.group(1), report))
+    assert dated_json_reports, "expected at least one dated public-dataset benchmark report"
+
+    newest_json = max(dated_json_reports, key=lambda item: item[0])[1]
+    newest_md = newest_json.with_suffix(".md")
+    latest_json = results_dir / "public-dataset-benchmark-latest.json"
+    latest_md = results_dir / "public-dataset-benchmark-latest.md"
+
+    assert latest_md.read_text(encoding="utf-8") == newest_md.read_text(encoding="utf-8")
+    assert json.loads(latest_json.read_text(encoding="utf-8"))["generatedAt"] == json.loads(newest_json.read_text(encoding="utf-8"))["generatedAt"]
+
+
 def main() -> None:
     test_wilson_interval_brackets_point_estimate()
     test_wilson_interval_no_data_is_maximally_uncertain()
@@ -77,6 +98,7 @@ def main() -> None:
     test_wilson_interval_is_clamped()
     test_disclaimer_is_honest()
     test_public_dataset_runner_resolves_prepared_folders_from_repo_root()
+    test_public_dataset_latest_pointer_matches_newest_run()
     print("benchmark units ok")
 
 

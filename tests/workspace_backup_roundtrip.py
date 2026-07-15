@@ -11,6 +11,12 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from crossage_fr.api_server import DesktopApi
+from crossage_fr.match.age_trajectory import (
+    AGE_TRAJECTORY_REFERENCE_KIND,
+    IMAGE_AGE_AUGMENTATION_METHOD_VERSION,
+)
+from crossage_fr.match.scoring import valid_reference
+from crossage_fr.models import ReferenceFace
 
 
 def make_face(path: Path, shirt: tuple[int, int, int] = (74, 88, 138)) -> None:
@@ -72,12 +78,21 @@ def assert_backup_restore_roundtrip() -> None:
             },
         },
     )
+    api.project.db.save_photo_relationship_name_review(
+        suggestion_id="relationship_name_backup_roundtrip",
+        source_cluster="Unmatched cluster backup-roundtrip",
+        target_person="Roundtrip Person",
+        evidence_hash="a" * 64,
+        decision="dismissed",
+        result={"score": 0.72},
+    )
 
     backup = api.handle("export_workspace_backup", {"includeGenerated": False})["value"]
     backup_path = Path(backup["zipPath"])
     verified = api.handle("verify_workspace_backup", {"path": str(backup_path)})["value"]
     assert verified["ok"] is True
     assert verified["manifest"]["counts"]["references"] == 1
+    assert verified["manifest"]["photos"]["counts"]["relationshipNameReviews"] == 1
     assert verified["databaseIntegrity"]["checked"] is True
     assert verified["databaseIntegrity"]["ok"] is True
 
@@ -97,6 +112,7 @@ def assert_backup_restore_roundtrip() -> None:
                 table_rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
                 tables = {str(row[0]) for row in table_rows}
                 assert {"scan_runs", "photo_assets", "review_candidates"} <= tables
+                assert conn.execute("SELECT COUNT(*) FROM photo_relationship_name_reviews").fetchone()[0] == 1
             finally:
                 conn.close()
 
@@ -121,12 +137,17 @@ def assert_backup_restore_roundtrip() -> None:
     restored_state = restored_api.state()
     assert restored_state["counts"]["references"] == api.state()["counts"]["references"]
     assert restored_state["counts"]["candidates"] == api.state()["counts"]["candidates"]
-    assert any(candidate.note == "roundtrip note" for candidate in restored_api.project.candidates.values())
+    restored_candidates = restored_api.handle("query_candidates", {"query": "Roundtrip Person", "limit": 10})
+    assert any(candidate["note"] == "roundtrip note" for candidate in restored_candidates["items"])
     restored_artifact = restored_api.project.db.learned_artifact_by_id("learn_backup_suggested_ref")
     assert restored_artifact is not None
     assert restored_artifact["artifact_type"] == "suggested_reference"
     assert restored_artifact["artifact_hash"]
     assert restored_artifact["payload"]["candidateId"] == candidate_id
+    restored_review = restored_api.project.db.photo_relationship_name_review("relationship_name_backup_roundtrip")
+    assert restored_review is not None
+    assert restored_review["decision"] == "dismissed"
+    assert restored_review["targetPerson"] == "Roundtrip Person"
 
     nonempty = root / "nonempty"
     nonempty.mkdir()
@@ -197,6 +218,8 @@ def assert_encrypted_backup_roundtrip() -> None:
         assert backup["encrypted"] is True, "backup should be encrypted when passphrase is set"
         backup_path = Path(backup["zipPath"])
         assert is_encrypted(backup_path.read_bytes()[:16]), "backup file must carry the encryption header"
+        assert not zipfile.is_zipfile(backup_path), "encrypted backup path must not be a plaintext zip"
+        assert not list(backup_path.parent.glob(f".{backup_path.name}.*.tmp")), "backup temp files should be removed"
 
         verified = api.handle("verify_workspace_backup", {"path": str(backup_path)})["value"]
         assert verified["ok"] is True, f"encrypted verify should succeed with passphrase: {verified.get('error')}"
@@ -214,7 +237,115 @@ def assert_encrypted_backup_roundtrip() -> None:
         os.environ.pop("VINTRACE_BACKUP_PASSPHRASE", None)
 
 
+def assert_synthetic_age_image_backup_policy() -> None:
+    os.environ["CROSSAGE_FORCE_FALLBACK"] = "1"
+    root = Path(tempfile.mkdtemp(prefix="vintrace-backup-age-image-"))
+    os.environ["VINTRACE_REGISTRY_HOME"] = str(root / "registry")
+    os.environ["CROSSAGE_REGISTRY_HOME"] = str(root / "registry")
+    api = DesktopApi(root / "workspace")
+    project = api.project
+
+    parent_path = root / "source" / "parent.jpg"
+    make_face(parent_path)
+    parent = ReferenceFace(
+        ref_id="ref_backup_parent",
+        person_name="Backup Person",
+        age_bucket="adult",
+        source_path=str(parent_path),
+        capture_date=None,
+        quality=0.9,
+        model_name="backup-fixture",
+        vector=[1.0, *([0.0] * 511)],
+        source_hash=digest(parent_path),
+    )
+    generated_path = project.synthetic_age_images_path / "reviewed-senior.png"
+    make_face(generated_path, (112, 112, 112))
+    generated_hash = digest(generated_path)
+    artifact_id = "syn_age_img_backup_roundtrip"
+    stored_path = project._synthetic_age_image_storage_key(generated_path)
+    artifact_result = project.db.upsert_learned_artifact(
+        artifact_id,
+        {
+            "artifactType": "synthetic_age_image_review",
+            "status": "promoted",
+            "modelName": "Qwen/Qwen-Image-Edit-2511",
+            "versionKey": IMAGE_AGE_AUGMENTATION_METHOD_VERSION,
+            "trainingDataHash": parent.source_hash,
+            "inputCount": 1,
+            "positiveCount": 1,
+            "metrics": {"quality": 0.88},
+            "payload": {
+                "personName": parent.person_name,
+                "parentRefId": parent.ref_id,
+                "parentSourceHash": parent.source_hash,
+                "generatedPath": stored_path,
+                "generatedHash": generated_hash,
+                "targetAgeBucket": "senior",
+            },
+        },
+    )
+    generated_ref = ReferenceFace(
+        ref_id="ref_backup_age_image",
+        person_name=parent.person_name,
+        age_bucket="senior",
+        source_path=str(generated_path),
+        capture_date=None,
+        quality=0.66,
+        model_name=parent.model_name,
+        vector=list(parent.vector),
+        source_hash=generated_hash,
+        capture_date_provenance=AGE_TRAJECTORY_REFERENCE_KIND,
+        reference_kind=AGE_TRAJECTORY_REFERENCE_KIND,
+        synthetic_method_version=IMAGE_AGE_AUGMENTATION_METHOD_VERSION,
+        synthetic_target_age_bucket="senior",
+        parent_ref_ids=[parent.ref_id],
+        derivation_provenance={
+            "kind": "reviewed-ai-generated-age-image",
+            "reviewArtifactId": artifact_id,
+            "reviewArtifactHash": artifact_result["artifactHash"],
+            "generatedImage": True,
+            "aiGenerated": True,
+            "authenticCapture": False,
+            "humanReviewed": True,
+            "parentSourceHash": parent.source_hash,
+            "outputHash": generated_hash,
+        },
+    )
+    assert valid_reference(parent) and valid_reference(generated_ref)
+    project.references = {parent.ref_id: parent, generated_ref.ref_id: generated_ref}
+    project.vector_store.rebuild({ref_id: ref.vector for ref_id, ref in project.references.items()})
+    project._mark_references_dirty(project.references)
+    project.save()
+
+    full_backup = project.export_workspace_backup(root / "full-backups", include_generated=True)
+    with zipfile.ZipFile(full_backup["zipPath"]) as archive:
+        assert stored_path in set(archive.namelist())
+    full_target = root / "restored-full"
+    project.restore_workspace_backup(Path(full_backup["zipPath"]), full_target)
+    full_api = DesktopApi(full_target)
+    full_artifact = full_api.project.db.learned_artifact_by_id(artifact_id)
+    full_ref = full_api.project.references[generated_ref.ref_id]
+    assert full_artifact and full_artifact["status"] == "promoted"
+    assert Path(full_ref.source_path).parent == full_api.project.synthetic_age_images_path
+    assert digest(Path(full_ref.source_path)) == generated_hash
+    assert full_api.project._synthetic_age_startup_result["rehomedReferences"] == 1
+
+    metadata_backup = project.export_workspace_backup(root / "metadata-backups", include_generated=False)
+    with zipfile.ZipFile(metadata_backup["zipPath"]) as archive:
+        assert not any(name.startswith("synthetic-age-images/") for name in archive.namelist())
+    metadata_target = root / "restored-metadata"
+    project.restore_workspace_backup(Path(metadata_backup["zipPath"]), metadata_target)
+    metadata_api = DesktopApi(metadata_target)
+    metadata_artifact = metadata_api.project.db.learned_artifact_by_id(artifact_id)
+    assert metadata_artifact and metadata_artifact["status"] == "rolled_back"
+    assert generated_ref.ref_id not in metadata_api.project.references
+    assert parent.ref_id in metadata_api.project.references
+    assert metadata_api.project._synthetic_age_startup_result["removedReferences"] == 1
+    assert generated_path.is_file()
+
+
 if __name__ == "__main__":
     assert_backup_restore_roundtrip()
     assert_encrypted_backup_roundtrip()
+    assert_synthetic_age_image_backup_policy()
     print("workspace backup roundtrip passed")

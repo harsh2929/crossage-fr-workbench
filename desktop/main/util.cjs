@@ -81,6 +81,23 @@ function backendRestartDelayMs(consecutiveFailures, baseMs = 500, capMs = 30000)
   return Math.min(capMs, delay);
 }
 
+// Keep the image-heavy renderer GPU accelerated in normal desktop use. Hidden
+// Playwright windows retain the deterministic software path unless a test opts
+// into production rendering, and operators can explicitly request the fallback
+// if a particular driver/OS combination is unstable.
+function resolveRendererGpuMode({ platform = process.platform, env = process.env } = {}) {
+  if (env.CROSSAGE_DISABLE_GPU === "1" || env.CROSSAGE_ENABLE_GPU === "0") {
+    return "software";
+  }
+  if (env.CROSSAGE_ENABLE_GPU === "1") {
+    return "hardware";
+  }
+  if (platform === "darwin" && env.CROSSAGE_ALLOW_MULTI_INSTANCE === "1" && env.CROSSAGE_SHOW_WINDOW !== "1") {
+    return "software";
+  }
+  return "hardware";
+}
+
 // MS-5: case-fold + canonicalize a path so trust comparisons are correct on
 // case-insensitive filesystems (default macOS / Windows). Returns a comparable
 // key; falls back to a normalized lowercase string if realpath fails.
@@ -199,6 +216,7 @@ module.exports = {
   isSubpath,
   safeRealpath,
   backendRestartDelayMs,
+  resolveRendererGpuMode,
   canonicalPathKey,
   pathTrustKeyFromResolved,
   buildContentSecurityPolicy,

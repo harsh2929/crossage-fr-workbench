@@ -1,6 +1,6 @@
 /**
  * Phase 5 QA: the Settings tab reorganized into a SectionTabs sub-nav
- * (General / Engine & Models / Privacy & Safety / Storage & Data / Advanced).
+ * (General / Engine & Models / Privacy & Safety / Storage & Data / AI Agents / Advanced).
  * Verifies the sub-nav renders, each section shows its own panels and hides others,
  * a deep-link lands on General, and no page errors. Screenshots for visual review.
  *
@@ -44,7 +44,7 @@ test("Phase 5: Settings sub-nav sections, panels gated, no errors", async () => 
   const app = await electron.launch({ args: [path.join(root, "desktop/main.cjs")], cwd: root, env });
   const page = await app.firstWindow();
   page.on("pageerror", (e) => pageErrors.push(e.message));
-  await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByText("Backend ready.")).toBeAttached({ timeout: 120_000 });
   await page.locator(".language-picker select").selectOption("en").catch(() => undefined);
   await dismissModals(page);
 
@@ -52,10 +52,11 @@ test("Phase 5: Settings sub-nav sections, panels gated, no errors", async () => 
   await page.waitForTimeout(500);
   await dismissModals(page);
 
-  // Sub-nav renders with the five sections.
+  // Sub-nav renders with every settings section, including the compatibility
+  // entry point for the first-class AI Agents destination.
   const tabs = page.locator(".section-tabs");
   await expect(tabs).toBeVisible({ timeout: 20_000 });
-  for (const label of ["General", "Engine & Models", "Privacy & Safety", "Storage & Data", "Advanced"]) {
+  for (const label of ["General", "Engine & Models", "Privacy & Safety", "Storage & Data", "AI Agents", "Advanced"]) {
     await expect(tabs.locator(".section-tab", { hasText: label })).toBeVisible();
   }
 
@@ -87,7 +88,24 @@ test("Phase 5: Settings sub-nav sections, panels gated, no errors", async () => 
   // Privacy & Safety: Activity history present.
   await goto("Privacy & Safety");
   await expect(page.getByText("Activity history", { exact: true })).toBeVisible();
+  const encryptionPanel = page.locator(".settings-panel", { has: page.locator(".panel-title", { hasText: "Data encryption" }) });
+  await expect(encryptionPanel).toBeVisible();
+  await expect(encryptionPanel.locator(".status")).toHaveText("encrypted");
+  await expect(page.getByRole("button", { name: "Rotate key" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /agent code/i })).toBeVisible();
   await expect(page.getByText("Matching choices")).toHaveCount(0);
+  await page.screenshot({ path: path.join(SHOT, "settings-privacy-encryption.png") });
+  const browserWindow = await app.browserWindow(page);
+  await browserWindow.evaluate((window) => window.setSize(760, 800));
+  await page.waitForTimeout(250);
+  const compactOverflow = await encryptionPanel.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  expect(compactOverflow.scrollWidth).toBeLessThanOrEqual(compactOverflow.clientWidth + 2);
+  await page.screenshot({ path: path.join(SHOT, "settings-privacy-encryption-compact.png") });
+  await browserWindow.evaluate((window) => window.setSize(1240, 820));
+  await page.waitForTimeout(250);
 
   // Engine & Models: a distinct section (the General matching card is not here).
   await goto("Engine & Models");

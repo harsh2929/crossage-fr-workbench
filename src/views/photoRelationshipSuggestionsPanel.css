@@ -1,0 +1,48 @@
+.photo-relationship-suggestions { display: flex; flex-direction: column; gap: 12px; }
+.photo-relationship-suggestions-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.photo-relationship-suggestions-head > div { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.photo-relationship-suggestions-head > div > svg { color: var(--accent-vivid-icon); flex: 0 0 auto; }
+.photo-relationship-suggestions-head > div > span { display: flex; flex-direction: column; min-width: 0; }
+.photo-relationship-suggestions-head strong { font-size: 15px; }
+.photo-relationship-suggestions-head small { color: var(--secondary); font-size: 12px; }
+.photo-relationship-suggestion-list { display: grid; gap: 8px; }
+.photo-relationship-suggestion-row {
+  display: grid;
+  grid-template-columns: minmax(176px, 0.65fr) minmax(240px, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px;
+  border: 1px solid var(--separator-soft);
+  border-radius: 8px;
+  background: var(--content-strong);
+}
+.photo-relationship-identities { display: grid; grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr); align-items: center; gap: 8px; min-width: 0; }
+.photo-relationship-identities > span { display: flex; flex-direction: column; align-items: center; gap: 5px; min-width: 0; text-align: center; }
+.photo-relationship-identities > svg { color: var(--secondary); }
+.photo-relationship-identities strong, .photo-relationship-identities small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.photo-relationship-identities strong { font-size: 12px; }
+.photo-relationship-identities small { color: var(--secondary); font-size: 11px; }
+.photo-relationship-identity-cover { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 50%; overflow: hidden; background: var(--fill); color: var(--secondary); font-size: 18px; font-weight: 700; border: 1px solid var(--separator-soft); }
+.photo-relationship-identity-cover img { width: 100%; height: 100%; object-fit: cover; }
+.photo-relationship-evidence { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.photo-relationship-evidence > strong { font-size: 13px; }
+.photo-relationship-evidence > small { color: var(--secondary); font-size: 11px; }
+.photo-relationship-neighbors { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 2px; }
+.photo-relationship-neighbors > small { color: var(--secondary); }
+.photo-relationship-neighbors > span { padding: 3px 6px; border-radius: 6px; background: var(--fill); font-size: 11px; }
+.photo-relationship-caution { margin-top: 2px; }
+.photo-relationship-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+.photo-relationship-empty { margin: 0; color: var(--secondary); font-size: 13px; }
+
+@media (max-width: 720px) {
+  .photo-relationship-suggestion-row { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
+  .photo-relationship-identities { max-width: 260px; }
+  .photo-relationship-actions { justify-content: flex-start; }
+}
+
+@media (max-width: 520px) {
+  .photo-relationship-suggestions-head .compact-action { width: 100%; justify-content: center; }
+  .photo-relationship-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .photo-relationship-actions .compact-action { min-width: 0; width: 100%; }
+  .photo-relationship-actions .compact-action span { white-space: normal; }
+}

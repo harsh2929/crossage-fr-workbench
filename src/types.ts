@@ -1,4 +1,4 @@
-export type AgeBucket = "child" | "adolescent" | "adult" | "unknown";
+export type AgeBucket = "child" | "adolescent" | "adult" | "older-adult" | "senior" | "unknown";
 export type CandidateStatus = "pending" | "accepted" | "rejected" | "uncertain";
 export type LearningMode = "off" | "manual" | "auto_stage";
 export type ExtensibleStringUnion<T extends string> = T | (string & Record<never, never>);
@@ -134,7 +134,11 @@ export interface AppConfig {
   perSubjectConsent?: boolean;
   jurisdictionPreset?: string;
   retentionReviewedDays?: number;
+  retentionPendingDays?: number;
+  retentionAuditDays?: number;
+  retentionEnforcementEnabled?: boolean;
   safeMode: boolean;
+  safeModeMultimodal?: boolean;
   safeModeZeroAdmittance?: boolean;
   safeModeThreshold: number;
   safeModeProfile?: string;
@@ -151,11 +155,38 @@ export interface AppConfig {
 
 export interface ConsentSummary {
   active: boolean;
+  recorded?: boolean;
   operator: string;
   source: string;
   scope: string;
   confirmedAt?: string | null;
   updatedAt?: string | null;
+  perSubjectConsent?: boolean;
+  subjectCount?: number;
+  activeSubjectCount?: number;
+  validSubjectCount?: number;
+  jurisdictionPreset?: string;
+  aiDisclosure?: AiDisclosureStatus;
+}
+
+export interface AiDisclosureNotice {
+  version: string;
+  title: string;
+  summary: string;
+  decisionBoundary: string;
+  dataFlow: string;
+  generatedContent: string;
+  notUsedFor: string[];
+  legalBasis: string;
+  source: string;
+}
+
+export interface AiDisclosureStatus {
+  version: string;
+  acknowledged: boolean;
+  acknowledgedAt?: string | null;
+  operator: string;
+  notice: AiDisclosureNotice;
 }
 
 export interface WorkspaceMetadata {
@@ -179,6 +210,18 @@ export interface SafeModeModelReport {
   nsfwIndex?: number;
   thresholdHint?: string;
   reason?: string;
+  categoryAware?: boolean;
+  multimodalEnabled?: boolean;
+  categories?: string[];
+  policyVersion?: string;
+  modelTier?: string;
+  modelRevision?: string;
+  offlineInference?: boolean;
+  humanReviewRequired?: boolean;
+  csamHashMatching?: boolean;
+  cacheVersion?: string;
+  fallback?: SafeModeModelReport;
+  multimodal?: SafeModeModelReport;
 }
 
 export interface ModelPackageStatus {
@@ -303,6 +346,37 @@ export interface ReferenceFace {
   modelName: string;
   poseBucket?: string;
   createdAt: string;
+  referenceKind?: "real" | "synthetic-age-trajectory";
+  syntheticMethodVersion?: string;
+  syntheticTargetAgeBucket?: AgeBucket | "";
+  parentRefIds?: string[];
+  syntheticScreenScore?: number | null;
+  syntheticScreenOriginalScore?: number | null;
+  syntheticScreenRecompressedScore?: number | null;
+  syntheticScreenThreshold?: number | null;
+  syntheticScreenModelId?: string;
+  syntheticScreenModelVersion?: string;
+  syntheticScreenReviewed?: boolean;
+  syntheticScreenHumanOverride?: boolean;
+}
+
+export interface AgeTrajectoryResult {
+  personName: string;
+  methodVersion: string;
+  realReferences: number;
+  syntheticReferences: number;
+  realAgeBuckets: string[];
+  targetAgeBuckets: string[];
+  eligible: boolean;
+  consentActive: boolean;
+  imageMethodVersion?: string;
+  embeddingReferences?: number;
+  generatedImageReferences?: number;
+  generatedImages: boolean;
+  externalAgingWeights: boolean;
+  added?: number;
+  retained?: number;
+  removed?: number;
 }
 
 export interface AgeReferenceGroup {
@@ -336,6 +410,13 @@ export interface ReviewCandidate {
   videoTimestampMs?: number | null;
   videoFrameIndex?: number | null;
   videoDurationMs?: number | null;
+  videoTrackId?: string;
+  videoTrackVersion?: string;
+  videoTrackStartMs?: number | null;
+  videoTrackEndMs?: number | null;
+  videoTrackFrameCount?: number;
+  videoTrackKeyframeTimestampsMs?: number[];
+  videoTrackKeyframeIndices?: number[];
   sourceHash?: string;
   personName: string;
   bestRefId: string | null;
@@ -351,6 +432,8 @@ export interface ReviewCandidate {
   status: CandidateStatus;
   note: string;
   riskFlags?: string[];
+  reviewPriority?: number;
+  reviewLane?: ExtensibleStringUnion<"surface" | "review" | "low-information">;
   reviewMoreProvenance?: {
     kind?: string;
     score?: number;
@@ -469,8 +552,8 @@ export interface PhotoPlace {
   placeId: string;
   name: string;
   label?: string;
-  latitude?: string;
-  longitude?: string;
+  latitude?: number | null;
+  longitude?: number | null;
   count: number;
   coverAssetId?: string;
   coverSourcePath?: string;
@@ -588,6 +671,89 @@ export interface PhotoMemory {
   updatedAt?: string;
   sortHint?: string;
   movieSettings?: PhotoMemoryMovieSettings;
+}
+
+export type PhotoStoryStyle = "journal" | "concise" | "cinematic";
+
+export interface PhotoStoryCaption {
+  assetId: string;
+  text: string;
+  source: string;
+}
+
+export interface PhotoStoryChapter {
+  id: string;
+  title: string;
+  narrative: string;
+  sourceAssetIds: string[];
+  captions: PhotoStoryCaption[];
+}
+
+export interface PhotoStoryHistoryItem {
+  versionId: string;
+  savedAt: string;
+  label: string;
+  contentSha256: string;
+}
+
+export interface PhotoStoryGeneration {
+  schemaVersion: number;
+  generatorVersion: string;
+  generatedAt: string;
+  inputSha256: string;
+  generatedContentSha256: string;
+  seed: number;
+  offline: boolean;
+  humanReviewRequired: boolean;
+  elapsedMs?: number;
+  model?: Record<string, unknown>;
+  route?: { requested?: string; tier?: string; reason?: string; totalMemoryBytes?: number };
+  usage?: Record<string, unknown>;
+  sourceManifest?: Array<{ assetId: string; contentHash: string; captionSha256: string; captionSource: string }>;
+  sourceSelection?: { available: number; selected: number; omitted: number };
+}
+
+export interface PhotoStory {
+  id: string;
+  sourceMemoryId: string;
+  title: string;
+  subtitle: string;
+  style: PhotoStoryStyle;
+  sourceAssetIds: string[];
+  coverAssetId?: string;
+  chapters: PhotoStoryChapter[];
+  generation: PhotoStoryGeneration;
+  revision: number;
+  history: PhotoStoryHistoryItem[];
+  currentContentSha256: string;
+  humanEdited: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PhotoStoryStatus {
+  available: boolean;
+  offline: boolean;
+  privacyDefault: string;
+  generatorVersion: string;
+  maxAssets: number;
+  styles: PhotoStoryStyle[];
+  preference: string;
+  powerMode: string;
+  route?: { available?: boolean; tier?: string; reason?: string };
+  reason: string;
+}
+
+export interface PhotoStoryExportValue {
+  storyId: string;
+  markdownPath: string;
+  jsonPath: string;
+  generatedAt: string;
+  contentSha256: string;
+  markdownSha256: string;
+  jsonSha256: string;
+  pathFree: boolean;
+  offline: boolean;
 }
 
 export interface PhotoImportSession {
@@ -928,6 +1094,335 @@ export interface PhotoImportResult {
   warnings?: PhotoImportWarning[];
 }
 
+export type RemotePhotoSourceProvider = "slack" | "web" | "google_drive" | "onedrive" | "dropbox" | "webdav";
+export type DamPhotoSourceProvider = "lightroom_catalog" | "capture_one_catalog";
+export type PhotoSourceProvider = "apple_photos" | "windows_folders" | DamPhotoSourceProvider | RemotePhotoSourceProvider;
+
+export interface OpenPhotoCatalogStatus {
+  format: string;
+  formatVersion: number;
+  extension: string;
+  container: string;
+  catalogEncoding: string;
+  mediaEncoding: string;
+  checksums: string;
+  encrypted: boolean;
+  pathFree: boolean;
+  networkAccess: string;
+  portableEntities: string[];
+  portablePreferences: string[];
+  excluded: string[];
+  counts: Record<string, number>;
+}
+
+export interface OpenPhotoCatalogInspection {
+  format: string;
+  formatVersion: number;
+  catalogId: string;
+  generatedAt: string;
+  mediaPolicy: ExtensibleStringUnion<"full" | "catalog-only">;
+  includeSidecars: boolean;
+  pathFree: boolean;
+  encrypted: boolean;
+  counts: Record<string, number>;
+  members: number;
+  verifiedFiles: number;
+  verifiedBytes: number;
+  mediaVerificationDeferred: number;
+  fullyVerified: boolean;
+  catalogPath: string;
+  warnings: PhotoImportWarning[];
+}
+
+export interface OpenPhotoCatalogExportResult {
+  format: string;
+  formatVersion: number;
+  catalogId: string;
+  catalogPath: string;
+  manifestPath: string;
+  mediaPolicy: ExtensibleStringUnion<"full" | "catalog-only">;
+  counts: Record<string, number>;
+  pathFree: boolean;
+  verified: boolean;
+}
+
+export interface OpenPhotoCatalogImportResult {
+  format: string;
+  formatVersion: number;
+  catalogId: string;
+  catalogPath: string;
+  managedRoot: string;
+  counts: Record<string, number>;
+  entityCounts: Record<string, number>;
+  unknownEntities: string[];
+  mergeByHash: boolean;
+  verified: boolean;
+  pathFreeSource: boolean;
+}
+
+export interface OpenPhotoCatalogProgress {
+  phase: string;
+  processed?: number;
+  total?: number;
+  message?: string;
+}
+
+export interface OpenPhotoCatalogProgressEvent {
+  id: number;
+  name: "photo_catalog";
+  payload: OpenPhotoCatalogProgress;
+}
+
+export interface InboundConnectorCredentialSummary {
+  provider: RemotePhotoSourceProvider;
+  connectionId: string;
+  displayName: string;
+  configuredAt: string;
+  updatedAt: string;
+  credentialConfigured: boolean;
+  config: Record<string, unknown>;
+}
+
+export interface InboundConnectorCatalogValue {
+  providers: PhotoSourceProviderStatus[];
+  sources: PhotoExternalSource[];
+  jobs: PhotoSourceJob[];
+  policy: {
+    discovery: string;
+    download: string;
+    credentials: string;
+    network: string;
+    stableIds: boolean;
+    sourceMutation: boolean;
+  };
+}
+
+export interface InboundConnectorsValue {
+  encryptionAvailable: boolean;
+  credentials: InboundConnectorCredentialSummary[];
+  catalog: InboundConnectorCatalogValue;
+}
+
+export interface PhotoSourceScopes {
+  originals: boolean;
+  edited: boolean;
+  raw: boolean;
+  livePhotoMotion: boolean;
+  albumsFolders: boolean;
+  keywords: boolean;
+  labelsOcr: boolean;
+  extractDetectedText: boolean;
+  favorites: boolean;
+  peopleFaces: boolean;
+  preciseLocation: boolean;
+  hidden: boolean;
+  deleted: boolean;
+  shared: boolean;
+  commentsLikes: boolean;
+}
+
+export interface PhotoSourceLibrary {
+  provider: PhotoSourceProvider;
+  libraryId: string;
+  path: string;
+  name: string;
+  available: boolean;
+  systemLibrary: boolean;
+  lastUsed: boolean;
+  modifiedAt: string;
+  photosVersion: string;
+  databaseVersion: string;
+  status: ExtensibleStringUnion<"ready" | "missing" | "permission_denied" | "error">;
+  warnings: PhotoImportWarning[];
+  metadata: Record<string, unknown>;
+}
+
+export interface PhotoExternalSource {
+  sourceId: string;
+  provider: PhotoSourceProvider;
+  libraryId: string;
+  rootPath: string;
+  displayName: string;
+  platform: string;
+  status: string;
+  capabilities: Record<string, boolean>;
+  consent: {
+    selectedScopes?: Partial<PhotoSourceScopes>;
+    sensitiveScopes?: string[];
+    recordedAt?: string;
+  };
+  cursor: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  lastPreviewAt: string;
+  lastSyncAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PhotoSourcePreviewSample {
+  externalId: string;
+  filename: string;
+  title?: string;
+  captureDate?: string;
+  mediaKind?: string;
+  favorite?: boolean;
+  hidden?: boolean;
+  deleted?: boolean;
+  missing?: boolean;
+  cloudAsset?: boolean;
+  albumCount?: number;
+  peopleCount?: number;
+  keywordCount?: number;
+}
+
+export interface PhotoSourcePreviewValue {
+  provider: PhotoSourceProvider;
+  sourceId: string;
+  source: PhotoExternalSource;
+  library: PhotoSourceLibrary;
+  scopes: PhotoSourceScopes;
+  counts: Record<string, number>;
+  samples: PhotoSourcePreviewSample[];
+  scannedCount: number;
+  complete: boolean;
+  elapsedMs: number;
+  warnings: PhotoImportWarning[];
+  unsupportedFields: string[];
+  capabilities: Record<string, boolean>;
+}
+
+export interface PhotoSourceProviderStatus {
+  provider: PhotoSourceProvider;
+  supported: boolean;
+  available: boolean;
+  dependency?: string;
+  dependencyVersion?: string;
+  dependencyLoadState?: ExtensibleStringUnion<"deferred" | "loaded">;
+  readOnly: boolean;
+  networkAccess: string;
+  capabilities: Record<string, boolean>;
+  error: string;
+  warnings: PhotoImportWarning[];
+  sources?: PhotoExternalSource[];
+  jobs?: PhotoSourceJob[];
+}
+
+export interface PhotoSourceDiscoveryValue {
+  provider: PhotoSourceProvider;
+  status: PhotoSourceProviderStatus;
+  libraries: PhotoSourceLibrary[];
+  configuredSources: PhotoExternalSource[];
+}
+
+export interface PhotoSourceJobProgress {
+  phase: ExtensibleStringUnion<"starting" | "preparing" | "previewing" | "importing" | "syncing" | "exporting" | "revoking_consent" | "completed" | "failed" | "cancelled">;
+  message?: string;
+  importId?: string;
+  total?: number;
+  seen?: number;
+  processed?: number;
+  imported?: number;
+  updated?: number;
+  unchanged?: number;
+  failed?: number;
+  removed?: number;
+  trashed?: number;
+  exported?: number;
+  exportedManaged?: number;
+  currentExternalId?: string;
+  [key: string]: unknown;
+}
+
+export interface PhotoSourceJobResult {
+  sourceId?: string;
+  provider?: PhotoSourceProvider;
+  libraryId?: string;
+  importId?: string;
+  storageMode?: ExtensibleStringUnion<"referenced" | "managed">;
+  managedRoot?: string;
+  counts?: Record<string, number>;
+  unsupportedFields?: string[];
+  session?: PhotoImportSession;
+  source?: PhotoExternalSource;
+  warnings?: PhotoImportWarning[];
+  destination?: string;
+  requested?: number;
+  exported?: number;
+  failed?: number;
+  paths?: string[];
+  failures?: Array<{ externalId: string; filename?: string; reason: string }>;
+  failureCount?: number;
+  failureSummaryTruncated?: boolean;
+  revokedScopes?: string[];
+  localCatalogOnly?: boolean;
+  sourceLibraryOpened?: boolean;
+  networkAccess?: string;
+  [key: string]: unknown;
+}
+
+export interface PhotoSourceJob {
+  jobId: string;
+  sourceId: string;
+  provider: PhotoSourceProvider;
+  jobKind: ExtensibleStringUnion<"preview" | "import" | "sync" | "export" | "revoke_consent">;
+  status: ExtensibleStringUnion<"queued" | "running" | "completed" | "failed" | "cancelled">;
+  params: Record<string, unknown>;
+  progress: PhotoSourceJobProgress;
+  result: PhotoSourceJobResult;
+  error: string;
+  cancelRequested: boolean;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string;
+  completedAt: string;
+}
+
+export interface PhotoSourceJobStartValue {
+  job: PhotoSourceJob;
+  jobId: string;
+  jobStarted: boolean;
+  jobs: PhotoSourceJob[];
+}
+
+export interface PhotoSourceJobStatusValue {
+  jobFound: boolean;
+  job: PhotoSourceJob;
+  jobs: PhotoSourceJob[];
+}
+
+export interface PhotoSourceJobsValue {
+  jobs: PhotoSourceJob[];
+  counts: Record<string, number>;
+}
+
+export interface PhotoSourcePeopleHint {
+  hintId: string;
+  assetId: string;
+  sourceId: string;
+  provider: PhotoSourceProvider;
+  libraryId: string;
+  externalAssetId: string;
+  externalPersonId: string;
+  externalFaceId: string;
+  personName: string;
+  status: ExtensibleStringUnion<"pending" | "accepted" | "rejected">;
+  region: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  sourcePath: string;
+  filename: string;
+  mediaKind: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PhotoSourcePeopleHintsValue {
+  hints: PhotoSourcePeopleHint[];
+  total: number;
+  limit: number;
+  offset: number;
+  counts: Record<string, number>;
+}
+
 export interface PhotoImportFailureListValue {
   failures: PhotoImportFailure[];
   total: number;
@@ -1103,6 +1598,7 @@ export interface PhotoMediaPairDeleteValue {
   assetId: string;
   sourcePath?: string;
   relatedSourcePath?: string;
+  relatedSourceUrl?: string;
   pairKind?: string;
   deleted: number;
   suppressedGenerated?: boolean;
@@ -1312,6 +1808,7 @@ export interface PhotoEditStackValue {
   sourcePath: string;
   operations: Array<Record<string, unknown>>;
   renderedPreviewPath?: string;
+  renderedPreviewUrl?: string;
   sidecarPath?: string;
   sidecarPayload?: Record<string, unknown>;
   version?: number;
@@ -1322,6 +1819,142 @@ export interface PhotoEditStackValue {
   removedPaths?: string[];
   hasStack?: boolean;
   stack?: Partial<PhotoEditStackValue> | Record<string, unknown>;
+}
+
+export type PhotoGenerativeMode = "cleanup" | "upscale" | "expand" | "reframe" | "relight";
+
+export interface PhotoContentCredentialSummary {
+  schemaVersion?: number;
+  policyVersion?: string;
+  specVersion?: string;
+  present: boolean;
+  embedded: boolean;
+  validationState: string;
+  cryptographicallyValid: boolean;
+  locallyTrusted: boolean;
+  globallyTrusted: boolean;
+  trustScope: ExtensibleStringUnion<"workspace-local" | "c2pa-global" | "untrusted" | "none">;
+  timestamped: boolean;
+  manifestId: string;
+  signer?: {
+    algorithm?: string;
+    issuer?: string;
+    commonName?: string;
+    signerId?: string;
+  };
+  actions?: Array<{
+    action?: string;
+    digitalSourceType?: string;
+    description?: string;
+  }>;
+  historyActions?: Array<{ action?: string }>;
+  sourceTypes?: string[];
+  containsAiHistory: boolean;
+  topLevelAiEdit: boolean;
+  ingredientCount: number;
+  assetSha256: string;
+  format?: string;
+  validation?: {
+    successCodes?: string[];
+    failureCodes?: string[];
+  };
+  error?: string;
+}
+
+export interface PhotoContentCredentialStatus {
+  available: boolean;
+  policyVersion: string;
+  specVersion: string;
+  packageVersion: string;
+  nativeSdkVersion: string;
+  offline: boolean;
+  remoteManifestFetch: false;
+  ocspFetch: false;
+  timestamped: false;
+  trustScope: "workspace-local";
+  globallyTrusted: false;
+  identityReady: boolean;
+  identityPersisted: boolean;
+  identityEncrypted: boolean;
+  identityStorage: string;
+  signerId: string;
+  error?: string;
+}
+
+export interface PhotoGenerativeCapabilityStatus {
+  available?: boolean;
+  ready?: boolean;
+  verified?: boolean;
+  installed?: boolean;
+  platformSupported?: boolean;
+  hardwareSupported?: boolean;
+  error?: string;
+  reason?: string;
+  [key: string]: unknown;
+}
+
+export interface PhotoGenerativeStatus {
+  catalogVersion: string;
+  catalogSha256: string;
+  offlineInference: boolean;
+  modelRoot: string;
+  platform: string;
+  totalMemoryBytes: number;
+  light: PhotoGenerativeCapabilityStatus & {
+    downloadBytes?: number;
+    cleanup?: PhotoGenerativeCapabilityStatus;
+    upscale?: PhotoGenerativeCapabilityStatus;
+  };
+  heavy: PhotoGenerativeCapabilityStatus & {
+    downloadBytes?: number;
+    minimumMemoryBytes?: number;
+    recommendedMemoryBytes?: number;
+    acknowledgement?: string;
+    models?: PhotoGenerativeCapabilityStatus;
+    runtime?: PhotoGenerativeCapabilityStatus;
+  };
+  modes: Record<PhotoGenerativeMode, boolean>;
+  contentCredentials?: PhotoContentCredentialStatus;
+  applyRequiresContentCredentials?: boolean;
+  applyAvailable?: boolean;
+}
+
+export interface PhotoGenerativePreviewValue {
+  previewId: string;
+  assetId: string;
+  mode: PhotoGenerativeMode;
+  tier: "light" | "heavy";
+  generativePreviewPath: string;
+  generativePreviewUrl?: string;
+  generativePreviewSha256: string;
+  width: number;
+  height: number;
+  durationSeconds: number;
+  offlineInference: true;
+  aiGenerated: true;
+  provenance: Record<string, unknown>;
+  createdAt: string;
+  expiresAt: string;
+  requiresConfirmation: true;
+  sourceChanged: false;
+}
+
+export interface PhotoGenerativeApplyValue {
+  previewId: string;
+  assetId: string;
+  mode: PhotoGenerativeMode;
+  tier: "light" | "heavy";
+  applied: boolean;
+  sourceChanged: false;
+  aiGenerated: true;
+  offlineInference: true;
+  artifactSha256: string;
+  modelOutputSha256: string;
+  contentCredentials: PhotoContentCredentialSummary;
+  stack: PhotoEditStackValue;
+  version?: PhotoEditStackVersionValue | Record<string, unknown>;
+  versionCreated: boolean;
+  idempotentReplay: boolean;
 }
 
 export interface PhotoEditStackVersionValue {
@@ -1504,6 +2137,12 @@ export interface PhotoFolderList {
   coverPreviewAttempts?: number;
   coverPreviewGenerated?: number;
   coverPreviewExisting?: number;
+  partial?: boolean;
+  railMode?: ExtensibleStringUnion<"interactive" | "full">;
+  catalogRevision?: string;
+  enriched?: boolean;
+  enrichmentQueued?: boolean;
+  enrichmentRunning?: boolean;
 }
 
 export interface PhotoPersonPresence {
@@ -1566,6 +2205,7 @@ export interface PhotoMediaPair {
   pairKind: string;
   sourcePath?: string;
   relatedSourcePath?: string;
+  relatedSourceUrl?: string;
   metadata?: Record<string, unknown>;
   sourceExists?: boolean | null;
   relatedExists?: boolean | null;
@@ -1622,6 +2262,9 @@ export interface PhotoItem {
   caption?: string;
   keywords?: string[];
   favorite?: boolean;
+  rating?: number;
+  colorLabel?: ExtensibleStringUnion<"red" | "yellow" | "green" | "blue" | "purple">;
+  pickStatus?: ExtensibleStringUnion<"pick" | "reject">;
   hidden?: boolean;
   deletedAt?: string;
   dateOverride?: string;
@@ -1799,6 +2442,26 @@ export interface PhotoSearchIndexStatus {
   };
 }
 
+export interface PhotoIndexingRuntimeStatus {
+  allowed: boolean;
+  reason: string;
+  schedulerEnabled: boolean;
+  running: boolean;
+  checkedAt: string;
+  powerMode: ExtensibleStringUnion<"low" | "balanced" | "performance">;
+  maxCostClass: ExtensibleStringUnion<"none" | "light" | "medium" | "heavy">;
+  constraints: string[];
+  onBattery: boolean;
+  idleState: ExtensibleStringUnion<"active" | "idle" | "locked" | "unknown">;
+  foregroundActive: boolean;
+  thermalState: ExtensibleStringUnion<"nominal" | "fair" | "serious" | "critical" | "unknown">;
+  speedLimit: number;
+  memoryPressure: ExtensibleStringUnion<"normal" | "pressured" | "critical" | "unknown">;
+  freeMemoryBytes: number;
+  totalMemoryBytes: number;
+  memoryAvailableFraction: number;
+}
+
 export interface PhotoDateBucket {
   key: string;
   label: string;
@@ -1851,6 +2514,15 @@ export interface PhotoLibrarySearchItem {
   dateBucketKey?: string;
   searchText?: string;
   count?: number;
+  resultKind?: ExtensibleStringUnion<"videoSegment" | "audioSegment">;
+  segmentId?: string;
+  timestampMs?: number;
+  startMs?: number;
+  endMs?: number;
+  durationMs?: number;
+  audioSegmentKind?: ExtensibleStringUnion<"speech" | "sound">;
+  audioLanguage?: string;
+  audioConfidence?: number | null;
 }
 
 export interface PhotoLibrarySearchGroup {
@@ -1915,14 +2587,6 @@ export interface PhotoAsset {
   people: PhotoAssetPerson[];
 }
 
-export interface PhotoAssetPage {
-  total: number;
-  offset: number;
-  limit: number;
-  returned: number;
-  items: PhotoAsset[];
-}
-
 export interface PhotoAlbumSuggestion {
   id: string;
   name: string;
@@ -1975,6 +2639,10 @@ export interface PhotoSelectionExportValue {
     rawProxyRendered?: number;
     renderFallback?: number;
     skipped?: number;
+    contentCredentialsSigned?: number;
+    contentCredentialsPreserved?: number;
+    contentCredentialsFailed?: number;
+    contentCredentialsAbsent?: number;
   };
   items: Array<{
     sourcePath: string;
@@ -2002,6 +2670,9 @@ export interface PhotoSelectionExportValue {
     videoEditTransform?: string;
     videoEditRender?: string;
     videoEditSummary?: string;
+    contentCredentialStatus?: string;
+    contentCredentialFailure?: string;
+    contentCredentials?: PhotoContentCredentialSummary | Record<string, never>;
   }>;
   sharedEvent?: PhotoAssetEventValue;
   operation?: PhotoOperation;
@@ -2249,6 +2920,15 @@ export interface PhotoPortraitBlurExportValue {
 export interface SemanticSearchPhotoResult {
   sourcePath: string;
   score: number;
+  resultKind?: ExtensibleStringUnion<"videoSegment" | "audioSegment">;
+  mediaKind?: string;
+  segmentId?: string;
+  assetId?: string;
+  timestampMs?: number;
+  startMs?: number;
+  endMs?: number;
+  durationMs?: number;
+  frameIndex?: number;
 }
 
 export interface SemanticSearchPhotoItem {
@@ -2259,17 +2939,116 @@ export interface SemanticSearchPhotoItem {
   sourceUrl?: string;
   mediaKind?: string;
   name?: string;
+  resultKind?: ExtensibleStringUnion<"videoSegment" | "audioSegment">;
+  segmentId?: string;
+  assetId?: string;
+  timestampMs?: number;
+  startMs?: number;
+  endMs?: number;
+  durationMs?: number;
+  frameIndex?: number;
 }
 
 export interface SemanticSearchPhotosValue {
   available: boolean;
   engine?: string;
   query: string;
+  candidateCount?: number;
+  imageCandidateCount?: number;
+  videoCandidateCount?: number;
   scored: number;
+  scoredImages?: number;
+  scoredVideoSegments?: number;
+  encoded?: number;
+  cached?: number;
+  skipped?: number;
+  missingEmbeddings?: number;
+  missingImageEmbeddings?: number;
+  missingVideoAssets?: number;
+  queued?: boolean;
+  queuedJob?: {
+    jobId?: string;
+    jobKind?: string;
+    status?: string;
+  } | Record<string, unknown>;
   dropped?: number;
   reason?: string;
   results: SemanticSearchPhotoResult[];
   items?: SemanticSearchPhotoItem[];
+  index?: Record<string, unknown>;
+  videoIndex?: Record<string, unknown>;
+}
+
+export interface PhotoLibraryAgentStatus {
+  version: string;
+  available: boolean;
+  offline: boolean;
+  reason?: string;
+  model?: Record<string, unknown>;
+  limits?: Record<string, number>;
+  capabilities?: Record<string, unknown>;
+}
+
+export interface PhotoLibraryAgentCitation {
+  citationId: number;
+  assetId: string;
+  title: string;
+  captureDate?: string;
+  mediaKind?: string;
+  matchReasons?: string[];
+}
+
+export interface PhotoLibraryAgentPlan {
+  planId: string;
+  action: string;
+  executionLane: ExtensibleStringUnion<"write" | "destructive">;
+  confirmationRequired: boolean;
+  destructive: boolean;
+  estimatedAffectedItems: number;
+  payloadKeys: string[];
+  createdAt: string;
+  expiresAt: string;
+  status: ExtensibleStringUnion<"pending" | "executing" | "complete" | "expired">;
+}
+
+export interface PhotoLibraryAgentToolTrace {
+  index: number;
+  tool: string;
+  ok: boolean;
+  arguments?: Record<string, unknown>;
+  fallbackApplied?: boolean;
+  error?: string;
+}
+
+export interface PhotoLibraryAgentResponse {
+  version: string;
+  requestId: string;
+  answer: string;
+  citations: PhotoLibraryAgentCitation[];
+  followUps: string[];
+  uncertainty?: string;
+  intent: string;
+  resultAssetIds: string[];
+  pendingPlans: PhotoLibraryAgentPlan[];
+  toolTrace: PhotoLibraryAgentToolTrace[];
+  grounding: {
+    citationCandidates: number;
+    validCitations: number;
+    injectionFlags: Record<string, number>;
+    untrustedContentIsolated: boolean;
+    answerNeutralized?: boolean;
+    answerNeutralizationFlags?: string[];
+  };
+  model?: Record<string, unknown>;
+  offline: boolean;
+  elapsedMs: number;
+}
+
+export interface PhotoLibraryAgentPlanExecution {
+  ok: boolean;
+  result?: Record<string, unknown>;
+  replayedPlan?: boolean;
+  plan: PhotoLibraryAgentPlan;
 }
 
 export interface PhotoLiveKeyPhotoValue {
@@ -2309,9 +3088,23 @@ export interface ScanMetrics {
   skipped: number;
   errors: number;
   unmatched: number;
+  clusterPasses?: number;
+  clusterModelGroups?: number;
+  clusterComponents?: number;
+  clusterUniqueInputs?: number;
+  clusterDuplicateInputs?: number;
+  clusterNoise?: number;
+  clusterSpoolPeak?: number;
   safeFiltered: number;
   videoFiles: number;
   videoFrames: number;
+  videoTrackObservations?: number;
+  videoTracks?: number;
+  videoTrackTemplates?: number;
+  videoTrackSingletons?: number;
+  videoTrackKeyframes?: number;
+  videoTrackMatches?: number;
+  videoTrackUnmatched?: number;
   videoProtected: number;
   excluded?: number;
   pathErrors?: number;
@@ -2339,6 +3132,7 @@ export interface ScanMetrics {
   poseProfile?: number;
   poseUnknown?: number;
   poseRelaxedReviews?: number;
+  ageGapRelaxedReviews?: number;
   poseRelaxedProfile?: number;
   poseRelaxedThreeQuarter?: number;
   poseReranked?: number;
@@ -2819,6 +3613,8 @@ export interface ConsentReceiptExportValue {
     reviewed: number;
     scanRuns: number;
     consentEvents: number;
+    subjectReleases?: number;
+    destructionReceipts?: number;
   };
 }
 
@@ -2838,12 +3634,141 @@ export interface RetentionPolicyReport {
   reviewedOlderThanDays: Record<string, number>;
   oldestReviewedAgeDays: number;
   policy: {
+    policyVersion?: string;
+    policyHash?: string;
+    jurisdictionPreset?: string;
+    publicPolicyRequired?: boolean;
+    enforcementEnabled?: boolean;
     recommendedReviewedRetentionDays: number;
     reviewedStatuses: CandidateStatus[];
     pendingRowsAreKept: boolean;
     originalMediaIsNeverDeleted: boolean;
+    publication?: PolicyPublicationStatus;
+  };
+  due?: {
+    reviewedCandidates: number;
+    pendingCandidates: number;
+    expiredSubjects: number;
+    auditEvents: number;
   };
   recommendations: string[];
+}
+
+export interface PolicyPublicationStatus {
+  required: boolean;
+  recorded: boolean;
+  current: boolean;
+  publicUrl: string;
+  approvedBy: string;
+  publishedAt?: string | null;
+  recordedAt?: string | null;
+}
+
+export interface BiometricRetentionPolicy {
+  schemaVersion: number;
+  policyVersion: string;
+  policyHash: string;
+  jurisdictionPreset: string;
+  title: string;
+  status: string;
+  publicPolicyRequired: boolean;
+  enforcementEnabled: boolean;
+  publication: PolicyPublicationStatus;
+  schedule: {
+    subjectTemplates: { destroyOn: string[]; maximumDaysAfterLastInteraction?: number | null };
+    reviewedMatches: { retainDays: number };
+    pendingMatches: { retainDays: number };
+    auditEvidence: { retainDays: number; subjectNamesPseudonymized: boolean };
+    originalMedia: { managedByPolicy: boolean; reason: string };
+  };
+  destructionMethod: string;
+  operatorAction: string;
+  sources: Array<{ label: string; url: string }>;
+  disclaimer: string;
+}
+
+export interface ComplianceSubjectRecord {
+  personName: string;
+  releaseId: string;
+  recordHash: string;
+  active: boolean;
+  complete: boolean;
+  expired: boolean;
+  signerName: string;
+  signerRole: string;
+  specificPurpose: string;
+  collectionTermDays: number;
+  lawfulBasis: string;
+  confirmedAt?: string | null;
+  expiresAt?: string | null;
+}
+
+export interface ComplianceStatus {
+  jurisdiction: Jurisdiction;
+  aiDisclosure: AiDisclosureStatus;
+  retentionPolicy: BiometricRetentionPolicy;
+  subjects: {
+    total: number;
+    active: number;
+    complete: number;
+    expired: number;
+    records: ComplianceSubjectRecord[];
+    biometric: number;
+    covered: number;
+    missing: number;
+    missingNames: string[];
+  };
+  processingAllowed: boolean;
+  evidenceReady: boolean;
+  startupEnforcement?: RetentionEnforcementValue | null;
+}
+
+export interface SubjectReleaseInput {
+  personName: string;
+  signerName: string;
+  signerRole: string;
+  specificPurpose: string;
+  collectionTermDays: number;
+  lawfulBasis: string;
+  writtenNoticeAcknowledged: boolean;
+  electronicSignatureAccepted: boolean;
+  aiDisclosureAcknowledged: boolean;
+}
+
+export interface SubjectDataDeletionValue {
+  references: number;
+  candidates: number;
+  generatedFiles: number;
+  generatedBytes: number;
+  receiptPath: string;
+  receipt: {
+    receiptId: string;
+    receiptHash: string;
+    destroyedAt: string;
+    originalMediaDeleted: boolean;
+  };
+  dbDeleted: Record<string, number>;
+}
+
+export interface BiometricPolicyExportValue {
+  jsonPath: string;
+  markdownPath: string;
+  htmlPath: string;
+  policyHash: string;
+  documentHash: string;
+  policyVersion: string;
+}
+
+export interface RetentionEnforcementValue {
+  enabled: boolean;
+  source: string;
+  jurisdictionPreset: string;
+  expiredSubjectsDeleted: number;
+  reviewedCandidatesDeleted: number;
+  pendingCandidatesDeleted: number;
+  auditEventsDeleted: number;
+  auditCheckpointHash?: string;
+  destructionReceipts: Array<Record<string, unknown>>;
 }
 
 export interface SafeModeAuditExportValue {
@@ -2880,6 +3805,88 @@ export interface ModelDriftReport {
     candidates: Array<Record<string, unknown>>;
   };
   recommendations: string[];
+}
+
+export interface ModelLifecycleMetric {
+  path: string;
+  direction: "higher" | "lower";
+  actual: number | null;
+  baseline?: number | null;
+  ok: boolean;
+  failures?: string[];
+}
+
+export interface ModelLifecycleComponent {
+  id: string;
+  label: string;
+  family: string;
+  status: "pass" | "not-installed" | "unavailable" | "blocked" | "candidate-rejected";
+  runtime: {
+    installed: boolean;
+    available: boolean;
+    verified: boolean;
+    version: string;
+    fingerprint: string;
+    reason: string;
+  };
+  baseline: {
+    passed: boolean;
+    integrity: boolean;
+    reportSha256: string;
+    reportName: string;
+    metrics: ModelLifecycleMetric[];
+    failures: string[];
+  };
+  candidate?: {
+    passed: boolean;
+    reportSha256: string;
+    reportName: string;
+    metrics: ModelLifecycleMetric[];
+    failures: string[];
+  } | null;
+  datasets: Array<{
+    id: string;
+    version: string;
+    kind: string;
+    verified: boolean;
+    verification: string;
+    claimBoundary?: string;
+  }>;
+  rollback: {
+    mode: "configuration" | "application-release";
+    fields: string[];
+  };
+  failures: string[];
+}
+
+export interface ModelLifecycleStatus {
+  schemaVersion: number;
+  generatedAt: string;
+  policyId: string;
+  policyVersion: string;
+  policySha256: string;
+  offlineOnly: boolean;
+  ready: boolean;
+  counts: {
+    components: number;
+    passed: number;
+    notInstalled: number;
+    unavailable: number;
+    blocked: number;
+    candidateRejected: number;
+    datasetManifests: number;
+    datasetManifestsVerified: number;
+  };
+  components: ModelLifecycleComponent[];
+  blockers: string[];
+  warnings: string[];
+  state: {
+    accepted: number;
+    staged: number;
+    history: number;
+    configurationHistory: number;
+    updatedAt: string;
+  };
 }
 
 export interface ReferenceGapItem {
@@ -3032,6 +4039,89 @@ export interface DuplicatePeopleResult {
   threshold: number;
   peopleChecked: number;
   suggestions: DuplicatePersonSuggestion[];
+}
+
+export interface PhotoRelationshipSharedRelationship {
+  personName: string;
+  sourceCooccurrences: number;
+  targetCooccurrences: number;
+  support: number;
+}
+
+export interface PhotoRelationshipNameSuggestion {
+  suggestionId: string;
+  evidenceHash: string;
+  graphVersion: string;
+  sourceCluster: string;
+  targetPerson: string;
+  score: number;
+  confidence: ExtensibleStringUnion<"strong" | "moderate">;
+  sourceAssetCount: number;
+  targetAssetCount: number;
+  sharedRelationshipCount: number;
+  relationshipSupport: number;
+  directCooccurrenceCount: 0;
+  sharedRelationships: PhotoRelationshipSharedRelationship[];
+  scoreComponents: {
+    weightedNeighborhoodOverlap: number;
+    sourceNeighborhoodCoverage: number;
+    supportStrength: number;
+  };
+  reason: string;
+  reviewRequired: true;
+  autoApply: false;
+  undoAvailable: true;
+}
+
+export interface PhotoRelationshipNameSuggestionResult {
+  available: boolean;
+  reason: string;
+  generatedAt: string;
+  graphVersion: string;
+  graphHash: string;
+  graphStats: {
+    nodes: number;
+    namedPeople: number;
+    unknownClusters: number;
+    edges: number;
+    candidatesEvaluated: number;
+    blockedByDirectCooccurrence: number;
+  };
+  minimums?: {
+    score: number;
+    sourceAssets: number;
+    relationshipSupport: number;
+  };
+  suggestions: PhotoRelationshipNameSuggestion[];
+  reviewRequired: true;
+  autoApplied?: 0;
+  offline: true;
+}
+
+export interface PhotoRelationshipNameReviewResult {
+  applied: boolean;
+  dismissed: boolean;
+  idempotentReplay: boolean;
+  operationId?: string;
+  operation?: PhotoOperation;
+  renamed?: {
+    references: number;
+    candidates: number;
+    peopleRows: number;
+    groupRows: number;
+    profileMerged: boolean;
+    identityMerged: boolean;
+  };
+  suggestion?: PhotoRelationshipNameSuggestion;
+  review?: {
+    suggestionId: string;
+    sourceCluster: string;
+    targetPerson: string;
+    evidenceHash: string;
+    decision: ExtensibleStringUnion<"dismissed" | "applied">;
+    operationId: string;
+    reviewedAt: string;
+  };
 }
 
 export interface ReviewRulesApplyResult {
@@ -3369,6 +4459,7 @@ export interface PublicDatasetCatalogEntry {
   sourceUrl: string;
   terms: string;
   recommendedUse: string;
+  requiresTermsAcknowledgement?: boolean;
 }
 
 export interface PublicDatasetCatalog {
@@ -3429,6 +4520,16 @@ export interface PublicDatasetBenchmarkResult {
       error: string;
       datasetId?: string;
     }>;
+    ageTrajectory?: {
+      enabled: boolean;
+      protocolVersion: string;
+      methodVersion: string;
+      generatedImages: false;
+      externalAgingWeights: false;
+      added: number;
+      retained: number;
+      people: number;
+    };
   };
   metrics: {
     evaluated: number;
@@ -3527,6 +4628,47 @@ export interface PublicDatasetBenchmarkResult {
   reportPath: string;
   recommendations: string[];
   importResult?: AccuracyLabelsImportValue | null;
+}
+
+export interface CrossAgeTrajectoryBenchmarkResult {
+  schemaVersion: number;
+  protocolVersion: string;
+  methodVersion: string;
+  generatedAt: string;
+  datasetId: "agedb" | "calfw" | "fgnet";
+  status: "pass" | "fail";
+  durationMs: number;
+  datasetEvidence: {
+    folderName: string;
+    manifestPath: string;
+    manifestSha256: string;
+    termsAcknowledged: true;
+    benchmarkOnly: true;
+  };
+  baseline: PublicDatasetBenchmarkResult;
+  augmented: PublicDatasetBenchmarkResult;
+  comparison: {
+    evaluated: number;
+    generatedReferences: number;
+    syntheticBestMatches: number;
+    syntheticEvidenceMatches: number;
+    syntheticTruePositiveEvidence: number;
+    identityChanges: number;
+    improvements: number;
+    regressions: number;
+    precisionDelta: number;
+    recallDelta: number;
+    genuineScoreImproved: number;
+    genuineScoreRegressed: number;
+    meanGenuineScoreDelta: number;
+    nonmatchScoreIncreased: number;
+    meanNonmatchScoreDelta: number;
+    improvementSamples: Array<Record<string, unknown>>;
+    regressionSamples: Array<Record<string, unknown>>;
+  };
+  gates: Record<string, boolean>;
+  limitations: string[];
+  reportPath: string;
 }
 
 export interface PublicDatasetModelComparisonPack {
@@ -3773,16 +4915,18 @@ export interface Jurisdiction {
   id: string;
   label: string;
   retentionReviewedDays: number;
+  retentionPendingDays?: number;
   requireExplicitConsent: boolean;
   perSubjectConsent: boolean;
   dataMinimization: boolean;
   auditRetentionDays: number;
+  biometricMaxRetentionDays?: number;
+  defaultCollectionTermDays?: number;
+  writtenReleaseRequired?: boolean;
+  publicPolicyRequired?: boolean;
+  enforceByDefault?: boolean;
+  sources?: Array<{ label: string; url: string }>;
   notes: string;
-}
-
-export interface JurisdictionCatalog {
-  jurisdictions: Jurisdiction[];
-  disclaimer: string;
 }
 
 export interface AuditChainStatus {
@@ -3825,6 +4969,83 @@ export interface ReferenceSuggestion {
   payload?: Record<string, unknown>;
 }
 
+export interface SyntheticEnrollmentScreenReport {
+  available: boolean;
+  verified: boolean;
+  engine: string;
+  modelId: string;
+  version: string;
+  reviewThreshold?: number;
+  stableScore?: string;
+  action: ExtensibleStringUnion<"stage-for-human-review">;
+  license?: string;
+  purpose?: string;
+  limitations?: string[];
+  reason?: string;
+  runtimeValidated?: boolean;
+}
+
+export interface SyntheticEnrollmentReview {
+  artifactId: string;
+  artifactHash: string;
+  status: ExtensibleStringUnion<"candidate" | "staged" | "promoted" | "rejected" | "rolled_back">;
+  personName: string;
+  ageBucket: AgeBucket;
+  sourceHash: string;
+  recognizerModel: string;
+  screenModelId: string;
+  screenModelVersion: string;
+  screenAvailable: boolean;
+  reviewReason: ExtensibleStringUnion<"score-threshold" | "screen-unavailable">;
+  stableScore?: number | null;
+  originalScore?: number | null;
+  recompressedScore?: number | null;
+  reviewThreshold?: number | null;
+  quality: number;
+  poseBucket: string;
+  previewPath?: string | null;
+  previewUrl?: string | null;
+  sourceAvailable: boolean;
+  createdAt?: string;
+  promotedAt?: string | null;
+}
+
+export interface SyntheticAgeImageReviewStatus {
+  methodVersion: string;
+  artifactType: string;
+  reviewOnly: true;
+  autoEnrollment: false;
+  counts: Record<string, number>;
+}
+
+export interface SyntheticAgeImageReview {
+  artifactId: string;
+  artifactHash: string;
+  status: ExtensibleStringUnion<"candidate" | "staged" | "promoted" | "rejected" | "rolled_back">;
+  personName: string;
+  targetAgeBucket: AgeBucket;
+  parentRefId: string;
+  generatedHash: string;
+  generatedPath: string;
+  generatedUrl?: string;
+  recognizerModel: string;
+  generationModel: string;
+  generationModelRevision: string;
+  generationLicense: string;
+  quality: number;
+  targetIdentityCosine: number;
+  parentCosine: number;
+  nearestOtherCosine?: number | null;
+  identityMargin?: number | null;
+  reasons: string[];
+  reviewOnly: true;
+  authenticCapture: false;
+  futureAppearancePrediction: false;
+  generatedAvailable: boolean;
+  createdAt?: string;
+  promotedAt?: string | null;
+}
+
 export interface AppState {
   version: string;
   buildInfo?: BuildInfo;
@@ -3858,6 +5079,10 @@ export interface AppState {
   references: ReferenceFace[];
   candidates: ReviewCandidate[];
   referenceSuggestions?: ReferenceSuggestion[];
+  syntheticEnrollmentScreen?: SyntheticEnrollmentScreenReport;
+  syntheticEnrollmentReviews?: SyntheticEnrollmentReview[];
+  syntheticAgeImageReviewStatus?: SyntheticAgeImageReviewStatus;
+  syntheticAgeImageReviews?: SyntheticAgeImageReview[];
   candidateWindow?: {
     limit: number;
     returned: number;
@@ -3870,6 +5095,8 @@ export interface AppState {
 export interface CommandResult<T = unknown> {
   state?: AppState;
   added?: number;
+  reviews?: number;
+  screened?: number;
   errors?: string[];
   metrics?: ScanMetrics;
   cleared?: number;
@@ -3934,6 +5161,111 @@ export interface FolderWatchStatus {
   result?: CommandResult;
 }
 
+export interface PhotoTetherCamera {
+  id: string;
+  model: string;
+  port: string;
+}
+
+export interface PhotoTetherCameraStatus {
+  available: boolean;
+  executableAvailable?: boolean;
+  version: string;
+  cameras: PhotoTetherCamera[];
+  captureSupported: boolean;
+  message: string;
+  error?: string;
+}
+
+export interface PhotoTetherCapture {
+  captureId: string;
+  sessionId: string;
+  sequence: number;
+  sourcePath: string;
+  sourceSignature: string;
+  status: "pending" | "interrupted" | "imported" | "failed";
+  targetPath: string;
+  assetId: string;
+  importId: string;
+  sizeBytes: number;
+  capturedAt: string;
+  importedAt: string;
+  updatedAt: string;
+  error: string;
+  metadata: Record<string, unknown>;
+  previewUrl?: string;
+}
+
+export interface PhotoTetherSession {
+  sessionId: string;
+  mode: "watch" | "ptp";
+  status: "active" | "recoverable" | "stopped" | "error";
+  sourcePath: string;
+  destinationPath: string;
+  storageMode: "referenced" | "managed";
+  managedRoot: string;
+  namingTemplate: string;
+  nextSequence: number;
+  sourceLabel: string;
+  camera: PhotoTetherCamera;
+  capabilities: PhotoTetherCameraStatus;
+  settings: {
+    includeExisting?: boolean;
+    autoResume?: boolean;
+    liveReview?: boolean;
+  };
+  startedAt: string;
+  stoppedAt: string;
+  updatedAt: string;
+  importedCount: number;
+  failedCount: number;
+  lastCaptureId: string;
+  lastError: string;
+  captures?: PhotoTetherCapture[];
+}
+
+export interface PhotoTetherStatus {
+  active: boolean;
+  sessionId: string;
+  mode: "" | "watch" | "ptp";
+  sourcePath: string;
+  queued: number;
+  importing: boolean;
+  captureBusy: boolean;
+  watchMode: string;
+  message: string;
+  session: PhotoTetherSession | null;
+  recoverable: PhotoTetherSession[];
+  recent: PhotoTetherSession[];
+  camera: PhotoTetherCameraStatus;
+}
+
+export interface PhotoTetherStartOptions {
+  mode: "watch" | "ptp";
+  sourcePath: string;
+  destinationPath?: string;
+  storageMode: "referenced" | "managed";
+  managedRoot?: string;
+  namingTemplate: string;
+  nextSequence?: number;
+  sourceLabel?: string;
+  cameraId?: string;
+  includeExisting?: boolean;
+  autoResume?: boolean;
+  liveReview?: boolean;
+  refreshCamera?: boolean;
+}
+
+export interface PhotoTetherEvent extends Partial<PhotoTetherStatus> {
+  type: string;
+  capture?: PhotoTetherCapture;
+  asset?: Partial<PhotoItem> & Record<string, unknown>;
+  previewUrl?: string;
+  error?: string;
+  code?: string;
+  dropped?: number;
+}
+
 export interface SystemIntegration {
   platform: string;
   launchAtLogin: boolean;
@@ -3961,6 +5293,31 @@ export interface WorkspaceLockStatus {
   lockPath: string;
   usingOsKeychain: boolean;
   message: string;
+}
+
+export interface WorkspaceEncryptionStatus {
+  required: boolean;
+  enabled: boolean;
+  keyId: string;
+  databaseCipher: string;
+  sensitiveFilesCipher: string;
+  migrationComplete: boolean;
+  recoveryConfigured: boolean;
+  recoveryPendingCovered: boolean;
+  plaintextVectorSidecars: string[];
+  database: {
+    required: boolean;
+    enabled: boolean;
+    encryptedHeader: boolean;
+    plaintextHeader: boolean;
+    keyId: string;
+    cipherVersion: string;
+    cipherIntegrity: string[];
+    walEncryptedByDatabaseCodec: boolean;
+    temporaryStorage: string;
+  };
+  sensitiveFiles: Array<{ name: string; exists: boolean; encrypted: boolean }>;
+  rotation?: { oldKeyId: string; newKeyId: string; pending: boolean };
 }
 
 export interface UpdateProgress {
@@ -4089,6 +5446,140 @@ export interface McpHttpStatus {
   error: string;
 }
 
+export interface MobileCompanionDevice {
+  accountId: string;
+  label: string;
+  status: "pending" | "paired" | "pairing-expired" | "expired" | "revoked";
+  allowPreviews: boolean;
+  createdAt: string;
+  pairedAt: string;
+  expiresAt: number | null;
+  pairingExpiresAt: number | null;
+  revokedAt: string;
+}
+
+export interface MobileCompanionStatus {
+  publicUrl: string;
+  appUrl: string;
+  secure: boolean;
+  loopback: boolean;
+  source: "environment" | "saved" | "default";
+  canEditEndpoint: boolean;
+  readyForPairing: boolean;
+  serverRunning: boolean;
+  devices: MobileCompanionDevice[];
+}
+
+export interface MobileCompanionPairingResult {
+  ok: boolean;
+  device: MobileCompanionDevice;
+  pairingUrl: string;
+  status: MobileCompanionStatus;
+}
+
+export interface MobileCompanionRevokeResult {
+  ok: boolean;
+  device: MobileCompanionDevice;
+  status: MobileCompanionStatus;
+}
+
+export interface LocalSyncPeer {
+  deviceId: string;
+  label: string;
+  host: string;
+  port: number;
+  status: "active" | "revoked";
+  pairedAt: string;
+  revokedAt: string;
+  lastSyncAt: string;
+  lastError: string;
+}
+
+export interface LocalSyncStatus {
+  protocol: "vintrace-local-sync-v1";
+  available: boolean;
+  initialized: boolean;
+  deviceId: string;
+  deviceLabel: string;
+  encryptionRequired: true;
+  encryptionReady: boolean;
+  server: {
+    running: boolean;
+    port: number;
+    addresses: string[];
+    discoveryEnabled: boolean;
+    discoveryError: string;
+  };
+  discoveryRuntime: {
+    available: boolean;
+    zeroconfVersion: string;
+    ifaddrVersion: string;
+    serviceType: string;
+    internetService: false;
+    error?: string;
+  };
+  peers: LocalSyncPeer[];
+  discoveredPeers: Array<{
+    deviceId: string;
+    host: string;
+    port: number;
+    paired: boolean;
+    lastSeenAt: string;
+  }>;
+  pendingInvitationCount: number;
+  counts: {
+    operations: number;
+    registers: number;
+    dirty: number;
+    conflicts: number;
+    assetsWithoutContentHash: number;
+    pendingAssets: number;
+  };
+  privacy: {
+    transport: string;
+    operationAuthentication: string;
+    stateAtRest: string;
+    internetService: false;
+    mediaTransfer: false;
+    biometricTransfer: false;
+    generatedModelDataTransfer: false;
+    discoveryAdvertisesLibraryMetadata: false;
+  };
+  scope: {
+    assetIdentity: string;
+    fields: string[];
+    missingMedia: string;
+    remoteDeletion: string;
+  };
+  recovery: {
+    bundleScope: string;
+    catalogRecovery: string;
+  };
+  reason: string;
+}
+
+export interface LocalSyncInvitation {
+  invitation: string;
+  expiresAt: string;
+  deviceId: string;
+  host: string;
+  port: number;
+}
+
+export interface LocalSyncConflictResult {
+  total: number;
+  conflicts: Array<{
+    conflictId: string;
+    entityType: string;
+    contentHashPrefix: string;
+    field: string;
+    winnerOperationId: string;
+    loserOperationId: string;
+    resolution: string;
+    resolvedAt: string;
+  }>;
+}
+
 export interface McpConnectionInfo {
   mode: "packaged" | "source";
   workspace: string;
@@ -4096,6 +5587,7 @@ export interface McpConnectionInfo {
   args: string[];
   env: Record<string, string>;
   httpUrl: string;
+  agentApiUrl: string;
   httpHost: string;
   httpPort: number;
   configs: {
@@ -4133,6 +5625,8 @@ export interface McpActionResult {
 export interface CrossAgeApi {
   invoke<T = unknown>(command: string, params?: Record<string, unknown>): Promise<T>;
   chooseFolder(): Promise<string | null>;
+  chooseDamCatalog(provider: DamPhotoSourceProvider): Promise<Pick<MediaRef, "path" | "isDir"> | null>;
+  chooseOpenPhotoCatalog(): Promise<Pick<MediaRef, "path" | "isDir"> | null>;
   /** Multi-select image picker; returns granted paths + thumbnail URLs. */
   chooseImages(): Promise<MediaRef[]>;
   /** Single audio picker; returns a granted path + media URL. */
@@ -4154,6 +5648,11 @@ export interface CrossAgeApi {
   getScanMarkerStatus(): Promise<{ workspace: string; cancelRequested: boolean; paused: boolean; cancelPath: string; pausePath: string }>;
   startFolderWatch(folder: string): Promise<FolderWatchStatus>;
   stopFolderWatch(): Promise<FolderWatchStatus>;
+  getPhotoTetherStatus(refreshCamera?: boolean): Promise<PhotoTetherStatus>;
+  startPhotoTether(options: PhotoTetherStartOptions): Promise<PhotoTetherStatus>;
+  stopPhotoTether(): Promise<PhotoTetherStatus>;
+  resumePhotoTether(sessionId: string): Promise<PhotoTetherStatus>;
+  capturePhotoTether(): Promise<{ capture?: PhotoTetherCapture | null; sequence?: number }>;
   getSystemIntegration(): Promise<SystemIntegration>;
   setLaunchAtLogin(openAtLogin: boolean): Promise<SystemIntegration>;
   getUpdateStatus(): Promise<UpdateStatus>;
@@ -4164,7 +5663,27 @@ export interface CrossAgeApi {
   getDiagnosticsReport(includePaths?: boolean): Promise<DiagnosticsReport>;
   exportDiagnosticsReport(includePaths?: boolean): Promise<DiagnosticsExportResult>;
   recordDiagnosticEvent(event: Record<string, unknown>): Promise<boolean>;
+  getPhotoIndexingRuntimeStatus(): Promise<PhotoIndexingRuntimeStatus>;
   getPhotoSources(): Promise<SystemPhotoSource[]>;
+  getPhotoCatalogStatus(): Promise<{ value: OpenPhotoCatalogStatus }>;
+  inspectOpenPhotoCatalog(payload: { catalogPath: string; verifyMedia?: boolean }): Promise<{ value: OpenPhotoCatalogInspection }>;
+  exportOpenPhotoCatalog(payload: { destination: string; metadataOnly?: boolean; includeSidecars?: boolean; name?: string }): Promise<{ value: OpenPhotoCatalogExportResult }>;
+  importOpenPhotoCatalog(payload: { catalogPath: string; managedRoot?: string; mergeByHash?: boolean; verifyMedia?: boolean }): Promise<{ value: OpenPhotoCatalogImportResult }>;
+  cancelOpenPhotoCatalog(): Promise<{ cancelRequested: boolean }>;
+  getDamCatalogStatus(provider: DamPhotoSourceProvider): Promise<{ value: PhotoSourceProviderStatus }>;
+  listDamCatalogs(provider: DamPhotoSourceProvider): Promise<{ value: PhotoSourceDiscoveryValue }>;
+  previewDamCatalog(payload: Record<string, unknown> & { provider: DamPhotoSourceProvider; libraryPath: string }): Promise<{ value: PhotoSourcePreviewValue | PhotoSourceJobStartValue }>;
+  importDamCatalog(payload: Record<string, unknown> & { provider: DamPhotoSourceProvider; libraryPath: string }): Promise<{ value: PhotoSourceJobStartValue }>;
+  syncDamCatalog(payload: Record<string, unknown> & { provider: DamPhotoSourceProvider; libraryPath: string }): Promise<{ value: PhotoSourceJobStartValue }>;
+  listInboundConnectors(): Promise<InboundConnectorsValue>;
+  saveInboundConnector(payload: {
+    provider: RemotePhotoSourceProvider;
+    connectionId: string;
+    displayName: string;
+    config: Record<string, unknown>;
+  }): Promise<InboundConnectorCredentialSummary & { configured?: Record<string, unknown> }>;
+  removeInboundConnector(provider: RemotePhotoSourceProvider, connectionId: string): Promise<{ provider: string; connectionId: string; removed: boolean }>;
+  invokeInboundConnector<T = unknown>(provider: RemotePhotoSourceProvider, connectionId: string, action: "preview" | "import" | "sync", params?: Record<string, unknown>): Promise<T>;
   getPhotosSensitiveAuthStatus(): Promise<PhotoSensitiveAuthStatus>;
   authenticatePhotosSensitiveAccess(reason?: string): Promise<PhotoSensitiveAuthResult>;
   getWorkspaceLockStatus(): Promise<WorkspaceLockStatus>;
@@ -4172,8 +5691,12 @@ export interface CrossAgeApi {
   lockWorkspace(): Promise<WorkspaceLockStatus>;
   unlockWorkspace(): Promise<WorkspaceLockStatus>;
   disableWorkspaceLock(): Promise<WorkspaceLockStatus>;
+  getWorkspaceEncryptionStatus(): Promise<WorkspaceEncryptionStatus>;
+  createWorkspaceRecoveryCode(): Promise<{ recoveryCode: string; status: WorkspaceEncryptionStatus }>;
+  rotateWorkspaceEncryptionKey(): Promise<WorkspaceEncryptionStatus>;
   revealPath(path: string): Promise<boolean>;
   openPath(path: string): Promise<{ ok: boolean; error?: string }>;
+  openPhotoPrivacySettings(): Promise<{ ok: boolean; platform: string; suppressed?: boolean; error?: string }>;
   openPathWith(path: string, editorPath?: string): Promise<OpenPathWithResult>;
   listExternalEditors(): Promise<ExternalEditorFavoritesResult>;
   forgetExternalEditor(editorPath: string): Promise<ExternalEditorFavoritesResult>;
@@ -4193,16 +5716,23 @@ export interface CrossAgeApi {
   stopMcpHttpServer(): Promise<McpHttpStatus>;
   getMcpHttpStatus(): Promise<McpHttpStatus>;
   onMcpHttpStatus(callback: (status: McpHttpStatus) => void): () => void;
+  getMobileCompanionStatus(): Promise<MobileCompanionStatus>;
+  configureMobileCompanion(publicUrl: string): Promise<MobileCompanionStatus>;
+  createMobileCompanion(options: { label: string; expiresInDays: number; allowPreviews: boolean }): Promise<MobileCompanionPairingResult>;
+  revokeMobileCompanion(accountId: string): Promise<MobileCompanionRevokeResult>;
   onAppCommand(callback: (command: AppCommand) => void): () => void;
   onExternalOpen(callback: (payload: ExternalOpenPayload) => void): () => void;
-  onScanProgress(callback: (event: ScanProgressEvent | ModelDownloadProgressEvent | MediaActionProgressEvent) => void): () => void;
+  onScanProgress(callback: (event: ScanProgressEvent | ModelDownloadProgressEvent | MediaActionProgressEvent | OpenPhotoCatalogProgressEvent) => void): () => void;
   onBackendStartup(callback: (event: BackendStartupEvent) => void): () => void;
   onFolderWatch(callback: (status: FolderWatchStatus) => void): () => void;
+  onPhotoTether(callback: (event: PhotoTetherEvent) => void): () => void;
   onBackendError(callback: (message: string) => void): () => void;
   onUpdateStatus(callback: (status: UpdateStatus) => void): () => void;
   onDiagnosticsEvent(callback: (event: Record<string, unknown>) => void): () => void;
   platform: string;
+  rendererGpuMode?: "hardware" | "software";
   testCamera?: boolean;
+  testCameraError?: boolean;
   testFileDropPathFallback?: boolean;
 }
 

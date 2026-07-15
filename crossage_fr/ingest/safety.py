@@ -7,8 +7,9 @@ import logging
 import math
 import os
 from pathlib import Path
+import re
 import sys
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -35,6 +36,10 @@ class SafetyAssessment:
     # Multi-level models (e.g. Freepik neutral/low/medium/high) report the dominant
     # level so the UI can separate "suggestive" from "explicit"; "" for 2-class models.
     level: str = ""
+    category_scores: dict[str, float] = field(default_factory=dict)
+    category_evidence: dict[str, str] = field(default_factory=dict)
+    policy_version: str = ""
+    model_provenance: dict[str, Any] = field(default_factory=dict)
 
 
 def nsfw_probability_from_levels(probs: Any, level_names: Any, sensitive_min_level: Any) -> float:
@@ -79,6 +84,7 @@ _OVERRIDE_CLEAR = {"", "clear", "none", "reset", "auto", "default"}
 _OVERRIDE_TRUE = {"true", "1", "yes", "on", "sensitive", "flag", "flagged"}
 _OVERRIDE_FALSE = {"false", "0", "no", "off", "safe", "not_sensitive", "notsensitive", "unflag", "allow"}
 _CV2_CONNECTED_COMPONENTS_AVAILABLE: bool | None = None
+HEURISTIC_GUARD_MARGIN = 0.12
 
 
 def normalize_override_value(value: Any) -> "bool | None":
@@ -100,34 +106,137 @@ def normalize_override_value(value: Any) -> "bool | None":
     return None
 
 
-def assess_image_safety(path: Path, threshold: float = 0.58, image: Image.Image | None = None, temperature: float = 1.0) -> SafetyAssessment:
+def assess_image_safety(
+    path: Path,
+    threshold: float = 0.58,
+    image: Image.Image | None = None,
+    temperature: float = 1.0,
+    *,
+    multimodal: bool = True,
+    multimodal_preference: str = "quality",
+    multimodal_power_mode: str = "balanced",
+) -> SafetyAssessment:
     image = image or load_image(path)
-    heuristic = _assess_image_safety_heuristic(image, threshold)
-    if _safety_engine_mode() == "heuristic":
-        return heuristic
+    mode = _safety_engine_mode()
+    if mode == "heuristic":
+        return _assess_image_safety_heuristic(image, threshold)
     model = _load_safety_model()
     if model is None:
-        return heuristic
+        compatibility = _assess_image_safety_heuristic(image, threshold)
+    else:
+        try:
+            heuristic_factory = None if mode == "model" else lambda: _assess_image_safety_heuristic(image, threshold)
+            compatibility = model.assess(image, threshold, heuristic_factory=heuristic_factory, temperature=temperature)
+        except Exception as exc:
+            heuristic = _assess_image_safety_heuristic(image, threshold)
+            compatibility = SafetyAssessment(
+                sensitive=heuristic.sensitive,
+                score=heuristic.score,
+                reason=f"{heuristic.reason}; ML Safe Mode unavailable ({type(exc).__name__})",
+                skin_ratio=heuristic.skin_ratio,
+                lower_skin_ratio=heuristic.lower_skin_ratio,
+                largest_region_ratio=heuristic.largest_region_ratio,
+                engine="heuristic-fallback",
+                model_name=heuristic.model_name,
+                model_score=None,
+                heuristic_score=heuristic.score,
+                threshold=threshold,
+                labels={},
+            )
+
+    use_multimodal = bool(multimodal) and mode in {"auto", "multimodal"}
+    if not use_multimodal:
+        return compatibility
     try:
-        return model.assess(image, threshold, heuristic, temperature)
-    except Exception as exc:
-        return SafetyAssessment(
-            sensitive=heuristic.sensitive,
-            score=heuristic.score,
-            reason=f"{heuristic.reason}; ML Safe Mode unavailable ({type(exc).__name__})",
-            skin_ratio=heuristic.skin_ratio,
-            lower_skin_ratio=heuristic.lower_skin_ratio,
-            largest_region_ratio=heuristic.largest_region_ratio,
-            engine="heuristic-fallback",
-            model_name=heuristic.model_name,
-            model_score=None,
-            heuristic_score=heuristic.score,
-            threshold=threshold,
-            labels={},
+        from crossage_fr.ingest.multimodal_safety import multimodal_guardrail_status, run_multimodal_guardrail
+
+        guardrail_status = multimodal_guardrail_status(
+            preference=multimodal_preference,
+            power_mode=multimodal_power_mode,
         )
+        if not guardrail_status.get("available"):
+            if mode == "multimodal":
+                return _multimodal_fallback(compatibility, str(guardrail_status.get("reason", "unavailable")))
+            return compatibility
+        verdict = run_multimodal_guardrail(
+            path,
+            threshold,
+            temperature=temperature,
+            preference=multimodal_preference,
+            power_mode=multimodal_power_mode,
+        )
+        return _combine_multimodal_assessment(verdict, compatibility, threshold)
+    except Exception as exc:
+        return _multimodal_fallback(compatibility, type(exc).__name__)
 
 
-def safety_model_report() -> dict[str, Any]:
+def _multimodal_fallback(compatibility: SafetyAssessment, detail: str) -> SafetyAssessment:
+    clean_detail = re.sub(r"\s+", " ", str(detail or "unavailable")).strip()[:160]
+    return SafetyAssessment(
+        sensitive=compatibility.sensitive,
+        score=compatibility.score,
+        reason=f"{compatibility.reason}; multimodal policy fallback ({clean_detail})",
+        skin_ratio=compatibility.skin_ratio,
+        lower_skin_ratio=compatibility.lower_skin_ratio,
+        largest_region_ratio=compatibility.largest_region_ratio,
+        engine="multimodal-fallback",
+        model_name=compatibility.model_name,
+        model_score=compatibility.model_score,
+        heuristic_score=compatibility.heuristic_score,
+        threshold=compatibility.threshold,
+        labels=dict(compatibility.labels),
+        level=compatibility.level,
+    )
+
+
+def _combine_multimodal_assessment(
+    verdict: dict[str, Any],
+    compatibility: SafetyAssessment,
+    threshold: float,
+) -> SafetyAssessment:
+    categories = verdict.get("categories") if isinstance(verdict.get("categories"), dict) else {}
+    category_scores = {
+        str(category_id): float(value.get("score", 0.0))
+        for category_id, value in categories.items()
+        if isinstance(value, dict)
+    }
+    category_evidence = {
+        str(category_id): str(value.get("evidence", "none"))
+        for category_id, value in categories.items()
+        if isinstance(value, dict)
+    }
+    policy_score = float(verdict.get("score", 0.0) or 0.0)
+    combined_score = max(policy_score, float(compatibility.score))
+    labels = {f"policy:{key}": value for key, value in category_scores.items()}
+    labels.update({f"compatibility:{key}": float(value) for key, value in compatibility.labels.items()})
+    reason = str(verdict.get("reason", "Local multimodal policy completed.") or "")
+    if compatibility.score >= threshold and compatibility.score > policy_score:
+        reason += f" Compatibility detector also crossed threshold ({compatibility.score:.2f})."
+    model_name = str(verdict.get("modelName", "local multimodal policy guardrail") or "")
+    provenance = verdict.get("model") if isinstance(verdict.get("model"), dict) else {}
+    compatibility_model_score = float(compatibility.model_score or 0.0)
+    return SafetyAssessment(
+        sensitive=combined_score >= threshold,
+        score=combined_score,
+        reason=reason,
+        skin_ratio=compatibility.skin_ratio,
+        lower_skin_ratio=compatibility.lower_skin_ratio,
+        largest_region_ratio=compatibility.largest_region_ratio,
+        engine="multimodal-hybrid",
+        model_name=f"{model_name} + {compatibility.model_name}",
+        model_score=max(policy_score, compatibility_model_score),
+        heuristic_score=compatibility.heuristic_score,
+        threshold=threshold,
+        labels=labels,
+        level=str(verdict.get("level", "") or ""),
+        category_scores=category_scores,
+        category_evidence=category_evidence,
+        policy_version=str(verdict.get("policyVersion", "") or ""),
+        model_provenance=dict(provenance),
+    )
+
+
+def safety_model_report(multimodal_enabled: bool = True) -> dict[str, Any]:
     if _safety_engine_mode() == "heuristic":
         return {
             "engine": "heuristic",
@@ -137,15 +246,40 @@ def safety_model_report() -> dict[str, Any]:
             "reason": "CROSSAGE_FORCE_FALLBACK or CROSSAGE_SAFE_MODE_ENGINE=heuristic is active.",
         }
     spec = _find_safety_model()
-    if spec is None:
-        return {
+    compatibility = _spec_report(spec) if spec is not None else {
             "engine": "heuristic",
             "available": False,
             "modelName": "exposed-skin-heuristic",
             "path": None,
             "reason": "No local ONNX safety model was found.",
         }
-    return _spec_report(spec)
+    mode = _safety_engine_mode()
+    if mode == "model":
+        return compatibility
+    try:
+        from crossage_fr.ingest.multimodal_safety import multimodal_guardrail_status
+
+        guardrail = multimodal_guardrail_status()
+    except Exception as exc:
+        guardrail = {"available": False, "reason": str(exc)[:300], "categoryAware": True}
+    if not multimodal_enabled:
+        return {
+            **compatibility,
+            "multimodal": guardrail,
+            "multimodalEnabled": False,
+            "categoryAware": False,
+        }
+    if not guardrail.get("available"):
+        return {**compatibility, "multimodal": guardrail, "multimodalEnabled": True, "categoryAware": False}
+    return {
+        **guardrail,
+        "engine": "multimodal-hybrid",
+        "available": True,
+        "path": None,
+        "fallback": compatibility,
+        "multimodalEnabled": True,
+        "categoryAware": True,
+    }
 
 
 def calibrate_safety_temperature(labeled: Any, progress: Any | None = None) -> dict[str, Any]:
@@ -417,7 +551,15 @@ class _OnnxSafetyModel:
         self.session = _session_for_model(str(spec.path), _model_stat_token(spec.path))
         self.input_name = self.session.get_inputs()[0].name
 
-    def assess(self, image: Image.Image, threshold: float, heuristic: SafetyAssessment, temperature: float = 1.0) -> SafetyAssessment:
+    def assess(
+        self,
+        image: Image.Image,
+        threshold: float,
+        heuristic: SafetyAssessment | None = None,
+        temperature: float = 1.0,
+        heuristic_factory: Callable[[], SafetyAssessment] | None = None,
+        heuristic_guard_margin: float = HEURISTIC_GUARD_MARGIN,
+    ) -> SafetyAssessment:
         logits = self._logits(image)
         # Stage 1b: temperature scaling (T fit per-user). T=1 leaves the raw model
         # unchanged; T>1 softens over-confident scores before thresholding.
@@ -453,20 +595,32 @@ class _OnnxSafetyModel:
                 self.spec.labels[index] if index < len(self.spec.labels) else f"class_{index}": float(value)
                 for index, value in enumerate(probabilities)
             }
-        labels["exposed_skin_guard"] = heuristic.score
-        combined_score = max(nsfw_score, heuristic.score)
-        guard_text = " plus exposed-skin guard" if heuristic.score >= threshold and nsfw_score < threshold else ""
+        if (
+            heuristic is None
+            and heuristic_factory is not None
+            and nsfw_score < threshold
+            and (threshold - nsfw_score) <= max(0.0, float(heuristic_guard_margin))
+        ):
+            heuristic = heuristic_factory()
+        guard_score = float(heuristic.score) if heuristic is not None else 0.0
+        if heuristic is not None:
+            labels["exposed_skin_guard"] = guard_score
+        combined_score = max(nsfw_score, guard_score)
+        guard_text = " plus exposed-skin guard" if guard_score >= threshold and nsfw_score < threshold else ""
+        guard_suffix = ""
+        if heuristic is None and nsfw_score < threshold:
+            guard_suffix = "; exposed-skin guard skipped for confident model score"
         return SafetyAssessment(
             sensitive=combined_score >= threshold,
             score=combined_score,
-            reason=f"ML Safe Mode score from {self.spec.model_name}{guard_text}" + (f"; level: {level}" if level else ""),
-            skin_ratio=heuristic.skin_ratio,
-            lower_skin_ratio=heuristic.lower_skin_ratio,
-            largest_region_ratio=heuristic.largest_region_ratio,
+            reason=f"ML Safe Mode score from {self.spec.model_name}{guard_text}{guard_suffix}" + (f"; level: {level}" if level else ""),
+            skin_ratio=heuristic.skin_ratio if heuristic is not None else 0.0,
+            lower_skin_ratio=heuristic.lower_skin_ratio if heuristic is not None else 0.0,
+            largest_region_ratio=heuristic.largest_region_ratio if heuristic is not None else 0.0,
             engine="onnx-hybrid",
             model_name=self.spec.model_name,
             model_score=nsfw_score,
-            heuristic_score=heuristic.score,
+            heuristic_score=heuristic.score if heuristic is not None else None,
             threshold=threshold,
             labels=labels,
             level=level,
@@ -517,7 +671,7 @@ def _safety_engine_mode() -> str:
     # safety-critical toggles (previously only the legacy name was read, so the
     # documented VINTRACE_SAFE_MODE_ENGINE / VINTRACE_FORCE_FALLBACK were ignored).
     configured = (env_value("SAFE_MODE_ENGINE", default="") or "").strip().lower()
-    if configured in {"heuristic", "model", "auto"}:
+    if configured in {"heuristic", "model", "multimodal", "auto"}:
         return configured
     if env_flag("FORCE_FALLBACK"):
         return "heuristic"

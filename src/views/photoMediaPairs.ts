@@ -7,6 +7,13 @@ export type PhotoMediaPairHistoryItem = {
   at: string;
 };
 
+export interface PhotoMediaPairShareEventMetadata extends Record<string, unknown> {
+  surface: string;
+  action: string;
+  pairKind: string;
+  relatedSourcePath: string;
+}
+
 function cleanText(value: unknown): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
@@ -31,6 +38,8 @@ export function photoMediaPairKindLabel(kind: unknown): string {
   if (key === "video_still") return "Video still";
   if (key === "metadata_sidecar") return "Metadata sidecar";
   if (key === "edit_sidecar") return "Edit sidecar";
+  if (key === "depth_sidecar") return "Depth / disparity";
+  if (key === "stereo_pair") return "Stereo right eye";
   if (key === "burst") return "Burst stack";
   if (!key) return "Related media";
   return key
@@ -58,6 +67,31 @@ export function photoMediaPairStatusKind(pair: PhotoMediaPair | null | undefined
   if (pair?.relatedExists === true) return "available";
   if (pair?.relatedExists === false) return "missing";
   return "unknown";
+}
+
+export function photoMediaPairRelatedPath(pair: PhotoMediaPair | null | undefined): string {
+  return cleanPath(pair?.relatedSourcePath);
+}
+
+export function photoMediaPairRelatedFileAvailable(pair: PhotoMediaPair | null | undefined): boolean {
+  return Boolean(photoMediaPairRelatedPath(pair)) && photoMediaPairStatusKind(pair) === "available";
+}
+
+export function photoMediaPairShareEventMetadata(
+  pair: PhotoMediaPair | null | undefined,
+  input: {
+    shared?: unknown;
+    relatedSourcePath?: unknown;
+    surface?: unknown;
+  } = {},
+): PhotoMediaPairShareEventMetadata {
+  const shared = Boolean(input.shared);
+  return {
+    surface: cleanText(input.surface) || "photos-related-media",
+    action: shared ? "native_share_related_media" : "share_fallback_reveal_related_media",
+    pairKind: cleanText(pair?.pairKind),
+    relatedSourcePath: cleanPath(input.relatedSourcePath) || photoMediaPairRelatedPath(pair),
+  };
 }
 
 export function photoMediaPairProducer(pair: PhotoMediaPair | null | undefined): string {
@@ -123,6 +157,7 @@ export function normalizePhotoMediaPairList(value: unknown): PhotoMediaPair[] {
       pairKind,
       sourcePath,
       relatedSourcePath,
+      relatedSourceUrl: cleanPath(record.relatedSourceUrl || record.related_source_url),
       metadata: cleanRecord(record.metadata),
       sourceExists: cleanBool(record.sourceExists ?? record.source_exists),
       relatedExists: cleanBool(record.relatedExists ?? record.related_exists),

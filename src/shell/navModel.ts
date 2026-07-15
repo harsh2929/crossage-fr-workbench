@@ -1,13 +1,13 @@
 // Navigation model for the Photos-first app shell.
-// Primary tabs are the five photos-first destinations + Tools (recognition engine)
-// + Settings. The legacy recognition tabs (dashboard/enroll/scan/review/photos)
+// Primary tabs are the photos-first destinations + a first-class AI Agents
+// destination + Tools (recognition engine) + Settings. The legacy recognition tabs
 // are folded into Tools / People & Pets and routed via legacyTabTarget(), so every
 // existing deep-link keeps working and nothing is left un-wired.
-import { Images, LayoutGrid, Search, Settings, Sparkles, Users, Wrench } from "lucide-react";
+import { Bot, Images, LayoutGrid, Search, Settings, Sparkles, Users, Wrench } from "lucide-react";
 import type { TranslationKey } from "../i18n";
 
-export type TabKey = "library" | "memories" | "albums" | "search" | "people" | "tools" | "settings";
-export type LegacyTab = "dashboard" | "enroll" | "scan" | "review" | "photos" | "settings";
+export type TabKey = "library" | "memories" | "albums" | "search" | "agents" | "people" | "tools" | "settings";
+export type LegacyTab = "dashboard" | "enroll" | "scan" | "review" | "photos" | "agents" | "settings";
 export type ToolsSection = "overview" | "scan" | "models" | "diagnostics";
 export type PeopleSection = "browse" | "enroll" | "review";
 export type SettingsSection = "general" | "engine" | "privacy" | "storage" | "advanced" | "agents";
@@ -20,6 +20,7 @@ export const tabs: NavTab[] = [
   { key: "memories", labelKey: "nav.memories", icon: Sparkles },
   { key: "albums", labelKey: "nav.albums", icon: LayoutGrid },
   { key: "search", labelKey: "nav.search", icon: Search },
+  { key: "agents", labelKey: "nav.agents", icon: Bot },
   { key: "people", labelKey: "nav.peoplePets", icon: Users },
   { key: "tools", labelKey: "nav.tools", icon: Wrench },
   { key: "settings", labelKey: "nav.settings", icon: Settings },
@@ -53,6 +54,8 @@ export function legacyTabTarget(tab: LegacyTab): NavTarget {
       return { tab: "people", peopleSection: "review" };
     case "photos":
       return { tab: "library" };
+    case "agents":
+      return { tab: "agents" };
     case "settings":
       return { tab: "settings", settingsSection: "general" };
   }

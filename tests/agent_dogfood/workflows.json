@@ -1,0 +1,137 @@
+[
+  {
+    "id": "01_connection_capabilities",
+    "prompt": "Connect to Vintrace and tell me the current image action count and maximum fetch batch. Use the minimum calls needed.",
+    "expectedFirst": ["list_image_capabilities"],
+    "allowed": ["list_image_capabilities"],
+    "maxCalls": 1
+  },
+  {
+    "id": "02_library_overview",
+    "prompt": "How many assets are in my Vintrace library, and are there any active image jobs? Do not inspect files or pixels.",
+    "expectedFirst": ["get_image_library_overview", "list_image_operations"],
+    "allowed": ["get_image_library_overview", "get_image_job", "list_image_operations"],
+    "maxCalls": 2
+  },
+  {
+    "id": "03_lexical_search",
+    "prompt": "Find the five images matching the exact terms golden needle amber lighthouse SN-1042. Return only stable asset IDs and titles; do not request previews.",
+    "expectedFirst": ["search_images"],
+    "allowed": ["search_images"],
+    "maxCalls": 1,
+    "search": {"expectedTag": "needle", "minimumAccepted": 5}
+  },
+  {
+    "id": "04_filtered_search",
+    "prompt": "Find up to 20 favorite red bicycle product images. Use exact metadata filtering and return stable IDs without pixels.",
+    "expectedFirst": ["search_images"],
+    "allowed": ["search_images"],
+    "maxCalls": 1,
+    "search": {"expectedTag": "favorite-red", "minimumAccepted": 20}
+  },
+  {
+    "id": "05_search_then_fetch",
+    "prompt": "Find cobalt prototype portfolio images, then fetch structured metadata for the top three stable IDs. Do not request previews.",
+    "expectedFirst": ["search_images"],
+    "allowed": ["search_images", "fetch_image_assets"],
+    "maxCalls": 2
+  },
+  {
+    "id": "06_existing_intelligence",
+    "prompt": "Find the golden needle SN-1042 images and report existing OCR, object, barcode, quality, and metadata intelligence for them. Do not run indexing and do not request pixels.",
+    "expectedFirst": ["search_images"],
+    "allowed": ["search_images", "analyze_image_assets"],
+    "maxCalls": 2
+  },
+  {
+    "id": "07_bounded_preview",
+    "prompt": "Find one studio portrait Alice image and show exactly one bounded preview at no more than 768 pixels. Do not preview any other asset.",
+    "expectedFirst": ["search_images"],
+    "allowed": ["search_images", "get_image_preview"],
+    "maxCalls": 2,
+    "approval": "pixel-disclosure"
+  },
+  {
+    "id": "08_recipe_discovery",
+    "prompt": "What reusable Vintrace image workflow recipes are available? Give names and approval counts only.",
+    "expectedFirst": ["list_image_recipes"],
+    "allowed": ["list_image_recipes"],
+    "maxCalls": 1
+  },
+  {
+    "id": "09_recipe_plan",
+    "prompt": "Plan the built-in portfolio curation recipe for query cobalt prototype with at most 12 candidates. Do not execute any step.",
+    "expectedFirst": ["plan_image_recipe", "list_image_recipes", "get_image_recipe"],
+    "allowed": ["plan_image_recipe", "get_image_recipe", "list_image_recipes"],
+    "maxCalls": 2
+  },
+  {
+    "id": "10_metadata_write_plan",
+    "prompt": "Find one green mountain hike image and plan changing its title to Reviewed mountain select. Do not perform the write.",
+    "expectedFirst": ["search_images"],
+    "allowed": ["search_images", "plan_image_action", "list_image_capabilities"],
+    "maxCalls": 3,
+    "approval": "write-plan"
+  },
+  {
+    "id": "11_metadata_write_execute",
+    "prompt": "Find one wildlife fox image, plan changing its title to Agent reviewed fox, then perform that non-destructive write. I explicitly confirm this write. Use idempotency key dogfood-{client}-metadata-v1 and verify the result without requesting pixels.",
+    "expectedFirst": ["search_images"],
+    "allowed": ["search_images", "plan_image_action", "run_image_write_action", "fetch_image_assets", "list_image_capabilities"],
+    "maxCalls": 5,
+    "approval": "confirmed-write"
+  },
+  {
+    "id": "12_album_write_execute",
+    "prompt": "Plan and create an empty manual album named Dogfood {client} Selects. I explicitly confirm this non-destructive metadata write. Use idempotency key dogfood-{client}-album-v1. Do not add assets.",
+    "expectedFirst": ["plan_image_action"],
+    "allowed": ["plan_image_action", "run_image_write_action"],
+    "maxCalls": 2,
+    "approval": "confirmed-write"
+  },
+  {
+    "id": "13_contact_sheet_artifact",
+    "prompt": "Find the five golden needle amber lighthouse images, plan a PNG contact sheet titled Dogfood {client} Needles with two columns and no captions, then create it. I explicitly confirm this non-destructive export. Use idempotency key dogfood-{client}-contact-sheet-v1. Return the operation or manifest identifier, never a filesystem path.",
+    "expectedFirst": ["search_images"],
+    "allowed": ["search_images", "plan_image_action", "run_image_write_action", "get_image_operation", "list_image_operations"],
+    "maxCalls": 5,
+    "approval": "confirmed-write",
+    "artifact": true
+  },
+  {
+    "id": "14_operation_trace",
+    "prompt": "List recent Vintrace agent-write and export operations, then inspect the newest matching operation and summarize its path-free manifest.",
+    "expectedFirst": ["list_image_operations"],
+    "allowed": ["list_image_operations", "get_image_operation"],
+    "maxCalls": 2
+  },
+  {
+    "id": "15_inbound_sources",
+    "prompt": "List the inbound visual sources the operator has authorized. Do not connect, discover remote items, or import anything.",
+    "expectedFirst": ["list_inbound_visual_sources"],
+    "allowed": ["list_inbound_visual_sources"],
+    "maxCalls": 1
+  },
+  {
+    "id": "16_missing_index_plan",
+    "prompt": "Find document archive images, inspect whether text, objects, and barcodes are already indexed, and if anything is missing plan the appropriate indexing action. Do not start the job.",
+    "expectedFirst": ["search_images"],
+    "allowed": ["search_images", "analyze_image_assets", "plan_image_action"],
+    "maxCalls": 5,
+    "approval": "write-plan"
+  },
+  {
+    "id": "17_archive_health_plan",
+    "prompt": "Inspect Vintrace image-library health and plan a dry-run catalog cleanup. Do not execute any mutation.",
+    "expectedFirst": ["get_image_library_overview"],
+    "allowed": ["get_image_library_overview", "plan_image_action", "list_image_operations"],
+    "maxCalls": 3
+  },
+  {
+    "id": "18_activity_audit",
+    "prompt": "Summarize recent Vintrace agent approvals, failures, replays, and pixel disclosures using the agent activity feed only.",
+    "expectedFirst": ["get_agent_activity"],
+    "allowed": ["get_agent_activity"],
+    "maxCalls": 1
+  }
+]

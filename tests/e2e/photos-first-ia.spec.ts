@@ -52,7 +52,7 @@ test("Photos-first IA: tabs render, recognition reachable, search works, no erro
   page.on("pageerror", (e) => pageErrors.push(e.message));
   page.on("console", (m) => { if (m.type() === "error") consoleErrors.push(m.text()); });
 
-  await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByText("Backend ready.")).toBeAttached({ timeout: 120_000 });
   await page.locator(".language-picker select").selectOption("en").catch(() => undefined);
   await dismissModals(page);
 

@@ -292,7 +292,11 @@ Any mobile app inherits every one of these. They are product invariants, not set
 - Retention machinery exists and applies: `retention_reviewed_days=90`, `retention_pending_days=365`, `delete_subject_data` + destruction receipts. A mobile replica carrying embeddings inherits BIPA / GDPR-Art.9-class obligations.
 
 ### Two security gaps that must be closed *before* mobile ships
-- **The workspace lock is enforced only in the Electron main process, not in the backend.** A paired mobile device is not subject to it — there is no lock check in the MCP request path.
+- ~~**The workspace lock is enforced only in the Electron main process, not in the backend.**~~ ❌ **THIS CLAIM WAS WRONG — corrected 2026-07-14.**
+
+  The workspace lock **IS** enforced in the MCP path, and it is enforced *more strictly* than the desktop, not less. `_api()` calls `_assert_unlocked()` on **every** backend access (`mcp_server.py:220`, comment: *"MCP-05: gate all backend access (tools + resources) on the lock"*). And `_workspace_lock_enabled()` (`mcp_server.py`) **fails closed**: because a separate process cannot observe the desktop's in-session unlock, it treats a lock-enabled workspace as **permanently locked** and refuses MCP entirely — *"the MCP server cannot verify the desktop unlock and refuses to read or modify locked biometric data."*
+
+  A paired phone is therefore **not** able to bypass the lock. The original claim would have sent an implementer to "fix" a non-bug. The Touch ID / Hidden question below is a *separate* mechanism and remains open.
 - **The Touch ID gate for Hidden / Recently Deleted is Electron-only and macOS-only** (`desktop/main.cjs:1049-1109`). No backend enforcement was found, so mobile/MCP clients **bypass it entirely**.
 
 > Both checks must move into the backend, or mobile becomes a privacy hole in a privacy-first product.
@@ -319,6 +323,8 @@ The renderer is **246 files / 104,456 lines**, dominated by two god-components: 
 
 These were found by the completeness critics re-auditing the audit. Each is confirmed with `file:line`. Each blocks a mobile capability.
 
+> **📌 STATUS (updated 2026-07-15): most of these are now FIXED.** The prose below records each defect *as found*; it is the diagnosis, not the current state. Fixed: §9.1 file-move data loss (content-hash rehoming), §9.2 preview ceiling, §9.3 Safe Mode fail-open, §9.5 telemetry, §9.7 ordered change feed, and §9.8 catalog-only media leak — each with a focused test. §9.4 (SQLite contention) and the §9.1 canonical-`asset_uid` half remain architecture/build work. See `2026-07-14-remaining-work-disposition.md`, `2026-07-14-p0-fixes.patch`, and `tests/catalog_change_feed_units.py` for current status.
+
 ### 9.1 Asset identity is forked three ways, and none of the three is portable
 
 | Space | Key | Where |
@@ -343,7 +349,11 @@ And `_public_asset()` (`agent_images.py:562-588`) exposes **neither `contentHash
 
 > **This is the #1 blocker. It must be resolved before any schema is written.** The decision taken (see the architecture document) is a stable UUID `asset_uid` as the single canonical key, with content-hash, external-id, and legacy path-hash as *resolvable axes*.
 
+> **CURRENT DISPOSITION:** the live move/rename data-loss half is fixed by conservative content-hash rehoming in `WorkspaceDb._photo_asset_id_for_moved_file()`. It requires one missing prior path plus matching hash, size, and mtime, so an unplugged external drive cannot be hijacked by an identical backup. `tests/asset_identity_rehome_units.py` passes. The cross-device canonical `asset_uid` migration remains open.
+
 ### 9.2 The preview endpoint has a hard 768px ceiling — and every prior document quoted 2048px
+
+> **CURRENT DISPOSITION: FIXED.** `preview_path_for(..., max_edge=...)` now generates dimension-keyed previews from the original; the HTTP service clamps truthfully at 2048. `tests/preview_dimension_honesty_units.py` verifies 512, 1536, and 2048 requests plus no-upscale behavior. The broader content-addressed proxy ladder and pruning work remains open.
 
 Confirmed, and **the reality is worse than the first draft stated**:
 
@@ -358,6 +368,8 @@ The cache is keyed on `resolve()|st_size|st_mtime_ns|preview-v3` (`manager.py:11
 **You cannot build a Photos-grade viewer on this.** A content-hash-keyed proxy ladder (thumb / screen / full) is a prerequisite.
 
 ### 9.3 Safe Mode staleness on the mobile preview path — a live security bug
+
+> **CURRENT DISPOSITION: FIXED.** `_safe_mode_status()` calls the stat-guarded `refresh_config_from_disk()` at the enforcement boundary. Tightening Safe Mode in the desktop process reaches the next mobile request without restarting the sidecar. Covered by `tests/safe_mode_cross_process_units.py`.
 
 `_api()` caches a module-level `DesktopApi` singleton (`mcp_server.py:218-223`). `EnrollmentProject.__init__` calls `load()` **once** and caches `config`, `references`, `candidates`, `consent`, `scan_history` (`enroll/manager.py:221-255`). **Only `consent` is ever re-read from disk** (`mcp_server.py:686`).
 
@@ -375,7 +387,11 @@ The most damning detail: **consent was explicitly fixed for exactly this cross-p
 
 `WorkspaceDb.connect()` (`store/workspace_db.py:299-313`) opens and closes a fresh SQLCipher connection per call, guarded by a **process-local** `RLock`, with `busy_timeout=30000`.
 
-**CORRECTED:** WAL mode means desktop writes do **not** block mobile *reads*. The contention is **writer-vs-writer**. But the real amplifier — which the critic missed — is that **the process-local `RLock` is held across the entire 30-second busy-wait.**
+**CORRECTED:** WAL mode means desktop writes do **not** block mobile *reads* across processes. But the real amplifier — which the critic missed — is that **the process-local `RLock` is held across the entire connection lifetime, so it serializes every connection *in-process*.**
+
+**EMPIRICALLY VERIFIED (2026-07-14):** a reader thread blocks **completely** while any other connection in the same process is held open — not writer-vs-writer, but *everything-vs-everything* within a process. Combined with a stuck cross-process writer (a connection waiting up to 30 s on the desktop's write lock while holding the RLock), and the 8-slot HTTP semaphore, this wedges the entire MCP HTTP surface for up to 30 s.
+
+> **Disposition:** the *correct* fix is connection pooling + reducing the RLock scope so concurrent reads don't serialize (spec B12). That is an architectural change to a hot path, and it can only be validated under concurrent load (a real MCP HTTP server + a competing desktop writer) — not in a unit test. A surgical `busy_timeout` reduction would cut the wedge from 30 s to ~5 s but trades off audit-write reliability under contention. **Neither is a safe blind spot-fix on the current heavily-churned `workspace_db.py`; this is deferred to the pooling work, not shipped as a hurried patch.**
 
 > So **one stuck mobile write serializes every other DB-touching request in the MCP process.** The 8-slot semaphore (`mcp_server.py:4159-4162`) — which has **no path exemption and no timeout** — then wedges the **entire HTTP surface, including authentication and the static mobile assets themselves.**
 
@@ -419,7 +435,9 @@ An earlier draft of this audit (and the critic that produced it) claimed the CRD
 
 And `_public_asset` has no `updatedAt`, no revision, no etag, no `deletedAt` (only `missing`), while `/v1/events` polls the audit table for `agent_tool_*` only.
 
-> **Corrected verdict: the delta feed is ~35% built, not 90%.** Pairing and auth are the parts that are nearly done. **The feed itself must be built**, and the natural substrate is a *stream of `photo_sync_operations` rows* — which requires making the op-log populate unconditionally, not only under SQLCipher.
+> **Finding validated; prescribed substrate corrected.** A signed CRDT operation cannot be created safely without the encrypted device identity that signs it. Making `photo_sync_operations` "unconditional" would either weaken key protection or create invalid unsigned operations. The implementation therefore keeps that peer-sync log encryption-bound and adds the separate unconditional `photo_catalog_changes` append-only journal.
+
+> **CURRENT DISPOSITION: FIXED (2026-07-15).** SQLite triggers record ordered asset, metadata, keyword, album-membership, people-link, edit-stack, and external-id mutations on encrypted and unencrypted workspaces. Existing catalogs receive a one-time baseline. Authenticated `GET /v1/changes?afterSeq=&limit=` returns path-free snapshots and durable delete/protected-removal tombstones with a resumable integer cursor; `/v1/events` remains the distinct agent-activity SSE stream. `photo_asset_events` intentionally remains the viewed/shared activity table. Covered by `tests/catalog_change_feed_units.py` and the paired-mobile HTTP suite.
 
 ---
 
@@ -475,13 +493,13 @@ Relevant decisions already taken, which the mobile design must not silently re-l
 - A media tier (originals, a real thumbnail ladder, video with byte ranges).
 - A blob-ingest RPC (small — the engines already accept in-memory images).
 - A compute-offload channel (blocked on the serial loop).
-- A change feed (90% built, unexposed).
-- A stable asset identity (the #1 blocker).
+- ~~A change feed~~ — **built 2026-07-15** as an unconditional catalog journal plus authenticated cursor API.
+- A canonical cross-device asset identity. The desktop move/rename data-loss half is fixed; `asset_uid` remains open.
 
 **What must be fixed before any mobile code is written:**
-1. Asset identity (§9.1)
-2. The 768px preview ceiling (§9.2)
-3. Safe Mode cache staleness (§9.3)
+1. Canonical cross-device asset identity (§9.1; move/rename data loss is fixed)
+2. ~~The lying 768px preview ceiling~~ (§9.2; fixed, proxy ladder still open)
+3. ~~Safe Mode cache staleness~~ (§9.3; fixed)
 4. Workspace-lock and Touch ID enforcement moving into the backend (§7)
 5. The serial command loop (§10)
 

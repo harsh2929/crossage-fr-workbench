@@ -21,12 +21,12 @@ def test_ffmpeg_frame_sampling_uses_workspace_temp_and_safe_move() -> None:
         source = root / "clip.mp4"
         source.write_bytes(b"fake video")
         output_root = root / "video-cache"
-        seen: dict[str, object] = {"moves": []}
+        seen: dict[str, object] = {"replaces": []}
 
         original_ffmpeg_path = video_io._ffmpeg_path  # noqa: SLF001 - targeted regression.
         original_probe = video_io._probe_video_ffmpeg  # noqa: SLF001 - targeted regression.
         original_run = video_io.subprocess.run
-        original_move = video_io.shutil.move
+        original_replace = video_io.os.replace
 
         def fake_run(command, capture_output, text, timeout, check):  # type: ignore[no-untyped-def]
             seen["filter"] = command[command.index("-vf") + 1]
@@ -37,13 +37,12 @@ def test_ffmpeg_frame_sampling_uses_workspace_temp_and_safe_move() -> None:
             (pattern.parent / "frame-00000002.jpg").write_bytes(b"frame two")
             return subprocess.CompletedProcess(command, 0, "", "")
 
-        def fake_move(source_path: str, target_path: str) -> str:
-            seen["moves"].append((source_path, target_path))  # type: ignore[union-attr]
+        def fake_replace(source_path: Path, target_path: Path) -> None:
+            seen["replaces"].append((str(source_path), str(target_path)))  # type: ignore[union-attr]
             source_frame = Path(source_path)
             target_frame = Path(target_path)
             target_frame.write_bytes(source_frame.read_bytes())
             source_frame.unlink()
-            return target_path
 
         try:
             video_io._ffmpeg_path = lambda: "/usr/bin/ffmpeg"  # type: ignore[assignment]
@@ -54,7 +53,7 @@ def test_ffmpeg_frame_sampling_uses_workspace_temp_and_safe_move() -> None:
                 "fps": 30.0,
             }
             video_io.subprocess.run = fake_run  # type: ignore[assignment]
-            video_io.shutil.move = fake_move  # type: ignore[assignment]
+            video_io.os.replace = fake_replace  # type: ignore[assignment]
 
             samples = video_io._sample_video_frames_ffmpeg(  # noqa: SLF001 - targeted regression.
                 source,
@@ -67,15 +66,56 @@ def test_ffmpeg_frame_sampling_uses_workspace_temp_and_safe_move() -> None:
             video_io._ffmpeg_path = original_ffmpeg_path  # type: ignore[assignment]
             video_io._probe_video_ffmpeg = original_probe  # type: ignore[assignment]
             video_io.subprocess.run = original_run  # type: ignore[assignment]
-            video_io.shutil.move = original_move  # type: ignore[assignment]
+            video_io.os.replace = original_replace  # type: ignore[assignment]
 
         assert seen["temp_parent"] == output_root, seen
         assert "fps=1/0.5" in str(seen["filter"]), seen
         assert "scale=w=min(iw\\," in str(seen["filter"]), seen
-        assert len(seen["moves"]) == 2, seen
+        frame_replaces = [item for item in seen["replaces"] if "frame-ffmpeg-" in item[1]]  # type: ignore[index]
+        assert len(frame_replaces) == 2, seen
         assert [sample.timestamp_ms for sample in samples] == [0, 500], samples
         assert all(sample.path.exists() for sample in samples), samples
         assert all(sample.path.parent.parent == output_root for sample in samples), samples
+
+
+def test_ffmpeg_frame_sampling_timeout_returns_video_load_error() -> None:
+    with tempfile.TemporaryDirectory(prefix="vintrace-video-timeout-") as temp_name:
+        root = Path(temp_name)
+        source = root / "slow.mp4"
+        source.write_bytes(b"fake slow video")
+
+        original_ffmpeg_path = video_io._ffmpeg_path  # noqa: SLF001 - targeted regression.
+        original_probe = video_io._probe_video_ffmpeg  # noqa: SLF001 - targeted regression.
+        original_run = video_io.subprocess.run
+
+        def timeout_run(command, capture_output, text, timeout, check):  # type: ignore[no-untyped-def]
+            raise subprocess.TimeoutExpired(command, timeout)
+
+        try:
+            video_io._ffmpeg_path = lambda: "/usr/bin/ffmpeg"  # type: ignore[assignment]
+            video_io._probe_video_ffmpeg = lambda _path: {  # type: ignore[assignment]
+                "width": 1920,
+                "height": 1080,
+                "durationMs": 120_000,
+                "fps": 30.0,
+            }
+            video_io.subprocess.run = timeout_run  # type: ignore[assignment]
+            try:
+                video_io._sample_video_frames_ffmpeg(  # noqa: SLF001 - targeted regression.
+                    source,
+                    root / "video-cache",
+                    max_frames=64,
+                    interval_seconds=1.0,
+                )
+            except video_io.VideoLoadError as exc:
+                assert "Timed out decoding video" in str(exc)
+                assert isinstance(exc.__cause__, subprocess.TimeoutExpired)
+            else:
+                raise AssertionError("expected FFmpeg timeout to become VideoLoadError")
+        finally:
+            video_io._ffmpeg_path = original_ffmpeg_path  # type: ignore[assignment]
+            video_io._probe_video_ffmpeg = original_probe  # type: ignore[assignment]
+            video_io.subprocess.run = original_run  # type: ignore[assignment]
 
 
 def test_opencv_frame_sampling_rejects_oversized_decoded_frame_before_rgb_conversion() -> None:
@@ -182,6 +222,7 @@ def test_video_decoder_report_does_not_import_cv2_for_availability() -> None:
 if __name__ == "__main__":
     test_default_image_pixel_limit_is_bounded_for_media_ingest()
     test_ffmpeg_frame_sampling_uses_workspace_temp_and_safe_move()
+    test_ffmpeg_frame_sampling_timeout_returns_video_load_error()
     test_opencv_frame_sampling_rejects_oversized_decoded_frame_before_rgb_conversion()
     test_video_decoder_report_does_not_import_cv2_for_availability()
     print("all video_io_units tests passed")

@@ -5,23 +5,46 @@ from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Iterable
 from contextlib import contextmanager
+import base64
+import binascii
 import csv
 import hashlib
-import io
+import html
 import json
 import math
 import os
+import re
 import shutil
-import sqlite3
 import tempfile
+import threading
 import time
 import zipfile
 from typing import Callable, Any
+from urllib.parse import urlsplit
 
-from crossage_fr.config import RuntimeConfig, Thresholds, archive_corrupt_file, load_config, save_config
-from crossage_fr.cluster import cluster_vectors
-from crossage_fr.crypto import DecryptionError, backup_passphrase, decrypt_bytes, encrypt_file, is_encrypted
+from crossage_fr.compliance import (
+    AI_DISCLOSURE_NOTICE,
+    AI_DISCLOSURE_VERSION,
+    CONSENT_SCHEMA_VERSION,
+    build_release_record,
+    build_retention_policy,
+    jurisdiction_preset,
+    parse_iso,
+    release_is_complete,
+    release_is_expired,
+)
+from crossage_fr.agent_telemetry import TRACE_FILENAME
+from crossage_fr.config import ConfigReadError, RuntimeConfig, Thresholds, archive_corrupt_file, load_config, save_config
+from crossage_fr.cluster import GlobalUnmatchedSpool
+from crossage_fr.crypto import DecryptionError, backup_passphrase, decrypt_file, encrypt_file, is_encrypted
 from crossage_fr.embed import EmbeddingEngine
+from crossage_fr.enroll.synthetic_screen import (
+    MODEL_ID as SYNTHETIC_SCREEN_MODEL_ID,
+    MODEL_VERSION as SYNTHETIC_SCREEN_MODEL_VERSION,
+    SyntheticScreenResult,
+    screen_enrollment_face,
+    synthetic_enrollment_screen_report,
+)
 from crossage_fr.ingest import ImageLoadError, VideoLoadError, image_record_for_path, iter_image_paths, load_image, sample_video_frames
 from crossage_fr.ingest.image_io import IMAGE_EXTENSIONS, RAW_IMAGE_EXTENSIONS, sha256_file, write_preview_image
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, configure_video_decoder_paths
@@ -29,6 +52,8 @@ from crossage_fr.ingest.safety import SafetyAssessment, apply_safe_mode_override
 from crossage_fr.match import (
     accuracy_at_threshold,
     accuracy_from_label_rows,
+    apply_cohort_separation,
+    apply_verified_age_gap_review,
     band_for_score,
     group_hits,
     pose_review_supported,
@@ -38,22 +63,57 @@ from crossage_fr.match import (
 )
 from crossage_fr.match import adapters as match_adapters
 from crossage_fr.match.age_gap import compute_age_gap, confidence_for_gap
+from crossage_fr.match.age_trajectory import (
+    AGE_BUCKET_CENTERS,
+    AGE_BUCKET_ORDER,
+    AGE_TRAJECTORY_METHOD_VERSION,
+    AGE_TRAJECTORY_REFERENCE_KIND,
+    IMAGE_AGE_AUGMENTATION_METHOD_VERSION,
+    build_age_trajectory_candidates,
+    is_generated_age_image_reference,
+    is_synthetic_age_reference,
+    normalize_age_bucket,
+)
 from crossage_fr.match.review_order import review_lane, review_priority
 from crossage_fr.match.calibration import (
+    AdaptiveLinearCalibrator,
+    CohortNormalizer,
     PlattCalibrator,
+    fit_adaptive_linear,
     fit_per_identity_calibrators,
     fit_score_calibrator,
+    normalized_pair_center,
     threshold_for_fmr,
+    validate_adaptive_calibration,
 )
+from crossage_fr.match.cohort import CohortIntegrityError, load_fixed_cohort, model_pack_for_name
 from crossage_fr.match.pooling import pool_template, template_cosine
+from crossage_fr.match.video_tracks import (
+    VIDEO_TRACK_TEMPLATE_VERSION,
+    VideoFaceObservation,
+    build_video_track_templates,
+    face_crop_sharpness,
+)
 from crossage_fr.match.validation import held_out_gate
 from crossage_fr.benchmark_quality import BENCHMARK_DISCLAIMER
 from crossage_fr.benchmarks.det_eval import det_report, det_report_by_cohort
 from crossage_fr.models import EmbeddingResult, ReferenceFace, ReviewCandidate, new_id, normalize_risk_flags
+from crossage_fr.photo_generative import (
+    AGE_PROGRESS_PROMPT_VERSION,
+    CATALOG_SHA256 as PHOTO_GENERATIVE_CATALOG_SHA256,
+    CATALOG_VERSION as PHOTO_GENERATIVE_CATALOG_VERSION,
+    QWEN_IMAGE_EDIT_MODEL_ID,
+    QWEN_IMAGE_EDIT_REVISION,
+    STABLE_DIFFUSION_CPP_REVISION,
+    STABLE_DIFFUSION_CPP_RUNTIME_ID,
+    STABLE_DIFFUSION_CPP_TAG,
+    age_progress_prompt_sha256,
+)
 from crossage_fr.storage import safe_is_mount, safe_resolve
 from crossage_fr.store import VectorStore
-from crossage_fr.store.workspace_db import WorkspaceDb, path_signature
-from crossage_fr.workspace_registry import atomic_write, atomic_write_text, ensure_workspace_metadata, now_iso, write_active_workspace
+from crossage_fr.store.workspace_db import WorkspaceDb, path_signature, sqlite3
+from crossage_fr.store.workspace_encryption import WorkspaceEncryption, WorkspaceEncryptionError, secure_remove_file
+from crossage_fr.workspace_registry import atomic_write, atomic_write_text, ensure_workspace_metadata, now_iso, restrict_file_mode, write_active_workspace
 from PIL import Image, ImageDraw, ImageEnhance
 
 
@@ -71,18 +131,11 @@ class FileChangedDuringScanError(OSError):
     pass
 
 try:
-    UNMATCHED_CLUSTER_BATCH_SIZE = max(100, int(os.environ.get("CROSSAGE_UNMATCHED_CLUSTER_BATCH_SIZE", "1000")))
+    # Deterministic UI-state testing only. The zero default has no production
+    # cost; the hard cap prevents accidental environment misuse from hanging a scan.
+    SCAN_TEST_ITEM_DELAY_SECONDS = min(0.25, max(0.0, float(os.environ.get("CROSSAGE_TEST_SCAN_ITEM_DELAY_MS", "0")) / 1000.0))
 except ValueError:
-    UNMATCHED_CLUSTER_BATCH_SIZE = 1000
-
-# Phase 2.4: unmatched faces are clustered ONCE globally at the terminal flush so a
-# single person can't fragment across periodic batches. Periodic clustering only fires
-# as a memory safety valve once the accumulated set exceeds this (high) cap; below it,
-# everything is held and clustered in one pass. Streaming kNN is the >1M follow-up.
-try:
-    UNMATCHED_CLUSTER_GLOBAL_CAP = max(2000, int(os.environ.get("CROSSAGE_UNMATCHED_CLUSTER_GLOBAL_CAP", "20000")))
-except ValueError:
-    UNMATCHED_CLUSTER_GLOBAL_CAP = 20000
+    SCAN_TEST_ITEM_DELAY_SECONDS = 0.0
 
 try:
     SCAN_DB_COMMIT_INTERVAL = max(25, int(os.environ.get("CROSSAGE_SCAN_DB_COMMIT_INTERVAL", "250")))
@@ -120,9 +173,23 @@ except ValueError:
     CANDIDATE_JSON_SNAPSHOT_LIMIT = 50_000
 
 try:
+    CANDIDATE_BOOT_HYDRATE_LIMIT = max(0, int(os.environ.get("CROSSAGE_CANDIDATE_BOOT_HYDRATE_LIMIT", "0")))
+except ValueError:
+    CANDIDATE_BOOT_HYDRATE_LIMIT = 0
+
+try:
     CANDIDATE_MEMORY_DEDUPE_LIMIT = max(1000, int(os.environ.get("CROSSAGE_CANDIDATE_MEMORY_DEDUPE_LIMIT", "100000")))
 except ValueError:
     CANDIDATE_MEMORY_DEDUPE_LIMIT = 100_000
+
+AUDIT_ENCRYPTED_PREFIX = b"VINTRACE-AUDIT-AESGCM1:"
+AUDIT_ENCRYPTION_ROLE = "audit-event-v1"
+SYNTHETIC_AGE_IMAGE_ARTIFACT_TYPE = "synthetic_age_image_review"
+SYNTHETIC_AGE_IDENTITY_MINIMUM = 0.20
+SYNTHETIC_AGE_PARENT_MINIMUM = 0.20
+SYNTHETIC_AGE_IMPOSTOR_MARGIN_MINIMUM = 0.08
+SYNTHETIC_AGE_MINIMUM_QUALITY = 0.35
+SYNTHETIC_AGE_MAX_TARGETS_PER_RUN = 3
 
 try:
     VIDEO_REVIEW_CANDIDATES_PER_SOURCE = max(1, int(os.environ.get("CROSSAGE_VIDEO_REVIEW_CANDIDATES_PER_SOURCE", "12")))
@@ -140,6 +207,12 @@ def _format_ms(value: int | None) -> str:
 def _video_note(metadata: dict[str, Any]) -> str:
     if metadata.get("media_kind") != "video":
         return ""
+    if metadata.get("video_track_id"):
+        start = _format_ms(metadata.get("video_track_start_ms"))
+        end = _format_ms(metadata.get("video_track_end_ms"))
+        frames = max(1, int(metadata.get("video_track_frame_count", 0) or 0))
+        keyframes = max(1, len(metadata.get("video_track_keyframe_indices", []) or []))
+        return f"Video face track {start} to {end}; pooled {keyframes} quality keyframe(s) from {frames} sampled face observation(s)."
     timestamp = _format_ms(metadata.get("video_timestamp_ms"))
     duration = _format_ms(metadata.get("video_duration_ms"))
     return f"Video moment at {timestamp}" + (f" of {duration}." if duration != "00:00" else ".")
@@ -158,17 +231,21 @@ class ProjectState:
         self.scan_history_path = self.root / "scan_history.json"
         self.accuracy_validation_history_path = self.root / "accuracy_validation_history.json"
         self.audit_path = self.root / "audit_log.jsonl"
+        self.content_credentials_identity_path = self.root / "content-credentials" / "signing-identity.json"
         self.cancel_scan_path = self.root / ".scan-cancel"
         self.pause_scan_path = self.root / ".scan-pause"
         self.media_action_cancel_path = self.root / ".media-action-cancel"
         self.vector_index_path = self.root / "reference-vectors.npz"
         self.previews_path = self.root / "previews"
         self.video_frames_path = self.root / "video-frames"
+        self.synthetic_age_images_path = self.root / "synthetic-age-images"
         self.validation_packs_path = self.root / "validation-packs"
-        self.db = WorkspaceDb(self.root / "workspace.sqlite3")
+        self.workspace_encryption = WorkspaceEncryption.from_environment(self.root)
+        self.db = WorkspaceDb(self.root / "workspace.sqlite3", encryption=self.workspace_encryption)
         self.workspace_metadata = ensure_workspace_metadata(self.root, actor=actor)
         write_active_workspace(self.root, actor=actor, metadata=self.workspace_metadata)
         self.config = load_config(self.config_path)
+        self._config_signature = self._config_disk_signature()
         self.apply_video_decoder_config()
         self.consent: dict[str, Any] = {}
         self.references: dict[str, ReferenceFace] = {}
@@ -178,6 +255,7 @@ class ProjectState:
         self._reference_index_version = 0
         self._model_vector_store_cache: dict[str, tuple[int, VectorStore, dict[str, ReferenceFace]]] = {}
         self._person_template_cache: tuple[tuple[int, str], dict[str, list[float]]] | None = None
+        self._fixed_cohort_cache: dict[str, tuple[CohortNormalizer | None, str]] = {}
         self._excluded_file_paths_cache_key: tuple[str, ...] = ()
         self._excluded_file_paths_cache: set[str] = set()
         self._exclusion_cache_key: tuple[Any, ...] = ()
@@ -194,11 +272,15 @@ class ProjectState:
         self._loaded_candidate_payloads: dict[str, dict[str, Any]] = {}
         self._candidate_dirty_ids: set[str] = set()
         self._candidate_deleted_ids: set[str] = set()
+        self._candidate_index_backed = False
         self._last_scan_progress_emit_at: dict[str, float] = {}
         self._last_scan_progress_processed: dict[str, int] = {}
         self.load()
         self._ensure_generated_dir_sentinel(self.previews_path)
         self._ensure_generated_dir_sentinel(self.video_frames_path)
+        self._ensure_generated_dir_sentinel(self.synthetic_age_images_path)
+        self._synthetic_age_startup_result = self._reconcile_synthetic_age_image_storage()
+        self._retention_startup_result = self.enforce_retention_policy(source="startup")
 
     def apply_video_decoder_config(self) -> None:
         configure_video_decoder_paths(self.config.ffmpeg_path, self.config.ffprobe_path)
@@ -247,6 +329,7 @@ class ProjectState:
         self.references.clear()
         self.candidates.clear()
         self.scan_history.clear()
+        self._candidate_index_backed = False
         self._loaded_config_payload = asdict(self.config)
         self.consent = self._read_json_object(self.consent_path)
         self._loaded_consent = dict(self.consent)
@@ -259,41 +342,53 @@ class ProjectState:
                 if not valid_reference(ref):
                     continue
                 self.references[ref.ref_id] = ref
-        if self.candidates_path.exists():
-            for row in self._read_json_array(self.candidates_path):
-                try:
-                    candidate = ReviewCandidate(**row)
-                except TypeError:
-                    continue
-                if not valid_candidate(candidate):
-                    continue
-                self.candidates[candidate.candidate_id] = candidate
         try:
             indexed_candidates = self.db.candidate_count()
         except sqlite3.Error:
             indexed_candidates = 0
-        if indexed_candidates > len(self.candidates):
-            loaded_from_index: dict[str, ReviewCandidate] = {}
-            try:
-                for row in self.db.iter_candidate_payloads():
+        if indexed_candidates > CANDIDATE_BOOT_HYDRATE_LIMIT:
+            self._candidate_index_backed = True
+        if self.candidates_path.exists():
+            if not self._candidate_index_backed:
+                for row in self._read_json_array(self.candidates_path):
                     try:
                         candidate = ReviewCandidate(**row)
                     except TypeError:
                         continue
                     if not valid_candidate(candidate):
                         continue
-                    loaded_from_index[candidate.candidate_id] = candidate
-            except sqlite3.Error:
-                loaded_from_index = {}
-            if len(loaded_from_index) > len(self.candidates):
-                self.candidates = loaded_from_index
+                    self.candidates[candidate.candidate_id] = candidate
+        if indexed_candidates > len(self.candidates):
+            if indexed_candidates <= CANDIDATE_BOOT_HYDRATE_LIMIT:
+                loaded_from_index: dict[str, ReviewCandidate] = {}
+                try:
+                    for row in self.db.iter_candidate_payloads():
+                        try:
+                            candidate = ReviewCandidate(**row)
+                        except TypeError:
+                            continue
+                        if not valid_candidate(candidate):
+                            continue
+                        loaded_from_index[candidate.candidate_id] = candidate
+                except sqlite3.Error:
+                    loaded_from_index = {}
+                if len(loaded_from_index) > len(self.candidates):
+                    self.candidates = loaded_from_index
+            else:
+                self.candidates.clear()
+                self._candidate_index_backed = True
         if self.scan_history_path.exists():
             self.scan_history.extend(self._read_json_array(self.scan_history_path)[:80])
         ref_vectors = {ref_id: ref.vector for ref_id, ref in self.references.items()}
-        if not self.vector_store.load(self.vector_index_path, expected_ids=set(ref_vectors)):
+        if self.workspace_encryption.enabled:
+            self.vector_store.rebuild(ref_vectors)
+            self._remove_plaintext_reference_vector_store()
+        elif not self.vector_store.load(self.vector_index_path, expected_ids=set(ref_vectors)):
             self.vector_store.rebuild(ref_vectors)
             if ref_vectors:
                 self.vector_store.save(self.vector_index_path)
+        self._migrate_sensitive_state_files()
+        self._migrate_audit_log_encryption()
         self._loaded_reference_ids = set(self.references.keys())
         self._loaded_reference_payloads = {ref_id: asdict(ref) for ref_id, ref in self.references.items()}
         self._reference_dirty_ids.clear()
@@ -302,7 +397,8 @@ class ProjectState:
         self._loaded_candidate_payloads = {candidate_id: asdict(candidate) for candidate_id, candidate in self.candidates.items()}
         self._candidate_dirty_ids.clear()
         self._candidate_deleted_ids.clear()
-        self._ensure_candidate_index()
+        if not self._candidate_index_backed:
+            self._ensure_candidate_index()
         self._invalidate_reference_indexes()
 
     def _invalidate_reference_indexes(self) -> None:
@@ -338,7 +434,7 @@ class ProjectState:
 
     def _merged_config_for_save(self) -> RuntimeConfig:
         local_payload = asdict(self.config)
-        disk_payload = asdict(load_config(self.config_path)) if self.config_path.exists() else {}
+        disk_payload = asdict(load_config(self.config_path, strict_read=True)) if self.config_path.exists() else {}
         merged_payload = self._three_way_dict_merge(self._loaded_config_payload, disk_payload, local_payload)
         return self._config_from_payload(merged_payload, self.config)
 
@@ -480,8 +576,14 @@ class ProjectState:
             for ref_id, ref in self.references.items()
             if self._compatible_reference_model_name(model_key, ref.model_name)
         }
-        store = VectorStore()
-        store.rebuild({ref_id: ref.vector for ref_id, ref in references.items()})
+        if (
+            len(references) == len(self.references)
+            and set(references) == set(self.vector_store.ids)
+        ):
+            store = self.vector_store
+        else:
+            store = VectorStore()
+            store.rebuild({ref_id: ref.vector for ref_id, ref in references.items()})
         self._model_vector_store_cache[model_key] = (self._reference_index_version, store, references)
         return store, references
 
@@ -500,6 +602,7 @@ class ProjectState:
         return [
             ref
             for ref in self.references.values()
+            if not is_synthetic_age_reference(ref)
             if not self._compatible_reference_model_name(active, ref.model_name)
             and self._reference_active_key(ref, active) not in active_keys
         ]
@@ -510,6 +613,47 @@ class ProjectState:
             return [], references
         return store.search(embedding.vector, k=k), references
 
+    def _fixed_cohort_normalizer(self, model_name: str) -> tuple[CohortNormalizer | None, str]:
+        model_pack = model_pack_for_name(model_name)
+        if not model_pack:
+            return None, ""
+        cached = self._fixed_cohort_cache.get(model_pack)
+        if cached is not None:
+            return cached
+        try:
+            fixed = load_fixed_cohort(model_name)
+            result = (CohortNormalizer(fixed.vectors), f"{fixed.model_pack}:{fixed.version}")
+        except (CohortIntegrityError, OSError, ValueError):
+            result = (None, "")
+        self._fixed_cohort_cache[model_pack] = result
+        return result
+
+    def _pair_calibration_context(self, embedding: EmbeddingResult, decision: Any) -> dict[str, Any]:
+        reference_id = str(getattr(decision, "best_ref_id", "") or "")
+        reference = self.references.get(reference_id)
+        if reference is None or not self._compatible_reference_model_name(embedding.model_name, reference.model_name):
+            return {}
+        center = normalized_pair_center(embedding.vector, reference.vector)
+        if center is None or center.size != 512:
+            return {}
+        normalizer, cohort_version = self._fixed_cohort_normalizer(embedding.model_name)
+        raw_cosine = getattr(decision, "raw_cosine", None)
+        cohort_z: float | None = None
+        if normalizer is not None and raw_cosine is not None:
+            cohort_z = normalizer.normalize_pair(
+                embedding.vector,
+                reference.vector,
+                float(raw_cosine),
+            )
+        return {
+            "bestRefId": reference_id,
+            "modelName": embedding.model_name,
+            "pairCenter": [float(value) for value in center],
+            "cohortZ": cohort_z,
+            "cohortVersion": cohort_version,
+            "contextVersion": f"adaptive-pair-v1|{cohort_version or 'cohort-unavailable'}",
+        }
+
     def save(self, snapshot_candidates: bool = True, flush_candidate_index: bool = True) -> None:
         dirty_reference_ids = set(self._reference_dirty_ids)
         deleted_reference_ids = set(self._reference_deleted_ids)
@@ -517,9 +661,14 @@ class ProjectState:
         deleted_candidate_ids = set(self._candidate_deleted_ids)
         with self._state_lock():
             self.root.mkdir(parents=True, exist_ok=True)
-            self.config = self._merged_config_for_save()
-            save_config(self.config, self.config_path)
-            self._loaded_config_payload = asdict(self.config)
+            try:
+                config_for_save = self._merged_config_for_save()
+            except ConfigReadError:
+                config_for_save = None
+            if config_for_save is not None:
+                self.config = config_for_save
+                save_config(self.config, self.config_path)
+                self._loaded_config_payload = asdict(self.config)
             self.consent = self._merged_consent_for_save()
             self._write_json_atomic(self.consent_path, self.consent)
             self._loaded_consent = dict(self.consent)
@@ -530,7 +679,10 @@ class ProjectState:
             refs = [asdict(ref) for ref in self.references.values()]
             self._write_json_atomic(self.refs_path, refs)
             self.vector_store.rebuild({ref_id: ref.vector for ref_id, ref in self.references.items()})
-            self.vector_store.save(self.vector_index_path)
+            if self.workspace_encryption.enabled:
+                self._remove_plaintext_reference_vector_store()
+            else:
+                self.vector_store.save(self.vector_index_path)
             self._loaded_reference_ids = set(self.references.keys())
             self._loaded_reference_payloads = {ref_id: asdict(ref) for ref_id, ref in self.references.items()}
             self._reference_dirty_ids.clear()
@@ -538,7 +690,7 @@ class ProjectState:
             self._invalidate_reference_indexes()
             if flush_candidate_index:
                 self._flush_candidate_index()
-            if snapshot_candidates and len(self.candidates) <= CANDIDATE_JSON_SNAPSHOT_LIMIT:
+            if snapshot_candidates and not self._candidate_index_backed and len(self.candidates) <= CANDIDATE_JSON_SNAPSHOT_LIMIT:
                 self.candidates = self._merged_candidates_for_snapshot(
                     dirty_ids=dirty_candidate_ids,
                     deleted_ids=deleted_candidate_ids,
@@ -550,6 +702,8 @@ class ProjectState:
             self._write_json_atomic(self.scan_history_path, self.scan_history[:80])
 
     def _ensure_candidate_index(self) -> None:
+        if self._candidate_index_backed and not self._candidate_dirty_ids and not self._candidate_deleted_ids:
+            return
         try:
             if self.db.candidate_count() != len(self.candidates):
                 self.db.replace_candidates(self.candidates.values())
@@ -561,6 +715,8 @@ class ProjectState:
             indexed = int((scale or {}).get("reviewCandidateRows", -1)) if scale is not None else self.db.candidate_count()
         except (sqlite3.Error, TypeError, ValueError):
             return False
+        if self._candidate_index_backed:
+            return indexed >= len(self.candidates)
         return indexed == len(self.candidates)
 
     def _mark_reference_dirty(self, ref_id: str | None) -> None:
@@ -606,10 +762,139 @@ class ProjectState:
     def _mark_all_candidates_dirty(self) -> None:
         self._mark_candidates_dirty(self.candidates.keys())
 
+    def _candidate_from_payload(self, payload: dict[str, Any] | None) -> ReviewCandidate | None:
+        if not isinstance(payload, dict):
+            return None
+        try:
+            candidate = ReviewCandidate(**payload)
+        except TypeError:
+            return None
+        return candidate if valid_candidate(candidate) else None
+
+    def _load_candidate_from_index(self, candidate_id: str) -> ReviewCandidate | None:
+        clean_id = str(candidate_id or "").strip()
+        if not clean_id:
+            return None
+        candidate = self.candidates.get(clean_id)
+        if candidate is not None:
+            return candidate
+        try:
+            payload = self.db.candidate_payload_by_id(clean_id)
+        except sqlite3.Error:
+            return None
+        candidate = self._candidate_from_payload(payload)
+        if candidate is None:
+            return None
+        self.candidates[candidate.candidate_id] = candidate
+        self._loaded_candidate_ids.add(candidate.candidate_id)
+        self._loaded_candidate_payloads[candidate.candidate_id] = asdict(candidate)
+        return candidate
+
+    def _candidate_or_raise(self, candidate_id: str) -> ReviewCandidate:
+        candidate = self._load_candidate_from_index(candidate_id)
+        if candidate is None:
+            raise KeyError(f"Candidate not found: {candidate_id}")
+        return candidate
+
+    def candidate_by_id(self, candidate_id: str) -> ReviewCandidate | None:
+        return self._load_candidate_from_index(candidate_id)
+
+    def _ensure_candidates_loaded(self, candidate_ids: Iterable[str]) -> list[str]:
+        unique_ids = list(dict.fromkeys(str(value or "").strip() for value in candidate_ids if str(value or "").strip()))
+        loaded: list[str] = []
+        if self._candidate_index_backed:
+            missing_ids = [candidate_id for candidate_id in unique_ids if candidate_id not in self.candidates]
+            if missing_ids:
+                try:
+                    payloads = self.db.candidate_payloads_by_ids(missing_ids)
+                except sqlite3.Error:
+                    payloads = {}
+                for candidate_id, payload in payloads.items():
+                    candidate = self._candidate_from_payload(payload)
+                    if candidate is None:
+                        continue
+                    self.candidates[candidate.candidate_id] = candidate
+                    self._loaded_candidate_ids.add(candidate.candidate_id)
+                    self._loaded_candidate_payloads[candidate.candidate_id] = asdict(candidate)
+        for candidate_id in unique_ids:
+            if self._load_candidate_from_index(candidate_id) is not None:
+                loaded.append(candidate_id)
+        return loaded
+
+    def _iter_authoritative_candidates(
+        self,
+        *,
+        statuses: Iterable[str] | None = None,
+        person_name: str = "",
+        order: str = "created",
+    ) -> Iterable[ReviewCandidate]:
+        if self._candidate_index_backed:
+            self._flush_candidate_index()
+            try:
+                for payload in self.db.iter_candidate_payloads_filtered(statuses=statuses, person_name=person_name, order=order):
+                    candidate = self._candidate_from_payload(payload)
+                    if candidate is not None:
+                        yield candidate
+                return
+            except sqlite3.Error:
+                pass
+        status_set = {str(status or "").strip() for status in (statuses or []) if str(status or "").strip()}
+        person_key = str(person_name or "").strip().casefold()
+        rows = list(self.candidates.values())
+        if status_set:
+            rows = [candidate for candidate in rows if candidate.status in status_set]
+        if person_key:
+            rows = [candidate for candidate in rows if candidate.person_name.casefold() == person_key]
+        if order == "status":
+            rows.sort(key=lambda item: (item.status, item.person_name.lower(), -item.score, item.candidate_id))
+        elif order in {"review", "score"}:
+            rows.sort(key=lambda item: (-float(item.score), -float(item.quality), item.created_at, item.candidate_id))
+        else:
+            rows.sort(key=lambda item: (item.created_at, item.candidate_id))
+        yield from rows
+
+    def _authoritative_candidate_ids(
+        self,
+        *,
+        statuses: Iterable[str] | None = None,
+        person_name: str = "",
+        created_before: str = "",
+    ) -> list[str]:
+        if self._candidate_index_backed:
+            self._flush_candidate_index()
+            try:
+                return self.db.candidate_ids_filtered(statuses=statuses, person_name=person_name, created_before=created_before)
+            except sqlite3.Error:
+                pass
+        status_set = {str(status or "").strip() for status in (statuses or []) if str(status or "").strip()}
+        person_key = str(person_name or "").strip().casefold()
+        cutoff = str(created_before or "").strip()
+        ids: list[str] = []
+        for candidate in self.candidates.values():
+            if status_set and candidate.status not in status_set:
+                continue
+            if person_key and candidate.person_name.casefold() != person_key:
+                continue
+            if cutoff and str(candidate.created_at or "") >= cutoff:
+                continue
+            ids.append(candidate.candidate_id)
+        return ids
+
+    def _forget_candidates(self, candidate_ids: Iterable[str]) -> None:
+        for candidate_id in candidate_ids:
+            self.candidates.pop(candidate_id, None)
+            self._loaded_candidate_ids.discard(candidate_id)
+            self._loaded_candidate_payloads.pop(candidate_id, None)
+            self._candidate_dirty_ids.discard(candidate_id)
+
     def _flush_candidate_index(self) -> None:
         try:
             if self._candidate_deleted_ids:
-                self.db.delete_candidates(self._candidate_deleted_ids)
+                deleted_ids = set(self._candidate_deleted_ids)
+                self.db.delete_candidates(deleted_ids)
+                for candidate_id in deleted_ids:
+                    self._loaded_candidate_ids.discard(candidate_id)
+                    self._loaded_candidate_payloads.pop(candidate_id, None)
                 self._candidate_deleted_ids.clear()
             if self._candidate_dirty_ids:
                 rows = [
@@ -618,8 +903,11 @@ class ProjectState:
                     if candidate_id in self.candidates
                 ]
                 self.db.upsert_candidates(rows)
+                for candidate in rows:
+                    self._loaded_candidate_ids.add(candidate.candidate_id)
+                    self._loaded_candidate_payloads[candidate.candidate_id] = asdict(candidate)
                 self._candidate_dirty_ids.clear()
-            elif (
+            elif not self._candidate_index_backed and (
                 self.db.candidate_count() != len(self.candidates)
                 or set(self.candidates.keys()) != self._loaded_candidate_ids
                 or any(
@@ -634,7 +922,52 @@ class ProjectState:
             pass
 
     def consent_on_file(self) -> bool:
-        return bool(self.consent.get("active"))
+        if not bool(self.consent.get("active")):
+            return False
+        preset = jurisdiction_preset(self.config.jurisdiction_preset) or {}
+        if preset.get("writtenReleaseRequired"):
+            return bool(self.ai_disclosure_status()["acknowledged"])
+        return True
+
+    def _backup_workspace_key_id(self) -> str:
+        try:
+            return self.workspace_encryption.key_id
+        except Exception:
+            return ""
+
+    def refresh_consent_from_disk(self) -> bool:
+        """Refresh the cross-process consent gate without reloading the library."""
+        consent = self._read_json_object(self.consent_path)
+        self.consent = consent
+        self._loaded_consent = dict(consent)
+        return self.consent_on_file()
+
+    def _config_disk_signature(self) -> tuple[int, int] | None:
+        try:
+            stat = self.config_path.stat()
+        except OSError:
+            return None
+        return (stat.st_size, stat.st_mtime_ns)
+
+    def refresh_config_from_disk(self) -> RuntimeConfig:
+        """Re-read config.json when it changed on disk, without reloading the library.
+
+        The desktop and the MCP/HTTP server that serves paired mobile devices are
+        separate processes, and the MCP process caches this project for its lifetime.
+        Safe Mode is read straight off ``self.config``, so without this an operator who
+        ENABLES or TIGHTENS Safe Mode on the desktop would not affect the mobile preview
+        path until the sidecar restarted — a fail-open staleness bug. Consent already
+        had the same problem and the same remedy (``refresh_consent_from_disk``).
+
+        Guarded on (size, mtime_ns) so it is a single ``stat`` on the hot path and only
+        re-parses when the file actually changed.
+        """
+        signature = self._config_disk_signature()
+        if signature is not None and signature == getattr(self, "_config_signature", None):
+            return self.config
+        self.config = load_config(self.config_path)
+        self._config_signature = signature
+        return self.config
 
     @staticmethod
     def _person_key(name: str) -> str:
@@ -653,12 +986,1392 @@ class ProjectState:
         if not getattr(self.config, "per_subject_consent", False):
             return True
         record = self.subject_consents().get(self._person_key(person_name))
-        return bool(record and record.get("active"))
+        if not record or not record.get("active") or release_is_expired(record):
+            return False
+        preset = jurisdiction_preset(self.config.jurisdiction_preset) or {}
+        return release_is_complete(record, preset)
+
+    def ai_disclosure_status(self) -> dict[str, Any]:
+        acknowledgement = self.consent.get("aiDisclosure")
+        if not isinstance(acknowledgement, dict):
+            acknowledgement = {}
+        return {
+            "version": AI_DISCLOSURE_VERSION,
+            "acknowledged": bool(
+                acknowledgement.get("acknowledged")
+                and acknowledgement.get("version") == AI_DISCLOSURE_VERSION
+            ),
+            "acknowledgedAt": acknowledgement.get("acknowledgedAt"),
+            "operator": str(acknowledgement.get("operator", "")),
+            "notice": AI_DISCLOSURE_NOTICE,
+        }
+
+    def biometric_retention_policy(self) -> dict[str, Any]:
+        preset = dict(jurisdiction_preset(self.config.jurisdiction_preset) or jurisdiction_preset("standard") or {})
+        preset["retentionReviewedDays"] = int(self.config.retention_reviewed_days)
+        preset["retentionPendingDays"] = int(self.config.retention_pending_days)
+        preset["auditRetentionDays"] = int(self.config.retention_audit_days)
+        policy = build_retention_policy(
+            preset,
+            enforcement_enabled=bool(self.config.retention_enforcement_enabled),
+        )
+        publication = self.consent.get("policyPublication")
+        if not isinstance(publication, dict):
+            publication = {}
+        current = bool(
+            publication.get("policyVersion") == policy["policyVersion"]
+            and publication.get("policyHash") == policy["policyHash"]
+            and publication.get("publicUrl")
+            and publication.get("publishedAt")
+        )
+        return {
+            **policy,
+            "status": "publication-recorded" if current else "operator-policy-template",
+            "publication": {
+                "required": bool(policy.get("publicPolicyRequired")),
+                "recorded": bool(publication),
+                "current": current,
+                "publicUrl": str(publication.get("publicUrl", "")) if current else "",
+                "approvedBy": str(publication.get("approvedBy", "")) if current else "",
+                "publishedAt": publication.get("publishedAt") if current else None,
+                "recordedAt": publication.get("recordedAt") if current else None,
+            },
+        }
+
+    def compliance_status(self) -> dict[str, Any]:
+        subjects = self.subject_consents()
+        preset = jurisdiction_preset(self.config.jurisdiction_preset) or {}
+        active = 0
+        complete = 0
+        expired = 0
+        complete_subject_keys: set[str] = set()
+        subject_rows: list[dict[str, Any]] = []
+        for record in subjects.values():
+            if not isinstance(record, dict) or not record.get("active"):
+                continue
+            active += 1
+            is_expired = release_is_expired(record)
+            is_complete = not is_expired and release_is_complete(record, preset)
+            if is_expired:
+                expired += 1
+            elif is_complete:
+                complete += 1
+                complete_subject_keys.add(self._person_key(str(record.get("personName", ""))))
+            subject_rows.append(
+                {
+                    "personName": str(record.get("personName", "")),
+                    "releaseId": str(record.get("releaseId", "")),
+                    "recordHash": str(record.get("recordHash", "")),
+                    "active": True,
+                    "complete": is_complete,
+                    "expired": is_expired,
+                    "signerName": str(record.get("signerName", "")),
+                    "signerRole": str(record.get("signerRole", "")),
+                    "specificPurpose": str(record.get("specificPurpose", "")),
+                    "collectionTermDays": int(record.get("collectionTermDays", 0) or 0),
+                    "lawfulBasis": str(record.get("lawfulBasis", "")),
+                    "confirmedAt": record.get("confirmedAt"),
+                    "expiresAt": record.get("expiresAt"),
+                }
+            )
+        subject_rows.sort(key=lambda row: str(row.get("personName", "")).casefold())
+        private_subjects: dict[str, str] = {
+            self._person_key(ref.person_name): ref.person_name.strip()
+            for ref in self.references.values()
+            if ref.person_name.strip()
+        }
+        try:
+            for person_name in self.db.subject_private_person_names():
+                private_subjects.setdefault(self._person_key(person_name), person_name)
+        except sqlite3.Error:
+            pass
+        missing_release_names = sorted(
+            (
+                display_name
+                for person_key, display_name in private_subjects.items()
+                if person_key not in complete_subject_keys
+            ),
+            key=str.casefold,
+        )
+        retention_policy = self.biometric_retention_policy()
+        publication = retention_policy.get("publication") if isinstance(retention_policy.get("publication"), dict) else {}
+        publication_ready = bool(
+            not retention_policy.get("publicPolicyRequired") or publication.get("current")
+        )
+        return {
+            "jurisdiction": preset,
+            "aiDisclosure": self.ai_disclosure_status(),
+            "retentionPolicy": retention_policy,
+            "subjects": {
+                "total": len(subjects),
+                "active": active,
+                "complete": complete,
+                "expired": expired,
+                "records": subject_rows,
+                "biometric": len(private_subjects),
+                "covered": len(private_subjects) - len(missing_release_names),
+                "missing": len(missing_release_names),
+                "missingNames": missing_release_names,
+            },
+            "processingAllowed": self.consent_on_file(),
+            "evidenceReady": bool(
+                self.ai_disclosure_status()["acknowledged"]
+                and publication_ready
+                and (
+                    not preset.get("perSubjectConsent")
+                    or (active == complete and not missing_release_names)
+                )
+            ),
+            "startupEnforcement": getattr(self, "_retention_startup_result", None),
+        }
+
+    def record_policy_publication(
+        self,
+        *,
+        public_url: str,
+        approved_by: str,
+        published_at: str = "",
+        source: str = "desktop",
+    ) -> dict[str, Any]:
+        url = str(public_url or "").strip()
+        approver = " ".join(str(approved_by or "").strip().split())
+        if not approver:
+            raise ValueError("The policy approver is required.")
+        if len(url) > 1200:
+            raise ValueError("The public policy URL is too long.")
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+        ):
+            raise ValueError("The public policy URL must be a credential-free HTTPS URL without a fragment.")
+        published = parse_iso(published_at) if published_at else datetime.now(timezone.utc)
+        if published is None:
+            raise ValueError("The policy publication timestamp must be a valid ISO-8601 value.")
+        if published > datetime.now(timezone.utc):
+            raise ValueError("The policy publication timestamp cannot be in the future.")
+        policy = build_retention_policy(
+            {
+                **dict(jurisdiction_preset(self.config.jurisdiction_preset) or jurisdiction_preset("standard") or {}),
+                "retentionReviewedDays": int(self.config.retention_reviewed_days),
+                "retentionPendingDays": int(self.config.retention_pending_days),
+                "auditRetentionDays": int(self.config.retention_audit_days),
+            },
+            enforcement_enabled=bool(self.config.retention_enforcement_enabled),
+        )
+        publication = {
+            "schemaVersion": 1,
+            "policyVersion": policy["policyVersion"],
+            "policyHash": policy["policyHash"],
+            "publicUrl": url,
+            "approvedBy": approver[:200],
+            "publishedAt": published.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "recordedAt": now_iso(),
+            "source": str(source or "desktop")[:80],
+        }
+        self.consent = {
+            **self.consent,
+            "schemaVersion": CONSENT_SCHEMA_VERSION,
+            "policyPublication": publication,
+        }
+        self._append_audit(
+            {
+                "action": "record_biometric_policy_publication",
+                "policyVersion": policy["policyVersion"],
+                "policyHash": policy["policyHash"],
+                "publicUrlHash": hashlib.sha256(url.encode("utf-8")).hexdigest(),
+                "approverRef": self._audit_person_ref(approver),
+                "publishedAt": publication["publishedAt"],
+                "source": publication["source"],
+            }
+        )
+        self.save()
+        return self.biometric_retention_policy()["publication"]
+
+    def acknowledge_ai_disclosure(self, *, operator: str = "", source: str = "desktop") -> dict[str, Any]:
+        timestamp = now_iso()
+        self.consent = {
+            **self.consent,
+            "schemaVersion": CONSENT_SCHEMA_VERSION,
+            "aiDisclosure": {
+                "version": AI_DISCLOSURE_VERSION,
+                "acknowledged": True,
+                "acknowledgedAt": timestamp,
+                "operator": str(operator or "")[:120],
+                "source": str(source or "desktop")[:80],
+            },
+        }
+        self._append_audit(
+            {
+                "action": "acknowledge_ai_disclosure",
+                "version": AI_DISCLOSURE_VERSION,
+                "operatorRef": self._audit_person_ref(operator) if operator else "",
+                "source": str(source or "desktop")[:80],
+            }
+        )
+        self.save()
+        return self.ai_disclosure_status()
+
+    def _synthetic_age_image_candidate(self, raw_path: str | Path) -> Path:
+        if not self._generated_dir_is_owned(self.synthetic_age_images_path):
+            raise ValueError("The private synthetic age-image directory is not owned by this workspace.")
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            parts = candidate.parts
+            if len(parts) == 1:
+                candidate = self.synthetic_age_images_path / candidate
+            elif len(parts) == 2 and parts[0] == self.synthetic_age_images_path.name:
+                candidate = self.root / candidate
+            else:
+                raise ValueError("The synthetic age-image path is outside this workspace.")
+        try:
+            root = self.synthetic_age_images_path.resolve()
+            if candidate.parent.resolve() != root or candidate.name in {"", ".", ".."}:
+                raise ValueError("The synthetic age-image path is outside this workspace.")
+        except (OSError, RuntimeError) as exc:
+            raise ValueError("The synthetic age-image path is unavailable.") from exc
+        return candidate
+
+    def _synthetic_age_image_path(self, raw_path: str | Path, *, require_file: bool = True) -> Path:
+        try:
+            root = self.synthetic_age_images_path.resolve()
+            candidate = self._synthetic_age_image_candidate(raw_path)
+            if candidate.is_symlink():
+                raise ValueError("Symbolic links are not accepted as synthetic age images.")
+            resolved = candidate.resolve()
+        except (OSError, RuntimeError) as exc:
+            raise ValueError("The synthetic age-image path is unavailable.") from exc
+        if resolved.parent != root:
+            raise ValueError("The synthetic age-image path is outside this workspace.")
+        if require_file and not resolved.is_file():
+            raise FileNotFoundError("The staged synthetic age image is unavailable.")
+        return resolved
+
+    def _remove_synthetic_age_image_file(self, raw_path: str | Path) -> bool:
+        try:
+            candidate = self._synthetic_age_image_candidate(raw_path)
+            if candidate.is_symlink():
+                candidate.unlink(missing_ok=True)
+            elif candidate.is_file():
+                secure_remove_file(candidate)
+            return not candidate.exists() and not candidate.is_symlink()
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+    def _synthetic_age_image_storage_key(self, path: Path) -> str:
+        resolved = self._synthetic_age_image_path(path)
+        return (Path(self.synthetic_age_images_path.name) / resolved.name).as_posix()
+
+    def _reconcile_synthetic_age_image_storage(self) -> dict[str, int]:
+        rehomed_references = 0
+        removed_references = 0
+        removed_files = 0
+        rejected_artifacts = 0
+        rolled_back_artifacts = 0
+        changed = False
+        valid_promoted_ref_ids: set[str] = set()
+        for artifact in self._synthetic_age_image_artifacts():
+            status = str(artifact.get("status", "") or "")
+            if status not in {"staged", "promoted"}:
+                continue
+            artifact_id = str(artifact.get("artifact_id", "") or "")
+            payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+            expected_hash = str(payload.get("generatedHash", "") or "")
+            generated_path: Path | None = None
+            try:
+                candidate = self._synthetic_age_image_path(str(payload.get("generatedPath", "") or ""))
+                if expected_hash and sha256_file(candidate) == expected_hash:
+                    generated_path = candidate
+            except (FileNotFoundError, OSError, RuntimeError, ValueError):
+                generated_path = None
+            matching_ref_ids = [
+                ref_id
+                for ref_id, ref in self.references.items()
+                if is_generated_age_image_reference(ref)
+                and str(ref.derivation_provenance.get("reviewArtifactId", "") or "") == artifact_id
+            ]
+            if status == "staged":
+                if generated_path is None:
+                    self.db.update_learned_artifact_status(artifact_id, "rejected")
+                    rejected_artifacts += 1
+                    changed = True
+                continue
+            payload_person = str(payload.get("personName", "") or "")
+            payload_target = normalize_age_bucket(str(payload.get("targetAgeBucket", "") or ""))
+            payload_parent_id = str(payload.get("parentRefId", "") or "")
+            payload_parent_hash = str(payload.get("parentSourceHash", "") or "")
+            artifact_hash = str(artifact.get("artifact_hash", "") or "")
+            ref_contract_ok = False
+            if generated_path is not None and len(matching_ref_ids) == 1:
+                candidate_ref = self.references[matching_ref_ids[0]]
+                provenance = candidate_ref.derivation_provenance
+                parent_ref = self.references.get(payload_parent_id)
+                ref_contract_ok = bool(
+                    self._person_key(candidate_ref.person_name) == self._person_key(payload_person)
+                    and normalize_age_bucket(candidate_ref.synthetic_target_age_bucket) == payload_target
+                    and candidate_ref.parent_ref_ids == [payload_parent_id]
+                    and str(candidate_ref.source_hash or "") == expected_hash
+                    and str(provenance.get("reviewArtifactHash", "") or "") == artifact_hash
+                    and str(provenance.get("outputHash", "") or "") == expected_hash
+                    and str(provenance.get("parentSourceHash", "") or "") == payload_parent_hash
+                    and parent_ref is not None
+                    and not is_synthetic_age_reference(parent_ref)
+                    and self._person_key(parent_ref.person_name) == self._person_key(payload_person)
+                    and str(parent_ref.source_hash or "") == payload_parent_hash
+                )
+            if not ref_contract_ok:
+                if generated_path is not None and self._remove_synthetic_age_image_file(generated_path):
+                    removed_files += 1
+                for ref_id in matching_ref_ids:
+                    self.references.pop(ref_id, None)
+                    self._mark_reference_deleted(ref_id)
+                    removed_references += 1
+                self.db.update_learned_artifact_status(artifact_id, "rolled_back")
+                rolled_back_artifacts += 1
+                changed = True
+                continue
+            for ref_id in matching_ref_ids:
+                ref = self.references[ref_id]
+                valid_promoted_ref_ids.add(ref_id)
+                next_path = str(generated_path)
+                if ref.source_path != next_path:
+                    ref.source_path = next_path
+                    self._mark_reference_dirty(ref_id)
+                    rehomed_references += 1
+                    changed = True
+        valid_generated_paths: set[str] = set()
+        for ref_id in valid_promoted_ref_ids:
+            ref = self.references.get(ref_id)
+            if ref is None:
+                continue
+            try:
+                valid_generated_paths.add(str(Path(ref.source_path).expanduser().resolve()))
+            except (OSError, RuntimeError):
+                continue
+        orphan_ref_ids = [
+            ref_id
+            for ref_id, ref in self.references.items()
+            if is_generated_age_image_reference(ref) and ref_id not in valid_promoted_ref_ids
+        ]
+        for ref_id in orphan_ref_ids:
+            ref = self.references.pop(ref_id, None)
+            if ref is not None:
+                try:
+                    orphan_path = self._synthetic_age_image_path(ref.source_path, require_file=False)
+                except (OSError, RuntimeError, ValueError):
+                    orphan_path = None
+                if orphan_path is not None and str(orphan_path) not in valid_generated_paths:
+                    if self._remove_synthetic_age_image_file(orphan_path):
+                        removed_files += 1
+            self._mark_reference_deleted(ref_id)
+            removed_references += 1
+            changed = True
+        if removed_references:
+            self.vector_store.rebuild({item_id: item.vector for item_id, item in self.references.items()})
+            self._invalidate_reference_indexes()
+        if changed:
+            self._append_audit(
+                {
+                    "action": "reconcile_synthetic_age_image_storage",
+                    "rehomedReferences": rehomed_references,
+                    "removedReferences": removed_references,
+                    "removedFiles": removed_files,
+                    "rejectedArtifacts": rejected_artifacts,
+                    "rolledBackArtifacts": rolled_back_artifacts,
+                }
+            )
+            self.save()
+        return {
+            "rehomedReferences": rehomed_references,
+            "removedReferences": removed_references,
+            "removedFiles": removed_files,
+            "rejectedArtifacts": rejected_artifacts,
+            "rolledBackArtifacts": rolled_back_artifacts,
+        }
+
+    def _synthetic_age_image_artifacts(self) -> list[dict[str, Any]]:
+        return self.db.all_learned_artifact_rows(SYNTHETIC_AGE_IMAGE_ARTIFACT_TYPE)
+
+    def _invalidate_synthetic_age_image_artifacts(
+        self,
+        *,
+        person_name: str = "",
+        parent_ref_id: str = "",
+        reason: str,
+    ) -> list[str]:
+        person_key = self._person_key(person_name)
+        invalidated: list[str] = []
+        for artifact in self._synthetic_age_image_artifacts():
+            status = str(artifact.get("status", "") or "")
+            if status not in {"candidate", "staged", "promoted"}:
+                continue
+            payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+            if person_key and self._person_key(str(payload.get("personName", "") or "")) != person_key:
+                continue
+            parent_ids = [
+                str(item)
+                for item in payload.get("parentRefIds", [])
+                if isinstance(item, str) and item
+            ]
+            single_parent = str(payload.get("parentRefId", "") or "")
+            if single_parent and single_parent not in parent_ids:
+                parent_ids.append(single_parent)
+            if parent_ref_id and parent_ref_id not in parent_ids:
+                continue
+            generated_path = str(payload.get("generatedPath", "") or "")
+            if generated_path and not self._remove_synthetic_age_image_file(generated_path):
+                raise OSError("A private synthetic age image could not be removed safely.")
+            next_status = "rolled_back" if status == "promoted" else "rejected"
+            self.db.update_learned_artifact_status(str(artifact["artifact_id"]), next_status)
+            invalidated.append(str(artifact["artifact_id"]))
+        if invalidated:
+            self._append_audit(
+                {
+                    "action": "invalidate_synthetic_age_image_artifacts",
+                    "personRef": self._audit_person_ref(person_name) if person_name else "",
+                    "parentRefId": parent_ref_id,
+                    "artifactIds": invalidated[:50],
+                    "count": len(invalidated),
+                    "reason": str(reason or "lifecycle-change")[:120],
+                }
+            )
+        return invalidated
+
+    def _erase_synthetic_age_image_artifacts_for_person(self, person_name: str) -> dict[str, int]:
+        person_key = self._person_key(person_name)
+        artifact_ids: list[str] = []
+        files = 0
+        bytes_removed = 0
+        for artifact in self._synthetic_age_image_artifacts():
+            payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+            if self._person_key(str(payload.get("personName", "") or "")) != person_key:
+                continue
+            generated_path = str(payload.get("generatedPath", "") or "")
+            try:
+                generated_size = self._synthetic_age_image_path(generated_path).stat().st_size if generated_path else 0
+            except (FileNotFoundError, OSError, RuntimeError, ValueError):
+                generated_size = 0
+            if generated_path and not self._remove_synthetic_age_image_file(generated_path):
+                raise OSError("A private synthetic age image could not be erased safely.")
+            if generated_size:
+                files += 1
+                bytes_removed += generated_size
+            artifact_ids.append(str(artifact["artifact_id"]))
+        return {
+            "artifacts": self.db.delete_learned_artifacts(artifact_ids),
+            "files": files,
+            "bytes": bytes_removed,
+        }
+
+    def _remove_age_trajectory_references(
+        self,
+        *,
+        person_name: str = "",
+        parent_ref_id: str = "",
+    ) -> list[str]:
+        person_key = self._person_key(person_name)
+        removed = [
+            ref_id
+            for ref_id, ref in self.references.items()
+            if is_synthetic_age_reference(ref)
+            and (not person_key or self._person_key(ref.person_name) == person_key)
+            and (not parent_ref_id or parent_ref_id in ref.parent_ref_ids)
+        ]
+        invalidated_artifacts = self._invalidate_synthetic_age_image_artifacts(
+            person_name=person_name,
+            parent_ref_id=parent_ref_id,
+            reason="synthetic-reference-removal",
+        )
+        if not removed:
+            return []
+        for ref_id in removed:
+            self.references.pop(ref_id, None)
+        self._mark_references_deleted(removed)
+        self.vector_store.rebuild({item_id: item.vector for item_id, item in self.references.items()})
+        self._invalidate_reference_indexes()
+        if invalidated_artifacts:
+            self._append_audit(
+                {
+                    "action": "remove_generated_age_reference_files",
+                    "references": len(removed),
+                    "artifacts": len(invalidated_artifacts),
+                }
+            )
+        return removed
+
+    def age_trajectory_status(self, person_name: str = "") -> dict[str, Any]:
+        person_key = self._person_key(person_name)
+        refs = [
+            ref
+            for ref in self.references.values()
+            if not person_key or self._person_key(ref.person_name) == person_key
+        ]
+        real_refs = [ref for ref in refs if not is_synthetic_age_reference(ref)]
+        synthetic_refs = [ref for ref in refs if is_synthetic_age_reference(ref)]
+        generated_image_refs = [ref for ref in synthetic_refs if is_generated_age_image_reference(ref)]
+        embedding_refs = [ref for ref in synthetic_refs if not is_generated_age_image_reference(ref)]
+        real_buckets = sorted(
+            {
+                normalize_age_bucket(ref.age_bucket)
+                for ref in real_refs
+                if normalize_age_bucket(ref.age_bucket) != "unknown"
+            }
+        )
+        return {
+            "personName": person_name.strip(),
+            "methodVersion": AGE_TRAJECTORY_METHOD_VERSION,
+            "imageMethodVersion": IMAGE_AGE_AUGMENTATION_METHOD_VERSION,
+            "realReferences": len(real_refs),
+            "syntheticReferences": len(synthetic_refs),
+            "embeddingReferences": len(embedding_refs),
+            "generatedImageReferences": len(generated_image_refs),
+            "realAgeBuckets": real_buckets,
+            "targetAgeBuckets": sorted({ref.synthetic_target_age_bucket for ref in synthetic_refs if ref.synthetic_target_age_bucket}),
+            "eligible": len(real_buckets) >= 2,
+            "consentActive": self.consent_for_person(person_name) if person_name.strip() else self.consent_on_file(),
+            "generatedImages": bool(generated_image_refs),
+            "externalAgingWeights": bool(generated_image_refs),
+        }
+
+    def build_age_trajectory_references(
+        self,
+        person_name: str,
+        *,
+        acknowledge_embedding_derivation: bool,
+        source: str = "desktop",
+    ) -> dict[str, Any]:
+        person = str(person_name or "").strip()
+        if not person:
+            raise ValueError("A person name is required.")
+        if not acknowledge_embedding_derivation:
+            raise ValueError("Confirm the local synthetic embedding derivation before building an age bridge.")
+        if not self.consent_for_person(person):
+            raise PermissionError("Active workspace and subject consent are required for age-trajectory augmentation.")
+        person_key = self._person_key(person)
+        real_refs = [
+            ref
+            for ref in self.references.values()
+            if self._person_key(ref.person_name) == person_key and not is_synthetic_age_reference(ref)
+        ]
+        candidates = build_age_trajectory_candidates(real_refs)
+        desired_ids = {candidate.ref_id for candidate in candidates}
+        existing = {
+            ref_id: ref
+            for ref_id, ref in self.references.items()
+            if self._person_key(ref.person_name) == person_key
+            and is_synthetic_age_reference(ref)
+            and ref.synthetic_method_version == AGE_TRAJECTORY_METHOD_VERSION
+        }
+        stale_ids = sorted(set(existing) - desired_ids)
+        if stale_ids:
+            for ref_id in stale_ids:
+                self.references.pop(ref_id, None)
+            self._mark_references_deleted(stale_ids)
+
+        consent_record = self.subject_consents().get(person_key, {})
+        consent_snapshot = {
+            "workspaceId": str(self.workspace_metadata.get("workspaceId") or ""),
+            "workspaceConfirmedAt": self.consent.get("confirmedAt"),
+            "workspaceUpdatedAt": self.consent.get("updatedAt"),
+            "subjectConfirmedAt": consent_record.get("confirmedAt"),
+            "subjectUpdatedAt": consent_record.get("updatedAt"),
+            "perSubjectRequired": bool(getattr(self.config, "per_subject_consent", False)),
+            "explicitEmbeddingDerivationAcknowledged": True,
+        }
+        added_ids: list[str] = []
+        retained_ids: list[str] = []
+        generated_at = now_iso()
+        for candidate in candidates:
+            current = existing.get(candidate.ref_id)
+            if (
+                current is not None
+                and current.synthetic_method_version == AGE_TRAJECTORY_METHOD_VERSION
+                and current.derivation_provenance.get("derivationHash") == candidate.derivation_hash
+            ):
+                retained_ids.append(current.ref_id)
+                continue
+            anchor = self.references.get(candidate.anchor_ref_id)
+            if anchor is None or is_synthetic_age_reference(anchor):
+                continue
+            ref = ReferenceFace(
+                ref_id=candidate.ref_id,
+                person_name=anchor.person_name,
+                age_bucket=candidate.target_age_bucket,
+                source_path=anchor.source_path,
+                capture_date=None,
+                quality=candidate.quality,
+                model_name=candidate.model_name,
+                vector=candidate.vector,
+                source_hash=candidate.derivation_hash,
+                pose_bucket="unknown",
+                capture_date_provenance=AGE_TRAJECTORY_REFERENCE_KIND,
+                reference_kind=AGE_TRAJECTORY_REFERENCE_KIND,
+                synthetic_method_version=AGE_TRAJECTORY_METHOD_VERSION,
+                synthetic_target_age_bucket=candidate.target_age_bucket,
+                parent_ref_ids=list(candidate.parent_ref_ids),
+                derivation_provenance={
+                    "schemaVersion": 1,
+                    "kind": "embedding-space-age-trajectory",
+                    "methodVersion": AGE_TRAJECTORY_METHOD_VERSION,
+                    "derivationHash": candidate.derivation_hash,
+                    "generatedAt": generated_at,
+                    "targetAgeBucket": candidate.target_age_bucket,
+                    "leftAgeBucket": candidate.left_age_bucket,
+                    "rightAgeBucket": candidate.right_age_bucket,
+                    "interpolation": candidate.interpolation,
+                    "parentReferenceIds": list(candidate.parent_ref_ids),
+                    "generatedImage": False,
+                    "externalAgingWeights": False,
+                    "licenseBasis": "first-party deterministic code over consented local reference embeddings",
+                    "consent": consent_snapshot,
+                },
+            )
+            self.references[ref.ref_id] = ref
+            self._mark_reference_dirty(ref.ref_id)
+            added_ids.append(ref.ref_id)
+        if stale_ids or added_ids:
+            self.vector_store.rebuild({item_id: item.vector for item_id, item in self.references.items()})
+            self._invalidate_reference_indexes()
+        result = {
+            **self.age_trajectory_status(person),
+            "added": len(added_ids),
+            "retained": len(retained_ids),
+            "removed": len(stale_ids),
+            "addedReferenceIds": added_ids,
+            "removedReferenceIds": stale_ids,
+            "source": str(source or "desktop")[:80],
+        }
+        self._append_audit(
+            {
+                "action": "build_age_trajectory_references",
+                "personRef": self._audit_person_ref(person),
+                "methodVersion": AGE_TRAJECTORY_METHOD_VERSION,
+                "realReferences": len(real_refs),
+                "added": len(added_ids),
+                "retained": len(retained_ids),
+                "removed": len(stale_ids),
+                "source": str(source or "desktop")[:80],
+                "explicitAcknowledgement": True,
+                "generatedImages": False,
+                "externalAgingWeights": False,
+            }
+        )
+        self.save()
+        return result
+
+    def remove_age_trajectory_references(self, person_name: str, *, source: str = "desktop") -> dict[str, Any]:
+        person = str(person_name or "").strip()
+        if not person:
+            raise ValueError("A person name is required.")
+        removed = self._remove_age_trajectory_references(person_name=person)
+        self._append_audit(
+            {
+                "action": "remove_age_trajectory_references",
+                "personRef": self._audit_person_ref(person),
+                "removed": len(removed),
+                "source": str(source or "desktop")[:80],
+            }
+        )
+        self.save()
+        return {**self.age_trajectory_status(person), "removed": len(removed), "removedReferenceIds": removed}
+
+    @staticmethod
+    def _synthetic_age_artifact_base_id(
+        person_name: str,
+        parent: ReferenceFace,
+        target_age_bucket: str,
+        recognizer_model: str,
+    ) -> str:
+        body = json.dumps(
+            {
+                "methodVersion": IMAGE_AGE_AUGMENTATION_METHOD_VERSION,
+                "person": ProjectState._person_key(person_name),
+                "parentRefId": parent.ref_id,
+                "parentSourceHash": str(parent.source_hash or ""),
+                "targetAgeBucket": target_age_bucket,
+                "recognizerModel": recognizer_model,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return "syn_age_img_" + hashlib.sha256(body.encode("utf-8")).hexdigest()[:24]
+
+    def _next_synthetic_age_artifact_id(self, base_artifact_id: str) -> tuple[str, dict[str, Any] | None]:
+        for attempt in range(1000):
+            artifact_id = base_artifact_id if attempt == 0 else f"{base_artifact_id}_{attempt + 1}"
+            existing = self.db.learned_artifact_by_id(artifact_id)
+            if existing is None:
+                return artifact_id, None
+            if str(existing.get("status", "") or "") in {"candidate", "staged", "promoted"}:
+                return artifact_id, existing
+        raise ValueError("Too many finalized synthetic age-image attempts exist for this source and target range.")
+
+    def _active_synthetic_age_artifact_is_valid(self, artifact: dict[str, Any]) -> bool:
+        status = str(artifact.get("status", "") or "")
+        if status not in {"staged", "promoted"}:
+            return False
+        payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+        try:
+            generated_path = self._synthetic_age_image_path(str(payload.get("generatedPath", "") or ""))
+            if sha256_file(generated_path) != str(payload.get("generatedHash", "") or ""):
+                return False
+        except (FileNotFoundError, OSError, ValueError):
+            return False
+        if status == "staged":
+            return True
+        artifact_id = str(artifact.get("artifact_id", "") or "")
+        return any(
+            is_generated_age_image_reference(ref)
+            and str(ref.derivation_provenance.get("reviewArtifactId", "") or "") == artifact_id
+            and Path(ref.source_path).expanduser().is_file()
+            for ref in self.references.values()
+        )
+
+    def _synthetic_age_parent_reference(
+        self,
+        references: list[ReferenceFace],
+        target_age_bucket: str,
+    ) -> ReferenceFace:
+        target_age = float(AGE_BUCKET_CENTERS[target_age_bucket])
+
+        def rank(ref: ReferenceFace) -> tuple[float, float, str]:
+            bucket = normalize_age_bucket(ref.age_bucket)
+            age = float(AGE_BUCKET_CENTERS.get(bucket, target_age))
+            return (abs(age - target_age), -float(ref.quality), ref.ref_id)
+
+        available = [ref for ref in references if Path(ref.source_path).expanduser().is_file()]
+        if not available:
+            raise FileNotFoundError("No compatible real source photo is available for local age-reference generation.")
+        return min(available, key=rank)
+
+    def _prepare_synthetic_age_source(
+        self,
+        parent: ReferenceFace,
+        engine: EmbeddingEngine,
+        destination: Path,
+    ) -> dict[str, Any]:
+        source = safe_resolve(Path(parent.source_path).expanduser())
+        if not source.is_file():
+            raise FileNotFoundError("The selected real source photo is unavailable.")
+        source_hash = sha256_file(source)
+        if parent.source_hash and source_hash != parent.source_hash:
+            raise ValueError("The selected real source photo changed after enrollment.")
+        embeddings = [
+            item
+            for item in engine.embed_image(source)
+            if self._compatible_reference_model_name(str(getattr(engine, "model_name", "") or ""), item.model_name)
+        ]
+        if not embeddings:
+            raise ValueError("The active recognizer could not re-detect the enrolled face in its source photo.")
+        ranked = sorted(
+            ((self._vector_cosine(item.vector, parent.vector), item) for item in embeddings),
+            key=lambda row: (-row[0], -float(row[1].quality)),
+        )
+        parent_score, selected = ranked[0]
+        if parent_score < SYNTHETIC_AGE_PARENT_MINIMUM:
+            raise ValueError("The source face no longer matches its enrolled reference reliably.")
+        if len(ranked) > 1 and parent_score - ranked[1][0] < SYNTHETIC_AGE_IMPOSTOR_MARGIN_MINIMUM:
+            raise ValueError("The source photo contains multiple faces too close to the enrolled reference; use a single-person photo.")
+        image = load_image(source)
+        if selected.bbox is not None:
+            left, top, right, bottom = (int(value) for value in selected.bbox)
+            left = max(0, min(image.width, left))
+            top = max(0, min(image.height, top))
+            right = max(0, min(image.width, right))
+            bottom = max(0, min(image.height, bottom))
+            if right <= left or bottom <= top:
+                raise ValueError("The enrolled face has an invalid source crop.")
+            face_width = right - left
+            face_height = bottom - top
+            side = max(face_width, face_height)
+            center_x = (left + right) / 2.0
+            center_y = (top + bottom) / 2.0
+            crop_side = max(128, int(round(side * 2.30)))
+            crop_left = max(0, int(round(center_x - crop_side / 2.0)))
+            crop_top = max(0, int(round(center_y - crop_side / 2.0)))
+            crop_right = min(image.width, crop_left + crop_side)
+            crop_bottom = min(image.height, crop_top + crop_side)
+            crop_left = max(0, crop_right - crop_side)
+            crop_top = max(0, crop_bottom - crop_side)
+            image = image.crop((crop_left, crop_top, crop_right, crop_bottom))
+            source_bbox: list[int] = [left, top, right, bottom]
+            crop_bbox: list[int] = [crop_left, crop_top, crop_right, crop_bottom]
+        elif len(embeddings) == 1:
+            source_bbox = []
+            crop_bbox = [0, 0, image.width, image.height]
+        else:
+            raise ValueError("The enrolled face could not be isolated from its source photo.")
+        image.thumbnail((1536, 1536), Image.Resampling.LANCZOS)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        image.save(destination, format="PNG", optimize=False)
+        restrict_file_mode(destination, 0o600)
+        return {
+            "sourcePath": str(source),
+            "sourceHash": source_hash,
+            "sourceFaceHash": sha256_file(destination),
+            "sourceFaceCosine": round(float(parent_score), 8),
+            "sourceBbox": source_bbox,
+            "cropBbox": crop_bbox,
+        }
+
+    def _evaluate_synthetic_age_image(
+        self,
+        generated_path: Path,
+        *,
+        person_name: str,
+        parent: ReferenceFace,
+        target_age_bucket: str,
+        engine: EmbeddingEngine,
+    ) -> tuple[EmbeddingResult | None, dict[str, Any]]:
+        engine_model = str(getattr(engine, "model_name", "") or "").strip()
+        embeddings = [
+            item
+            for item in engine.embed_image(generated_path)
+            if self._compatible_reference_model_name(engine_model, item.model_name)
+        ]
+        reasons: list[str] = []
+        if len(embeddings) != 1:
+            reasons.append("face-count-not-one")
+        if not embeddings:
+            return None, {
+                "targetAgeBucket": target_age_bucket,
+                "faceCount": 0,
+                "recognizerModel": engine_model,
+                "reasons": reasons,
+            }
+        selected = max(
+            embeddings,
+            key=lambda item: (self._vector_cosine(item.vector, parent.vector), float(item.quality)),
+        )
+        real_refs = [
+            ref
+            for ref in self.references.values()
+            if not is_synthetic_age_reference(ref)
+            and self._compatible_reference_model_name(selected.model_name, ref.model_name)
+        ]
+        same_person = [ref for ref in real_refs if self._person_key(ref.person_name) == self._person_key(person_name)]
+        other_people = [ref for ref in real_refs if self._person_key(ref.person_name) != self._person_key(person_name)]
+        same_scores = [(self._vector_cosine(selected.vector, ref.vector), ref.ref_id) for ref in same_person]
+        other_scores = [(self._vector_cosine(selected.vector, ref.vector), ref.ref_id) for ref in other_people]
+        target_score, best_same_ref_id = max(same_scores, default=(0.0, ""))
+        parent_score = self._vector_cosine(selected.vector, parent.vector)
+        nearest_other_score, nearest_other_ref_id = max(other_scores, default=(0.0, ""))
+        identity_margin = target_score - nearest_other_score if other_scores else None
+        identity_minimum = max(SYNTHETIC_AGE_IDENTITY_MINIMUM, float(self.config.thresholds.likely))
+        quality_minimum = max(SYNTHETIC_AGE_MINIMUM_QUALITY, float(self.config.thresholds.quality_min))
+        if not same_person:
+            reasons.append("no-compatible-real-reference")
+        if target_score < identity_minimum:
+            reasons.append("identity-score-too-low")
+        if parent_score < SYNTHETIC_AGE_PARENT_MINIMUM:
+            reasons.append("parent-score-too-low")
+        if identity_margin is not None and identity_margin < SYNTHETIC_AGE_IMPOSTOR_MARGIN_MINIMUM:
+            reasons.append("impostor-margin-too-small")
+        if float(selected.quality) < quality_minimum:
+            reasons.append("quality-too-low")
+        if selected.align_error and float(selected.align_error) > self.REFERENCE_SUGGESTION_MAX_ALIGN_ERROR:
+            reasons.append("alignment-too-high")
+        if selected.ied_px and float(selected.ied_px) < self.REFERENCE_SUGGESTION_MIN_IED_PX:
+            reasons.append("face-too-small")
+        metrics = {
+            "targetAgeBucket": target_age_bucket,
+            "faceCount": len(embeddings),
+            "recognizerModel": selected.model_name,
+            "quality": round(float(selected.quality), 8),
+            "qualityMinimum": quality_minimum,
+            "targetIdentityCosine": round(float(target_score), 8),
+            "identityMinimum": identity_minimum,
+            "parentCosine": round(float(parent_score), 8),
+            "parentMinimum": SYNTHETIC_AGE_PARENT_MINIMUM,
+            "nearestOtherCosine": round(float(nearest_other_score), 8) if other_scores else None,
+            "identityMargin": round(float(identity_margin), 8) if identity_margin is not None else None,
+            "marginMinimum": SYNTHETIC_AGE_IMPOSTOR_MARGIN_MINIMUM,
+            "bestSameReferenceId": best_same_ref_id,
+            "nearestOtherReferenceId": nearest_other_ref_id,
+            "bbox": list(selected.bbox or ()),
+            "poseBucket": str(selected.pose_bucket or "unknown"),
+            "iedPx": round(float(selected.ied_px or 0.0), 8),
+            "alignError": round(float(selected.align_error or 0.0), 8),
+            "reasons": sorted(set(reasons)),
+        }
+        return selected, metrics
+
+    def synthetic_age_image_review_status(self, limit: int = 20) -> dict[str, Any]:
+        safe_limit = max(1, min(100, int(limit or 20)))
+        rows = self.db.learned_artifact_rows(SYNTHETIC_AGE_IMAGE_ARTIFACT_TYPE, limit=safe_limit)
+        all_rows = self._synthetic_age_image_artifacts()
+        counts = {"staged": 0, "promoted": 0, "rejected": 0, "candidate": 0, "rolled_back": 0}
+        for row in all_rows:
+            status = str(row.get("status", "") or "")
+            if status in counts:
+                counts[status] += 1
+        return {
+            "methodVersion": IMAGE_AGE_AUGMENTATION_METHOD_VERSION,
+            "artifactType": SYNTHETIC_AGE_IMAGE_ARTIFACT_TYPE,
+            "reviewOnly": True,
+            "autoEnrollment": False,
+            "counts": counts,
+            "artifacts": self._learned_artifact_status_payloads(rows),
+        }
+
+    def generate_synthetic_age_image_reviews(
+        self,
+        person_name: str,
+        target_age_buckets: Iterable[str],
+        engine: EmbeddingEngine,
+        generator: Callable[..., dict[str, Any]],
+        *,
+        acknowledge_ai_age_generation: bool,
+        source: str = "desktop",
+        generative_root: str | Path | None = None,
+        seed: int = 42,
+        steps: int = 20,
+        on_progress: ScanProgress | None = None,
+    ) -> dict[str, Any]:
+        person = str(person_name or "").strip()
+        if not person:
+            raise ValueError("A person name is required.")
+        if acknowledge_ai_age_generation is not True:
+            raise ValueError("Confirm that synthetic age portraits are AI-generated review aids, not authentic captures or predictions.")
+        if not self.consent_for_person(person):
+            raise PermissionError("Active workspace and subject consent are required for synthetic age-reference generation.")
+        if not self.ai_disclosure_status()["acknowledged"]:
+            raise PermissionError("Acknowledge the current Vintrace AI and biometric processing notice before generating an age reference.")
+        engine_model = str(getattr(engine, "model_name", "") or "").strip()
+        if not engine_model or engine_model.startswith("local-image-fingerprint"):
+            raise ValueError("A full face recognition model is required for synthetic age-reference safety checks.")
+        targets: list[str] = []
+        for value in target_age_buckets:
+            bucket = normalize_age_bucket(str(value or ""))
+            if bucket == "unknown":
+                raise ValueError("Choose a supported target age range.")
+            if bucket not in targets:
+                targets.append(bucket)
+        if not targets:
+            raise ValueError("Choose at least one target age range.")
+        if len(targets) > SYNTHETIC_AGE_MAX_TARGETS_PER_RUN:
+            raise ValueError(f"Generate at most {SYNTHETIC_AGE_MAX_TARGETS_PER_RUN} target age ranges at a time.")
+        person_key = self._person_key(person)
+        real_refs = [
+            ref
+            for ref in self.references.values()
+            if self._person_key(ref.person_name) == person_key
+            and not is_synthetic_age_reference(ref)
+            and self._compatible_reference_model_name(engine_model, ref.model_name)
+        ]
+        if not real_refs:
+            raise ValueError("No real saved photo is compatible with the active face recognition model.")
+        real_buckets = {normalize_age_bucket(ref.age_bucket) for ref in real_refs}
+        if any(target in real_buckets for target in targets):
+            raise ValueError("Synthetic augmentation is only available for an age range without a real saved photo.")
+        try:
+            safe_seed = max(0, min(2_147_483_647, int(seed)))
+            safe_steps = max(8, min(40, int(steps)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Seed and step count must be integers.") from exc
+        self._ensure_generated_dir_sentinel(self.synthetic_age_images_path)
+        if not self._generated_dir_is_owned(self.synthetic_age_images_path):
+            raise ValueError("The private synthetic age-image directory could not be prepared safely.")
+        restrict_file_mode(self.synthetic_age_images_path, 0o700)
+        staged: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        for index, target in enumerate(targets, start=1):
+            parent = self._synthetic_age_parent_reference(real_refs, target)
+            base_id = self._synthetic_age_artifact_base_id(person, parent, target, engine_model)
+            artifact_id, existing = self._next_synthetic_age_artifact_id(base_id)
+            if existing is not None:
+                if self._active_synthetic_age_artifact_is_valid(existing):
+                    skipped.append({"artifactId": artifact_id, "targetAgeBucket": target, "status": str(existing.get("status", ""))})
+                    continue
+                stale_payload = existing.get("payload") if isinstance(existing.get("payload"), dict) else {}
+                stale_path = str(stale_payload.get("generatedPath", "") or "")
+                if stale_path and not self._remove_synthetic_age_image_file(stale_path):
+                    raise OSError("A stale synthetic age-image artifact could not be removed safely.")
+                stale_status = "rolled_back" if existing.get("status") == "promoted" else "rejected"
+                self.db.update_learned_artifact_status(str(existing["artifact_id"]), stale_status)
+                artifact_id, existing = self._next_synthetic_age_artifact_id(base_id)
+                if existing is not None:
+                    raise ValueError("A stale synthetic age-image artifact could not be superseded safely.")
+            generated_path = self.synthetic_age_images_path / f"{artifact_id}.png"
+            if generated_path.exists() or generated_path.is_symlink():
+                if not self._remove_synthetic_age_image_file(generated_path):
+                    raise OSError("A stale synthetic age-image output could not be removed safely.")
+            if on_progress:
+                on_progress(
+                    {
+                        "phase": "synthetic_age_generation",
+                        "processed": index - 1,
+                        "total": len(targets),
+                        "targetAgeBucket": target,
+                        "message": f"Preparing the {target} synthetic age reference.",
+                    }
+                )
+            try:
+                with tempfile.TemporaryDirectory(prefix="vintrace-age-source-") as temp_value:
+                    prepared_path = Path(temp_value) / "consented-face.png"
+                    source_detail = self._prepare_synthetic_age_source(parent, engine, prepared_path)
+                    result = generator(
+                        "age-progress",
+                        prepared_path,
+                        generated_path,
+                        {
+                            "targetAgeBucket": target,
+                            "aspect": "original",
+                            "seed": safe_seed,
+                            "steps": safe_steps,
+                        },
+                        root=generative_root,
+                    )
+                restrict_file_mode(generated_path, 0o600)
+                actual_output_hash = sha256_file(self._synthetic_age_image_path(generated_path))
+                provenance = result.get("provenance") if isinstance(result.get("provenance"), dict) else {}
+                parameters = provenance.get("parameters") if isinstance(provenance.get("parameters"), dict) else {}
+                model = provenance.get("model") if isinstance(provenance.get("model"), dict) else {}
+                runtime = provenance.get("runtime") if isinstance(provenance.get("runtime"), dict) else {}
+                contract_ok = bool(
+                    result.get("mode") == "age-progress"
+                    and result.get("aiGenerated") is True
+                    and result.get("offlineInference") is True
+                    and str(result.get("outputSha256", "")) == actual_output_hash
+                    and str(result.get("sourceSha256", "")) == source_detail["sourceFaceHash"]
+                    and Path(str(result.get("outputPath", "") or "")).expanduser().resolve() == generated_path.resolve()
+                    and provenance.get("mode") == "age-progress"
+                    and str(provenance.get("sourceSha256", "")) == source_detail["sourceFaceHash"]
+                    and str(provenance.get("outputSha256", "")) == actual_output_hash
+                    and provenance.get("catalogVersion") == PHOTO_GENERATIVE_CATALOG_VERSION
+                    and provenance.get("catalogSha256") == PHOTO_GENERATIVE_CATALOG_SHA256
+                    and parameters.get("targetAgeBucket") == target
+                    and float(parameters.get("targetAgeYears", -1)) == float(AGE_BUCKET_CENTERS[target])
+                    and parameters.get("fixedSafetyPrompt") is True
+                    and parameters.get("promptVersion") == AGE_PROGRESS_PROMPT_VERSION
+                    and parameters.get("promptSha256") == age_progress_prompt_sha256(target)
+                    and not str(parameters.get("prompt", "") or "")
+                    and int(parameters.get("seed", -1)) == safe_seed
+                    and int(parameters.get("steps", -1)) == safe_steps
+                    and model.get("id") == QWEN_IMAGE_EDIT_MODEL_ID
+                    and model.get("revision") == QWEN_IMAGE_EDIT_REVISION
+                    and model.get("license") == "Apache-2.0"
+                    and runtime.get("id") == STABLE_DIFFUSION_CPP_RUNTIME_ID
+                    and runtime.get("tag") == STABLE_DIFFUSION_CPP_TAG
+                    and runtime.get("revision") == STABLE_DIFFUSION_CPP_REVISION
+                    and runtime.get("license") == "MIT"
+                )
+                if not contract_ok:
+                    raise ValueError("The local age-generation runtime returned incomplete or mismatched provenance.")
+                embedding, metrics = self._evaluate_synthetic_age_image(
+                    generated_path,
+                    person_name=person,
+                    parent=parent,
+                    target_age_bucket=target,
+                    engine=engine,
+                )
+                consent_record = self.subject_consents().get(person_key, {})
+                payload = {
+                    "schemaVersion": 1,
+                    "personName": person[:200],
+                    "targetAgeBucket": target,
+                    "generatedPath": self._synthetic_age_image_storage_key(generated_path),
+                    "generatedHash": actual_output_hash,
+                    "parentRefId": parent.ref_id,
+                    "parentRefIds": [parent.ref_id],
+                    "parentSourceHash": source_detail["sourceHash"],
+                    "sourceFaceHash": source_detail["sourceFaceHash"],
+                    "sourceFaceCosine": source_detail["sourceFaceCosine"],
+                    "sourceBbox": source_detail["sourceBbox"],
+                    "cropBbox": source_detail["cropBbox"],
+                    "recognizerModel": engine_model,
+                    "methodVersion": IMAGE_AGE_AUGMENTATION_METHOD_VERSION,
+                    "generationProvenance": provenance,
+                    "reviewOnly": True,
+                    "authenticCapture": False,
+                    "futureAppearancePrediction": False,
+                    "consent": {
+                        "workspaceId": str(self.workspace_metadata.get("workspaceId") or ""),
+                        "workspaceConfirmedAt": self.consent.get("confirmedAt"),
+                        "workspaceUpdatedAt": self.consent.get("updatedAt"),
+                        "subjectConfirmedAt": consent_record.get("confirmedAt"),
+                        "subjectUpdatedAt": consent_record.get("updatedAt"),
+                        "aiDisclosureVersion": self.ai_disclosure_status()["version"],
+                        "explicitAgeGenerationAcknowledged": True,
+                    },
+                }
+                reasons = list(metrics.get("reasons", []))
+                status = "staged" if embedding is not None and not reasons else "rejected"
+                artifact = self.db.upsert_learned_artifact(
+                    artifact_id,
+                    {
+                        "artifactType": SYNTHETIC_AGE_IMAGE_ARTIFACT_TYPE,
+                        "status": status,
+                        "modelName": str(model.get("id", "")),
+                        "versionKey": IMAGE_AGE_AUGMENTATION_METHOD_VERSION,
+                        "trainingDataHash": source_detail["sourceHash"],
+                        "inputCount": 1,
+                        "positiveCount": 1 if status == "staged" else 0,
+                        "negativeCount": 1 if status == "rejected" else 0,
+                        "metrics": metrics,
+                        "payload": payload,
+                        "createdAt": now_iso(),
+                    },
+                )
+                item = {
+                    **artifact,
+                    "targetAgeBucket": target,
+                    "metrics": metrics,
+                    "payload": payload,
+                }
+                if status == "staged":
+                    staged.append(item)
+                else:
+                    if not self._remove_synthetic_age_image_file(generated_path):
+                        raise OSError("A rejected synthetic age image could not be removed safely.")
+                    rejected.append(item)
+                self._append_audit(
+                    {
+                        "action": "stage_synthetic_age_image_review" if status == "staged" else "reject_synthetic_age_image_generation",
+                        "artifactId": artifact_id,
+                        "artifactHash": artifact.get("artifactHash", ""),
+                        "personRef": self._audit_person_ref(person),
+                        "parentRefId": parent.ref_id,
+                        "targetAgeBucket": target,
+                        "generatedHash": actual_output_hash,
+                        "recognizerModel": engine_model,
+                        "targetIdentityCosine": metrics.get("targetIdentityCosine"),
+                        "identityMargin": metrics.get("identityMargin"),
+                        "quality": metrics.get("quality"),
+                        "reasons": reasons,
+                        "source": str(source or "desktop")[:80],
+                    }
+                )
+            except Exception as exc:
+                if (generated_path.exists() or generated_path.is_symlink()) and not self._remove_synthetic_age_image_file(generated_path):
+                    raise OSError("A failed synthetic age-image output could not be removed safely.") from exc
+                errors.append(
+                    {
+                        "targetAgeBucket": target,
+                        "error": re.sub(r"\s+", " ", str(exc).strip() or exc.__class__.__name__)[:600],
+                    }
+                )
+            if on_progress:
+                on_progress(
+                    {
+                        "phase": "synthetic_age_generation",
+                        "processed": index,
+                        "total": len(targets),
+                        "targetAgeBucket": target,
+                        "message": f"Finished the {target} synthetic age-reference attempt.",
+                    }
+                )
+        self.save()
+        return {
+            "personName": person,
+            "methodVersion": IMAGE_AGE_AUGMENTATION_METHOD_VERSION,
+            "reviewOnly": True,
+            "autoEnrollment": False,
+            "staged": len(staged),
+            "rejected": len(rejected),
+            "skipped": len(skipped),
+            "errors": errors,
+            "artifacts": staged,
+            "rejectedArtifacts": rejected,
+            "skippedArtifacts": skipped,
+            "summary": self.synthetic_age_image_review_status(),
+        }
+
+    def approve_synthetic_age_image_review(
+        self,
+        artifact_id: str,
+        engine: EmbeddingEngine,
+        *,
+        operator: str = "",
+        acknowledge_visual_review: bool = False,
+    ) -> dict[str, Any]:
+        if acknowledge_visual_review is not True:
+            raise ValueError("Confirm that you visually reviewed the AI-generated portrait before approving it.")
+        artifact = self.db.learned_artifact_by_id(artifact_id)
+        if not artifact or artifact.get("artifact_type") != SYNTHETIC_AGE_IMAGE_ARTIFACT_TYPE:
+            raise ValueError("No synthetic age-image review is available for approval.")
+        if artifact.get("status") != "staged":
+            raise ValueError("Only staged synthetic age-image reviews can be approved.")
+        payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+        person = str(payload.get("personName", "") or "").strip()
+        target = normalize_age_bucket(str(payload.get("targetAgeBucket", "") or ""))
+        if not person or target == "unknown":
+            raise ValueError("The staged synthetic age-image metadata is incomplete.")
+        if not self.consent_for_person(person) or not self.ai_disclosure_status()["acknowledged"]:
+            raise PermissionError("Current workspace, subject, and AI-disclosure consent are required for approval.")
+        parent_id = str(payload.get("parentRefId", "") or "")
+        parent = self.references.get(parent_id)
+        if parent is None or is_synthetic_age_reference(parent) or self._person_key(parent.person_name) != self._person_key(person):
+            raise ValueError("The real parent reference is no longer available for approval.")
+        if str(parent.source_hash or "") != str(payload.get("parentSourceHash", "") or ""):
+            raise ValueError("The parent reference changed after generation.")
+        parent_source = safe_resolve(Path(parent.source_path).expanduser())
+        if not parent_source.is_file() or sha256_file(parent_source) != str(payload.get("parentSourceHash", "") or ""):
+            raise ValueError("The real parent source photo changed after generation.")
+        generated_path = self._synthetic_age_image_path(str(payload.get("generatedPath", "") or ""))
+        generated_hash = sha256_file(generated_path)
+        if generated_hash != str(payload.get("generatedHash", "") or ""):
+            raise ValueError("The staged synthetic age image changed after generation.")
+        if str(getattr(engine, "model_name", "") or "") != str(payload.get("recognizerModel", "") or ""):
+            raise ValueError("The active face recognition model changed; regenerate the synthetic age reference.")
+        existing_target = [
+            ref
+            for ref in self.references.values()
+            if is_generated_age_image_reference(ref)
+            and self._person_key(ref.person_name) == self._person_key(person)
+            and normalize_age_bucket(ref.synthetic_target_age_bucket) == target
+        ]
+        if existing_target:
+            raise ValueError("A reviewed synthetic image already covers this person's target age range.")
+        embedding, metrics = self._evaluate_synthetic_age_image(
+            generated_path,
+            person_name=person,
+            parent=parent,
+            target_age_bucket=target,
+            engine=engine,
+        )
+        reasons = list(metrics.get("reasons", []))
+        if embedding is None or reasons:
+            raise ValueError("The synthetic age image no longer passes identity safety checks: " + ", ".join(reasons or ["no face detected"]))
+        redundant_bridge_ids = [
+            ref_id
+            for ref_id, ref in self.references.items()
+            if self._person_key(ref.person_name) == self._person_key(person)
+            and ref.synthetic_method_version == AGE_TRAJECTORY_METHOD_VERSION
+            and normalize_age_bucket(ref.synthetic_target_age_bucket) == target
+        ]
+        for ref_id in redundant_bridge_ids:
+            self.references.pop(ref_id, None)
+        if redundant_bridge_ids:
+            self._mark_references_deleted(redundant_bridge_ids)
+        artifact_hash = str(artifact.get("artifact_hash", "") or "")
+        ref = ReferenceFace(
+            ref_id="ref_ageimg_" + artifact_hash[:16],
+            person_name=person,
+            age_bucket=target,
+            source_path=str(generated_path),
+            capture_date=None,
+            quality=round(float(embedding.quality) * 0.75, 6),
+            model_name=str(embedding.model_name),
+            vector=list(embedding.vector),
+            source_hash=generated_hash,
+            pose_bucket=str(embedding.pose_bucket or "unknown"),
+            capture_date_provenance=AGE_TRAJECTORY_REFERENCE_KIND,
+            reference_kind=AGE_TRAJECTORY_REFERENCE_KIND,
+            synthetic_method_version=IMAGE_AGE_AUGMENTATION_METHOD_VERSION,
+            synthetic_target_age_bucket=target,
+            parent_ref_ids=[parent.ref_id],
+            derivation_provenance={
+                "schemaVersion": 1,
+                "kind": "reviewed-ai-generated-age-image",
+                "methodVersion": IMAGE_AGE_AUGMENTATION_METHOD_VERSION,
+                "reviewArtifactId": str(artifact["artifact_id"]),
+                "reviewArtifactHash": artifact_hash,
+                "generatedImage": True,
+                "aiGenerated": True,
+                "authenticCapture": False,
+                "futureAppearancePrediction": False,
+                "offlineInference": True,
+                "targetAgeBucket": target,
+                "parentReferenceIds": [parent.ref_id],
+                "parentSourceHash": str(payload.get("parentSourceHash", "") or ""),
+                "sourceFaceHash": str(payload.get("sourceFaceHash", "") or ""),
+                "outputHash": generated_hash,
+                "generation": dict(payload.get("generationProvenance", {})) if isinstance(payload.get("generationProvenance"), dict) else {},
+                "approvalMetrics": metrics,
+                "humanReviewed": True,
+                "visualReviewAcknowledged": True,
+                "reviewerRef": self._audit_person_ref(operator or self.actor),
+                "approvedAt": now_iso(),
+                "consent": dict(payload.get("consent", {})) if isinstance(payload.get("consent"), dict) else {},
+            },
+        )
+        if not valid_reference(ref):
+            raise ValueError("The reviewed synthetic age reference failed the saved-reference contract.")
+        self.references[ref.ref_id] = ref
+        self._mark_reference_dirty(ref.ref_id)
+        self.vector_store.rebuild({item_id: item.vector for item_id, item in self.references.items()})
+        self._invalidate_reference_indexes()
+        promoted_at = now_iso()
+        self.db.update_learned_artifact_status(str(artifact["artifact_id"]), "promoted", promoted_at=promoted_at)
+        self._append_audit(
+            {
+                "action": "approve_synthetic_age_image_review",
+                "artifactId": str(artifact["artifact_id"]),
+                "artifactHash": artifact_hash,
+                "refId": ref.ref_id,
+                "personRef": self._audit_person_ref(person),
+                "parentRefId": parent.ref_id,
+                "targetAgeBucket": target,
+                "generatedHash": generated_hash,
+                "targetIdentityCosine": metrics.get("targetIdentityCosine"),
+                "identityMargin": metrics.get("identityMargin"),
+                "quality": metrics.get("quality"),
+                "operatorRef": self._audit_person_ref(operator or self.actor),
+                "removedEmbeddingBridgeReferences": len(redundant_bridge_ids),
+            }
+        )
+        self.save()
+        return {
+            "approved": True,
+            "artifactId": str(artifact["artifact_id"]),
+            "artifactHash": artifact_hash,
+            "refId": ref.ref_id,
+            "reference": asdict(ref),
+            "promotedAt": promoted_at,
+            "metrics": metrics,
+            "summary": self.synthetic_age_image_review_status(),
+        }
+
+    def reject_synthetic_age_image_review(self, artifact_id: str, *, reason: str = "") -> dict[str, Any]:
+        artifact = self.db.learned_artifact_by_id(artifact_id)
+        if not artifact or artifact.get("artifact_type") != SYNTHETIC_AGE_IMAGE_ARTIFACT_TYPE:
+            raise ValueError("No synthetic age-image review is available for rejection.")
+        if artifact.get("status") not in {"candidate", "staged"}:
+            raise ValueError("Only candidate or staged synthetic age-image reviews can be rejected.")
+        payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+        generated_path = str(payload.get("generatedPath", "") or "")
+        if generated_path and not self._remove_synthetic_age_image_file(generated_path):
+            raise OSError("The private synthetic age image could not be removed safely.")
+        self.db.update_learned_artifact_status(str(artifact["artifact_id"]), "rejected")
+        self._append_audit(
+            {
+                "action": "reject_synthetic_age_image_review",
+                "artifactId": str(artifact["artifact_id"]),
+                "artifactHash": str(artifact.get("artifact_hash", "") or ""),
+                "personRef": self._audit_person_ref(str(payload.get("personName", "") or "")),
+                "parentRefId": str(payload.get("parentRefId", "") or ""),
+                "targetAgeBucket": str(payload.get("targetAgeBucket", "") or ""),
+                "generatedHash": str(payload.get("generatedHash", "") or ""),
+                "reason": str(reason or "")[:300],
+            }
+        )
+        return {
+            "rejected": True,
+            "artifactId": str(artifact["artifact_id"]),
+            "fileRemoved": not bool(generated_path and Path(generated_path).exists()),
+            "summary": self.synthetic_age_image_review_status(),
+        }
 
     def consent_summary(self) -> dict[str, Any]:
         subjects = self.subject_consents()
+        preset = jurisdiction_preset(self.config.jurisdiction_preset) or {}
+        valid_subjects = [
+            record
+            for record in subjects.values()
+            if isinstance(record, dict)
+            and record.get("active")
+            and not release_is_expired(record)
+            and release_is_complete(record, preset)
+        ]
         return {
             "active": self.consent_on_file(),
+            "recorded": bool(self.consent.get("active")),
             "operator": str(self.consent.get("operator", "")),
             "source": str(self.consent.get("source", "")),
             "scope": str(
@@ -671,6 +2384,9 @@ class ProjectState:
             "perSubjectConsent": bool(getattr(self.config, "per_subject_consent", False)),
             "subjectCount": len(subjects),
             "activeSubjectCount": sum(1 for record in subjects.values() if record.get("active")),
+            "validSubjectCount": len(valid_subjects),
+            "jurisdictionPreset": str(self.config.jurisdiction_preset),
+            "aiDisclosure": self.ai_disclosure_status(),
         }
 
     def set_jurisdiction_preset(self, preset_id: str) -> dict[str, Any]:
@@ -683,6 +2399,9 @@ class ProjectState:
             raise ValueError(f"Unknown jurisdiction preset: {preset_id!r}.")
         self.config.jurisdiction_preset = preset["id"]
         self.config.retention_reviewed_days = int(preset["retentionReviewedDays"])
+        self.config.retention_pending_days = int(preset["retentionPendingDays"])
+        self.config.retention_audit_days = int(preset["auditRetentionDays"])
+        self.config.retention_enforcement_enabled = bool(preset["enforceByDefault"])
         self.config.require_consent = bool(preset["requireExplicitConsent"])
         self.config.per_subject_consent = bool(preset["perSubjectConsent"])
         self._append_audit(
@@ -690,6 +2409,9 @@ class ProjectState:
                 "action": "set_jurisdiction_preset",
                 "preset": preset["id"],
                 "retentionReviewedDays": int(preset["retentionReviewedDays"]),
+                "retentionPendingDays": int(preset["retentionPendingDays"]),
+                "retentionAuditDays": int(preset["auditRetentionDays"]),
+                "retentionEnforcementEnabled": bool(preset["enforceByDefault"]),
                 "perSubjectConsent": bool(preset["perSubjectConsent"]),
             }
         )
@@ -698,6 +2420,9 @@ class ProjectState:
             "preset": preset["id"],
             "label": preset["label"],
             "retentionReviewedDays": int(preset["retentionReviewedDays"]),
+            "retentionPendingDays": int(preset["retentionPendingDays"]),
+            "retentionAuditDays": int(preset["auditRetentionDays"]),
+            "retentionEnforcementEnabled": bool(preset["enforceByDefault"]),
             "requireConsent": bool(preset["requireExplicitConsent"]),
             "perSubjectConsent": bool(preset["perSubjectConsent"]),
             "notes": preset["notes"],
@@ -707,20 +2432,32 @@ class ProjectState:
         active = str(active_model_name or "").strip()
         counts: dict[str, int] = {}
         compatible = 0
+        synthetic_total = 0
+        stale_synthetic = 0
         for ref in self.references.values():
             model_name = str(ref.model_name or "").strip() or "unknown"
             counts[model_name] = counts.get(model_name, 0) + 1
             if self._compatible_reference_model_name(active, model_name):
                 compatible += 1
+            if is_synthetic_age_reference(ref):
+                synthetic_total += 1
+                if active and not self._compatible_reference_model_name(active, model_name):
+                    stale_synthetic += 1
         pending = len(self._pending_backfill_references(active))
         return {
             "activeModelName": active,
             "compatibleReferences": compatible,
-            "otherModelReferences": pending,
+            "otherModelReferences": pending + stale_synthetic,
             "totalReferences": len(self.references),
+            "syntheticAgeReferences": synthetic_total,
+            "staleSyntheticAgeReferences": stale_synthetic,
             "modelCounts": counts,
             "needsBackfill": pending > 0 and bool(active),
+            "needsAgeTrajectoryRebuild": stale_synthetic > 0 and bool(active),
             "message": (
+                "Synthetic age references belong to another recognizer; rebuild them after refreshing the real saved photos."
+                if stale_synthetic > 0
+                else
                 "Some saved person photos were embedded with another model pack. Re-enroll or backfill before judging recall."
                 if pending > 0
                 else "Saved person photos are compatible with the active recognizer."
@@ -736,33 +2473,69 @@ class ProjectState:
         scope: str = "",
         person_name: str = "",
         lawful_basis: str = "",
+        release: dict[str, Any] | None = None,
     ) -> None:
         timestamp = now_iso()
         subjects = self.subject_consents()
         person = self._person_key(person_name)
+        release_payload = dict(release or {}) if isinstance(release, dict) else {}
+        preset = jurisdiction_preset(self.config.jurisdiction_preset) or jurisdiction_preset("standard") or {}
         if person:
-            # Per-subject consent record; workspace-level consent is left untouched.
             previous = bool(subjects.get(person, {}).get("active"))
-            record = dict(subjects.get(person, {}))
-            record.update(
-                {
-                    "active": bool(value),
+            existing = dict(subjects.get(person, {}))
+            if value and (preset.get("writtenReleaseRequired") or release_payload):
+                release_payload.setdefault("note", note)
+                record = build_release_record(
+                    person_name=person_name,
+                    source=source,
+                    operator=operator,
+                    lawful_basis=lawful_basis,
+                    release=release_payload,
+                    preset=preset,
+                    existing=existing,
+                )
+            elif value:
+                record = {
+                    **existing,
+                    "schemaVersion": CONSENT_SCHEMA_VERSION,
+                    "active": True,
                     "personName": str(person_name).strip()[:200],
-                    "source": source,
+                    "source": str(source or "desktop")[:80],
                     "operator": operator[:120],
                     "note": note[:800],
                     "lawfulBasis": str(lawful_basis)[:200],
+                    "jurisdictionPreset": str(preset.get("id", "standard")),
+                    "confirmedAt": existing.get("confirmedAt") or timestamp,
                     "updatedAt": timestamp,
+                    "releaseComplete": False,
                 }
-            )
-            if value and not record.get("confirmedAt"):
-                record["confirmedAt"] = timestamp
+            else:
+                record = {
+                    **existing,
+                    "schemaVersion": CONSENT_SCHEMA_VERSION,
+                    "active": False,
+                    "updatedAt": timestamp,
+                    "revokedAt": timestamp,
+                    "destructionRequired": True,
+                }
             subjects[person] = record
-            self.consent = {**self.consent, "schemaVersion": 2, "subjects": subjects}
+            self.consent = {**self.consent, "schemaVersion": CONSENT_SCHEMA_VERSION, "subjects": subjects}
             audit_action = "set_subject_consent"
         elif value:
+            disclosure_acknowledged = bool(release_payload.get("aiDisclosureAcknowledged"))
+            if preset.get("writtenReleaseRequired") and not disclosure_acknowledged:
+                raise ValueError("Acknowledge the current Vintrace AI and biometric processing notice before granting permission.")
+            ai_disclosure = self.consent.get("aiDisclosure") if isinstance(self.consent.get("aiDisclosure"), dict) else {}
+            if disclosure_acknowledged:
+                ai_disclosure = {
+                    "version": AI_DISCLOSURE_VERSION,
+                    "acknowledged": True,
+                    "acknowledgedAt": timestamp,
+                    "operator": operator[:120],
+                }
             self.consent = {
-                "schemaVersion": 2,
+                **self.consent,
+                "schemaVersion": CONSENT_SCHEMA_VERSION,
                 "active": True,
                 "workspaceId": self.workspace_metadata.get("workspaceId"),
                 "source": source,
@@ -772,6 +2545,7 @@ class ProjectState:
                 "confirmedAt": self.consent.get("confirmedAt") or timestamp,
                 "updatedAt": timestamp,
                 "subjects": subjects,
+                "aiDisclosure": ai_disclosure,
             }
             previous = False
             audit_action = "set_consent"
@@ -779,7 +2553,7 @@ class ProjectState:
             previous = self.consent_on_file()
             self.consent = {
                 **self.consent,
-                "schemaVersion": 2,
+                "schemaVersion": CONSENT_SCHEMA_VERSION,
                 "active": False,
                 "source": source,
                 "operator": operator[:120],
@@ -789,19 +2563,39 @@ class ProjectState:
                 "subjects": subjects,
             }
             audit_action = "set_consent"
+        removed_age_trajectory_ids: list[str] = []
+        if not value:
+            removed_age_trajectory_ids = self._remove_age_trajectory_references(person_name=person_name)
         self._append_audit(
             {
                 "action": audit_action,
                 "value": bool(value),
                 "previous": previous,
                 "source": source,
-                "operator": operator[:120],
-                "scope": (scope or str(self.workspace_metadata.get("workspaceId") or "workspace"))[:600],
-                "note": note[:800],
-                **({"person": person, "lawfulBasis": str(lawful_basis)[:200]} if person else {}),
+                "scope": str(self.workspace_metadata.get("workspaceId") or "workspace"),
+                "operatorRef": self._audit_person_ref(operator) if operator else "",
+                "noteRecorded": bool(note or release_payload.get("note")),
+                **(
+                    {
+                        "personRef": self._audit_person_ref(person_name),
+                        "lawfulBasis": str(lawful_basis)[:200],
+                        "releaseId": str(subjects.get(person, {}).get("releaseId", "")),
+                        "releaseHash": str(subjects.get(person, {}).get("recordHash", "")),
+                    }
+                    if person
+                    else {"aiDisclosureVersion": AI_DISCLOSURE_VERSION if release_payload.get("aiDisclosureAcknowledged") else ""}
+                ),
+                "removedSyntheticAgeReferences": len(removed_age_trajectory_ids),
             }
         )
         self.save()
+        if person and not value:
+            self.delete_subject_data(
+                person_name,
+                confirm=True,
+                reason="subject-consent-revoked",
+                source=source,
+            )
 
     def enroll_folder(
         self,
@@ -811,11 +2605,12 @@ class ProjectState:
         engine: EmbeddingEngine,
         recursive: bool = True,
         excluded_dirs: set[Path] | None = None,
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[int, list[str], int]:
         person_name = person_name.strip()
         if not person_name:
             raise ValueError("A person name is required for enrollment.")
         added = 0
+        reviews = 0
         errors: list[str] = []
         known_hashes = {
             (ref.source_hash or self._path_key(ref.source_path), self._person_key(ref.person_name))
@@ -831,11 +2626,13 @@ class ProjectState:
             excluded_dirs=excluded_dirs,
             exclusion_reason=self.scan_exclusion_reason,
         ):
-            count, error = self._enroll_one(path, person_name, age_bucket, engine, known_hashes)
+            count, held, error = self._enroll_one(path, person_name, age_bucket, engine, known_hashes)
             added += count
+            reviews += held
             if error:
                 errors.append(error)
         if added:
+            removed = self._remove_age_trajectory_references(person_name=person_name)
             self._invalidate_reference_indexes()
         self._append_audit(
             {
@@ -844,11 +2641,13 @@ class ProjectState:
                 "age_bucket": age_bucket,
                 "folder": str(folder.expanduser()),
                 "added": added,
+                "synthetic_screen_reviews": reviews,
                 "errors": len(errors),
+                "invalidatedSyntheticAgeReferences": len(removed) if added else 0,
             }
         )
         self.save()
-        return added, errors
+        return added, errors, reviews
 
     def _enroll_one(
         self,
@@ -857,26 +2656,55 @@ class ProjectState:
         age_bucket: str,
         engine: EmbeddingEngine,
         known_hashes: set[tuple[str, str]],
-    ) -> tuple[int, str | None]:
+    ) -> tuple[int, int, str | None]:
         """Embed one image and store any qualifying faces as references.
 
-        Shared by enroll_folder and enroll_paths. Returns (faces_added, error_or_None).
+        Shared by enroll_folder and enroll_paths. Returns
+        (faces_added, faces_held_for_authenticity_review, error_or_None).
         De-duplicates by source hash and person via the caller-owned ``known_hashes`` set.
         """
         try:
             source_hash = sha256_file(path)
             known_key = (source_hash or self._path_key(path), self._person_key(person_name))
             if known_key in known_hashes:
-                return 0, None
+                return 0, 0, None
             image = load_image(path)
             record = image_record_for_path(path, image=image, sha256=source_hash)
-            embeddings = engine.embed_loaded_image(image, path)
+            embeddings, _cache_hit = self._embed_image_cached(path, engine, image=image, content_hash=source_hash)
             if not embeddings and self.config.two_pass_scan:
-                rescue_method = getattr(engine, "embed_loaded_image_rescue", None)
-                embeddings = rescue_method(image, path) if callable(rescue_method) else []
+                embeddings, _rescue_cache_hit = self._embed_image_cached(
+                    path,
+                    engine,
+                    image=image,
+                    content_hash=source_hash,
+                    cache_variant="rescue",
+                )
             added = 0
-            for embedding in embeddings:
+            held = 0
+            for face_index, embedding in enumerate(embeddings):
                 if embedding.quality < self.config.thresholds.quality_min:
+                    continue
+                screen_result: SyntheticScreenResult | None = None
+                screen_error = ""
+                try:
+                    screen_result = screen_enrollment_face(image, embedding.bbox)
+                except Exception as exc:
+                    # Fail closed into review. Enrollment remains usable when a
+                    # model pack is missing, corrupt, or temporarily unable to
+                    # run, but no face is silently described as screened.
+                    screen_error = str(exc)[:600] or exc.__class__.__name__
+                if screen_result is None or screen_result.flagged_for_review:
+                    self._stage_synthetic_enrollment_review(
+                        path=path,
+                        person_name=person_name,
+                        age_bucket=age_bucket,
+                        record=record,
+                        embedding=embedding,
+                        face_index=face_index,
+                        screen_result=screen_result,
+                        screen_error=screen_error,
+                    )
+                    held += 1
                     continue
                 ref = ReferenceFace(
                     ref_id=new_id("ref"),
@@ -890,15 +2718,331 @@ class ProjectState:
                     source_hash=record.sha256,
                     pose_bucket=embedding.pose_bucket,
                     capture_date_provenance=record.capture_date_provenance,
+                    synthetic_screen_score=screen_result.stable_score,
+                    synthetic_screen_original_score=screen_result.original_score,
+                    synthetic_screen_recompressed_score=screen_result.recompressed_score,
+                    synthetic_screen_threshold=screen_result.review_threshold,
+                    synthetic_screen_model_id=screen_result.model_id,
+                    synthetic_screen_model_version=screen_result.model_version,
                 )
                 self.references[ref.ref_id] = ref
                 self._mark_reference_dirty(ref.ref_id)
                 self.vector_store.add(ref.ref_id, ref.vector)
                 added += 1
             known_hashes.add((record.sha256 or self._path_key(path), self._person_key(person_name)))
-            return added, None
+            return added, held, None
         except (ImageLoadError, OSError, ValueError) as exc:
-            return 0, f"{path.name}: {exc}"
+            return 0, 0, f"{path.name}: {exc}"
+
+    @staticmethod
+    def _synthetic_enrollment_artifact_id(
+        person_name: str,
+        source_hash: str,
+        bbox: tuple[int, int, int, int] | None,
+        recognizer_model: str,
+    ) -> str:
+        body = json.dumps(
+            {
+                "person": ProjectState._person_key(person_name),
+                "sourceHash": str(source_hash or ""),
+                "bbox": list(bbox or ()),
+                "recognizerModel": str(recognizer_model or ""),
+                "screenVersion": SYNTHETIC_SCREEN_MODEL_VERSION,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return "syn_enroll_" + hashlib.sha256(body.encode("utf-8")).hexdigest()[:24]
+
+    def _stage_synthetic_enrollment_review(
+        self,
+        *,
+        path: Path,
+        person_name: str,
+        age_bucket: str,
+        record: Any,
+        embedding: EmbeddingResult,
+        face_index: int,
+        screen_result: SyntheticScreenResult | None,
+        screen_error: str = "",
+    ) -> dict[str, Any]:
+        base_artifact_id = self._synthetic_enrollment_artifact_id(
+            person_name,
+            str(record.sha256 or ""),
+            embedding.bbox,
+            embedding.model_name,
+        )
+        artifact_id = base_artifact_id
+        for attempt in range(1, 1000):
+            existing = self.db.learned_artifact_by_id(artifact_id)
+            if existing is None:
+                break
+            if str(existing.get("status", "") or "") in {"candidate", "staged"}:
+                return self._learned_artifact_status_payload(existing) or {}
+            artifact_id = f"{base_artifact_id}_{attempt + 1}"
+        else:
+            raise ValueError("Too many finalized review attempts exist for this enrollment source.")
+        reason = "score-threshold" if screen_result is not None else "screen-unavailable"
+        payload: dict[str, Any] = {
+            "personName": str(person_name)[:200],
+            "ageBucket": str(age_bucket or "unknown")[:80],
+            "sourcePath": str(path)[:4096],
+            "sourceHash": str(record.sha256 or ""),
+            "captureDate": record.capture_date,
+            "captureDateProvenance": str(record.capture_date_provenance or "unknown"),
+            "bbox": list(embedding.bbox or ()),
+            "faceIndex": max(0, int(face_index)),
+            "quality": round(float(embedding.quality or 0.0), 8),
+            "poseBucket": str(embedding.pose_bucket or "unknown"),
+            "recognizerModel": str(embedding.model_name or ""),
+            "screenModelId": screen_result.model_id if screen_result else SYNTHETIC_SCREEN_MODEL_ID,
+            "screenModelVersion": screen_result.model_version if screen_result else SYNTHETIC_SCREEN_MODEL_VERSION,
+            "screenAvailable": screen_result is not None,
+            "reviewReason": reason,
+        }
+        metrics: dict[str, Any] = {
+            "quality": round(float(embedding.quality or 0.0), 8),
+            "stableScore": round(float(screen_result.stable_score), 8) if screen_result else None,
+            "originalScore": round(float(screen_result.original_score), 8) if screen_result else None,
+            "recompressedScore": round(float(screen_result.recompressed_score), 8) if screen_result else None,
+            "reviewThreshold": round(float(screen_result.review_threshold), 8) if screen_result else None,
+            "screenAvailable": screen_result is not None,
+        }
+        artifact = self.db.upsert_learned_artifact(
+            artifact_id,
+            {
+                "artifactType": "synthetic_enrollment_review",
+                "status": "staged",
+                "modelName": payload["screenModelId"],
+                "versionKey": payload["screenModelVersion"],
+                "trainingDataHash": str(record.sha256 or ""),
+                "inputCount": 1,
+                "positiveCount": 1 if reason == "score-threshold" else 0,
+                "negativeCount": 0,
+                "metrics": metrics,
+                "payload": payload,
+                "createdAt": now_iso(),
+            },
+        )
+        self._append_audit(
+            {
+                "action": "stage_synthetic_enrollment_review",
+                "artifact_id": artifact_id,
+                "artifact_hash": artifact.get("artifactHash", ""),
+                "person_ref": self._audit_person_ref(person_name),
+                "source_hash": str(record.sha256 or ""),
+                "recognizer_model": str(embedding.model_name or ""),
+                "screen_model": payload["screenModelId"],
+                "screen_version": payload["screenModelVersion"],
+                "screen_available": screen_result is not None,
+                "stable_score": metrics["stableScore"],
+                "review_threshold": metrics["reviewThreshold"],
+                "reason": reason,
+                "screen_error_class": "unavailable" if screen_error else "",
+            }
+        )
+        return {
+            **artifact,
+            "artifactType": "synthetic_enrollment_review",
+            "metrics": metrics,
+            "payload": payload,
+        }
+
+    def synthetic_enrollment_review_status(self, limit: int = 20) -> dict[str, Any]:
+        safe_limit = max(1, min(100, int(limit or 20)))
+        rows = self.db.learned_artifact_rows("synthetic_enrollment_review", limit=safe_limit)
+        count_rows = self.db.learned_artifact_rows("synthetic_enrollment_review", limit=200)
+        counts = {"staged": 0, "promoted": 0, "rejected": 0, "candidate": 0, "rolled_back": 0}
+        for row in count_rows:
+            status = str(row.get("status", "") or "")
+            if status in counts:
+                counts[status] += 1
+        return {
+            "model": synthetic_enrollment_screen_report(),
+            "counts": counts,
+            "artifacts": self._learned_artifact_status_payloads(rows),
+            "truncated": len(count_rows) >= 200,
+        }
+
+    @staticmethod
+    def _bbox_iou(
+        first: tuple[int, int, int, int] | None,
+        second: tuple[int, int, int, int] | None,
+    ) -> float:
+        if first is None or second is None:
+            return 1.0 if first is None and second is None else 0.0
+        left = max(int(first[0]), int(second[0]))
+        top = max(int(first[1]), int(second[1]))
+        right = min(int(first[2]), int(second[2]))
+        bottom = min(int(first[3]), int(second[3]))
+        intersection = max(0, right - left) * max(0, bottom - top)
+        first_area = max(0, int(first[2]) - int(first[0])) * max(0, int(first[3]) - int(first[1]))
+        second_area = max(0, int(second[2]) - int(second[0])) * max(0, int(second[3]) - int(second[1]))
+        union = first_area + second_area - intersection
+        return float(intersection / union) if union > 0 else 0.0
+
+    def approve_synthetic_enrollment_review(
+        self,
+        artifact_id: str,
+        engine: EmbeddingEngine,
+        *,
+        allow_synthetic_override: bool = False,
+        operator: str = "",
+    ) -> dict[str, Any]:
+        artifact = self.db.learned_artifact_by_id(artifact_id)
+        if not artifact or artifact.get("artifact_type") != "synthetic_enrollment_review":
+            raise ValueError("No synthetic enrollment review is available for approval.")
+        if artifact.get("status") != "staged":
+            raise ValueError("Only staged synthetic enrollment reviews can be approved.")
+        payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+        person_name = str(payload.get("personName", "") or "").strip()
+        if not person_name:
+            raise ValueError("Synthetic enrollment review is missing the person name.")
+        if self.config.require_consent and not self.consent_for_person(person_name):
+            raise PermissionError("Consent must remain active before an enrollment review can be approved.")
+        source_path = Path(str(payload.get("sourcePath", "") or "")).expanduser()
+        expected_hash = str(payload.get("sourceHash", "") or "")
+        if not source_path.is_file() or not expected_hash:
+            raise ValueError("The enrollment review source is no longer available.")
+        actual_hash = sha256_file(source_path)
+        if actual_hash != expected_hash:
+            raise ValueError("The enrollment review source changed after staging; enroll it again.")
+        if any(
+            self._person_key(ref.person_name) == self._person_key(person_name)
+            and str(ref.source_hash or "") == expected_hash
+            for ref in self.references.values()
+        ):
+            raise ValueError("This source is already a saved reference for the person.")
+
+        image = load_image(source_path)
+        record = image_record_for_path(source_path, image=image, sha256=actual_hash)
+        embeddings, _cache_hit = self._embed_image_cached(
+            source_path,
+            engine,
+            image=image,
+            content_hash=actual_hash,
+        )
+        eligible = [item for item in embeddings if item.quality >= self.config.thresholds.quality_min]
+        if not eligible and self.config.two_pass_scan:
+            rescued, _rescue_hit = self._embed_image_cached(
+                source_path,
+                engine,
+                image=image,
+                content_hash=actual_hash,
+                cache_variant="rescue",
+            )
+            eligible = [item for item in rescued if item.quality >= self.config.thresholds.quality_min]
+        if not eligible:
+            raise ValueError("The staged face no longer passes enrollment quality checks.")
+        raw_bbox = payload.get("bbox")
+        expected_bbox = (
+            tuple(int(value) for value in raw_bbox)
+            if isinstance(raw_bbox, list) and len(raw_bbox) == 4
+            else None
+        )
+        embedding = max(eligible, key=lambda item: (self._bbox_iou(item.bbox, expected_bbox), item.quality))
+        bbox_overlap = self._bbox_iou(embedding.bbox, expected_bbox)
+        if expected_bbox is not None and bbox_overlap < 0.20:
+            raise ValueError("The staged face could not be matched reliably after re-detection.")
+
+        screen_result: SyntheticScreenResult | None = None
+        screen_error = ""
+        try:
+            screen_result = screen_enrollment_face(image, embedding.bbox)
+        except Exception as exc:
+            screen_error = str(exc)[:600] or exc.__class__.__name__
+        needs_override = screen_result is None or screen_result.flagged_for_review
+        if needs_override and not allow_synthetic_override:
+            reason = "screen is unavailable" if screen_result is None else "score remains above the review threshold"
+            raise ValueError(f"Explicit human override is required because the {reason}.")
+
+        ref = ReferenceFace(
+            ref_id=new_id("ref"),
+            person_name=person_name,
+            age_bucket=str(payload.get("ageBucket", "unknown") or "unknown"),
+            source_path=str(source_path),
+            capture_date=record.capture_date,
+            quality=float(embedding.quality or 0.0),
+            model_name=str(embedding.model_name or payload.get("recognizerModel", "") or ""),
+            vector=list(embedding.vector),
+            source_hash=actual_hash,
+            pose_bucket=str(embedding.pose_bucket or payload.get("poseBucket", "unknown") or "unknown"),
+            capture_date_provenance=record.capture_date_provenance,
+            synthetic_screen_score=screen_result.stable_score if screen_result else None,
+            synthetic_screen_original_score=screen_result.original_score if screen_result else None,
+            synthetic_screen_recompressed_score=screen_result.recompressed_score if screen_result else None,
+            synthetic_screen_threshold=(
+                screen_result.review_threshold
+                if screen_result
+                else float((artifact.get("metrics") or {}).get("reviewThreshold") or 0.0) or None
+            ),
+            synthetic_screen_model_id=screen_result.model_id if screen_result else str(payload.get("screenModelId", SYNTHETIC_SCREEN_MODEL_ID)),
+            synthetic_screen_model_version=screen_result.model_version if screen_result else str(payload.get("screenModelVersion", SYNTHETIC_SCREEN_MODEL_VERSION)),
+            synthetic_screen_reviewed=True,
+            synthetic_screen_human_override=needs_override,
+        )
+        self.references[ref.ref_id] = ref
+        self._mark_reference_dirty(ref.ref_id)
+        self.vector_store.add(ref.ref_id, ref.vector)
+        invalidated_synthetic = len(self._remove_age_trajectory_references(person_name=person_name))
+        self._invalidate_reference_indexes()
+        promoted_at = now_iso()
+        self.db.update_learned_artifact_status(str(artifact["artifact_id"]), "promoted", promoted_at=promoted_at)
+        self._append_audit(
+            {
+                "action": "approve_synthetic_enrollment_review",
+                "artifact_id": str(artifact["artifact_id"]),
+                "artifact_hash": str(artifact.get("artifact_hash", "") or ""),
+                "ref_id": ref.ref_id,
+                "person_ref": self._audit_person_ref(person_name),
+                "source_hash": actual_hash,
+                "recognizer_model": ref.model_name,
+                "screen_model": ref.synthetic_screen_model_id,
+                "screen_version": ref.synthetic_screen_model_version,
+                "stable_score": ref.synthetic_screen_score,
+                "review_threshold": ref.synthetic_screen_threshold,
+                "human_override": needs_override,
+                "screen_error_class": "unavailable" if screen_error else "",
+                "bbox_iou": round(bbox_overlap, 6),
+                "operator": str(operator or self.actor)[:120],
+                "invalidated_synthetic_age_references": invalidated_synthetic,
+            }
+        )
+        self.save()
+        return {
+            "approved": True,
+            "artifactId": str(artifact["artifact_id"]),
+            "artifactHash": str(artifact.get("artifact_hash", "") or ""),
+            "refId": ref.ref_id,
+            "reference": asdict(ref),
+            "humanOverride": needs_override,
+            "promotedAt": promoted_at,
+            "summary": self.synthetic_enrollment_review_status(),
+        }
+
+    def reject_synthetic_enrollment_review(self, artifact_id: str, reason: str = "") -> dict[str, Any]:
+        artifact = self.db.learned_artifact_by_id(artifact_id)
+        if not artifact or artifact.get("artifact_type") != "synthetic_enrollment_review":
+            raise ValueError("No synthetic enrollment review is available for rejection.")
+        if artifact.get("status") not in {"candidate", "staged"}:
+            raise ValueError("Only candidate or staged synthetic enrollment reviews can be rejected.")
+        payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+        self.db.update_learned_artifact_status(str(artifact["artifact_id"]), "rejected")
+        self._append_audit(
+            {
+                "action": "reject_synthetic_enrollment_review",
+                "artifact_id": str(artifact["artifact_id"]),
+                "artifact_hash": str(artifact.get("artifact_hash", "") or ""),
+                "person_ref": self._audit_person_ref(str(payload.get("personName", "") or "")),
+                "source_hash": str(payload.get("sourceHash", "") or ""),
+                "reason": str(reason or "")[:300],
+            }
+        )
+        return {
+            "rejected": True,
+            "artifactId": str(artifact["artifact_id"]),
+            "summary": self.synthetic_enrollment_review_status(),
+        }
 
     def _expand_enroll_paths(self, paths: Iterable[str | Path], recursive: bool = True) -> list[Path]:
         """Turn a mixed list of file/folder paths into an ordered, de-duplicated
@@ -937,7 +3081,7 @@ class ProjectState:
         paths: Iterable[str | Path],
         engine: EmbeddingEngine,
         recursive: bool = True,
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[int, list[str], int]:
         """Enroll reference faces from a list of individual files and/or folders.
 
         Powers the redesigned 'Add a person' flow (pick photos / drop / folder).
@@ -947,17 +3091,20 @@ class ProjectState:
             raise ValueError("A person name is required for enrollment.")
         paths = list(paths)
         added = 0
+        reviews = 0
         errors: list[str] = []
         known_hashes = {
             (ref.source_hash or self._path_key(ref.source_path), self._person_key(ref.person_name))
             for ref in self.references.values()
         }
         for path in self._expand_enroll_paths(paths, recursive=recursive):
-            count, error = self._enroll_one(path, person_name, age_bucket, engine, known_hashes)
+            count, held, error = self._enroll_one(path, person_name, age_bucket, engine, known_hashes)
             added += count
+            reviews += held
             if error:
                 errors.append(error)
         if added:
+            removed = self._remove_age_trajectory_references(person_name=person_name)
             self._invalidate_reference_indexes()
         self._append_audit(
             {
@@ -966,18 +3113,20 @@ class ProjectState:
                 "age_bucket": age_bucket,
                 "paths": len(paths),
                 "added": added,
+                "synthetic_screen_reviews": reviews,
                 "errors": len(errors),
+                "invalidatedSyntheticAgeReferences": len(removed) if added else 0,
             }
         )
         self.save()
-        return added, errors
+        return added, errors, reviews
 
     def enroll_age_groups(
         self,
         person_name: str,
         groups: list[dict[str, str]],
         engine: EmbeddingEngine,
-    ) -> tuple[int, list[str], int]:
+    ) -> tuple[int, list[str], int, int]:
         person_name = person_name.strip()
         if not person_name:
             raise ValueError("A person name is required for enrollment.")
@@ -990,12 +3139,14 @@ class ProjectState:
         if not selected:
             raise ValueError("Add at least one age-group folder.")
         total_added = 0
+        total_reviews = 0
         errors: list[str] = []
         enrolled_groups = 0
         for age_bucket, folder in selected:
-            added, group_errors = self.enroll_folder(person_name, age_bucket, folder, engine)
+            added, group_errors, reviews = self.enroll_folder(person_name, age_bucket, folder, engine)
             total_added += added
-            if added:
+            total_reviews += reviews
+            if added or reviews:
                 enrolled_groups += 1
             errors.extend(f"{age_bucket}: {error}" for error in group_errors)
         self._append_audit(
@@ -1004,10 +3155,11 @@ class ProjectState:
                 "person_name": person_name,
                 "groups": enrolled_groups,
                 "added": total_added,
+                "synthetic_screen_reviews": total_reviews,
                 "errors": len(errors),
             }
         )
-        return total_added, errors, enrolled_groups
+        return total_added, errors, enrolled_groups, total_reviews
 
     def backfill_references_for_model(
         self,
@@ -1029,6 +3181,7 @@ class ProjectState:
             source_refs = source_refs[: max(0, int(limit))]
         total = len(source_refs)
         added = skipped = errors = low_quality = missing = processed = paused_seconds = 0
+        changed_people: set[str] = set()
         cancelled = False
         error_rows: list[str] = []
         if on_progress:
@@ -1086,10 +3239,15 @@ class ProjectState:
                     processed += 1
                     continue
                 record = image_record_for_path(path, image=image, sha256=source_hash)
-                embeddings = engine.embed_loaded_image(image, path)
+                embeddings, _cache_hit = self._embed_image_cached(path, engine, image=image, content_hash=source_hash)
                 if not embeddings and self.config.two_pass_scan:
-                    rescue_method = getattr(engine, "embed_loaded_image_rescue", None)
-                    embeddings = rescue_method(image, path) if callable(rescue_method) else []
+                    embeddings, _rescue_cache_hit = self._embed_image_cached(
+                        path,
+                        engine,
+                        image=image,
+                        content_hash=source_hash,
+                        cache_variant="rescue",
+                    )
                 accepted = 0
                 for embedding in embeddings:
                     if embedding.quality < self.config.thresholds.quality_min:
@@ -1119,6 +3277,7 @@ class ProjectState:
                     existing_keys.add((record.sha256 or self._path_key(path), new_ref.person_name.casefold(), self._model_family_key(new_ref.model_name)))
                     added += 1
                     accepted += 1
+                    changed_people.add(new_ref.person_name)
                 if not accepted:
                     skipped += 1
                 processed += 1
@@ -1142,6 +3301,9 @@ class ProjectState:
                         "currentPath": str(path),
                     }
                 )
+        invalidated_synthetic = 0
+        for person_name in sorted(changed_people, key=str.casefold):
+            invalidated_synthetic += len(self._remove_age_trajectory_references(person_name=person_name))
         if added:
             self._invalidate_reference_indexes()
         self._append_audit(
@@ -1156,6 +3318,7 @@ class ProjectState:
                 "low_quality": low_quality,
                 "errors": errors,
                 "cancelled": cancelled,
+                "invalidated_synthetic_age_references": invalidated_synthetic,
             }
         )
         self.save()
@@ -1182,6 +3345,7 @@ class ProjectState:
             "errors": errors,
             "cancelled": cancelled,
             "pausedSeconds": paused_seconds,
+            "invalidatedSyntheticAgeReferences": invalidated_synthetic,
             "errorRows": error_rows,
             "compatibility": self.model_compatibility_report(target_model),
         }
@@ -1241,7 +3405,7 @@ class ProjectState:
         self.db.create_scan_run(run_id, label, source, root_path, int(total or 0))
         added = 0
         errors: list[str] = []
-        unmatched: list[tuple[Path, float, str, list[float], dict[str, Any]]] = []
+        unmatched_spool: GlobalUnmatchedSpool | None = None
         unmatched_paths: set[Path] = set()
         large_candidate_store = len(self.candidates) > CANDIDATE_MEMORY_DEDUPE_LIMIT and self.candidate_index_ready()
         existing = set() if large_candidate_store else {self._candidate_existing_key(candidate) for candidate in self.candidates.values()}
@@ -1257,7 +3421,6 @@ class ProjectState:
                 except (OSError, RuntimeError):
                     pass
         generated_video_frame_paths: set[Path] = set()
-        cluster_label_offset = 0
         metrics = {
             "total": int(total or 0),
             "processed": 0,
@@ -1267,9 +3430,23 @@ class ProjectState:
             "skipped": 0,
             "errors": 0,
             "unmatched": 0,
+            "clusterPasses": 0,
+            "clusterModelGroups": 0,
+            "clusterComponents": 0,
+            "clusterUniqueInputs": 0,
+            "clusterDuplicateInputs": 0,
+            "clusterNoise": 0,
+            "clusterSpoolPeak": 0,
             "safeFiltered": 0,
             "videoFiles": 0,
             "videoFrames": 0,
+            "videoTrackObservations": 0,
+            "videoTracks": 0,
+            "videoTrackTemplates": 0,
+            "videoTrackSingletons": 0,
+            "videoTrackKeyframes": 0,
+            "videoTrackMatches": 0,
+            "videoTrackUnmatched": 0,
             "videoProtected": 0,
             "cancelled": 0,
             "pausedSeconds": 0,
@@ -1289,6 +3466,14 @@ class ProjectState:
             "profileRescueFound": 0,
             "profileRescueMatched": 0,
             "profileRescueUnmatched": 0,
+            "alignmentRecoveryAttempted": 0,
+            "alignmentRecoverySucceeded": 0,
+            "alignmentRecoveryRejected": 0,
+            "fixedCohortPairs": 0,
+            "fixedCohortFallbacks": 0,
+            "fixedCohortDemotions": 0,
+            "ageGapRelaxedReviews": 0,
+            "syntheticAgeEvidence": 0,
             "safeModeFaceCropAllowed": 0,
             "poseFrontal": 0,
             "poseThreeQuarter": 0,
@@ -1330,77 +3515,109 @@ class ProjectState:
                 raise InterruptedError("Scan cancelled. Resume will skip completed files.")
 
         def flush_unmatched(force: bool = False) -> None:
-            nonlocal added, cluster_label_offset, unmatched
-            # Cluster once globally at the terminal (force) flush; only overflow past the
-            # high cap triggers an early batched pass (which keeps the label offset).
-            overflow_cap = max(UNMATCHED_CLUSTER_GLOBAL_CAP, int(self.config.cluster_min_size))
-            if not unmatched or (not force and len(unmatched) < overflow_cap):
+            nonlocal added
+            # There is deliberately no periodic path. Vectors live in SQLite until the
+            # terminal flush, so changing discovery batch size cannot split identities.
+            spool = unmatched_spool
+            if not force or spool is None or spool.count == 0:
                 return
             self._emit_scan_progress(on_progress, "clustering", metrics)
-            batch = unmatched
-            unmatched = []
-            unmatched_paths.difference_update(row[0] for row in batch)
-            labels = cluster_vectors([row[3] for row in batch], self.config.cluster_min_size)
-            max_label = max(labels, default=-1)
-            for (path, quality, model_name, _vector, metadata), label in zip(batch, labels):
-                manifest_hash = str(metadata.get("source_hash") or "")
-                if label < 0:
-                    self._record_manifest_file(run_id, path, "completed", "unmatched", "", scan_conn, content_hash=manifest_hash)
-                    continue
-                person_name = f"Unmatched cluster {cluster_label_offset + label + 1}"
-                key = (self._candidate_dedupe_source(path, metadata), None, person_name)
-                if candidate_key_exists(key):
-                    self._record_manifest_file(run_id, path, "completed", "duplicate", "", scan_conn, content_hash=manifest_hash)
-                    continue
-                if not video_candidate_allowed(metadata):
-                    metrics["skipped"] += 1
-                    self._record_manifest_file(run_id, path, "completed", "video_candidate_cap", "", scan_conn, content_hash=manifest_hash)
-                    continue
-                candidate = ReviewCandidate(
-                    candidate_id=new_id("cand"),
-                    source_path=str(path),
-                    person_name=person_name,
-                    best_ref_id=None,
-                    best_ref_path=None,
-                    score=0.0,
-                    band="clustered review",
-                    quality=quality,
-                    model_name=model_name,
-                    note=_video_note(metadata) or "Grouped with visually similar unmatched media for manual triage.",
-                    **metadata,
+            groups = spool.groups()
+            metrics["clusterPasses"] = 1
+            metrics["clusterModelGroups"] = len(groups)
+            metrics["clusterSpoolPeak"] = max(metrics["clusterSpoolPeak"], spool.peak_count)
+            manifest_outcomes: dict[Path, tuple[int, str, str, str, str]] = {}
+
+            def remember_manifest(
+                path: Path,
+                priority: int,
+                status: str,
+                phase: str,
+                candidate_id: str,
+                content_hash: str,
+            ) -> None:
+                previous = manifest_outcomes.get(path)
+                if previous is None or priority >= previous[0]:
+                    manifest_outcomes[path] = (priority, status, phase, candidate_id, content_hash)
+
+            for group in groups:
+                clustered_group = spool.cluster_group(group, self.config.cluster_min_size)
+                metrics["clusterComponents"] += clustered_group.components
+                metrics["clusterUniqueInputs"] += group.unique_rows
+                metrics["clusterDuplicateInputs"] += group.rows - group.unique_rows
+                for row in spool.iter_rows(group):
+                    path = row.path
+                    metadata = row.metadata
+                    manifest_hash = str(metadata.get("source_hash") or "")
+                    person_name = clustered_group.assignments.get(row.stable_key)
+                    if person_name is None:
+                        metrics["clusterNoise"] += 1
+                        remember_manifest(path, 0, "completed", "unmatched", "", manifest_hash)
+                        continue
+                    key = (self._candidate_dedupe_source(path, metadata), None, person_name)
+                    if candidate_key_exists(key):
+                        metrics["duplicateCandidates"] += 1
+                        remember_manifest(path, 1, "completed", "duplicate", "", manifest_hash)
+                        continue
+                    if not video_candidate_allowed(metadata):
+                        metrics["skipped"] += 1
+                        metrics["videoCandidateCap"] += 1
+                        remember_manifest(path, 2, "completed", "video_candidate_cap", "", manifest_hash)
+                        continue
+                    candidate = ReviewCandidate(
+                        candidate_id=new_id("cand"),
+                        source_path=str(path),
+                        person_name=person_name,
+                        best_ref_id=None,
+                        best_ref_path=None,
+                        score=0.0,
+                        band="clustered review",
+                        quality=row.quality,
+                        model_name=row.model_name,
+                        note=_video_note(metadata) or "Grouped with visually similar unmatched media for manual triage.",
+                        risk_flags=["video-track-template"] if metadata.get("video_track_id") else [],
+                        **metadata,
+                    )
+                    self.candidates[candidate.candidate_id] = candidate
+                    self._mark_candidate_dirty(candidate.candidate_id)
+                    try:
+                        frame_path = safe_resolve(path)
+                        if self.video_frames_path in frame_path.parents:
+                            retained_video_frame_paths.add(frame_path)
+                    except (OSError, RuntimeError):
+                        pass
+                    remember_candidate_key(key)
+                    note_video_candidate(metadata)
+                    added += 1
+                    metrics["added"] = added
+                    metrics["clustered"] += 1
+                    self._emit_scan_progress(
+                        on_progress,
+                        "candidate",
+                        metrics,
+                        current_path=str(path),
+                        candidate_id=candidate.candidate_id,
+                    )
+                    remember_manifest(path, 3, "clustered", "candidate", candidate.candidate_id, manifest_hash)
+
+            for path, (_priority, status, phase, candidate_id, content_hash) in manifest_outcomes.items():
+                self._record_manifest_file(
+                    run_id,
+                    path,
+                    status,
+                    phase,
+                    candidate_id,
+                    scan_conn,
+                    content_hash=content_hash,
                 )
-                self.candidates[candidate.candidate_id] = candidate
-                self._mark_candidate_dirty(candidate.candidate_id)
-                try:
-                    frame_path = safe_resolve(path)
-                    if self.video_frames_path in frame_path.parents:
-                        retained_video_frame_paths.add(frame_path)
-                except (OSError, RuntimeError):
-                    pass
-                remember_candidate_key(key)
-                note_video_candidate(metadata)
-                added += 1
-                metrics["added"] = added
-                metrics["clustered"] += 1
-                self._emit_scan_progress(
-                    on_progress,
-                    "candidate",
-                    metrics,
-                    current_path=str(path),
-                    candidate_id=candidate.candidate_id,
-                )
-                self._record_manifest_file(run_id, path, "clustered", "candidate", candidate.candidate_id, scan_conn, content_hash=manifest_hash)
-                if metrics["clustered"] % 25 == 0 and scan_conn is not None:
-                    scan_conn.commit()
-            if max_label >= 0:
-                cluster_label_offset += max_label + 1
+            unmatched_paths.clear()
 
         def prune_generated_video_frames(paths: Iterable[Path] | None = None) -> None:
             targets = {safe_resolve(path) for path in (paths or generated_video_frame_paths)}
             if not targets:
                 return
             pending_frames = set()
-            for pending_path, *_rest in unmatched:
+            for pending_path in unmatched_paths:
                 try:
                     pending_frame = safe_resolve(pending_path)
                 except (OSError, RuntimeError):
@@ -1479,6 +3696,8 @@ class ProjectState:
             apply_safe_mode: bool = True,
             precomputed_signature: dict[str, Any] | None = None,
             precomputed_content_hash: str = "",
+            precomputed_embeddings: list[EmbeddingResult] | None = None,
+            video_observations: list[VideoFaceObservation] | None = None,
         ) -> int:
             nonlocal added
             ensure_not_cancelled()
@@ -1495,7 +3714,9 @@ class ProjectState:
                 _cap_date, _cap_prov = self._safe_capture_date_with_provenance(image_path, image=image, sha256=content_hash)
                 metadata["capture_date"] = _cap_date
                 metadata["capture_date_provenance"] = _cap_prov
-            embeddings: list[EmbeddingResult] | None = None
+            embeddings: list[EmbeddingResult] | None = (
+                list(precomputed_embeddings) if precomputed_embeddings is not None else None
+            )
             cache_hit = False
             if apply_safe_mode and self.config.safe_mode:
                 assessment, content_hash = self._assess_safety_cached(image_path, image, scan_conn, content_hash=content_hash)
@@ -1533,12 +3754,13 @@ class ProjectState:
             if embeddings is None:
                 embeddings, cache_hit = self._embed_image_cached(image_path, engine, image=image, content_hash=content_hash, conn=scan_conn)
             ensure_not_cancelled()
-            if cache_hit:
-                metrics["embeddingCacheHits"] += 1
-            else:
-                metrics["embeddingCacheMisses"] += 1
+            if precomputed_embeddings is None:
+                if cache_hit:
+                    metrics["embeddingCacheHits"] += 1
+                else:
+                    metrics["embeddingCacheMisses"] += 1
             rescue_used = False
-            if not embeddings and self.config.two_pass_scan:
+            if precomputed_embeddings is None and not embeddings and self.config.two_pass_scan:
                 metrics["profileRescueAttempted"] += 1
                 metrics["twoPassVerified"] += 1
                 rescue_embeddings, rescue_cache_hit = self._embed_image_cached(
@@ -1563,22 +3785,48 @@ class ProjectState:
             queued_unmatched = False
             low_quality_seen = False
             for embedding in embeddings:
+                if precomputed_embeddings is None and embedding.alignment_attempts > 0:
+                    metrics["alignmentRecoveryAttempted"] += 1
+                    if embedding.alignment_rescued:
+                        metrics["alignmentRecoverySucceeded"] += 1
+                    else:
+                        metrics["alignmentRecoveryRejected"] += 1
                 if embedding.quality < self.config.thresholds.quality_min:
                     metrics["skipped"] += 1
                     metrics["lowQualityFaces"] += 1
                     low_quality_seen = True
                     continue
                 pose_bucket = self._normalized_pose_bucket(embedding.pose_bucket)
-                if pose_bucket == "frontal":
-                    metrics["poseFrontal"] += 1
-                elif pose_bucket == "three-quarter":
-                    metrics["poseThreeQuarter"] += 1
-                elif pose_bucket == "profile":
-                    metrics["poseProfile"] += 1
-                else:
-                    metrics["poseUnknown"] += 1
+                if precomputed_embeddings is None:
+                    if pose_bucket == "frontal":
+                        metrics["poseFrontal"] += 1
+                    elif pose_bucket == "three-quarter":
+                        metrics["poseThreeQuarter"] += 1
+                    elif pose_bucket == "profile":
+                        metrics["poseProfile"] += 1
+                    else:
+                        metrics["poseUnknown"] += 1
                 embedding_metadata = {**metadata, "pose_bucket": pose_bucket}
                 accepted += 1
+                if video_observations is not None:
+                    try:
+                        sharpness = face_crop_sharpness(image, embedding.bbox)
+                    except (OSError, TypeError, ValueError):
+                        sharpness = 0.0
+                    video_observations.append(
+                        VideoFaceObservation(
+                            frame_path=image_path,
+                            timestamp_ms=max(0, int(metadata.get("video_timestamp_ms", 0) or 0)),
+                            frame_index=max(0, int(metadata.get("video_frame_index", 0) or 0)),
+                            duration_ms=max(0, int(metadata.get("video_duration_ms", 0) or 0)),
+                            frame_width=max(1, int(metadata.get("video_frame_width", getattr(image, "width", 1)) or 1)),
+                            frame_height=max(1, int(metadata.get("video_frame_height", getattr(image, "height", 1)) or 1)),
+                            embedding=embedding,
+                            sharpness=max(0.0, float(sharpness)),
+                        )
+                    )
+                    metrics["videoTrackObservations"] += 1
+                    continue
                 hits, compatible_refs = self._search_matching_references(embedding, k=k)
                 pose_thresholds = thresholds_for_pose(self.config.thresholds, pose_bucket) if pose_review_supported(hits, compatible_refs, self.config.thresholds, pose_bucket) else self.config.thresholds
                 # §5.3: per-person pooled-template cosines so a "confident" match that leaned
@@ -1603,6 +3851,26 @@ class ProjectState:
                         age_gap_years,
                         embedding_metadata,
                     )
+                    decision = apply_verified_age_gap_review(
+                        decision,
+                        pose_thresholds,
+                        age_gap_years,
+                        age_gap_confidence,
+                    )
+                    if "verified-cross-age-threshold" in decision.flags:
+                        metrics["ageGapRelaxedReviews"] += 1
+                pair_context: dict[str, Any] = {}
+                if decision is not None:
+                    pair_context = self._pair_calibration_context(embedding, decision)
+                    cohort_z = pair_context.get("cohortZ")
+                    if cohort_z is None:
+                        metrics["fixedCohortFallbacks"] += 1
+                    else:
+                        metrics["fixedCohortPairs"] += 1
+                        previous_band = decision.band
+                        decision = apply_cohort_separation(decision, pose_thresholds, float(cohort_z))
+                        if decision.band != previous_band:
+                            metrics["fixedCohortDemotions"] += 1
                 decision_flags = set(decision.flags) if decision is not None else set()
                 if "pose-reranked" in decision_flags:
                     metrics["poseReranked"] += 1
@@ -1614,6 +3882,8 @@ class ProjectState:
                     metrics["singleReferenceMatches"] += 1
                 if "single-reference-hard-pose" in decision_flags:
                     metrics["hardPoseUnsupported"] += 1
+                if "synthetic-age-evidence" in decision_flags:
+                    metrics["syntheticAgeEvidence"] += 1
                 pose_relaxed = (
                     decision is not None
                     and pose_thresholds.relaxed_child < self.config.thresholds.relaxed_child
@@ -1627,13 +3897,24 @@ class ProjectState:
                     elif pose_bucket == "three-quarter":
                         metrics["poseRelaxedThreeQuarter"] += 1
                 if decision is None or decision.band == "below-review":
-                    unmatched.append((image_path, embedding.quality, embedding.model_name, embedding.vector, embedding_metadata))
+                    if unmatched_spool is None:
+                        raise RuntimeError("The global unmatched clustering spool is unavailable.")
+                    unmatched_spool.add(
+                        image_path,
+                        embedding.quality,
+                        embedding.model_name,
+                        embedding.vector,
+                        embedding_metadata,
+                        embedding.bbox,
+                    )
                     unmatched_paths.add(image_path)
                     metrics["unmatched"] += 1
+                    metrics["clusterSpoolPeak"] = max(metrics["clusterSpoolPeak"], unmatched_spool.peak_count)
                     if rescue_used:
                         metrics["profileRescueUnmatched"] += 1
                     queued_unmatched = True
-                    flush_unmatched()
+                    if metadata.get("video_track_id"):
+                        metrics["videoTrackUnmatched"] += 1
                     continue
                 if self.db.blocked_pair_exists(content_hash, decision.person_name, decision.best_ref_id, scan_conn):
                     metrics["skipped"] += 1
@@ -1670,6 +3951,8 @@ class ProjectState:
                     ("single-reference-hard-pose", "Only one hard-angle signal matched; add a side/angled saved photo if this is wrong."),
                     ("single-reference-match", "Only one saved photo supported this match; review before bulk actions."),
                     ("pose-reranked", "Hard-angle match used pose-aware scoring; compare against saved photos."),
+                    ("verified-cross-age-threshold", "Verified wide capture-date gap used the review-only cross-age threshold; verify carefully."),
+                    ("synthetic-age-evidence", "A strong local synthetic age reference supported this result; compare the real parent photos."),
                 ):
                     if flag in decision_flags:
                         candidate_note = self._append_candidate_note(candidate_note, message)
@@ -1678,10 +3961,37 @@ class ProjectState:
                     candidate_note = self._append_candidate_note(candidate_note, "Hard-pose review threshold used; verify carefully.")
                 if rescue_used:
                     candidate_note = self._append_candidate_note(candidate_note, "Recovered by the side-face detector; review before accepting.")
+                if embedding.alignment_rescued:
+                    candidate_note = self._append_candidate_note(
+                        candidate_note,
+                        f"Face alignment was recovered using {embedding.alignment_strategy}; compare carefully.",
+                    )
+                    candidate_risk_flags = normalize_risk_flags(
+                        [*candidate_risk_flags, "alignment-recovered"],
+                        candidate_note,
+                    )
                 candidate_risk_flags = normalize_risk_flags(candidate_risk_flags, candidate_note)
                 if age_gap_flag:
                     candidate_risk_flags = normalize_risk_flags(
                         [*candidate_risk_flags, age_gap_flag], candidate_note
+                    )
+                best_reference = self.references.get(decision.best_ref_id or "")
+                if best_reference is not None and is_synthetic_age_reference(best_reference):
+                    evidence_label = (
+                        "A reviewed AI-generated age reference supported this result"
+                        if is_generated_age_image_reference(best_reference)
+                        else "A local synthetic age-trajectory embedding supported this result"
+                    )
+                    candidate_note = self._append_candidate_note(
+                        candidate_note,
+                        f"{evidence_label}; compare the real parent photos.",
+                    )
+                    candidate_risk_flags = normalize_risk_flags(
+                        [*candidate_risk_flags, "synthetic-age-reference"], candidate_note
+                    )
+                if metadata.get("video_track_id"):
+                    candidate_risk_flags = normalize_risk_flags(
+                        [*candidate_risk_flags, "video-track-template"], candidate_note
                     )
                 candidate_review_lane = review_lane(
                     band=decision.band,
@@ -1689,9 +3999,16 @@ class ProjectState:
                     ied_px=embedding.ied_px,
                     quality=embedding.quality,
                 )
+                probability_detail = self.match_probability_detail(
+                    decision.score,
+                    embedding.model_name,
+                    decision.person_name,
+                    pair_center=pair_context.get("pairCenter"),
+                    raw_cosine=decision.raw_cosine,
+                )
                 candidate_review_priority = review_priority(
                     lane=candidate_review_lane,
-                    probability=self.match_probability(decision.score, embedding.model_name, decision.person_name),
+                    probability=probability_detail["probability"],
                     score=decision.score,
                 )
                 candidate = ReviewCandidate(
@@ -1715,10 +4032,26 @@ class ProjectState:
                     ied_px=embedding.ied_px,
                     review_lane=candidate_review_lane,
                     review_priority=candidate_review_priority,
+                    calibrated_probability=probability_detail["probability"],
+                    calibration_source=str(probability_detail["source"]),
+                    calibration_version=str(probability_detail["version"]),
                     **embedding_metadata,
                 )
                 self.candidates[candidate.candidate_id] = candidate
                 self._mark_candidate_dirty(candidate.candidate_id)
+                if pair_context.get("pairCenter") and candidate.best_ref_id:
+                    try:
+                        self.db.upsert_candidate_match_context(
+                            candidate.candidate_id,
+                            candidate.best_ref_id,
+                            candidate.model_name,
+                            pair_context["pairCenter"],
+                            pair_context.get("cohortZ"),
+                            str(pair_context.get("cohortVersion", "")),
+                            conn=scan_conn,
+                        )
+                    except (sqlite3.Error, TypeError, ValueError):
+                        metrics["fixedCohortFallbacks"] += 1
                 if metadata.get("media_kind") == "video":
                     try:
                         frame_path = safe_resolve(image_path)
@@ -1743,6 +4076,8 @@ class ProjectState:
                 added += 1
                 metrics["added"] = added
                 metrics["matched"] += 1
+                if metadata.get("video_track_id"):
+                    metrics["videoTrackMatches"] += 1
                 if rescue_used:
                     metrics["profileRescueMatched"] += 1
                 self._emit_scan_progress(
@@ -1752,6 +4087,18 @@ class ProjectState:
                     current_path=str(image_path),
                     candidate_id=candidate.candidate_id,
                 )
+            if video_observations is not None and accepted:
+                self.db.record_scan_file(
+                    run_id,
+                    image_path,
+                    signature,
+                    "completed",
+                    phase="video_track_observation",
+                    content_hash=content_hash,
+                    conn=scan_conn,
+                    refresh_import_session=False,
+                )
+                recorded_any = True
             if not accepted:
                 metrics["skipped"] += 1
                 if not embeddings:
@@ -1794,6 +4141,7 @@ class ProjectState:
 
         with self.db.connect() as connection:
             scan_conn = connection
+            unmatched_spool = GlobalUnmatchedSpool(connection, run_id)
             for raw_path in paths:
                 if isinstance(raw_path, ScanDiscoveryError):
                     path = safe_resolve(raw_path.path)
@@ -1857,6 +4205,8 @@ class ProjectState:
                     self._emit_scan_progress(on_progress, "cancelled", metrics, current_path=str(path), message="Scan cancelled. Resume will skip completed files.")
                     checkpoint(path, force=True)
                     break
+                if SCAN_TEST_ITEM_DELAY_SECONDS:
+                    time.sleep(SCAN_TEST_ITEM_DELAY_SECONDS)
                 try:
                     signature = path_signature(path)
                     resume_row = self.db.scan_file_resume_row(resume_run_id, path, signature, scan_conn) if resume_run_id else None
@@ -1950,6 +4300,8 @@ class ProjectState:
                         if protected:
                             prune_generated_video_frames(sample_paths)
                             continue
+                        track_observations: list[VideoFaceObservation] = []
+                        video_capture_date = self._media_mtime_date(path)
                         for sample in samples:
                             image = load_image(sample.path)
                             ensure_not_cancelled()
@@ -1962,12 +4314,73 @@ class ProjectState:
                                     "video_timestamp_ms": sample.timestamp_ms,
                                     "video_frame_index": sample.frame_index,
                                     "video_duration_ms": sample.duration_ms,
-                                    "capture_date": self._media_mtime_date(path),
+                                    "video_frame_width": sample.width,
+                                    "video_frame_height": sample.height,
+                                    "capture_date": video_capture_date,
                                     # §5.4: a video frame's date is the file mtime, not an EXIF
                                     # event date, so the age gap is always "estimated".
                                     "capture_date_provenance": "mtime",
                                 },
                                 apply_safe_mode=False,
+                                video_observations=track_observations,
+                            )
+                        tracks = build_video_track_templates(track_observations, source_key=str(path))
+                        metrics["videoTracks"] += len(tracks)
+                        metrics["videoTrackTemplates"] += sum(1 for track in tracks if len(track.observations) >= 2)
+                        metrics["videoTrackSingletons"] += sum(1 for track in tracks if len(track.observations) == 1)
+                        metrics["videoTrackKeyframes"] += sum(len(track.keyframes) for track in tracks)
+                        for track in tracks:
+                            ensure_not_cancelled()
+                            representative = track.representative
+                            keyframes = list(track.keyframes)
+                            total_weight = sum(max(0.05, float(item.embedding.quality)) for item in keyframes)
+
+                            def weighted(field: str) -> float:
+                                return sum(
+                                    float(getattr(item.embedding, field, 0.0) or 0.0)
+                                    * max(0.05, float(item.embedding.quality))
+                                    for item in keyframes
+                                ) / max(1e-9, total_weight)
+
+                            pooled_embedding = EmbeddingResult(
+                                vector=track.vector,
+                                quality=track.quality,
+                                bbox=representative.embedding.bbox,
+                                model_name=track.model_name,
+                                note=f"{VIDEO_TRACK_TEMPLATE_VERSION}:{track.track_id}",
+                                pose_bucket=representative.embedding.pose_bucket,
+                                quality_norm=weighted("quality_norm"),
+                                det_score=weighted("det_score"),
+                                ied_px=weighted("ied_px"),
+                                fiqa_score=weighted("fiqa_score"),
+                                align_error=weighted("align_error"),
+                                alignment_rescued=any(item.embedding.alignment_rescued for item in keyframes),
+                                alignment_strategy="track-keyframe-pool",
+                                alignment_original_error=weighted("alignment_original_error"),
+                                alignment_quality_gain=weighted("alignment_quality_gain"),
+                                alignment_attempts=sum(int(item.embedding.alignment_attempts) for item in keyframes),
+                            )
+                            queue_image(
+                                representative.frame_path,
+                                image=load_image(representative.frame_path),
+                                media_metadata={
+                                    "media_kind": "video",
+                                    "media_source_path": str(path),
+                                    "video_timestamp_ms": representative.timestamp_ms,
+                                    "video_frame_index": representative.frame_index,
+                                    "video_duration_ms": representative.duration_ms,
+                                    "video_track_id": track.track_id,
+                                    "video_track_version": track.template_version,
+                                    "video_track_start_ms": track.start_ms,
+                                    "video_track_end_ms": track.end_ms,
+                                    "video_track_frame_count": len(track.observations),
+                                    "video_track_keyframe_timestamps_ms": [item.timestamp_ms for item in keyframes],
+                                    "video_track_keyframe_indices": [item.frame_index for item in keyframes],
+                                    "capture_date": video_capture_date,
+                                    "capture_date_provenance": "mtime",
+                                },
+                                apply_safe_mode=False,
+                                precomputed_embeddings=[pooled_embedding],
                             )
                         self.db.record_scan_file(run_id, path, signature, "completed", phase="video", content_hash=video_content_hash, conn=scan_conn, refresh_import_session=False)
                         prune_generated_video_frames(sample_paths)
@@ -1993,13 +4406,17 @@ class ProjectState:
                     metrics["processed"] += 1
                     self._emit_scan_progress(on_progress, "processed", metrics, current_path=str(path))
                     checkpoint(path)
-            if final_status == "complete":
-                flush_unmatched(force=True)
+            try:
+                if final_status == "complete":
+                    flush_unmatched(force=True)
+                else:
+                    unmatched_paths.clear()
                 prune_generated_video_frames()
-            checkpoint(Path(root_path or self.root), force=True)
-            scan_conn = None
-        if final_status == "cancelled":
-            unmatched = []
+                checkpoint(Path(root_path or self.root), force=True)
+            finally:
+                unmatched_paths.clear()
+                unmatched_spool.close()
+                scan_conn = None
         self._record_scan_run(source, label, started_at, metrics, errors, status=final_status)
         self.save(snapshot_candidates=False)
         self.db.update_scan_run(run_id, metrics, final_status, "")
@@ -2026,9 +4443,19 @@ class ProjectState:
         latest = latest if latest is not None else self.scale_summary().get("latestScan")
         latest_status = str(latest.get("status", "")) if isinstance(latest, dict) else ""
         active = latest_status == "running" and not self.cancel_scan_path.exists()
-        can_resume = bool(isinstance(latest, dict) and latest_status in {"running", "cancelled", "error"})
         processed = int(latest.get("processed", 0) or 0) if isinstance(latest, dict) else 0
         total = int(latest.get("total", 0) or 0) if isinstance(latest, dict) else 0
+        errors = int(latest.get("errors", 0) or 0) if isinstance(latest, dict) else 0
+        # A fatal discovery failure (for example, a missing root folder) has no
+        # successful manifest work to resume. Offering Resume in that state only
+        # repeats the same failure; partial error runs can still skip completed work.
+        can_resume = bool(
+            isinstance(latest, dict)
+            and (
+                latest_status in {"running", "cancelled"}
+                or (latest_status == "error" and processed > errors)
+            )
+        )
         if self.pause_scan_path.exists():
             action = "Resume scan when ready."
         elif self.cancel_scan_path.exists():
@@ -2037,6 +4464,8 @@ class ProjectState:
             action = "Scan is running."
         elif can_resume and processed:
             action = "Resume will skip completed files from the manifest."
+        elif latest_status == "error":
+            action = "Check that the scan source still exists and is readable before trying again."
         else:
             action = "No active scan."
         return {
@@ -2232,6 +4661,11 @@ class ProjectState:
             "sourcePath": ref.source_path,
             "quality": ref.quality,
             "modelName": ref.model_name,
+            "referenceKind": ref.reference_kind,
+            "syntheticMethodVersion": ref.synthetic_method_version,
+            "syntheticTargetAgeBucket": ref.synthetic_target_age_bucket,
+            "parentRefIds": list(ref.parent_ref_ids),
+            "derivationProvenance": dict(ref.derivation_provenance),
         }
 
     def apply_review_rules(self) -> dict[str, Any]:
@@ -2250,7 +4684,8 @@ class ProjectState:
             "unchanged": 0,
             "rules": rules,
         }
-        for candidate in self.candidates.values():
+        updated_candidates: list[ReviewCandidate] = []
+        for candidate in self._iter_authoritative_candidates(statuses={"pending"}, order="review"):
             if candidate.status != "pending":
                 continue
             result["checked"] += 1
@@ -2273,9 +4708,24 @@ class ProjectState:
                 continue
             candidate.status = next_status
             candidate.note = self._append_candidate_note(candidate.note, reason)
-            self._mark_candidate_dirty(candidate.candidate_id)
+            if self._candidate_index_backed:
+                updated_candidates.append(candidate)
+            else:
+                self._mark_candidate_dirty(candidate.candidate_id)
             result["updated"] += 1
         if result["updated"]:
+            if self._candidate_index_backed and updated_candidates:
+                try:
+                    self.db.upsert_candidates(updated_candidates)
+                except sqlite3.Error:
+                    for candidate in updated_candidates:
+                        self.candidates[candidate.candidate_id] = candidate
+                        self._mark_candidate_dirty(candidate.candidate_id)
+                else:
+                    for candidate in updated_candidates:
+                        if candidate.candidate_id in self.candidates:
+                            self.candidates[candidate.candidate_id] = candidate
+                            self._loaded_candidate_payloads[candidate.candidate_id] = asdict(candidate)
             self._append_audit(
                 {
                     "action": "apply_review_rules",
@@ -2294,7 +4744,7 @@ class ProjectState:
         k: int = 20,
         on_progress: ScanProgress | None = None,
     ) -> dict[str, int]:
-        unique_ids = [candidate_id for candidate_id in dict.fromkeys(candidate_ids) if candidate_id in self.candidates]
+        unique_ids = self._ensure_candidates_loaded(candidate_ids)
         metrics = {
             "total": len(unique_ids),
             "processed": 0,
@@ -2348,6 +4798,7 @@ class ProjectState:
                     else:
                         best_decision = None
                         best_embedding = None
+                        best_pair_context: dict[str, Any] = {}
                         for embedding in embeddings:
                             if embedding.quality < self.config.thresholds.quality_min:
                                 continue
@@ -2355,9 +4806,17 @@ class ProjectState:
                             decision = group_hits(hits, compatible_refs, self.config.thresholds)
                             if decision is None or decision.band == "below-review":
                                 continue
+                            pair_context = self._pair_calibration_context(embedding, decision)
+                            if pair_context.get("cohortZ") is not None:
+                                decision = apply_cohort_separation(
+                                    decision,
+                                    self.config.thresholds,
+                                    float(pair_context["cohortZ"]),
+                                )
                             if best_decision is None or decision.score > best_decision.score:
                                 best_decision = decision
                                 best_embedding = embedding
+                                best_pair_context = pair_context
                         if best_decision is None or best_embedding is None:
                             metrics["downgraded"] += 1
                             candidate.note = self._append_candidate_note(candidate.note, "High-detail recheck could not confirm this match.")
@@ -2382,6 +4841,42 @@ class ProjectState:
                             candidate.band = best_decision.band
                             candidate.quality = best_embedding.quality
                             candidate.model_name = best_embedding.model_name
+                            candidate.raw_cosine = best_decision.raw_cosine
+                            candidate.align_error = best_embedding.align_error
+                            candidate.ied_px = best_embedding.ied_px
+                            probability_detail = self.match_probability_detail(
+                                candidate.score,
+                                candidate.model_name,
+                                candidate.person_name,
+                                pair_center=best_pair_context.get("pairCenter"),
+                                raw_cosine=candidate.raw_cosine,
+                            )
+                            candidate.calibrated_probability = probability_detail["probability"]
+                            candidate.calibration_source = str(probability_detail["source"])
+                            candidate.calibration_version = str(probability_detail["version"])
+                            candidate.review_lane = review_lane(
+                                band=candidate.band,
+                                align_error=candidate.align_error,
+                                ied_px=candidate.ied_px,
+                                quality=candidate.quality,
+                            )
+                            candidate.review_priority = review_priority(
+                                lane=candidate.review_lane,
+                                probability=candidate.calibrated_probability,
+                                score=candidate.score,
+                            )
+                            if best_pair_context.get("pairCenter") and candidate.best_ref_id:
+                                self.db.upsert_candidate_match_context(
+                                    candidate.candidate_id,
+                                    candidate.best_ref_id,
+                                    candidate.model_name,
+                                    best_pair_context["pairCenter"],
+                                    best_pair_context.get("cohortZ"),
+                                    str(best_pair_context.get("cohortVersion", "")),
+                                    conn=conn,
+                                )
+                            else:
+                                self.db.delete_candidate_match_context(candidate.candidate_id, conn=conn)
                             self._mark_candidate_dirty(candidate.candidate_id)
                             current = (candidate.person_name, candidate.best_ref_id, round(candidate.score, 6), candidate.band)
                             if current != previous:
@@ -2473,7 +4968,8 @@ class ProjectState:
     def _embedding_cache_version(self, engine: EmbeddingEngine) -> str:
         version = str(getattr(engine, "model_name", "unknown"))
         detect_tag = str(getattr(engine, "detect_cache_tag", "") or "")
-        return f"{version}|{detect_tag}" if detect_tag else version
+        alignment_tag = str(getattr(engine, "alignment_recovery_version", "") or "")
+        return "|".join(part for part in (version, detect_tag, alignment_tag) if part)
 
     def _embedding_detector_size(self, engine: EmbeddingEngine) -> int:
         return int(getattr(engine, "detector_size", self.config.face_detector_size))
@@ -2487,6 +4983,11 @@ class ProjectState:
             "iedPx": embedding.ied_px,
             "fiqaScore": embedding.fiqa_score,
             "alignError": embedding.align_error,
+            "alignmentRescued": embedding.alignment_rescued,
+            "alignmentStrategy": embedding.alignment_strategy,
+            "alignmentOriginalError": embedding.alignment_original_error,
+            "alignmentQualityGain": embedding.alignment_quality_gain,
+            "alignmentAttempts": embedding.alignment_attempts,
             "bbox": list(embedding.bbox) if embedding.bbox else None,
             "modelName": embedding.model_name,
             "note": embedding.note,
@@ -2505,6 +5006,11 @@ class ProjectState:
             ied_px=float(row.get("iedPx", 0.0) or 0.0),
             fiqa_score=float(row.get("fiqaScore", 0.0) or 0.0),
             align_error=float(row.get("alignError", 0.0) or 0.0),
+            alignment_rescued=bool(row.get("alignmentRescued", False)),
+            alignment_strategy=str(row.get("alignmentStrategy", "") or ""),
+            alignment_original_error=float(row.get("alignmentOriginalError", 0.0) or 0.0),
+            alignment_quality_gain=float(row.get("alignmentQualityGain", 0.0) or 0.0),
+            alignment_attempts=int(row.get("alignmentAttempts", 0) or 0),
             bbox=bbox,
             model_name=str(row.get("modelName", "")),
             note=str(row.get("note", "")),
@@ -2546,6 +5052,8 @@ class ProjectState:
 
     def _candidate_dedupe_source(self, path: Path, metadata: dict[str, Any]) -> str:
         if metadata.get("media_kind") == "video" and metadata.get("media_source_path"):
+            if metadata.get("video_track_id"):
+                return str(path)
             return str(metadata["media_source_path"])
         source_hash = str(metadata.get("source_hash", "")).strip()
         if source_hash:
@@ -2554,7 +5062,7 @@ class ProjectState:
 
     def _candidate_existing_key(self, candidate: ReviewCandidate) -> tuple[str, str | None, str]:
         if candidate.media_kind == "video" and candidate.media_source_path:
-            source_path = candidate.media_source_path
+            source_path = candidate.source_path if candidate.video_track_id else candidate.media_source_path
         elif candidate.source_hash:
             source_path = f"sha256:{candidate.source_hash}"
         else:
@@ -2706,16 +5214,20 @@ class ProjectState:
             pass
 
     def _safety_cache_version(self) -> str:
-        report = safety_model_report()
-        path = Path(str(report.get("path") or ""))
+        report = safety_model_report(multimodal_enabled=self.config.safe_mode_multimodal)
+        path_text = str(report.get("path") or "").strip()
+        path = Path(path_text) if path_text else None
         parts = [str(report.get("engine", "heuristic")), str(report.get("modelName", "unknown"))]
+        if report.get("cacheVersion"):
+            parts.append(str(report["cacheVersion"]))
         try:
             temperature = float(self.config.safe_mode_temperature)
         except (TypeError, ValueError):
             temperature = 1.0
         parts.append(f"temperature:{temperature:.6g}")
+        parts.append(f"multimodal:{int(bool(self.config.safe_mode_multimodal))}")
         try:
-            if path.exists():
+            if path is not None and path.exists():
                 stat = path.stat()
                 parts.extend([str(stat.st_size), str(stat.st_mtime_ns)])
         except OSError:
@@ -2746,10 +5258,21 @@ class ProjectState:
                 heuristic_score=None,
                 threshold=self.config.safe_mode_threshold,
                 labels=dict(cached.get("labels", {})),
+                category_scores={
+                    str(key).removeprefix("policy:"): float(value)
+                    for key, value in dict(cached.get("labels", {})).items()
+                    if str(key).startswith("policy:")
+                },
             )
         else:
-            assessment = assess_image_safety(path, self.config.safe_mode_threshold, image=image, temperature=self.config.safe_mode_temperature)
-            if assessment.engine != "heuristic-fallback":
+            assessment = assess_image_safety(
+                path,
+                self.config.safe_mode_threshold,
+                image=image,
+                temperature=self.config.safe_mode_temperature,
+                multimodal=self.config.safe_mode_multimodal,
+            )
+            if not assessment.engine.endswith("fallback"):
                 self.db.safety_store(content_hash, model_version, self.config.safe_mode_threshold, assessment, conn)
         # A per-item user override from the review dashboard wins over the classifier's
         # verdict, so a corrected false positive stays corrected across re-scans.
@@ -2790,6 +5313,13 @@ class ProjectState:
         file_hash = self._candidate_file_hash(candidate)
         is_match = status == "accepted"
         label_id = new_id("label")
+        pair_context = self.db.candidate_match_context(
+            candidate.candidate_id,
+            best_ref_id=str(candidate.best_ref_id or ""),
+            model_name=str(candidate.model_name or ""),
+            conn=conn,
+        )
+        cohort_version = str(pair_context.get("cohortVersion", "") or "") if pair_context else ""
         self.db.add_calibration_label(
             label_id,
             {
@@ -2800,9 +5330,14 @@ class ProjectState:
                 "matchScore": candidate.score,
                 "isMatch": is_match,
                 "poseBucket": candidate.pose_bucket,
+                "mediaKind": candidate.media_kind,
                 "ageGapYears": candidate.age_gap_years,
                 "rawCosine": candidate.raw_cosine,
                 "modelName": candidate.model_name,
+                "bestRefId": candidate.best_ref_id or "",
+                "pairCenter": pair_context.get("pairCenter") if pair_context else None,
+                "cohortZ": pair_context.get("cohortZ") if pair_context else None,
+                "contextVersion": f"adaptive-pair-v1|{cohort_version or 'cohort-unavailable'}" if pair_context else "",
             },
             conn=conn,
         )
@@ -2818,6 +5353,11 @@ class ProjectState:
             "iedPx": candidate.ied_px,
             "reviewPriority": candidate.review_priority,
             "reviewLane": candidate.review_lane,
+            "calibratedProbability": candidate.calibrated_probability,
+            "calibrationSource": candidate.calibration_source,
+            "calibrationVersion": candidate.calibration_version,
+            "cohortZ": pair_context.get("cohortZ") if pair_context else None,
+            "cohortVersion": cohort_version,
             "riskFlags": list(candidate.risk_flags),
             "videoTimestampMs": candidate.video_timestamp_ms,
         }
@@ -2855,7 +5395,7 @@ class ProjectState:
     def set_candidate_status(self, candidate_id: str, status: str) -> dict[str, Any] | None:
         if status not in {"pending", "accepted", "rejected", "uncertain"}:
             raise ValueError(f"Unsupported review status: {status}")
-        candidate = self.candidates[candidate_id]
+        candidate = self._candidate_or_raise(candidate_id)
         previous = {
             "status": candidate.status,
             "personName": candidate.person_name,
@@ -2924,7 +5464,7 @@ class ProjectState:
         return operation
 
     def set_candidate_note(self, candidate_id: str, note: str) -> None:
-        candidate = self.candidates[candidate_id]
+        candidate = self._candidate_or_raise(candidate_id)
         candidate.note = note.strip()[:1200]
         self._mark_candidate_dirty(candidate_id)
         self._append_audit(
@@ -2938,8 +5478,24 @@ class ProjectState:
         )
         self.save()
 
-    def block_false_match(self, candidate_id: str, note: str = "") -> dict[str, Any]:
-        candidate = self.candidates[candidate_id]
+    def _unique_candidate_ids_or_raise(self, candidate_ids: Iterable[str], field_name: str = "candidate_ids") -> list[str]:
+        unique_ids = list(dict.fromkeys(str(candidate_id or "").strip() for candidate_id in candidate_ids if str(candidate_id or "").strip()))
+        if not unique_ids:
+            raise ValueError(f"{field_name} must contain at least one candidate id.")
+        self._ensure_candidates_loaded(unique_ids)
+        missing = [candidate_id for candidate_id in unique_ids if candidate_id not in self.candidates]
+        if missing:
+            raise KeyError(f"Candidate not found: {missing[0]}")
+        return unique_ids
+
+    def _block_false_match(
+        self,
+        candidate_id: str,
+        note: str = "",
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        candidate = self._candidate_or_raise(candidate_id)
         file_hash = candidate.source_hash
         if not file_hash:
             try:
@@ -2967,6 +5523,7 @@ class ProjectState:
         operation_snapshot = self.db.review_candidate_correction_undo_snapshot(
             candidate=candidate,
             blocked_pairs=blocked_pair_rows,
+            conn=conn,
         )
         self.db.add_blocked_pair(
             {
@@ -2975,7 +5532,8 @@ class ProjectState:
                 "bestRefId": best_ref_id,
                 "sourcePath": candidate.source_path,
                 "note": note or "Rejected from review as a repeated false match.",
-            }
+            },
+            conn=conn,
         )
         blocked_count = 1
         if best_ref_id:
@@ -2986,13 +5544,14 @@ class ProjectState:
                     "bestRefId": "",
                     "sourcePath": candidate.source_path,
                     "note": note or "Rejected from review as a repeated same-image/person false match.",
-                }
+                },
+                conn=conn,
             )
             blocked_count += 1
         candidate.status = "rejected"
         candidate.note = self._append_candidate_note(candidate.note, "Do not suggest this image/person pair again.")
         self._mark_candidate_dirty(candidate_id)
-        learning = self._record_review_learning_example(candidate, "rejected")
+        learning = self._record_review_learning_example(candidate, "rejected", conn=conn)
         self._append_audit(
             {
                 "action": "block_false_match",
@@ -3005,7 +5564,6 @@ class ProjectState:
                 "training_example_id": learning.get("exampleId", ""),
             }
         )
-        self.save()
         operation = self.db.record_review_candidate_correction_operation(
             operation_type="person_match_remove",
             label=f"Removed {operation_snapshot.get('candidate', {}).get('person_name', candidate.person_name)} from photo match",
@@ -3029,15 +5587,42 @@ class ProjectState:
                 "noteAfter": candidate.note,
                 "blockedRows": blocked_count,
             },
+            conn=conn,
         )
-        return {"blocked": blocked_count, "summary": self.db.blocked_pairs_summary(limit=5), "operation": operation}
+        return {"candidateId": candidate_id, "blocked": blocked_count, "operation": operation}
 
-    def reassign_candidate_person(self, candidate_id: str, person_name: str, clear_reference: bool = True) -> dict[str, Any]:
+    def block_false_match(self, candidate_id: str, note: str = "") -> dict[str, Any]:
+        with self.db.connect() as conn:
+            result = self._block_false_match(candidate_id, note, conn=conn)
+        self.save()
+        result["summary"] = self.db.blocked_pairs_summary(limit=5)
+        return result
+
+    def bulk_block_false_matches(self, candidate_ids: list[str], note: str = "") -> dict[str, Any]:
+        unique_ids = self._unique_candidate_ids_or_raise(candidate_ids)
+        with self.db.connect() as conn:
+            results = [self._block_false_match(candidate_id, note, conn=conn) for candidate_id in unique_ids]
+        self.save()
+        return {
+            "updated": len(results),
+            "blocked": sum(int(result.get("blocked", 0) or 0) for result in results),
+            "results": results,
+            "summary": self.db.blocked_pairs_summary(limit=5),
+        }
+
+    def _reassign_candidate_person(
+        self,
+        candidate_id: str,
+        person_name: str,
+        clear_reference: bool = True,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
         target = person_name.strip()
         if not target:
             raise ValueError("Choose the person this match belongs to.")
-        candidate = self.candidates[candidate_id]
-        operation_snapshot = self.db.review_candidate_correction_undo_snapshot(candidate=candidate)
+        candidate = self._candidate_or_raise(candidate_id)
+        operation_snapshot = self.db.review_candidate_correction_undo_snapshot(candidate=candidate, conn=conn)
         previous = {
             "personName": candidate.person_name,
             "bestRefId": candidate.best_ref_id,
@@ -3054,6 +5639,21 @@ class ProjectState:
             candidate.band = "manual assignment"
         candidate.status = "uncertain"
         candidate.note = self._append_candidate_note(candidate.note, f"Moved to {target} for manual identity cleanup.")
+        candidate.calibrated_probability = None
+        candidate.calibration_source = ""
+        candidate.calibration_version = ""
+        candidate.review_lane = review_lane(
+            band=candidate.band,
+            align_error=candidate.align_error,
+            ied_px=candidate.ied_px,
+            quality=candidate.quality,
+        )
+        candidate.review_priority = review_priority(
+            lane=candidate.review_lane,
+            probability=None,
+            score=candidate.score,
+        )
+        self.db.delete_candidate_match_context(candidate_id, conn=conn)
         self._mark_candidate_dirty(candidate_id)
         self._append_audit(
             {
@@ -3064,7 +5664,6 @@ class ProjectState:
                 "clear_reference": bool(clear_reference),
             }
         )
-        self.save()
         operation = self.db.record_review_candidate_correction_operation(
             operation_type="person_match_reassign",
             label=f"Moved match from {previous['personName']} to {target}",
@@ -3089,18 +5688,48 @@ class ProjectState:
                 "newBestRefPath": candidate.best_ref_path or "",
                 "clearReference": bool(clear_reference),
             },
+            conn=conn,
         )
         return {"candidateId": candidate_id, "previous": previous, "personName": target, "operation": operation}
+
+    def reassign_candidate_person(self, candidate_id: str, person_name: str, clear_reference: bool = True) -> dict[str, Any]:
+        with self.db.connect() as conn:
+            result = self._reassign_candidate_person(
+                candidate_id,
+                person_name,
+                clear_reference=clear_reference,
+                conn=conn,
+            )
+        self.save()
+        return result
+
+    def bulk_reassign_candidate_person(
+        self,
+        candidate_ids: list[str],
+        person_name: str,
+        clear_reference: bool = True,
+    ) -> dict[str, Any]:
+        target = person_name.strip()
+        if not target:
+            raise ValueError("Choose the person this match belongs to.")
+        unique_ids = self._unique_candidate_ids_or_raise(candidate_ids)
+        with self.db.connect() as conn:
+            results = [
+                self._reassign_candidate_person(
+                    candidate_id,
+                    target,
+                    clear_reference=clear_reference,
+                    conn=conn,
+                )
+                for candidate_id in unique_ids
+            ]
+        self.save()
+        return {"updated": len(results), "personName": target, "results": results}
 
     def bulk_set_candidate_status(self, candidate_ids: list[str], status: str) -> int:
         if status not in {"pending", "accepted", "rejected", "uncertain"}:
             raise ValueError(f"Unsupported review status: {status}")
-        unique_ids = list(dict.fromkeys(candidate_ids))
-        if not unique_ids:
-            raise ValueError("candidate_ids must contain at least one candidate id.")
-        missing = [candidate_id for candidate_id in unique_ids if candidate_id not in self.candidates]
-        if missing:
-            raise KeyError(f"Candidate not found: {missing[0]}")
+        unique_ids = self._unique_candidate_ids_or_raise(candidate_ids)
         learning_examples = 0
         with self.db.connect() as conn:
             for candidate_id in unique_ids:
@@ -3166,8 +5795,8 @@ class ProjectState:
         existing = self._suggested_reference_artifact_candidate_ids()
         candidates = [
             candidate
-            for candidate in self.candidates.values()
-            if candidate.status == "accepted" and candidate.candidate_id not in existing
+            for candidate in self._iter_authoritative_candidates(statuses={"accepted"}, order="score")
+            if candidate.candidate_id not in existing
         ]
         candidates.sort(key=lambda item: (-float(item.score), -float(item.quality), str(item.created_at), item.candidate_id))
         return candidates[: max(1, min(500, int(limit or 80)))]
@@ -3365,12 +5994,64 @@ class ProjectState:
             status = str(artifact.get("status", ""))
             counts[status] = counts.get(status, 0) + 1
         return {
-            "artifacts": artifacts,
+            "artifacts": self._learned_artifact_status_payloads(artifacts),
             "counts": counts,
             "staged": counts.get("staged", 0),
             "promoted": counts.get("promoted", 0),
             "rejected": counts.get("rejected", 0),
         }
+
+    @staticmethod
+    def _learned_artifact_status_payload(artifact: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not artifact:
+            return None
+
+        def field(camel: str, snake: str | None = None) -> Any:
+            return artifact.get(camel, artifact.get(snake or camel))
+
+        def string_field(camel: str, snake: str | None = None) -> str:
+            value = field(camel, snake)
+            return "" if value is None else str(value)
+
+        def int_field(camel: str, snake: str | None = None) -> int:
+            try:
+                return int(field(camel, snake) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        def optional_time(camel: str, snake: str | None = None) -> str | None:
+            value = field(camel, snake)
+            if value is None or value == "":
+                return None
+            return str(value)
+
+        metrics = artifact.get("metrics") if isinstance(artifact.get("metrics"), dict) else {}
+        payload = artifact.get("payload") if isinstance(artifact.get("payload"), dict) else {}
+        return {
+            "artifactId": string_field("artifactId", "artifact_id"),
+            "artifactType": string_field("artifactType", "artifact_type"),
+            "status": string_field("status") or "candidate",
+            "modelName": string_field("modelName", "model_name"),
+            "versionKey": string_field("versionKey", "version_key"),
+            "trainingDataHash": string_field("trainingDataHash", "training_data_hash"),
+            "inputCount": int_field("inputCount", "input_count"),
+            "positiveCount": int_field("positiveCount", "positive_count"),
+            "negativeCount": int_field("negativeCount", "negative_count"),
+            "metrics": dict(metrics),
+            "payload": dict(payload),
+            "artifactHash": string_field("artifactHash", "artifact_hash"),
+            "parentArtifactId": string_field("parentArtifactId", "parent_artifact_id"),
+            "createdAt": string_field("createdAt", "created_at"),
+            "promotedAt": optional_time("promotedAt", "promoted_at"),
+        }
+
+    def _learned_artifact_status_payloads(self, artifacts: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            payload
+            for artifact in artifacts
+            for payload in [self._learned_artifact_status_payload(artifact)]
+            if payload is not None
+        ]
 
     def approve_reference_suggestion(
         self,
@@ -3419,6 +6100,7 @@ class ProjectState:
         self.references[ref.ref_id] = ref
         self._mark_reference_dirty(ref.ref_id)
         self.vector_store.add(ref.ref_id, ref.vector)
+        invalidated_synthetic = len(self._remove_age_trajectory_references(person_name=ref.person_name))
         self._invalidate_reference_indexes()
         promoted_at = now_iso()
         self.db.update_learned_artifact_status(str(artifact["artifact_id"]), "promoted", promoted_at=promoted_at)
@@ -3435,6 +6117,7 @@ class ProjectState:
                 "model_name": ref.model_name,
                 "quality": ref.quality,
                 "operator": str(operator or self.actor)[:120],
+                "invalidated_synthetic_age_references": invalidated_synthetic,
             }
         )
         self.save()
@@ -3466,28 +6149,40 @@ class ProjectState:
         return {"rejected": True, "artifactId": artifact["artifact_id"], "summary": self.reference_suggestion_status()}
 
     def clear_candidates(self) -> None:
-        count = len(self.candidates)
-        candidate_ids = list(self.candidates.keys())
+        try:
+            count = self.db.candidate_count() if self._candidate_index_backed else len(self.candidates)
+        except sqlite3.Error:
+            count = len(self.candidates)
+        candidate_ids = [] if self._candidate_index_backed else list(self.candidates.keys())
         self.candidates.clear()
+        self._loaded_candidate_ids.clear()
+        self._loaded_candidate_payloads.clear()
+        self._candidate_dirty_ids.clear()
+        self._candidate_deleted_ids.clear()
+        self._candidate_index_backed = False
         self._mark_candidates_deleted(candidate_ids)
         try:
             self.db.clear_candidates()
         except sqlite3.Error:
             pass
-        deleted_suggestions = self.db.delete_suggested_reference_artifacts(candidate_ids=candidate_ids, statuses={"staged", "candidate"})
+        deleted_suggestions = self.db.delete_suggested_reference_artifacts(
+            candidate_ids=candidate_ids,
+            statuses={"staged", "candidate"},
+            all_candidates=True,
+        )
         self._append_audit({"action": "clear_candidates", "count": count, "suggested_reference_artifacts_deleted": deleted_suggestions})
-        self.save()
+        self.save(snapshot_candidates=False)
+        self._write_json_array_atomic(self.candidates_path, [])
 
     def purge_candidates(self, statuses: list[str]) -> int:
         allowed = {"pending", "accepted", "rejected", "uncertain"}
         status_set = {str(status) for status in statuses}
         if not status_set or not status_set <= allowed:
             raise ValueError("Purge statuses must be selected from pending, accepted, rejected, and uncertain.")
-        to_delete = [candidate_id for candidate_id, candidate in self.candidates.items() if candidate.status in status_set]
+        to_delete = self._authoritative_candidate_ids(statuses=status_set)
         deleted_suggestions = self.db.delete_suggested_reference_artifacts(candidate_ids=to_delete, statuses={"staged", "candidate"})
         self._mark_candidates_deleted(to_delete)
-        for candidate_id in to_delete:
-            self.candidates.pop(candidate_id, None)
+        self._forget_candidates(to_delete)
         self._append_audit(
             {
                 "action": "purge_candidates",
@@ -3501,7 +6196,7 @@ class ProjectState:
 
     def duplicate_candidate_groups(self) -> list[dict[str, Any]]:
         groups: dict[tuple[str, str, str], list[ReviewCandidate]] = {}
-        for candidate in self.candidates.values():
+        for candidate in self._iter_authoritative_candidates(order="created"):
             key = (self._candidate_duplicate_source(candidate), candidate.person_name.casefold(), candidate.best_ref_id or "")
             groups.setdefault(key, []).append(candidate)
         duplicates: list[dict[str, Any]] = []
@@ -3526,7 +6221,7 @@ class ProjectState:
 
     def _duplicate_candidate_summary(self, limit: int = 20) -> dict[str, Any]:
         groups: dict[tuple[str, str, str], dict[str, Any]] = {}
-        for candidate in self.candidates.values():
+        for candidate in self._iter_authoritative_candidates(order="created"):
             key = (self._candidate_duplicate_source(candidate), candidate.person_name.casefold(), candidate.best_ref_id or "")
             row = groups.get(key)
             if row is None:
@@ -3581,9 +6276,8 @@ class ProjectState:
         for group in self.duplicate_candidate_groups():
             keep_id = str(group["keepCandidateId"])
             to_delete.extend(candidate_id for candidate_id in group["candidateIds"] if candidate_id != keep_id)
-        for candidate_id in to_delete:
-            self.candidates.pop(candidate_id, None)
         self._mark_candidates_deleted(to_delete)
+        self._forget_candidates(to_delete)
         self._append_audit({"action": "purge_duplicate_candidates", "count": len(to_delete)})
         self.save()
         return len(to_delete)
@@ -3592,7 +6286,8 @@ class ProjectState:
         if ref_id not in self.references:
             raise KeyError(f"Reference not found: {ref_id}")
         ref = self.references.pop(ref_id)
-        self._mark_reference_deleted(ref_id)
+        dependent_ids = self._remove_age_trajectory_references(parent_ref_id=ref_id)
+        self._mark_references_deleted([ref_id, *dependent_ids])
         self.vector_store.rebuild({item_id: item.vector for item_id, item in self.references.items()})
         self._invalidate_reference_indexes()
         self._append_audit(
@@ -3601,12 +6296,14 @@ class ProjectState:
                 "ref_id": ref_id,
                 "source_path": ref.source_path,
                 "person_name": ref.person_name,
+                "dependentSyntheticAgeReferences": len(dependent_ids),
             }
         )
         self.save()
 
     def clear_references(self) -> int:
         count = len(self.references)
+        self._remove_age_trajectory_references()
         self._mark_references_deleted(list(self.references.keys()))
         self.references.clear()
         self.vector_store.clear()
@@ -3615,32 +6312,156 @@ class ProjectState:
         self.save()
         return count
 
-    def delete_person(self, person_name: str) -> dict[str, int]:
+    def delete_subject_data(
+        self,
+        person_name: str,
+        *,
+        confirm: bool = False,
+        reason: str = "subject-request",
+        source: str = "desktop",
+    ) -> dict[str, Any]:
+        if not confirm:
+            raise ValueError("Subject data deletion requires confirm=true.")
         normalized = person_name.strip().casefold()
         if not normalized:
             raise ValueError("A person name is required.")
         ref_ids = [ref_id for ref_id, ref in self.references.items() if ref.person_name.casefold() == normalized]
-        candidate_ids = [
-            candidate_id
-            for candidate_id, candidate in self.candidates.items()
-            if candidate.person_name.casefold() == normalized
-        ]
-        if not ref_ids and not candidate_ids:
-            raise KeyError(f"Person not found: {person_name}")
+        candidate_ids = self._authoritative_candidate_ids(person_name=person_name)
+        self._ensure_candidates_loaded(candidate_ids)
+        candidate_rows = [self.candidates[candidate_id] for candidate_id in candidate_ids if candidate_id in self.candidates]
+        source_paths = {candidate.source_path for candidate in candidate_rows if candidate.source_path}
+        release_record = self.subject_consents().get(normalized, {})
+        person_ref = self._audit_person_ref(person_name)
+        erased_synthetic_age = self._erase_synthetic_age_image_artifacts_for_person(person_name)
         for ref_id in ref_ids:
             self.references.pop(ref_id, None)
         self._mark_references_deleted(ref_ids)
-        for candidate_id in candidate_ids:
-            self.candidates.pop(candidate_id, None)
         self._mark_candidates_deleted(candidate_ids)
+        self._forget_candidates(candidate_ids)
         deleted_suggestions = self.db.delete_suggested_reference_artifacts(person_names=[person_name.strip()])
+        db_deleted = self.db.delete_subject_private_data(person_name, candidate_ids=candidate_ids)
+        audit_erasure = self._pseudonymize_subject_audit(person_name)
         self.vector_store.rebuild({item_id: item.vector for item_id, item in self.references.items()})
         if ref_ids:
             self._invalidate_reference_indexes()
-        result = {"references": len(ref_ids), "candidates": len(candidate_ids), "suggestedReferenceArtifacts": deleted_suggestions}
-        self._append_audit({"action": "delete_person", "personRef": self._audit_person_ref(person_name), **result})
+
+        self.config.calibration_platt = []
+        self.config.calibration_platt_by_person = {
+            key: value
+            for key, value in self.config.calibration_platt_by_person.items()
+            if str(key).strip().casefold() != normalized
+        }
+        self.config.calibration_adaptive = {}
+        self.config.calibration_model = ""
+
+        generated_removed = int(erased_synthetic_age["files"])
+        generated_bytes = int(erased_synthetic_age["bytes"])
+        paths_still_in_use = self.db.review_candidate_source_paths_in_use(source_paths)
+        for raw_path in source_paths:
+            source_path = Path(raw_path).expanduser()
+            try:
+                if source_path.exists():
+                    preview_path = self._preview_cache_path(source_path)
+                    if preview_path.exists() and self._generated_dir_is_owned(self.previews_path):
+                        generated_bytes += preview_path.stat().st_size
+                        preview_path.unlink()
+                        generated_removed += 1
+                resolved = source_path.resolve()
+                if (
+                    raw_path not in paths_still_in_use
+                    and self._generated_dir_is_owned(self.video_frames_path)
+                    and self.video_frames_path.resolve() in resolved.parents
+                    and resolved.is_file()
+                ):
+                    generated_bytes += resolved.stat().st_size
+                    resolved.unlink()
+                    generated_removed += 1
+            except OSError:
+                continue
+
+        subjects = self.subject_consents()
+        subjects.pop(normalized, None)
+        destroyed_at = now_iso()
+        receipt_reason = re.sub(
+            re.escape(person_name.strip()),
+            "[redacted subject]",
+            str(reason or "subject-request")[:160],
+            flags=re.IGNORECASE,
+        )
+        receipt = {
+            "schemaVersion": 1,
+            "receiptId": "destruction_" + hashlib.sha256(
+                f"{person_ref}\0{destroyed_at}\0{reason}\0{source}".encode("utf-8")
+            ).hexdigest()[:24],
+            "subjectRef": person_ref,
+            "releaseId": str(release_record.get("releaseId", "")),
+            "releaseHash": str(release_record.get("recordHash", "")),
+            "destroyedAt": destroyed_at,
+            "reason": receipt_reason,
+            "source": str(source or "desktop")[:80],
+            "originalMediaDeleted": False,
+            "auditErasureCheckpointHash": str(audit_erasure.get("checkpointHash", "")),
+            "counts": {
+                "references": len(ref_ids),
+                "candidates": len(candidate_ids),
+                "generatedFiles": generated_removed,
+                "generatedBytes": generated_bytes,
+                "suggestedReferenceArtifacts": deleted_suggestions,
+                "syntheticAgeImageArtifacts": int(erased_synthetic_age["artifacts"]),
+                "auditEventsPseudonymized": int(audit_erasure.get("redacted", 0) or 0),
+                **db_deleted,
+            },
+        }
+        receipt["receiptHash"] = hashlib.sha256(
+            json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        receipt_rows = self.consent.get("destructionReceipts")
+        if not isinstance(receipt_rows, list):
+            receipt_rows = []
+        self.consent = {
+            **self.consent,
+            "schemaVersion": CONSENT_SCHEMA_VERSION,
+            "subjects": subjects,
+            "destructionReceipts": [*receipt_rows[-499:], receipt],
+        }
+        self._append_audit(
+            {
+                "action": "delete_subject_data",
+                "personRef": person_ref,
+                "receiptId": receipt["receiptId"],
+                "receiptHash": receipt["receiptHash"],
+                "reason": receipt["reason"],
+                "source": receipt["source"],
+                "originalMediaDeleted": False,
+                "counts": receipt["counts"],
+            }
+        )
         self.save()
-        return result
+
+        receipt_root = self.root / "exports" / "destruction-receipts"
+        receipt_root.mkdir(parents=True, exist_ok=True)
+        receipt_path = receipt_root / f"vintrace-{receipt['receiptId']}.json"
+        atomic_write_text(receipt_path, json.dumps(receipt, indent=2, sort_keys=True))
+        return {
+            "references": len(ref_ids),
+            "candidates": len(candidate_ids),
+            "suggestedReferenceArtifacts": deleted_suggestions,
+            "syntheticAgeImageArtifacts": int(erased_synthetic_age["artifacts"]),
+            "relationshipNameReviews": int(db_deleted.get("relationshipNameReviews", 0)),
+            "dbDeleted": db_deleted,
+            "generatedFiles": generated_removed,
+            "generatedBytes": generated_bytes,
+            "receipt": receipt,
+            "receiptPath": str(receipt_path),
+        }
+
+    def delete_person(self, person_name: str) -> dict[str, Any]:
+        return self.delete_subject_data(
+            person_name,
+            confirm=True,
+            reason="operator-delete-person",
+            source=self.actor,
+        )
 
     def rename_person(self, old_name: str, new_name: str) -> dict[str, Any]:
         old_clean = old_name.strip()
@@ -3650,14 +6471,18 @@ class ProjectState:
         old_key = old_clean.casefold()
         if old_key == new_clean.casefold():
             return {"references": 0, "candidates": 0}
+        removed_synthetic_age_references = self._remove_age_trajectory_references(person_name=old_clean)
+        target_reference_exists = any(
+            ref.person_name.casefold() == new_clean.casefold()
+            for ref in self.references.values()
+        )
+        target_candidate_exists = bool(self._authoritative_candidate_ids(person_name=new_clean))
+        target_photo_presence_exists = self.db.photo_person_presence_count(new_clean) > 0
         reference_undo_rows: list[dict[str, str]] = []
-        candidate_ids: list[str] = []
         for ref in self.references.values():
             if ref.person_name.casefold() == old_key:
                 reference_undo_rows.append({"refId": ref.ref_id, "personName": ref.person_name, "sourcePath": ref.source_path})
-        for candidate in self.candidates.values():
-            if candidate.person_name.casefold() == old_key:
-                candidate_ids.append(candidate.candidate_id)
+        candidate_ids = self._authoritative_candidate_ids(person_name=old_clean)
         self._flush_candidate_index()
         operation_snapshot = self.db.photo_person_label_undo_snapshot(
             old_name=old_clean,
@@ -3671,11 +6496,21 @@ class ProjectState:
                 ref.person_name = new_clean
                 self._mark_reference_dirty(ref.ref_id)
                 references += 1
-        for candidate in self.candidates.values():
-            if candidate.person_name.casefold() == old_key:
+        if self._candidate_index_backed:
+            renamed_ids = self.db.rename_review_candidate_person(old_clean, new_clean)
+            candidates = len(renamed_ids)
+            for candidate_id in renamed_ids:
+                candidate = self.candidates.get(candidate_id)
+                if candidate is None:
+                    continue
                 candidate.person_name = new_clean
-                candidates += 1
-                self._mark_candidate_dirty(candidate.candidate_id)
+                self._loaded_candidate_payloads[candidate_id] = asdict(candidate)
+        else:
+            for candidate in self.candidates.values():
+                if candidate.person_name.casefold() == old_key:
+                    candidate.person_name = new_clean
+                    candidates += 1
+                    self._mark_candidate_dirty(candidate.candidate_id)
         if references == 0 and candidates == 0:
             raise KeyError(f"Person not found: {old_name}")
         if references:
@@ -3687,25 +6522,42 @@ class ProjectState:
                 "newPersonRef": self._audit_person_ref(new_clean),
                 "references": references,
                 "candidates": candidates,
+                "removedSyntheticAgeReferences": len(removed_synthetic_age_references),
             }
         )
         self.save()
         photo_profile = self.db.rename_photo_person_profile(old_clean, new_clean)
         photo_people_rows = operation_snapshot.get("photoPeopleRows", []) if isinstance(operation_snapshot, dict) else []
+        target_profile_snapshot = operation_snapshot.get("targetProfile", {}) if isinstance(operation_snapshot, dict) else {}
+        identity_merged = bool(
+            target_reference_exists
+            or target_candidate_exists
+            or target_photo_presence_exists
+            or (isinstance(target_profile_snapshot, dict) and target_profile_snapshot.get("exists"))
+            or photo_profile.get("profileMerged")
+        )
         operation = self.db.record_photo_person_label_operation(
-            operation_type="person_label_merge" if bool(photo_profile.get("profileMerged")) else "person_label_rename",
+            operation_type="person_label_merge" if identity_merged else "person_label_rename",
             label=(
                 f"Merged person {old_clean} into {new_clean}"
-                if bool(photo_profile.get("profileMerged"))
+                if identity_merged
                 else f"Renamed person {old_clean} to {new_clean}"
             ),
             old_name=old_clean,
             new_name=new_clean,
             references=reference_undo_rows,
             snapshot=operation_snapshot if isinstance(operation_snapshot, dict) else {},
-            affected_count=references + candidates + len(photo_people_rows),
+            affected_count=references + candidates + len(photo_people_rows) + int(photo_profile.get("groupRows", 0) or 0),
+            merged_into_existing=identity_merged,
         )
-        return {"references": references, "candidates": candidates, **photo_profile, "operation": operation}
+        return {
+            "references": references,
+            "candidates": candidates,
+            "removedSyntheticAgeReferences": len(removed_synthetic_age_references),
+            **photo_profile,
+            "identityMerged": identity_merged,
+            "operation": operation,
+        }
 
     def restore_person_label_references(self, undo_payload: dict[str, Any]) -> int:
         if not isinstance(undo_payload, dict):
@@ -3738,7 +6590,7 @@ class ProjectState:
         cutoff = datetime.now(timezone.utc).timestamp() - days * 24 * 60 * 60
         to_delete: list[str] = []
         skipped_undated = 0
-        for candidate_id, candidate in self.candidates.items():
+        for candidate in self._iter_authoritative_candidates(statuses=status_set, order="created"):
             if candidate.status not in status_set:
                 continue
             try:
@@ -3747,7 +6599,7 @@ class ProjectState:
                 skipped_undated += 1
                 continue
             if created < cutoff:
-                to_delete.append(candidate_id)
+                to_delete.append(candidate.candidate_id)
         deleted_examples = 0
         deleted_suggestions = 0
         if to_delete:
@@ -3756,9 +6608,8 @@ class ProjectState:
             except sqlite3.Error:
                 deleted_examples = 0
             deleted_suggestions = self.db.delete_suggested_reference_artifacts(candidate_ids=to_delete, statuses={"staged", "candidate"})
-        for candidate_id in to_delete:
-            self.candidates.pop(candidate_id, None)
         self._mark_candidates_deleted(to_delete)
+        self._forget_candidates(to_delete)
         self._append_audit(
             {
                 "action": "purge_old_candidates",
@@ -3779,17 +6630,32 @@ class ProjectState:
             for ref_id, ref in self.references.items()
             if not Path(ref.source_path).exists()
         ]
-        missing_candidate_ids = [
-            candidate_id
-            for candidate_id, candidate in self.candidates.items()
+        missing_parent_ids = set(missing_ref_ids)
+        dependent_synthetic_ids = [
+            ref_id
+            for ref_id, ref in self.references.items()
+            if is_synthetic_age_reference(ref)
+            and any(parent_ref_id in missing_parent_ids for parent_ref_id in ref.parent_ref_ids)
+        ]
+        missing_ref_ids = list(dict.fromkeys([*missing_ref_ids, *dependent_synthetic_ids]))
+        affected_age_artifact_ids = {
+            str(ref.derivation_provenance.get("reviewArtifactId", "") or "")
+            for ref_id in missing_ref_ids
+            for ref in [self.references.get(ref_id)]
+            if ref is not None and is_generated_age_image_reference(ref)
+            if str(ref.derivation_provenance.get("reviewArtifactId", "") or "")
+        }
+        missing_candidates = [
+            candidate
+            for candidate in self._iter_authoritative_candidates(order="created")
             if not Path(candidate.source_path).exists()
             or (candidate.media_source_path and not Path(candidate.media_source_path).exists())
         ]
+        missing_candidate_ids = [candidate.candidate_id for candidate in missing_candidates]
         missing_values: list[str] = []
         for ref_id in missing_ref_ids:
             missing_values.append(self.references[ref_id].source_path)
-        for candidate_id in missing_candidate_ids:
-            candidate = self.candidates[candidate_id]
+        for candidate in missing_candidates:
             missing_values.append(candidate.source_path)
             if candidate.media_source_path:
                 missing_values.append(candidate.media_source_path)
@@ -3825,6 +6691,8 @@ class ProjectState:
             "destructiveBlocked": destructive_blocked,
             "unavailableRoots": unavailable_roots,
             "removedReferences": len(missing_ref_ids),
+            "removedDependentSyntheticAgeReferences": len(dependent_synthetic_ids),
+            "rolledBackSyntheticAgeArtifacts": len(affected_age_artifact_ids),
             "removedCandidates": len(missing_candidate_ids),
             "referenceIds": missing_ref_ids[:50],
             "candidateIds": missing_candidate_ids[:50],
@@ -3845,12 +6713,26 @@ class ProjectState:
                 }
             )
             return result
+        invalidated_age_artifacts: set[str] = set()
+        for parent_ref_id in missing_parent_ids:
+            parent = self.references.get(parent_ref_id)
+            if parent is not None and not is_synthetic_age_reference(parent):
+                invalidated_age_artifacts.update(
+                    self._invalidate_synthetic_age_image_artifacts(
+                        parent_ref_id=parent_ref_id,
+                        reason="workspace-repair-missing-parent",
+                    )
+                )
+        for artifact_id in affected_age_artifact_ids:
+            artifact = self.db.learned_artifact_by_id(artifact_id)
+            if artifact and str(artifact.get("status", "") or "") == "promoted":
+                self.db.update_learned_artifact_status(artifact_id, "rolled_back")
+                invalidated_age_artifacts.add(artifact_id)
         for ref_id in missing_ref_ids:
             self.references.pop(ref_id, None)
         self._mark_references_deleted(missing_ref_ids)
-        for candidate_id in missing_candidate_ids:
-            self.candidates.pop(candidate_id, None)
         self._mark_candidates_deleted(missing_candidate_ids)
+        self._forget_candidates(missing_candidate_ids)
         if missing_ref_ids:
             self.vector_store.rebuild({item_id: item.vector for item_id, item in self.references.items()})
             self._invalidate_reference_indexes()
@@ -3859,10 +6741,13 @@ class ProjectState:
                 "action": "repair_workspace",
                 "removed_references": len(missing_ref_ids),
                 "removed_candidates": len(missing_candidate_ids),
+                "removed_dependent_synthetic_age_references": len(dependent_synthetic_ids),
+                "rolled_back_synthetic_age_artifacts": len(invalidated_age_artifacts),
             }
         )
         self.save()
         result["after"] = self.workspace_health()
+        result["rolledBackSyntheticAgeArtifacts"] = len(invalidated_age_artifacts)
         return result
 
     def database_integrity(self) -> dict[str, Any]:
@@ -3944,6 +6829,7 @@ class ProjectState:
         relinked_references = 0
         relinked_candidates = 0
         relinked_fields = 0
+        changed_candidates: list[ReviewCandidate] = []
 
         def remap(value: str) -> tuple[str, bool, bool]:
             if not value:
@@ -3968,7 +6854,7 @@ class ProjectState:
                     self._mark_reference_dirty(ref.ref_id)
                 relinked_references += 1
                 relinked_fields += 1
-        for candidate in self.candidates.values():
+        for candidate in self._iter_authoritative_candidates(order="created"):
             candidate_changed = False
             for field_name in ("source_path", "best_ref_path", "media_source_path"):
                 current = str(getattr(candidate, field_name) or "")
@@ -3982,7 +6868,19 @@ class ProjectState:
             if candidate_changed:
                 relinked_candidates += 1
                 if not dry_run:
-                    self._mark_candidate_dirty(candidate.candidate_id)
+                    if self._candidate_index_backed:
+                        changed_candidates.append(candidate)
+                    else:
+                        self._mark_candidate_dirty(candidate.candidate_id)
+        if not dry_run and changed_candidates:
+            self.db.upsert_candidates(changed_candidates)
+            for candidate in changed_candidates:
+                loaded = self.candidates.get(candidate.candidate_id)
+                if loaded is not None:
+                    loaded.source_path = candidate.source_path
+                    loaded.best_ref_path = candidate.best_ref_path
+                    loaded.media_source_path = candidate.media_source_path
+                    self._loaded_candidate_payloads[candidate.candidate_id] = asdict(loaded)
         result = {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "dryRun": bool(dry_run),
@@ -4026,7 +6924,32 @@ class ProjectState:
         except (OSError, RuntimeError):
             return False
 
-    def _photos_manifest_root_profiles(self, settings: dict[str, Any], asset_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _sql_like_path_prefix(self, root_path: Path) -> tuple[str, str, str]:
+        root_text = str(root_path).rstrip("/\\")
+        escaped = root_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return root_text, f"{escaped}/%", f"{escaped}\\\\%"
+
+    def _photo_asset_count_under_root(
+        self,
+        conn: sqlite3.Connection,
+        root_path: Path,
+        *,
+        managed_only: bool = False,
+    ) -> int:
+        root_text, slash_prefix, backslash_prefix = self._sql_like_path_prefix(root_path)
+        filters = [
+            "(source_path = ? OR source_path LIKE ? ESCAPE '\\' OR source_path LIKE ? ESCAPE '\\')"
+        ]
+        params: list[Any] = [root_text, slash_prefix, backslash_prefix]
+        if managed_only:
+            filters.append("LOWER(COALESCE(source_kind, '')) = 'managed'")
+        row = conn.execute(
+            f"SELECT COUNT(*) AS n FROM photo_assets WHERE {' AND '.join(filters)}",
+            params,
+        ).fetchone()
+        return int(row["n"] if row else 0)
+
+    def _photos_manifest_root_profiles(self, settings: dict[str, Any], conn: sqlite3.Connection) -> list[dict[str, Any]]:
         workspace_default = str((self.root / "photo-library" / "managed").expanduser().resolve())
         roots = [dict(root) for root in settings.get("managedRoots", []) if isinstance(root, dict)]
         if not any(str(root.get("path", "") or "") == workspace_default for root in roots):
@@ -4048,17 +6971,7 @@ class ProjectState:
             except (OSError, RuntimeError):
                 root_path = Path(root_path_text)
                 inside_workspace = False
-            asset_count = 0
-            for asset in asset_rows:
-                if str(asset.get("sourceKind", "") or "").lower() != "managed":
-                    continue
-                source = str(asset.get("sourcePath", "") or "")
-                try:
-                    source_path = Path(source).expanduser().resolve()
-                    if source_path == root_path or root_path in source_path.parents:
-                        asset_count += 1
-                except (OSError, RuntimeError):
-                    continue
+            asset_count = self._photo_asset_count_under_root(conn, root_path, managed_only=True)
             profiles.append({
                 "profileId": str(root.get("profileId", "") or ""),
                 "name": str(root.get("name", "") or Path(root_path_text).name or "Managed library"),
@@ -4090,8 +7003,19 @@ class ProjectState:
             "metadataRows": 0,
             "keywordAssignments": 0,
             "peopleLinks": 0,
+            "peopleProfiles": 0,
+            "relationshipNameReviews": 0,
             "savedFilters": 0,
             "editStacks": 0,
+            "editVersions": 0,
+            "mediaPairRows": 0,
+            "curationPreferences": 0,
+            "externalSources": 0,
+            "externalAssetLinks": 0,
+            "externalAlbumLinks": 0,
+            "externalAlbumItems": 0,
+            "tetherSessions": 0,
+            "tetherCaptures": 0,
         }
         media_pairs = {
             "livePhotoAssets": 0,
@@ -4109,42 +7033,80 @@ class ProjectState:
             "samples": [],
             "nonLiveSamples": [],
         }
-        asset_rows: list[dict[str, Any]] = []
+        live_asset_rows: list[dict[str, Any]] = []
         media_pair_rows: list[dict[str, Any]] = []
         settings: dict[str, Any] = {}
+        root_profiles: list[dict[str, Any]] = []
         try:
             settings = self.db.photo_library_settings()
             with self.db.connect() as conn:
-                rows = conn.execute(
+                workspace_root = self.root.expanduser().resolve()
+                workspace_root_text, workspace_slash_prefix, workspace_backslash_prefix = self._sql_like_path_prefix(workspace_root)
+                count_row = conn.execute(
                     """
-                    SELECT asset_id, source_path, source_kind, media_kind, missing_at, metadata_json
+                    SELECT
+                        COUNT(*) AS assets,
+                        SUM(CASE WHEN LOWER(COALESCE(source_kind, '')) = 'managed' THEN 1 ELSE 0 END) AS managed_assets,
+                        SUM(CASE WHEN LOWER(COALESCE(source_kind, '')) = 'managed' THEN 0 ELSE 1 END) AS referenced_assets,
+                        SUM(CASE WHEN COALESCE(missing_at, '') != '' THEN 1 ELSE 0 END) AS missing_originals,
+                        SUM(CASE WHEN COALESCE(missing_at, '') != '' AND LOWER(COALESCE(source_kind, '')) = 'managed' THEN 1 ELSE 0 END) AS missing_managed_originals,
+                        SUM(CASE WHEN COALESCE(missing_at, '') != '' AND LOWER(COALESCE(source_kind, '')) != 'managed' THEN 1 ELSE 0 END) AS missing_referenced_originals,
+                        SUM(CASE WHEN source_path = ? OR source_path LIKE ? ESCAPE '\\' OR source_path LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END) AS workspace_backed_originals
                     FROM photo_assets
-                    ORDER BY added_at ASC, asset_id ASC
-                    """
-                ).fetchall()
-                asset_rows = [
-                    {
-                        "assetId": str(row["asset_id"] or ""),
-                        "sourcePath": str(row["source_path"] or ""),
-                        "sourceKind": str(row["source_kind"] or "referenced"),
-                        "mediaKind": str(row["media_kind"] or "image"),
-                        "missingAt": str(row["missing_at"] or ""),
-                        "metadataJson": str(row["metadata_json"] or "{}"),
-                    }
-                    for row in rows
-                ]
+                    """,
+                    (workspace_root_text, workspace_slash_prefix, workspace_backslash_prefix),
+                ).fetchone()
+                if count_row:
+                    counts["assets"] = int(count_row["assets"] or 0)
+                    counts["managedAssets"] = int(count_row["managed_assets"] or 0)
+                    counts["referencedAssets"] = int(count_row["referenced_assets"] or 0)
+                    counts["missingOriginals"] = int(count_row["missing_originals"] or 0)
+                    counts["missingManagedOriginals"] = int(count_row["missing_managed_originals"] or 0)
+                    counts["missingReferencedOriginals"] = int(count_row["missing_referenced_originals"] or 0)
+                    counts["workspaceBackedOriginals"] = int(count_row["workspace_backed_originals"] or 0)
+                    counts["externalOriginals"] = max(0, counts["assets"] - counts["workspaceBackedOriginals"])
+                    counts["managedOriginalsOutsideWorkspace"] = max(0, counts["managedAssets"] - self._photo_asset_count_under_root(conn, workspace_root, managed_only=True))
+                    counts["referencedOriginalsOutsideWorkspace"] = max(0, counts["externalOriginals"] - counts["managedOriginalsOutsideWorkspace"])
                 for key, sql in {
                     "metadataRows": "SELECT COUNT(*) AS n FROM photo_asset_metadata",
                     "keywordAssignments": "SELECT COUNT(*) AS n FROM photo_asset_keywords",
                     "peopleLinks": "SELECT COUNT(*) AS n FROM photo_asset_people",
+                    "peopleProfiles": "SELECT COUNT(*) AS n FROM photo_people_profiles",
+                    "relationshipNameReviews": "SELECT COUNT(*) AS n FROM photo_relationship_name_reviews",
                     "albums": "SELECT COUNT(*) AS n FROM photo_albums",
                     "albumFolders": "SELECT COUNT(*) AS n FROM photo_album_folders",
                     "albumItems": "SELECT COUNT(*) AS n FROM photo_album_items",
                     "savedFilters": "SELECT COUNT(*) AS n FROM photo_saved_filters",
                     "editStacks": "SELECT COUNT(*) AS n FROM photo_edit_stacks",
+                    "editVersions": "SELECT COUNT(*) AS n FROM photo_edit_stack_versions",
+                    "mediaPairRows": "SELECT COUNT(*) AS n FROM photo_media_pairs",
+                    "curationPreferences": "SELECT COUNT(*) AS n FROM meta WHERE key = 'photo_curation_preferences'",
+                    "externalSources": "SELECT COUNT(*) AS n FROM photo_external_sources",
+                    "externalAssetLinks": "SELECT COUNT(*) AS n FROM photo_asset_external_ids",
+                    "externalAlbumLinks": "SELECT COUNT(*) AS n FROM photo_external_album_links",
+                    "externalAlbumItems": "SELECT COUNT(*) AS n FROM photo_external_album_items",
+                    "tetherSessions": "SELECT COUNT(*) AS n FROM photo_tether_sessions",
+                    "tetherCaptures": "SELECT COUNT(*) AS n FROM photo_tether_captures",
                 }.items():
                     row = conn.execute(sql).fetchone()
                     counts[key] = int(row["n"] if row else 0)
+                rows = conn.execute(
+                    """
+                    SELECT asset_id, source_path, media_kind, metadata_json
+                    FROM photo_assets
+                    WHERE media_kind = 'live_photo' OR metadata_json LIKE '%pairedVideoPath%'
+                    ORDER BY added_at ASC, asset_id ASC
+                    """
+                ).fetchall()
+                live_asset_rows = [
+                    {
+                        "assetId": str(row["asset_id"] or ""),
+                        "sourcePath": str(row["source_path"] or ""),
+                        "mediaKind": str(row["media_kind"] or "image"),
+                        "metadataJson": str(row["metadata_json"] or "{}"),
+                    }
+                    for row in rows
+                ]
                 try:
                     pair_rows = conn.execute(
                         """
@@ -4171,6 +7133,7 @@ class ProjectState:
                     ]
                 except sqlite3.DatabaseError:
                     media_pair_rows = []
+                root_profiles = self._photos_manifest_root_profiles(settings, conn)
         except sqlite3.DatabaseError as exc:
             return {
                 "schemaVersion": 1,
@@ -4179,27 +7142,8 @@ class ProjectState:
                 "counts": counts,
             }
 
-        for asset in asset_rows:
-            counts["assets"] += 1
+        for asset in live_asset_rows:
             source_path = str(asset.get("sourcePath", "") or "")
-            source_kind = str(asset.get("sourceKind", "") or "referenced").lower()
-            is_managed = source_kind == "managed"
-            counts["managedAssets" if is_managed else "referencedAssets"] += 1
-            inside_workspace = self._path_inside_workspace(source_path)
-            if inside_workspace:
-                counts["workspaceBackedOriginals"] += 1
-            else:
-                counts["externalOriginals"] += 1
-                counts["managedOriginalsOutsideWorkspace" if is_managed else "referencedOriginalsOutsideWorkspace"] += 1
-            source_exists = False
-            try:
-                source_exists = Path(source_path).expanduser().is_file()
-            except (OSError, RuntimeError):
-                source_exists = False
-            if not source_exists:
-                counts["missingOriginals"] += 1
-                counts["missingManagedOriginals" if is_managed else "missingReferencedOriginals"] += 1
-
             metadata: dict[str, Any] = {}
             try:
                 parsed = json.loads(str(asset.get("metadataJson", "{}") or "{}"))
@@ -4285,7 +7229,6 @@ class ProjectState:
                         "includedInWorkspaceBackup": included_in_workspace,
                     })
 
-        root_profiles = self._photos_manifest_root_profiles(settings, asset_rows)
         backup_policy = settings.get("backupPolicy", {}) if isinstance(settings.get("backupPolicy"), dict) else {}
         return {
             "schemaVersion": 1,
@@ -4321,14 +7264,23 @@ class ProjectState:
         while backup_path.exists():
             backup_path = export_root / f"vintrace-workspace-backup-{stamp}-{counter}.zip"
             counter += 1
+        try:
+            candidate_count = self.db.candidate_count() if self._candidate_index_backed else len(self.candidates)
+        except sqlite3.Error:
+            candidate_count = len(self.candidates)
         manifest = {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "workspace": str(self.root),
             "workspaceMetadata": self.workspace_metadata,
             "includeGenerated": bool(include_generated),
+            # The id (not the key) of the workspace key this backup's SQLCipher DB and
+            # AES-GCM sidecars are encrypted under. On restore it lets us tell a genuine
+            # cross-machine KEY MISMATCH (host key id differs -> recoverable with the code)
+            # apart from CORRUPTION (key id matches but the bytes still won't open -> fail).
+            "workspaceKeyId": self._backup_workspace_key_id(),
             "counts": {
                 "references": len(self.references),
-                "candidates": len(self.candidates),
+                "candidates": candidate_count,
                 "scanRuns": len(self.scan_history),
             },
             "photos": self._photos_backup_manifest(include_generated=bool(include_generated)),
@@ -4336,7 +7288,7 @@ class ProjectState:
         }
         include_dirs = {"exports"}
         if not include_generated:
-            include_dirs.update({"previews", "video-frames"})
+            include_dirs.update({"previews", "video-frames", "synthetic-age-images"})
         # data-persistence-3: archive a transactionally-consistent DB snapshot
         # (VACUUM INTO) instead of byte-copying the live workspace.sqlite3 + its
         # -wal/-shm, which can be torn if a writer (scan / MCP process) is active
@@ -4352,8 +7304,11 @@ class ProjectState:
         except Exception:
             snapshot_ok = False
         written = 0
+        passphrase = backup_passphrase()
+        encrypted = bool(passphrase)
+        archive_path = backup_path if not encrypted else export_root / f".{backup_path.name}.plain.tmp"
         try:
-            with zipfile.ZipFile(backup_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                 archive.writestr("backup-manifest.json", json.dumps(manifest, indent=2))
                 written += 1
                 if snapshot_ok:
@@ -4368,6 +7323,13 @@ class ProjectState:
                         relative = path.relative_to(self.root)
                         if path == backup_path or path == db_snapshot or path.name == ".state.lock":
                             continue
+                        # Never archive the OpenTelemetry trace log. It is plaintext, it
+                        # sits inside an otherwise SQLCipher-encrypted workspace, and a
+                        # backup is the easiest way for it to leave the machine. Telemetry
+                        # is opt-in (agent_telemetry.py), but even an operator who opts in
+                        # has not consented to shipping spans inside a restore archive.
+                        if path.name == TRACE_FILENAME:
+                            continue
                         # Never archive the live WAL/SHM (process-private, can be
                         # inconsistent with the main file); skip the live main DB
                         # too when the consistent snapshot was written.
@@ -4377,28 +7339,26 @@ class ProjectState:
                             continue
                         archive.write(path, relative.as_posix())
                         written += 1
+            if encrypted:
+                encrypted_temp = export_root / f".{backup_path.name}.enc.tmp"
+                try:
+                    encrypt_file(archive_path, encrypted_temp, passphrase)
+                    os.replace(encrypted_temp, backup_path)
+                finally:
+                    try:
+                        encrypted_temp.unlink()
+                    except OSError:
+                        pass
         finally:
             try:
                 db_snapshot.unlink()
             except OSError:
                 pass
-        # PC-03: optionally encrypt the finished backup at rest (AES-256-GCM via
-        # an operator passphrase). The file keeps its .zip name; verify/restore
-        # detect the encryption from the content header. Default (no passphrase)
-        # path is unchanged.
-        encrypted = False
-        passphrase = backup_passphrase()
-        if passphrase:
-            encrypted_temp = backup_path.with_name(f".{backup_path.name}.enc.tmp")
             try:
-                encrypt_file(backup_path, encrypted_temp, passphrase)
-                os.replace(encrypted_temp, backup_path)
-            finally:
-                try:
-                    encrypted_temp.unlink()
-                except OSError:
-                    pass
-            encrypted = True
+                if archive_path != backup_path:
+                    archive_path.unlink()
+            except OSError:
+                pass
         self._append_audit(
             {
                 "action": "export_workspace_backup",
@@ -4416,24 +7376,31 @@ class ProjectState:
             "encrypted": encrypted,
         }
 
+    @contextmanager
     def _backup_archive_source(self, path: Path):
         # PC-03: transparently open an (optionally) encrypted backup. Returns the
-        # path itself for a plain ZIP (unchanged behavior) or an in-memory
-        # decrypted ZIP. Raises ValueError if encrypted but the passphrase is
-        # missing/wrong.
+        # path itself for a plain ZIP (unchanged behavior) or a temporary
+        # decrypted ZIP path. Raises ValueError if encrypted but the passphrase
+        # is missing/wrong.
         with path.open("rb") as handle:
             head = handle.read(16)
         if not is_encrypted(head):
-            return path
+            yield path
+            return
         passphrase = backup_passphrase()
         if not passphrase:
             raise ValueError("This backup is encrypted; set VINTRACE_BACKUP_PASSPHRASE to verify or restore it.")
         try:
-            return io.BytesIO(decrypt_bytes(path.read_bytes(), passphrase))
+            with tempfile.TemporaryDirectory(prefix="vintrace-backup-decrypt-") as tmp:
+                decrypted_path = Path(tmp) / "backup.zip"
+                decrypt_file(path, decrypted_path, passphrase)
+                yield decrypted_path
         except DecryptionError as exc:
             raise ValueError(str(exc)) from exc
 
-    def _verify_backup_database_entry(self, archive: zipfile.ZipFile) -> dict[str, Any]:
+    def _verify_backup_database_entry(
+        self, archive: zipfile.ZipFile, *, archived_key_id: str = ""
+    ) -> dict[str, Any]:
         report: dict[str, Any] = {
             "checked": False,
             "ok": True,
@@ -4456,7 +7423,35 @@ class ProjectState:
                 if database_path.stat().st_size <= 0:
                     report["error"] = "workspace.sqlite3 is empty."
                     return report
-                conn = sqlite3.connect(str(database_path))
+                try:
+                    conn = self.db._open_connection(database_path)
+                except WorkspaceEncryptionError as exc:
+                    # A failed open means one of two very different things, and SQLCipher cannot
+                    # itself tell them apart (a wrong key and corrupt bytes both just fail to
+                    # decrypt). We disambiguate with the archived workspace key id:
+                    #   * host key id != archived key id -> genuine CROSS-MACHINE KEY MISMATCH.
+                    #     The bytes are intact; the DB opens with the user's recovery code after
+                    #     restore. Let restore proceed (without it, no disaster recovery is
+                    #     possible at all — restore aborts before extracting a single file).
+                    #   * host key id == archived key id -> the key is right but the open failed,
+                    #     so the DB is CORRUPT. This must remain a hard failure.
+                    report["error"] = str(exc)
+                    header = database_path.read_bytes()[:16]
+                    if header.startswith(b"SQLite format 3\x00"):
+                        # Plaintext SQLite is malformed for this product (the workspace DB is
+                        # always SQLCipher), regardless of key id.
+                        report["error"] = "workspace.sqlite3 is not encrypted as expected."
+                        report["ok"] = False
+                        return report
+                    host_key_id = self._backup_workspace_key_id()
+                    genuine_mismatch = bool(archived_key_id) and archived_key_id != host_key_id
+                    if genuine_mismatch:
+                        report["keyMismatch"] = True
+                        report["ok"] = True
+                    else:
+                        # Same key id (or unknown) but the DB will not open -> treat as corrupt.
+                        report["ok"] = False
+                    return report
                 try:
                     conn.execute("PRAGMA query_only=ON")
                     integrity_rows = conn.execute("PRAGMA integrity_check").fetchall()
@@ -4519,63 +7514,113 @@ class ProjectState:
         result["bytes"] = path.stat().st_size
         required = {"backup-manifest.json", "config.json", "references.json"}
         try:
-            with zipfile.ZipFile(self._backup_archive_source(path)) as archive:
-                corrupt = archive.testzip()
-                names = archive.namelist()
-                result["fileCount"] = len(names)
-                result["corruptEntry"] = corrupt or ""
-                name_set = set(names)
-                result["missingCoreFiles"] = sorted(required - name_set)
-                if "review_candidates.json" not in name_set and "workspace.sqlite3" not in name_set:
-                    result["missingCoreFiles"].append("review_candidates.json or workspace.sqlite3")
-                result["dangerousEntries"] = [
-                    name
-                    for name in names
-                    if (
-                        name.startswith(("/", "\\\\", "//"))
-                        or (len(name) >= 3 and name[1] == ":" and name[2] in {"/", "\\"})
-                        or Path(name).is_absolute()
-                        or ".." in Path(name).parts
+            with self._backup_archive_source(path) as archive_source:
+                with zipfile.ZipFile(archive_source) as archive:
+                    corrupt = archive.testzip()
+                    names = archive.namelist()
+                    result["fileCount"] = len(names)
+                    result["corruptEntry"] = corrupt or ""
+                    name_set = set(names)
+                    result["missingCoreFiles"] = sorted(required - name_set)
+                    if "review_candidates.json" not in name_set and "workspace.sqlite3" not in name_set:
+                        result["missingCoreFiles"].append("review_candidates.json or workspace.sqlite3")
+                    result["dangerousEntries"] = [
+                        name
+                        for name in names
+                        if (
+                            name.startswith(("/", "\\\\", "//"))
+                            or (len(name) >= 3 and name[1] == ":" and name[2] in {"/", "\\"})
+                            or Path(name).is_absolute()
+                            or ".." in Path(name).parts
+                        )
+                    ][:20]
+                    # Read the manifest's workspace key id up front so the sensitive-file loop
+                    # can tell a genuine cross-machine key mismatch from corruption, the same way
+                    # the DB check does. A "key mismatch" that isn't a real mismatch is corruption.
+                    archived_key_id = ""
+                    if "backup-manifest.json" in name_set:
+                        try:
+                            manifest_probe = json.loads(archive.read("backup-manifest.json").decode("utf-8"))
+                            if isinstance(manifest_probe, dict):
+                                archived_key_id = str(manifest_probe.get("workspaceKeyId") or "")
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            archived_key_id = ""
+                    host_key_id = self._backup_workspace_key_id()
+                    genuine_key_mismatch = bool(archived_key_id) and archived_key_id != host_key_id
+
+                    expected_shapes = {
+                        "backup-manifest.json": dict,
+                        "config.json": dict,
+                        "references.json": list,
+                        "review_candidates.json": list,
+                    }
+                    for name, expected_type in expected_shapes.items():
+                        if name not in name_set:
+                            continue
+                        try:
+                            raw = archive.read(name)
+                            role = self._sensitive_file_role(Path(name))
+                            if role:
+                                raw = self.workspace_encryption.decrypt_bytes(raw, role=role)
+                            payload = json.loads(raw.decode("utf-8"))
+                        except WorkspaceEncryptionError as exc:
+                            # Cross-machine disaster recovery: a sensitive core file that is
+                            # genuinely AES-GCM-encrypted (correct magic) and whose archived key
+                            # id differs from this host's is a KEY MISMATCH, not corruption. The
+                            # bytes are intact and decrypt under the recovery code after restore.
+                            # If the key id MATCHES but decryption still fails, the file is
+                            # corrupt and must be rejected.
+                            if (
+                                role
+                                and genuine_key_mismatch
+                                and self.workspace_encryption.is_encrypted_bytes(archive.read(name))
+                            ):
+                                result["keyMismatch"] = True
+                                continue
+                            result["invalidCoreFiles"].append(name)
+                            result["invalidCoreErrors"][name] = str(exc)
+                            continue
+                        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                            result["invalidCoreFiles"].append(name)
+                            result["invalidCoreErrors"][name] = str(exc)
+                            continue
+                        if not isinstance(payload, expected_type):
+                            result["invalidCoreFiles"].append(name)
+                            result["invalidCoreErrors"][name] = f"Expected {expected_type.__name__}."
+                            continue
+                        if name == "backup-manifest.json":
+                            result["manifest"] = payload
+                    archived_key_id = ""
+                    if isinstance(result.get("manifest"), dict):
+                        archived_key_id = str(result["manifest"].get("workspaceKeyId") or "")
+                    database_integrity = self._verify_backup_database_entry(
+                        archive, archived_key_id=archived_key_id
                     )
-                ][:20]
-                expected_shapes = {
-                    "backup-manifest.json": dict,
-                    "config.json": dict,
-                    "references.json": list,
-                    "review_candidates.json": list,
-                }
-                for name, expected_type in expected_shapes.items():
-                    if name not in name_set:
-                        continue
-                    try:
-                        payload = json.loads(archive.read(name).decode("utf-8"))
-                    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                        result["invalidCoreFiles"].append(name)
-                        result["invalidCoreErrors"][name] = str(exc)
-                        continue
-                    if not isinstance(payload, expected_type):
-                        result["invalidCoreFiles"].append(name)
-                        result["invalidCoreErrors"][name] = f"Expected {expected_type.__name__}."
-                        continue
-                    if name == "backup-manifest.json":
-                        result["manifest"] = payload
-                database_integrity = self._verify_backup_database_entry(archive)
-                result["databaseIntegrity"] = database_integrity
-                if database_integrity.get("checked") and not database_integrity.get("ok"):
-                    result["invalidCoreFiles"].append("workspace.sqlite3")
-                    message = database_integrity.get("error") or "workspace.sqlite3 failed integrity verification."
-                    result["invalidCoreErrors"]["workspace.sqlite3"] = str(message)
-                if "backup-manifest.json" not in name_set:
-                    result["error"] = "Backup manifest is missing."
-                result["ok"] = (
-                    not corrupt
-                    and not result["missingCoreFiles"]
-                    and not result["dangerousEntries"]
-                    and not result["invalidCoreFiles"]
-                    and isinstance(result["manifest"], dict)
-                    and bool(result["manifest"])
-                )
-        except (OSError, zipfile.BadZipFile, json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+                    result["databaseIntegrity"] = database_integrity
+                    if database_integrity.get("checked") and not database_integrity.get("ok"):
+                        result["invalidCoreFiles"].append("workspace.sqlite3")
+                        message = database_integrity.get("error") or "workspace.sqlite3 failed integrity verification."
+                        result["invalidCoreErrors"]["workspace.sqlite3"] = str(message)
+                    if "backup-manifest.json" not in name_set:
+                        result["error"] = "Backup manifest is missing."
+                    result["ok"] = (
+                        not corrupt
+                        and not result["missingCoreFiles"]
+                        and not result["dangerousEntries"]
+                        and not result["invalidCoreFiles"]
+                        and isinstance(result["manifest"], dict)
+                        and bool(result["manifest"])
+                    )
+        except (
+            OSError,
+            zipfile.BadZipFile,
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            ValueError,
+            WorkspaceEncryptionError,
+        ) as exc:
+            # WorkspaceEncryptionError must degrade to a graceful ok=False here, never propagate
+            # as an uncaught RuntimeError into restore_workspace_backup and abort the whole run.
             result["error"] = str(exc)
         self._append_audit(
             {
@@ -4641,28 +7686,29 @@ class ProjectState:
 
         file_count = 0
         bytes_written = 0
-        with zipfile.ZipFile(self._backup_archive_source(path)) as archive:
-            for member in archive.infolist():
-                name = member.filename
-                if not name or name.endswith("/"):
-                    continue
-                if (
-                    name.startswith(("/", "\\\\", "//"))
-                    or (len(name) >= 3 and name[1] == ":" and name[2] in {"/", "\\"})
-                    or Path(name).is_absolute()
-                    or ".." in Path(name).parts
-                ):
-                    raise ValueError(f"Unsafe path in backup: {name}")
-                destination = (target / name).resolve()
-                try:
-                    destination.relative_to(target)
-                except ValueError as exc:
-                    raise ValueError(f"Unsafe path in backup: {name}") from exc
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(member) as source, destination.open("wb") as output:
-                    shutil.copyfileobj(source, output, length=1024 * 1024)
-                file_count += 1
-                bytes_written += destination.stat().st_size
+        with self._backup_archive_source(path) as archive_source:
+            with zipfile.ZipFile(archive_source) as archive:
+                for member in archive.infolist():
+                    name = member.filename
+                    if not name or name.endswith("/"):
+                        continue
+                    if (
+                        name.startswith(("/", "\\\\", "//"))
+                        or (len(name) >= 3 and name[1] == ":" and name[2] in {"/", "\\"})
+                        or Path(name).is_absolute()
+                        or ".." in Path(name).parts
+                    ):
+                        raise ValueError(f"Unsafe path in backup: {name}")
+                    destination = (target / name).resolve()
+                    try:
+                        destination.relative_to(target)
+                    except ValueError as exc:
+                        raise ValueError(f"Unsafe path in backup: {name}") from exc
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(member) as source, destination.open("wb") as output:
+                        shutil.copyfileobj(source, output, length=1024 * 1024)
+                    file_count += 1
+                    bytes_written += destination.stat().st_size
 
         state_summary = {
             "references": 0,
@@ -4676,12 +7722,12 @@ class ProjectState:
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                 if isinstance(metadata, dict):
                     state_summary["workspaceId"] = str(metadata.get("workspaceId", ""))
-            refs = json.loads((target / "references.json").read_text(encoding="utf-8"))
+            refs = self.workspace_encryption.read_json(target / "references.json", role="face-references-v1")
             if isinstance(refs, list):
                 state_summary["references"] = len(refs)
             candidates_path = target / "review_candidates.json"
             if candidates_path.exists():
-                candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
+                candidates = self.workspace_encryption.read_json(candidates_path, role="review-candidates-v1")
                 if isinstance(candidates, list):
                     state_summary["candidates"] = len(candidates)
             scan_history_path = target / "scan_history.json"
@@ -4689,7 +7735,7 @@ class ProjectState:
                 scan_runs = json.loads(scan_history_path.read_text(encoding="utf-8"))
                 if isinstance(scan_runs, list):
                     state_summary["scanRuns"] = len(scan_runs)
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError, WorkspaceEncryptionError):
             pass
         database_path = target / "workspace.sqlite3"
         summary_warnings: list[str] = []
@@ -4701,7 +7747,7 @@ class ProjectState:
             # always raised and was silently swallowed). Warn on disagreement
             # with the manifest/JSON-derived counts.
             try:
-                with sqlite3.connect(database_path) as connection:
+                with self.db._open_connection(database_path) as connection:
                     for key, table in (("candidates", "review_candidates"), ("scanRuns", "scan_runs")):
                         try:
                             db_count = int(connection.execute(f"select count(*) from {table}").fetchone()[0])
@@ -4716,6 +7762,15 @@ class ProjectState:
                         state_summary[key] = db_count
             except sqlite3.DatabaseError:
                 summary_warnings.append("Could not open the restored database to verify counts.")
+            except WorkspaceEncryptionError:
+                # Cross-machine disaster recovery: the restored DB is encrypted under the key
+                # of the machine that made the backup and opens only with the user's recovery
+                # code, which is applied when the workspace is next unlocked — not here. The
+                # files ARE restored; only this optional count cross-check is deferred.
+                summary_warnings.append(
+                    "Restored database is encrypted under a different key; enter your recovery "
+                    "code to unlock it. Counts could not be cross-checked during restore."
+                )
 
         self._append_audit(
             {
@@ -4837,6 +7892,13 @@ class ProjectState:
             "video_timestamp_ms",
             "video_frame_index",
             "video_duration_ms",
+            "video_track_id",
+            "video_track_version",
+            "video_track_start_ms",
+            "video_track_end_ms",
+            "video_track_frame_count",
+            "video_track_keyframe_timestamps_ms",
+            "video_track_keyframe_indices",
             "source_hash",
             "best_ref_id",
             "best_ref_path",
@@ -4859,6 +7921,13 @@ class ProjectState:
             "video_timestamp_ms": candidate.get("video_timestamp_ms"),
             "video_frame_index": candidate.get("video_frame_index"),
             "video_duration_ms": candidate.get("video_duration_ms"),
+            "video_track_id": candidate.get("video_track_id", ""),
+            "video_track_version": candidate.get("video_track_version", ""),
+            "video_track_start_ms": candidate.get("video_track_start_ms"),
+            "video_track_end_ms": candidate.get("video_track_end_ms"),
+            "video_track_frame_count": candidate.get("video_track_frame_count", 0),
+            "video_track_keyframe_timestamps_ms": json.dumps(candidate.get("video_track_keyframe_timestamps_ms", [])),
+            "video_track_keyframe_indices": json.dumps(candidate.get("video_track_keyframe_indices", [])),
             "source_hash": candidate.get("source_hash", ""),
             "best_ref_id": candidate["best_ref_id"],
             "best_ref_path": candidate["best_ref_path"],
@@ -4874,42 +7943,82 @@ class ProjectState:
         json_path = export_root / f"vintrace-review-report-{stamp}.json"
         csv_path = export_root / f"vintrace-candidates-{stamp}.csv"
         status_counts = {"pending": 0, "accepted": 0, "rejected": 0, "uncertain": 0}
-        for candidate in self.candidates.values():
-            if candidate.status in status_counts:
-                status_counts[candidate.status] += 1
-        payload = {
+        candidate_total = 0
+        try:
+            if self._candidate_index_backed:
+                self._flush_candidate_index()
+                indexed_counts = self.db.candidate_status_counts()
+                for key in status_counts:
+                    status_counts[key] = int(indexed_counts.get(key, 0) or 0)
+                candidate_total = int(indexed_counts.get("total", 0) or 0)
+        except sqlite3.Error:
+            candidate_total = 0
+        if not candidate_total:
+            for candidate in self._iter_authoritative_candidates(order="status"):
+                status = str(candidate.status or "")
+                if status in status_counts:
+                    status_counts[status] += 1
+                candidate_total += 1
+        counts = {
+            "references": len(self.references),
+            "candidates": candidate_total,
+            **status_counts,
+        }
+        header_payload = {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "workspace": str(self.root),
-            "counts": {
-                "references": len(self.references),
-                "candidates": len(self.candidates),
-                **status_counts,
-            },
+            "counts": counts,
             "config": asdict(self.config),
             "scanHistory": self.scan_history[:80],
             "references": [self._reference_summary(ref) for ref in sorted(self.references.values(), key=lambda item: (item.person_name.lower(), item.age_bucket, item.source_path))],
-            "candidates": [asdict(candidate) for candidate in sorted(self.candidates.values(), key=lambda item: (item.status, item.person_name.lower(), -item.score))],
         }
-        json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        def candidate_payloads() -> Iterable[dict[str, Any]]:
+            for candidate in self._iter_authoritative_candidates(order="status"):
+                yield asdict(candidate)
+
+        def stream_report(handle) -> None:
+            handle.write("{")
+            first_field = True
+            for key, value in header_payload.items():
+                if first_field:
+                    first_field = False
+                else:
+                    handle.write(",")
+                handle.write(json.dumps(str(key), separators=(",", ":")))
+                handle.write(":")
+                handle.write(json.dumps(value, separators=(",", ":")))
+            handle.write(",\"candidates\":[")
+            first_candidate = True
+            for candidate in candidate_payloads():
+                if first_candidate:
+                    first_candidate = False
+                else:
+                    handle.write(",")
+                handle.write(json.dumps(candidate, separators=(",", ":")))
+            handle.write("]}")
+
+        atomic_write(json_path, stream_report)
         with csv_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(
                 handle,
                 fieldnames=self._candidate_csv_fieldnames(),
             )
             writer.writeheader()
-            for candidate in payload["candidates"]:
+            for candidate in candidate_payloads():
                 writer.writerow(self._candidate_csv_row(candidate))
         self._append_audit({"action": "export_report", "json_path": str(json_path), "csv_path": str(csv_path)})
         return {
             "jsonPath": str(json_path),
             "csvPath": str(csv_path),
-            "counts": payload["counts"],
+            "counts": counts,
         }
 
     def export_candidates(self, candidate_ids: list[str], folder: Path | None = None) -> dict[str, Any]:
         unique_ids = list(dict.fromkeys(str(candidate_id) for candidate_id in candidate_ids if str(candidate_id).strip()))
         if not unique_ids:
             raise ValueError("Select at least one candidate to export.")
+        self._ensure_candidates_loaded(unique_ids)
         missing = [candidate_id for candidate_id in unique_ids if candidate_id not in self.candidates]
         if missing:
             raise KeyError(f"Candidate not found: {missing[0]}")
@@ -4962,6 +8071,44 @@ class ProjectState:
             return Path(candidate.media_source_path)
         return Path(candidate.source_path)
 
+    def _media_path_lookup_values(self, path: Path, resolved: Path | None = None) -> set[str]:
+        raw = path.expanduser()
+        values = {str(raw)}
+        if not raw.is_absolute():
+            try:
+                values.add(str(raw.absolute()))
+            except OSError:
+                pass
+        if resolved is not None:
+            values.add(str(resolved))
+        return {value for value in values if value}
+
+    def _candidate_media_source_lookup_values(self, candidate: ReviewCandidate) -> set[str]:
+        return self._media_path_lookup_values(self._candidate_media_source(candidate))
+
+    def _candidate_media_source_matches(self, source_paths: Iterable[str]) -> list[ReviewCandidate]:
+        lookup_values = {str(path or "").strip() for path in source_paths if str(path or "").strip()}
+        if not lookup_values:
+            return []
+        candidates_by_id: dict[str, ReviewCandidate] = {}
+        if self._candidate_index_backed:
+            self._flush_candidate_index()
+            try:
+                for payload in self.db.iter_candidate_payloads_for_source_paths(lookup_values):
+                    candidate = self._candidate_from_payload(payload)
+                    if candidate is not None:
+                        candidates_by_id[candidate.candidate_id] = candidate
+                return list(candidates_by_id.values())
+            except sqlite3.Error:
+                pass
+        for candidate in self.candidates.values():
+            if self._candidate_media_source_lookup_values(candidate) & lookup_values:
+                candidates_by_id[candidate.candidate_id] = candidate
+        return list(candidates_by_id.values())
+
+    def _candidate_media_source_match_count(self, source_paths: Iterable[str]) -> int:
+        return len(self._candidate_media_source_matches(source_paths))
+
     def _candidate_media_destination_root(self, action: str, folder: Path | None = None) -> Path:
         if folder is not None:
             return folder.expanduser().resolve()
@@ -4973,6 +8120,7 @@ class ProjectState:
         unique_ids = list(dict.fromkeys(str(candidate_id) for candidate_id in candidate_ids if str(candidate_id).strip()))
         if not unique_ids:
             raise ValueError("Select at least one possible match first.")
+        self._ensure_candidates_loaded(unique_ids)
         missing = [candidate_id for candidate_id in unique_ids if candidate_id not in self.candidates]
         if missing:
             raise KeyError(f"Candidate not found: {missing[0]}")
@@ -4998,14 +8146,13 @@ class ProjectState:
         item_limit = max(1, min(250, int(item_limit)))
         item_offset = max(0, int(item_offset))
         destination_root = self._candidate_media_destination_root(action, folder)
-        reference_paths = {
-            str(safe_resolve(Path(ref.source_path)))
-            for ref in self.references.values()
-            if ref.source_path
-        }
+        reference_lookup_values: set[str] = set()
+        for ref in self.references.values():
+            if ref.source_path:
+                reference_lookup_values.update(self._media_path_lookup_values(Path(ref.source_path)))
         generated_roots = [safe_resolve(self.previews_path), safe_resolve(self.video_frames_path)]
         seen_sources: dict[str, dict[str, Any]] = {}
-        actionable_source_keys: set[str] = set()
+        actionable_source_lookup_values: set[str] = set()
         items: list[dict[str, Any]] = []
         counts = {
             "selected": len(unique_ids),
@@ -5026,6 +8173,7 @@ class ProjectState:
             source = self._candidate_media_source(candidate).expanduser()
             resolved_source = safe_resolve(source)
             source_key = str(resolved_source)
+            source_lookup_values = self._media_path_lookup_values(source, resolved_source)
             size_bytes = 0
             reason = ""
             result = "ready"
@@ -5056,7 +8204,7 @@ class ProjectState:
                     elif is_symlink:
                         reason = "symbolic_links_are_not_managed"
                         counts["symlinks"] += 1
-                    elif action in {"move", "trash"} and source_key in reference_paths:
+                    elif action in {"move", "trash"} and source_lookup_values & reference_lookup_values:
                         reason = "source_is_also_a_saved_person_photo"
                         counts["protectedReferences"] += 1
                     elif action in {"move", "trash"} and any(root == resolved_source or root in resolved_source.parents for root in generated_roots):
@@ -5067,13 +8215,13 @@ class ProjectState:
                     counts["actionable"] += 1
                     counts["uniqueSources"] += 1
                     counts["totalBytes"] += size_bytes
-                    actionable_source_keys.add(source_key)
+                    actionable_source_lookup_values.update(source_lookup_values)
                 else:
                     counts["skipped"] += 1
                     result = "skipped"
                 seen_sources[source_key] = {"actionable": actionable, "reason": reason, "sizeBytes": size_bytes}
             if action in {"move", "trash"} and actionable:
-                actionable_source_keys.add(source_key)
+                actionable_source_lookup_values.update(source_lookup_values)
             if preview_index >= item_offset and len(items) < item_limit:
                 items.append(
                     {
@@ -5088,13 +8236,8 @@ class ProjectState:
                     }
                 )
 
-        if action in {"move", "trash"} and actionable_source_keys:
-            for candidate in self.candidates.values():
-                try:
-                    if str(safe_resolve(self._candidate_media_source(candidate))) in actionable_source_keys:
-                        counts["removedCandidatesEstimate"] += 1
-                except Exception:
-                    continue
+        if action in {"move", "trash"} and actionable_source_lookup_values:
+            counts["removedCandidatesEstimate"] = self._candidate_media_source_match_count(actionable_source_lookup_values)
 
         storage = self._destination_storage_report(destination_root)
         warnings: list[str] = []
@@ -5132,13 +8275,12 @@ class ProjectState:
         media_root = action_root / "media"
         media_root.mkdir(parents=True, exist_ok=True)
 
-        reference_paths = {
-            str(safe_resolve(Path(ref.source_path)))
-            for ref in self.references.values()
-            if ref.source_path
-        }
+        reference_lookup_values: set[str] = set()
+        for ref in self.references.values():
+            if ref.source_path:
+                reference_lookup_values.update(self._media_path_lookup_values(Path(ref.source_path)))
         copied_or_moved_sources: dict[str, dict[str, Any]] = {}
-        affected_source_keys: set[str] = set()
+        affected_source_lookup_values: set[str] = set()
         removable_candidate_ids: set[str] = set()
         items: list[dict[str, Any]] = []
         counts = {
@@ -5152,9 +8294,6 @@ class ProjectState:
             "verified": 0,
             "verificationFailed": 0,
         }
-
-        def safe_source_key(path: Path) -> str:
-            return str(safe_resolve(path))
 
         def unique_target(source: Path, candidate: ReviewCandidate, index: int) -> Path:
             person_dir = media_root / self._safe_filename(candidate.person_name or "Unlabeled")
@@ -5235,6 +8374,7 @@ class ProjectState:
             source = self._candidate_media_source(candidate).expanduser()
             resolved_source = safe_resolve(source)
             source_key = str(resolved_source)
+            source_lookup_values = self._media_path_lookup_values(source, resolved_source)
             emit("processing", str(source), f"{action.title()} source media.")
             if source_key in copied_or_moved_sources:
                 previous = copied_or_moved_sources[source_key]
@@ -5249,7 +8389,7 @@ class ProjectState:
                     verify_status=str(previous.get("verifyStatus", "duplicate_source")),
                 )
                 if action in {"move", "trash"}:
-                    affected_source_keys.add(source_key)
+                    affected_source_lookup_values.update(source_lookup_values)
                     removable_candidate_ids.add(candidate.candidate_id)
                 continue
             try:
@@ -5268,7 +8408,7 @@ class ProjectState:
                 counts["skipped"] += 1
                 append_item(candidate, source, "", "skipped", "symbolic_links_are_not_managed")
                 continue
-            if action in {"move", "trash"} and source_key in reference_paths:
+            if action in {"move", "trash"} and source_lookup_values & reference_lookup_values:
                 counts["skipped"] += 1
                 append_item(candidate, source, "", "skipped", "source_is_also_a_saved_person_photo")
                 continue
@@ -5296,7 +8436,7 @@ class ProjectState:
                     else:
                         counts["trashed"] += 1
                         result_status = "trashed"
-                    affected_source_keys.add(source_key)
+                    affected_source_lookup_values.update(source_lookup_values)
                     removable_candidate_ids.add(candidate.candidate_id)
                 try:
                     target_size_bytes = int(target.stat().st_size)
@@ -5320,17 +8460,16 @@ class ProjectState:
                 counts["skipped"] += 1
                 append_item(candidate, source, "", "skipped", f"io_error: {exc}", source_size_bytes=source_size_bytes)
 
-        if action in {"move", "trash"} and affected_source_keys:
-            for candidate_id, candidate in list(self.candidates.items()):
-                try:
-                    if safe_source_key(self._candidate_media_source(candidate)) in affected_source_keys:
-                        removable_candidate_ids.add(candidate_id)
-                except Exception:
-                    continue
+        if action in {"move", "trash"} and affected_source_lookup_values:
+            removed_candidate_payloads = []
+            for candidate in self._candidate_media_source_matches(affected_source_lookup_values):
+                removable_candidate_ids.add(candidate.candidate_id)
+                removed_candidate_payloads.append(asdict(candidate))
             self._mark_candidates_deleted(removable_candidate_ids)
-            for candidate_id in removable_candidate_ids:
-                self.candidates.pop(candidate_id, None)
+            self._forget_candidates(removable_candidate_ids)
             counts["removedCandidates"] = len(removable_candidate_ids)
+        else:
+            removed_candidate_payloads = []
 
         manifest = {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
@@ -5340,6 +8479,7 @@ class ProjectState:
             "mediaPath": str(media_root),
             "counts": counts,
             "items": items,
+            "removedCandidates": removed_candidate_payloads,
             "note": (
                 "Trash is app-managed: recover files from this folder if needed."
                 if action == "trash"
@@ -5348,6 +8488,7 @@ class ProjectState:
         }
         manifest_path = action_root / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        self._write_media_action_manifest_summary(manifest, manifest_path)
         self._append_audit(
             {
                 "action": "manage_candidate_media",
@@ -5385,6 +8526,46 @@ class ProjectState:
             raise ValueError("This media action manifest belongs to another app folder.")
         return payload
 
+    def _media_action_summary_path(self, manifest_path: Path) -> Path:
+        return manifest_path.expanduser().resolve().with_name("manifest-summary.json")
+
+    def _media_action_manifest_summary(self, manifest: dict[str, Any], manifest_path: Path) -> dict[str, Any]:
+        counts = manifest.get("counts") if isinstance(manifest.get("counts"), dict) else {}
+        items = manifest.get("items") if isinstance(manifest.get("items"), list) else []
+        skipped_items = [
+            item
+            for item in items
+            if isinstance(item, dict) and str(item.get("result", "")) == "skipped"
+        ][:8]
+        return {
+            "manifestPath": str(manifest_path.expanduser().resolve()),
+            "generatedAt": manifest.get("generatedAt", ""),
+            "workspace": str(manifest.get("workspace", "") or ""),
+            "action": manifest.get("action", ""),
+            "destinationPath": manifest.get("destinationPath", ""),
+            "mediaPath": manifest.get("mediaPath", ""),
+            "undoneAt": str(manifest.get("undoneAt", "") or ""),
+            "undoManifestPath": str(manifest.get("undoManifestPath", "") or ""),
+            "counts": counts,
+            "skippedItems": skipped_items,
+        }
+
+    def _write_media_action_manifest_summary(self, manifest: dict[str, Any], manifest_path: Path) -> None:
+        summary = self._media_action_manifest_summary(manifest, manifest_path)
+        self._write_json_atomic(self._media_action_summary_path(manifest_path), summary)
+
+    def _read_media_action_summary(self, manifest_path: Path) -> dict[str, Any]:
+        path = self._media_action_summary_path(manifest_path)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        if str(payload.get("workspace", "")) != str(self.root):
+            return {}
+        return payload
+
     def media_action_history(self, limit: int = 20) -> dict[str, Any]:
         limit = max(1, min(100, int(limit)))
         rows: list[dict[str, Any]] = []
@@ -5399,19 +8580,25 @@ class ProjectState:
             manifest_path = Path(manifest_value)
             manifest: dict[str, Any] = {}
             if manifest_path.exists():
-                try:
-                    manifest = self._read_media_action_manifest(manifest_path)
-                except Exception:
-                    manifest = {}
+                manifest = self._read_media_action_summary(manifest_path)
+                if not manifest:
+                    try:
+                        full_manifest = self._read_media_action_manifest(manifest_path)
+                        manifest = self._media_action_manifest_summary(full_manifest, manifest_path)
+                        self._write_media_action_manifest_summary(full_manifest, manifest_path)
+                    except Exception:
+                        manifest = {}
             counts = manifest.get("counts") if isinstance(manifest.get("counts"), dict) else {}
-            items = manifest.get("items") if isinstance(manifest.get("items"), list) else []
-            skipped_items = [item for item in items if isinstance(item, dict) and str(item.get("result")) == "skipped"]
+            skipped_items = manifest.get("skippedItems") if isinstance(manifest.get("skippedItems"), list) else []
+            undone_at = str(manifest.get("undoneAt", "") or "")
             row = {
                 "manifestPath": manifest_value,
                 "generatedAt": manifest.get("generatedAt") or event.get("at", ""),
                 "action": manifest.get("action") or event.get("media_action", ""),
                 "destinationPath": manifest.get("destinationPath") or "",
                 "mediaPath": manifest.get("mediaPath") or "",
+                "undoneAt": undone_at,
+                "undoManifestPath": str(manifest.get("undoManifestPath", "") or ""),
                 "counts": {
                     "selected": int(counts.get("selected", event.get("selected", 0)) or 0),
                     "copied": int(counts.get("copied", event.get("copied", 0)) or 0),
@@ -5424,8 +8611,8 @@ class ProjectState:
                     "cancelled": bool(counts.get("cancelled", event.get("cancelled", False))),
                 },
                 "exists": manifest_path.exists(),
-                "canRestore": bool((manifest.get("action") or event.get("media_action")) == "trash" and int(counts.get("trashed", event.get("trashed", 0)) or 0) > 0),
-                "canUndo": bool(manifest_path.exists() and (int(counts.get("copied", 0) or 0) + int(counts.get("moved", 0) or 0) + int(counts.get("trashed", 0) or 0)) > 0),
+                "canRestore": bool(not undone_at and (manifest.get("action") or event.get("media_action")) == "trash" and int(counts.get("trashed", event.get("trashed", 0)) or 0) > 0),
+                "canUndo": bool(not undone_at and manifest_path.exists() and (int(counts.get("copied", 0) or 0) + int(counts.get("moved", 0) or 0) + int(counts.get("trashed", 0) or 0)) > 0),
                 "canRetry": bool(skipped_items),
                 "skippedItems": skipped_items[:8],
             }
@@ -5433,6 +8620,33 @@ class ProjectState:
             if len(rows) >= limit:
                 break
         return {"items": rows, "total": len(rows)}
+
+    def _encode_audit_line(self, row: dict[str, Any]) -> bytes:
+        plaintext = json.dumps(row, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        if not self.workspace_encryption.enabled:
+            return plaintext + b"\n"
+        envelope = self.workspace_encryption.encrypt_bytes(plaintext, role=AUDIT_ENCRYPTION_ROLE)
+        return AUDIT_ENCRYPTED_PREFIX + base64.b64encode(envelope) + b"\n"
+
+    def _decode_audit_line(self, raw: bytes) -> dict[str, Any] | None:
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        if stripped.startswith(AUDIT_ENCRYPTED_PREFIX):
+            try:
+                envelope = base64.b64decode(stripped[len(AUDIT_ENCRYPTED_PREFIX):], validate=True)
+                plaintext = self.workspace_encryption.decrypt_bytes(envelope, role=AUDIT_ENCRYPTION_ROLE)
+                value = json.loads(plaintext.decode("utf-8"))
+            except WorkspaceEncryptionError:
+                raise
+            except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                raise WorkspaceEncryptionError("Encrypted audit event failed authentication or decoding.") from exc
+        else:
+            try:
+                value = json.loads(stripped.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return None
+        return value if isinstance(value, dict) else None
 
     def _iter_audit_rows_reverse(self, chunk_size: int = 65536) -> Iterable[dict[str, Any]]:
         if not self.audit_path.exists():
@@ -5457,11 +8671,8 @@ class ProjectState:
                         stripped = raw.strip()
                         if not stripped:
                             continue
-                        try:
-                            value = json.loads(stripped.decode("utf-8"))
-                        except (json.JSONDecodeError, UnicodeDecodeError):
-                            continue
-                        if isinstance(value, dict):
+                        value = self._decode_audit_line(stripped)
+                        if value is not None:
                             yield value
         except OSError:
             return
@@ -5471,6 +8682,8 @@ class ProjectState:
         if str(manifest.get("action", "")) != "trash":
             raise ValueError("Only app trash actions can be restored.")
         restored = skipped = missing = existing = 0
+        restored_candidates = 0
+        candidate_restore_skipped = 0
         rows: list[dict[str, Any]] = []
         for item in manifest.get("items", []):
             if not isinstance(item, dict) or str(item.get("result")) != "trashed":
@@ -5493,6 +8706,34 @@ class ProjectState:
             except OSError as exc:
                 skipped += 1
                 rows.append({**item, "restoreResult": f"io_error: {exc}"})
+        for payload in manifest.get("removedCandidates", []):
+            if not isinstance(payload, dict):
+                candidate_restore_skipped += 1
+                continue
+            try:
+                candidate = ReviewCandidate(**payload)
+            except TypeError:
+                candidate_restore_skipped += 1
+                continue
+            if not valid_candidate(candidate):
+                candidate_restore_skipped += 1
+                continue
+            if candidate.candidate_id in self.candidates:
+                candidate_restore_skipped += 1
+                continue
+            try:
+                media_source = self._candidate_media_source(candidate).expanduser()
+                media_exists = media_source.exists() and media_source.is_file()
+            except OSError:
+                media_exists = False
+            if not media_exists:
+                candidate_restore_skipped += 1
+                continue
+            self.candidates[candidate.candidate_id] = candidate
+            self._mark_candidate_dirty(candidate.candidate_id)
+            restored_candidates += 1
+        if restored_candidates:
+            self.save()
         result = {
             "manifestPath": str(manifest_path.expanduser().resolve()),
             "counts": {
@@ -5500,6 +8741,8 @@ class ProjectState:
                 "missing": missing,
                 "existing": existing,
                 "skipped": skipped,
+                "restoredCandidates": restored_candidates,
+                "candidateRestoreSkipped": candidate_restore_skipped,
             },
             "items": rows,
         }
@@ -5545,6 +8788,8 @@ class ProjectState:
             "missing": 0,
             "existing": 0,
             "skipped": 0,
+            "restoredCandidates": 0,
+            "candidateRestoreSkipped": 0,
         }
         rows: list[dict[str, Any]] = []
         for index, item in enumerate(manifest.get("items", []), start=1):
@@ -5586,6 +8831,35 @@ class ProjectState:
             except OSError as exc:
                 counts["skipped"] += 1
                 rows.append({**item, "undoResult": f"io_error: {exc}"})
+        if action in {"move", "trash"}:
+            for payload in manifest.get("removedCandidates", []):
+                if not isinstance(payload, dict):
+                    counts["candidateRestoreSkipped"] += 1
+                    continue
+                try:
+                    candidate = ReviewCandidate(**payload)
+                except TypeError:
+                    counts["candidateRestoreSkipped"] += 1
+                    continue
+                if not valid_candidate(candidate):
+                    counts["candidateRestoreSkipped"] += 1
+                    continue
+                if candidate.candidate_id in self.candidates:
+                    counts["candidateRestoreSkipped"] += 1
+                    continue
+                try:
+                    media_source = self._candidate_media_source(candidate).expanduser()
+                    media_exists = media_source.exists() and media_source.is_file()
+                except OSError:
+                    media_exists = False
+                if not media_exists:
+                    counts["candidateRestoreSkipped"] += 1
+                    continue
+                self.candidates[candidate.candidate_id] = candidate
+                self._mark_candidate_dirty(candidate.candidate_id)
+                counts["restoredCandidates"] += 1
+            if counts["restoredCandidates"]:
+                self.save()
         undo_manifest = {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "workspace": str(self.root),
@@ -5598,6 +8872,11 @@ class ProjectState:
         }
         undo_manifest_path = undo_root / "manifest.json"
         undo_manifest_path.write_text(json.dumps(undo_manifest, indent=2), encoding="utf-8")
+        manifest["undoneAt"] = undo_manifest["generatedAt"]
+        manifest["undoManifestPath"] = str(undo_manifest_path)
+        manifest["undoCounts"] = counts
+        target_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        self._write_media_action_manifest_summary(manifest, target_manifest)
         self._append_audit({"action": "undo_media_action", "manifest_path": str(target_manifest), "undo_manifest_path": str(undo_manifest_path), **counts})
         return {"manifestPath": str(target_manifest), "undoManifestPath": str(undo_manifest_path), "undoPath": str(undo_root), "counts": counts, "items": rows}
 
@@ -5736,6 +9015,13 @@ class ProjectState:
             "safeFiltered",
             "videoFiles",
             "videoFrames",
+            "videoTrackObservations",
+            "videoTracks",
+            "videoTrackTemplates",
+            "videoTrackSingletons",
+            "videoTrackKeyframes",
+            "videoTrackMatches",
+            "videoTrackUnmatched",
             "videoProtected",
             "excluded",
             "cancelled",
@@ -5759,6 +9045,8 @@ class ProjectState:
             "poseProfile",
             "poseUnknown",
             "poseRelaxedReviews",
+            "ageGapRelaxedReviews",
+            "syntheticAgeEvidence",
             "poseRelaxedProfile",
             "poseRelaxedThreeQuarter",
             "poseReranked",
@@ -5806,12 +9094,23 @@ class ProjectState:
         json_path = export_root / f"vintrace-workspace-inventory-{stamp}.json"
         csv_path = export_root / f"vintrace-workspace-inventory-{stamp}.csv"
         folder_rows = self.source_folder_summary(limit=500)
-        payload = {
+        try:
+            indexed_candidates = self.db.candidate_count()
+        except sqlite3.Error:
+            indexed_candidates = 0
+        use_candidate_index = (
+            indexed_candidates >= len(self.candidates)
+            and indexed_candidates > 0
+            and not self._candidate_dirty_ids
+            and not self._candidate_deleted_ids
+        )
+        candidate_count = indexed_candidates if indexed_candidates >= len(self.candidates) else len(self.candidates)
+        header_payload = {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "workspace": str(self.root),
             "counts": {
                 "references": len(self.references),
-                "candidates": len(self.candidates),
+                "candidates": candidate_count,
                 "sourceFolders": len(folder_rows),
             },
             "sourceFolders": folder_rows,
@@ -5828,23 +9127,58 @@ class ProjectState:
                 }
                 for ref in sorted(self.references.values(), key=lambda item: (item.person_name.lower(), item.source_path))
             ],
-            "candidates": [
-                {
-                    "candidateId": candidate.candidate_id,
-                    "personName": candidate.person_name,
-                    "status": candidate.status,
-                    "sourcePath": candidate.source_path,
-                    "mediaSourcePath": candidate.media_source_path,
-                    "mediaKind": candidate.media_kind,
-                    "score": candidate.score,
-                    "quality": candidate.quality,
-                    "createdAt": candidate.created_at,
-                    "exists": Path(candidate.source_path).exists(),
-                }
-                for candidate in sorted(self.candidates.values(), key=lambda item: (item.status, item.person_name.lower(), -item.score))
-            ],
         }
-        json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        def candidate_rows() -> Iterable[ReviewCandidate]:
+            if use_candidate_index:
+                try:
+                    for row in self.db.iter_candidate_payloads():
+                        try:
+                            candidate = ReviewCandidate(**row)
+                        except TypeError:
+                            continue
+                        if valid_candidate(candidate):
+                            yield candidate
+                    return
+                except sqlite3.Error:
+                    pass
+            yield from sorted(self.candidates.values(), key=lambda item: (item.status, item.person_name.lower(), -item.score))
+
+        def candidate_payload(candidate: ReviewCandidate) -> dict[str, Any]:
+            return {
+                "candidateId": candidate.candidate_id,
+                "personName": candidate.person_name,
+                "status": candidate.status,
+                "sourcePath": candidate.source_path,
+                "mediaSourcePath": candidate.media_source_path,
+                "mediaKind": candidate.media_kind,
+                "score": candidate.score,
+                "quality": candidate.quality,
+                "createdAt": candidate.created_at,
+                "exists": Path(candidate.source_path).exists(),
+            }
+
+        def stream_inventory(handle) -> None:
+            handle.write("{")
+            first_field = True
+            for key, value in header_payload.items():
+                if not first_field:
+                    handle.write(",")
+                first_field = False
+                handle.write(json.dumps(str(key), separators=(",", ":")))
+                handle.write(":")
+                handle.write(json.dumps(value, separators=(",", ":")))
+            handle.write(",\"candidates\":[")
+            first_candidate = True
+            for candidate in candidate_rows():
+                if first_candidate:
+                    first_candidate = False
+                else:
+                    handle.write(",")
+                handle.write(json.dumps(candidate_payload(candidate), separators=(",", ":")))
+            handle.write("]}")
+
+        atomic_write(json_path, stream_inventory)
         with csv_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(
                 handle,
@@ -5854,7 +9188,7 @@ class ProjectState:
             for row in folder_rows:
                 writer.writerow(row)
         self._append_audit({"action": "export_workspace_inventory", "json_path": str(json_path), "csv_path": str(csv_path), "folders": len(folder_rows)})
-        return {"jsonPath": str(json_path), "csvPath": str(csv_path), "counts": payload["counts"]}
+        return {"jsonPath": str(json_path), "csvPath": str(csv_path), "counts": header_payload["counts"]}
 
     def export_audit_log(self, folder: Path | None = None) -> dict[str, Any]:
         export_root = (folder or self.root / "exports").expanduser().resolve()
@@ -5862,39 +9196,72 @@ class ProjectState:
         stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
         json_path = export_root / f"vintrace-activity-log-{stamp}.json"
         csv_path = export_root / f"vintrace-activity-log-{stamp}.csv"
-        rows = self._read_audit_rows()
+        event_count = sum(1 for _row in self._iter_audit_rows_forward())
         chain = self.verify_audit_chain()
-        payload = {
+        header_payload = {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            "workspace": str(self.root),
-            "counts": {"events": len(rows)},
+            "workspaceId": str(self.workspace_metadata.get("workspaceId", "")),
+            "counts": {"events": event_count},
             "chain": chain,
-            "events": rows,
         }
-        json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        def stream_audit_log(handle) -> None:
+            handle.write("{")
+            first_field = True
+            for key, value in header_payload.items():
+                if first_field:
+                    first_field = False
+                else:
+                    handle.write(",")
+                handle.write(json.dumps(str(key), separators=(",", ":")))
+                handle.write(":")
+                handle.write(json.dumps(value, separators=(",", ":")))
+            handle.write(",\"events\":[")
+            first_event = True
+            for row in self._iter_audit_rows_forward():
+                if first_event:
+                    first_event = False
+                else:
+                    handle.write(",")
+                handle.write(json.dumps(row, separators=(",", ":")))
+            handle.write("]}")
+
+        atomic_write(json_path, stream_audit_log)
         with csv_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=["at", "action", "summary", "json"])
             writer.writeheader()
-            for row in rows:
+            for row in self._iter_audit_rows_forward():
                 action = str(row.get("action") or row.get("status") or "event")
                 summary = " • ".join(str(row.get(key)) for key in ("personRef", "source", "status", "count") if row.get(key) not in (None, ""))
                 writer.writerow({"at": row.get("at", ""), "action": action, "summary": summary, "json": json.dumps(row, separators=(",", ":"))})
-        self._append_audit({"action": "export_audit_log", "json_path": str(json_path), "csv_path": str(csv_path), "events": len(rows)})
-        return {"jsonPath": str(json_path), "csvPath": str(csv_path), "counts": payload["counts"]}
+        self._append_audit(
+            {
+                "action": "export_audit_log",
+                "jsonSha256": sha256_file(json_path),
+                "csvSha256": sha256_file(csv_path),
+                "events": event_count,
+            }
+        )
+        return {"jsonPath": str(json_path), "csvPath": str(csv_path), "counts": header_payload["counts"]}
+
+    def _iter_audit_rows_forward(self) -> Iterable[dict[str, Any]]:
+        if not self.audit_path.exists():
+            return
+        try:
+            with self.audit_path.open("rb") as handle:
+                for raw in handle:
+                    value = self._decode_audit_line(raw)
+                    if value is not None:
+                        yield value
+        except OSError:
+            return
 
     def _read_audit_rows(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         if not self.audit_path.exists():
             return rows
         try:
-            with self.audit_path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    try:
-                        value = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(value, dict):
-                        rows.append(value)
+            rows.extend(self._iter_audit_rows_forward())
         except OSError:
             return []
         return rows
@@ -5903,10 +9270,108 @@ class ProjectState:
         if not self.audit_path.exists():
             return 0
         try:
-            with self.audit_path.open("r", encoding="utf-8") as handle:
-                return sum(1 for _ in handle)
+            return sum(1 for _ in self._iter_audit_rows_forward())
         except OSError:
             return 0
+
+    def export_biometric_retention_policy(self, folder: Path | None = None) -> dict[str, Any]:
+        export_root = (folder or self.root / "exports").expanduser().resolve()
+        export_root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        json_path = export_root / f"vintrace-biometric-retention-policy-{stamp}.json"
+        markdown_path = export_root / f"vintrace-biometric-retention-policy-{stamp}.md"
+        html_path = export_root / f"vintrace-biometric-retention-policy-{stamp}.html"
+        base_policy = self.biometric_retention_policy()
+        publication = base_policy.get("publication") if isinstance(base_policy.get("publication"), dict) else {}
+        policy = {
+            **base_policy,
+            "generatedAt": now_iso(),
+            "workspaceId": str(self.workspace_metadata.get("workspaceId", "")),
+            "aiDisclosure": AI_DISCLOSURE_NOTICE,
+            "operatorApproval": {
+                "organization": "",
+                "approvedBy": str(publication.get("approvedBy", "")),
+                "approvedAt": publication.get("recordedAt") or "",
+                "publishedAt": publication.get("publishedAt") or "",
+                "publicUrl": str(publication.get("publicUrl", "")),
+            },
+        }
+        policy_hash = str(base_policy["policyHash"])
+        document_hash = hashlib.sha256(
+            json.dumps(policy, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+        policy["documentHash"] = document_hash
+        atomic_write_text(json_path, json.dumps(policy, indent=2, sort_keys=True, ensure_ascii=False))
+
+        schedule = policy["schedule"]
+        sources = policy.get("sources", []) if isinstance(policy.get("sources"), list) else []
+        source_markdown = "\n".join(
+            f"- [{str(row.get('label', 'Source'))}]({str(row.get('url', ''))})"
+            for row in sources
+            if isinstance(row, dict) and str(row.get("url", "")).startswith("https://")
+        ) or "- No jurisdiction-specific source is attached to the standard template."
+        markdown = (
+            f"# {policy['title']}\n\n"
+            f"**Policy version:** `{policy['policyVersion']}`  \n"
+            f"**Policy hash:** `{policy_hash}`  \n"
+            f"**Jurisdiction template:** `{policy['jurisdictionPreset']}`  \n"
+            f"**Automatic enforcement:** `{policy['enforcementEnabled']}`\n\n"
+            "## Scope\n\n"
+            "Vintrace stores local numeric face templates and human-review records. This schedule does not authorize collection, "
+            "does not change source photos, and is not a substitute for a jurisdiction-specific legal review.\n\n"
+            "## Destruction schedule\n\n"
+            f"- Subject templates: destroy on {', '.join(schedule['subjectTemplates']['destroyOn'])}.\n"
+            f"- Maximum after last interaction: {schedule['subjectTemplates']['maximumDaysAfterLastInteraction'] or 'operator/counsel-defined; no fixed term is asserted by this template'}.\n"
+            f"- Reviewed match rows: {schedule['reviewedMatches']['retainDays']} days.\n"
+            f"- Pending match rows: {schedule['pendingMatches']['retainDays']} days.\n"
+            f"- Pseudonymous audit evidence: {schedule['auditEvidence']['retainDays']} days.\n"
+            "- Source photos and videos are outside biometric erasure and remain under the operator's media policy.\n\n"
+            "## Method\n\n"
+            f"{policy['destructionMethod']}\n\n"
+            "## AI notice\n\n"
+            f"{AI_DISCLOSURE_NOTICE['summary']} {AI_DISCLOSURE_NOTICE['decisionBoundary']}\n\n"
+            "## Official sources\n\n"
+            f"{source_markdown}\n\n"
+            "## Approval and publication\n\n"
+            f"Organization: ____________________  \nApproved by: {publication.get('approvedBy') or '____________________'}  \n"
+            f"Recorded at: {publication.get('recordedAt') or '____________________'}  \n"
+            f"Published at: {publication.get('publishedAt') or '____________________'}  \n"
+            f"Public URL: {publication.get('publicUrl') or '____________________'}\n\n"
+            f"> {policy['disclaimer']}\n"
+        )
+        atomic_write_text(markdown_path, markdown)
+        html_sources = "".join(
+            f'<li><a href="{html.escape(str(row.get("url", "")), quote=True)}">{html.escape(str(row.get("label", "Source")))}</a></li>'
+            for row in sources
+            if isinstance(row, dict) and str(row.get("url", "")).startswith("https://")
+        ) or "<li>No jurisdiction-specific source is attached to the standard template.</li>"
+        html_document = f"""<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(str(policy['title']))}</title>
+<style>body{{font:16px/1.55 system-ui,sans-serif;max-width:52rem;margin:3rem auto;padding:0 1.25rem;color:#17191c}}h1,h2{{line-height:1.2}}code{{overflow-wrap:anywhere}}.notice{{border-left:4px solid #355c7d;padding:.75rem 1rem;background:#f4f7fa}}@media(max-width:600px){{body{{margin:1.5rem auto}}}}</style></head>
+<body><main><h1>{html.escape(str(policy['title']))}</h1>
+<p><strong>Policy version:</strong> <code>{html.escape(str(policy['policyVersion']))}</code><br><strong>Policy hash:</strong> <code>{policy_hash}</code><br><strong>Jurisdiction template:</strong> {html.escape(str(policy['jurisdictionPreset']))}<br><strong>Automatic enforcement:</strong> {str(bool(policy['enforcementEnabled'])).lower()}</p>
+<h2>Scope</h2><p>Vintrace stores local numeric face templates and human-review records. This schedule does not authorize collection, alter source media, or replace legal review.</p>
+<h2>Destruction schedule</h2><ul><li>Subject templates: destroy on {html.escape(', '.join(schedule['subjectTemplates']['destroyOn']))}.</li><li>Maximum after last interaction: {html.escape(str(schedule['subjectTemplates']['maximumDaysAfterLastInteraction'] or 'operator/counsel-defined'))}.</li><li>Reviewed match rows: {schedule['reviewedMatches']['retainDays']} days.</li><li>Pending match rows: {schedule['pendingMatches']['retainDays']} days.</li><li>Pseudonymous audit evidence: {schedule['auditEvidence']['retainDays']} days.</li><li>Source photos and videos remain under the operator's media policy.</li></ul>
+<h2>Method</h2><p>{html.escape(str(policy['destructionMethod']))}</p><h2>AI notice</h2><p>{html.escape(str(AI_DISCLOSURE_NOTICE['summary']))} {html.escape(str(AI_DISCLOSURE_NOTICE['decisionBoundary']))}</p>
+<h2>Official sources</h2><ul>{html_sources}</ul><h2>Approval and publication</h2><p>Organization: ____________________<br>Approved by: {html.escape(str(publication.get('approvedBy') or '____________________'))}<br>Recorded at: {html.escape(str(publication.get('recordedAt') or '____________________'))}<br>Published at: {html.escape(str(publication.get('publishedAt') or '____________________'))}<br>Public URL: {html.escape(str(publication.get('publicUrl') or '____________________'))}</p><p class="notice">{html.escape(str(policy['disclaimer']))}</p></main></body></html>"""
+        atomic_write_text(html_path, html_document)
+        self._append_audit(
+            {
+                "action": "export_biometric_retention_policy",
+                "policyVersion": policy["policyVersion"],
+                "policyHash": policy_hash,
+                "jurisdictionPreset": policy["jurisdictionPreset"],
+            }
+        )
+        return {
+            "jsonPath": str(json_path),
+            "markdownPath": str(markdown_path),
+            "htmlPath": str(html_path),
+            "policyHash": policy_hash,
+            "documentHash": document_hash,
+            "policyVersion": policy["policyVersion"],
+        }
 
     def export_consent_receipt(self, folder: Path | None = None) -> dict[str, Any]:
         export_root = (folder or self.root / "exports").expanduser().resolve()
@@ -5917,21 +9382,49 @@ class ProjectState:
         consent_events = [
             row
             for row in self._read_audit_rows()
-            if row.get("action") == "set_consent"
+            if row.get("action") in {
+                "set_consent",
+                "set_subject_consent",
+                "acknowledge_ai_disclosure",
+                "record_biometric_policy_publication",
+                "delete_subject_data",
+            }
         ]
+        try:
+            candidate_counts = self.db.candidate_status_counts() if self._candidate_index_backed else {}
+        except sqlite3.Error:
+            candidate_counts = {}
+        if not candidate_counts:
+            pending_count = sum(1 for candidate in self.candidates.values() if candidate.status == "pending")
+            reviewed_count = sum(1 for candidate in self.candidates.values() if candidate.status != "pending")
+            candidate_total = len(self.candidates)
+        else:
+            pending_count = int(candidate_counts.get("pending", 0) or 0)
+            reviewed_count = int(candidate_counts.get("reviewed", 0) or 0)
+            candidate_total = int(candidate_counts.get("total", 0) or 0)
         counts = {
             "references": len(self.references),
-            "candidates": len(self.candidates),
+            "candidates": candidate_total,
             "people": len({ref.person_name.casefold() for ref in self.references.values()}),
-            "pending": sum(1 for candidate in self.candidates.values() if candidate.status == "pending"),
-            "reviewed": sum(1 for candidate in self.candidates.values() if candidate.status != "pending"),
+            "pending": pending_count,
+            "reviewed": reviewed_count,
             "scanRuns": len(self.scan_history),
             "consentEvents": len(consent_events),
+            "subjectReleases": len(self.subject_consents()),
+            "destructionReceipts": len(
+                self.consent.get("destructionReceipts", [])
+                if isinstance(self.consent.get("destructionReceipts"), list)
+                else []
+            ),
         }
+        compliance = self.compliance_status()
+        destruction_receipts = self.consent.get("destructionReceipts")
+        if not isinstance(destruction_receipts, list):
+            destruction_receipts = []
         payload = {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            "workspace": str(self.root),
-            "workspaceMetadata": self.workspace_metadata,
+            "schemaVersion": 2,
+            "workspaceId": str(self.workspace_metadata.get("workspaceId", "")),
             "consent": {
                 **self.consent_summary(),
                 "note": str(self.consent.get("note", "")),
@@ -5944,51 +9437,86 @@ class ProjectState:
                 "reviewOnly": bool(self.config.review_only),
                 "safeMode": bool(self.config.safe_mode),
                 "safeModeThreshold": float(self.config.safe_mode_threshold),
+                "jurisdictionPreset": str(self.config.jurisdiction_preset),
+                "retention": compliance["retentionPolicy"],
             },
+            "aiDisclosure": compliance["aiDisclosure"],
+            "evidenceReady": bool(compliance["evidenceReady"]),
+            "destructionReceipts": destruction_receipts,
             "counts": counts,
             "latestConsentEvent": consent_events[-1] if consent_events else None,
+            "consentEvents": consent_events,
             "note": "Receipt only. It does not include photos, videos, thumbnails, face vectors, or model files.",
         }
-        json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_text(json_path, json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False))
         with csv_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["field", "value"])
-            writer.writerow(["generatedAt", payload["generatedAt"]])
-            writer.writerow(["workspaceId", self.workspace_metadata.get("workspaceId", "")])
-            writer.writerow(["consentActive", payload["consent"]["active"]])
-            writer.writerow(["operator", payload["consent"]["operator"]])
-            writer.writerow(["source", payload["consent"]["source"]])
-            writer.writerow(["scope", payload["consent"]["scope"]])
-            writer.writerow(["confirmedAt", payload["consent"]["confirmedAt"]])
-            writer.writerow(["updatedAt", payload["consent"]["updatedAt"]])
-            writer.writerow(["requireConsent", payload["policy"]["requireConsent"]])
-            writer.writerow(["reviewOnly", payload["policy"]["reviewOnly"]])
-            writer.writerow(["safeMode", payload["policy"]["safeMode"]])
-            for key, value in counts.items():
-                writer.writerow([key, value])
-        self._append_audit({"action": "export_consent_receipt", "json_path": str(json_path), "csv_path": str(csv_path), "active": self.consent_on_file()})
+            writer.writerow([
+                "recordType", "subject", "active", "complete", "expired", "releaseId", "recordHash",
+                "signer", "signerRole", "purpose", "collectionTermDays", "lawfulBasis", "confirmedAt", "expiresAt",
+            ])
+            writer.writerow([
+                "workspace", "", payload["consent"]["active"], "", "", "", "", payload["consent"]["operator"],
+                "operator", payload["consent"].get("scope", ""), "", "", payload["consent"].get("confirmedAt", ""), "",
+            ])
+            for record in compliance["subjects"]["records"]:
+                writer.writerow([
+                    "subject-release", record.get("personName", ""), record.get("active", False),
+                    record.get("complete", False), record.get("expired", False), record.get("releaseId", ""),
+                    record.get("recordHash", ""), record.get("signerName", ""), record.get("signerRole", ""),
+                    record.get("specificPurpose", ""), record.get("collectionTermDays", ""), record.get("lawfulBasis", ""),
+                    record.get("confirmedAt", ""), record.get("expiresAt", ""),
+                ])
+            for receipt in destruction_receipts:
+                if not isinstance(receipt, dict):
+                    continue
+                writer.writerow([
+                    "destruction-receipt", receipt.get("subjectRef", ""), False, "", "", receipt.get("receiptId", ""),
+                    receipt.get("receiptHash", ""), "", "", receipt.get("reason", ""), "", "",
+                    receipt.get("destroyedAt", ""), "",
+                ])
+        self._append_audit(
+            {
+                "action": "export_consent_receipt",
+                "jsonSha256": sha256_file(json_path),
+                "csvSha256": sha256_file(csv_path),
+                "active": self.consent_on_file(),
+            }
+        )
         return {"jsonPath": str(json_path), "csvPath": str(csv_path), "counts": counts}
 
-    def retention_policy_report(self) -> dict[str, Any]:
-        now_ts = datetime.now(timezone.utc).timestamp()
-        windows = [30, 90, 180, 365]
+    def retention_policy_report(self, *, now: datetime | None = None) -> dict[str, Any]:
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        now_ts = current.astimezone(timezone.utc).timestamp()
+        reviewed_window = int(self.config.retention_reviewed_days)
+        pending_window = int(self.config.retention_pending_days)
+        windows = sorted({30, 90, 180, 365, reviewed_window, pending_window})
         by_status = {"pending": 0, "accepted": 0, "rejected": 0, "uncertain": 0}
         reviewed = 0
         invalid_dates = 0
         oldest_reviewed_days = 0
         older_than = {str(days): 0 for days in windows}
-        for candidate in self.candidates.values():
+        due_reviewed = 0
+        due_pending = 0
+        due_audit = self.audit_events_due_for_retention(int(self.config.retention_audit_days), now=current)
+        for candidate in self._iter_authoritative_candidates(order="created"):
             by_status[candidate.status] = by_status.get(candidate.status, 0) + 1
-            if candidate.status == "pending":
-                continue
-            reviewed += 1
             try:
                 created_ts = datetime.fromisoformat(candidate.created_at.replace("Z", "+00:00")).timestamp()
             except (TypeError, ValueError):
                 created_ts = 0.0
                 invalid_dates += 1
             age_days = max(0, int((now_ts - created_ts) // (24 * 60 * 60))) if created_ts else 3650
+            if candidate.status == "pending":
+                if created_ts and age_days >= pending_window:
+                    due_pending += 1
+                continue
+            reviewed += 1
             oldest_reviewed_days = max(oldest_reviewed_days, age_days)
+            if created_ts and age_days >= reviewed_window:
+                due_reviewed += 1
             for days in windows:
                 if age_days >= days:
                     older_than[str(days)] += 1
@@ -5996,8 +9524,14 @@ class ProjectState:
         recommendations: list[str] = []
         if reviewed:
             recommendations.append("Export the review ledger before purging old reviewed matches.")
-        if older_than["90"]:
-            recommendations.append(f"{older_than['90']} reviewed match row(s) are older than 90 days and can be purged if no longer needed.")
+        if due_reviewed:
+            recommendations.append(f"{due_reviewed} reviewed match row(s) have reached the configured {reviewed_window}-day destruction window.")
+        if due_pending:
+            recommendations.append(f"{due_pending} pending match row(s) have reached the configured {pending_window}-day destruction window.")
+        if due_audit:
+            recommendations.append(
+                f"{due_audit} audit event(s) have reached the configured {int(self.config.retention_audit_days)}-day evidence window."
+            )
         if privacy["generatedBytes"] > 512 * 1024 * 1024:
             recommendations.append("Generated previews and video frames are sizable; run Optimize app folder after exports.")
         if invalid_dates:
@@ -6007,7 +9541,7 @@ class ProjectState:
         return {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "counts": {
-                "candidates": len(self.candidates),
+                "candidates": sum(by_status.values()),
                 "reviewedCandidates": reviewed,
                 "pendingCandidates": by_status.get("pending", 0),
                 "invalidDates": invalid_dates,
@@ -6020,14 +9554,99 @@ class ProjectState:
             "reviewedOlderThanDays": older_than,
             "oldestReviewedAgeDays": oldest_reviewed_days,
             "policy": {
+                **self.biometric_retention_policy(),
                 "recommendedReviewedRetentionDays": int(self.config.retention_reviewed_days),
                 "jurisdictionPreset": str(self.config.jurisdiction_preset),
                 "reviewedStatuses": ["accepted", "rejected", "uncertain"],
-                "pendingRowsAreKept": True,
+                "pendingRowsAreKept": not bool(self.config.retention_enforcement_enabled),
                 "originalMediaIsNeverDeleted": True,
+            },
+            "due": {
+                "reviewedCandidates": due_reviewed,
+                "pendingCandidates": due_pending,
+                "expiredSubjects": self.compliance_status()["subjects"]["expired"],
+                "auditEvents": due_audit,
             },
             "recommendations": recommendations,
         }
+
+    def enforce_retention_policy(
+        self,
+        *,
+        source: str = "manual",
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        enabled = bool(self.config.retention_enforcement_enabled)
+        result: dict[str, Any] = {
+            "enabled": enabled,
+            "source": str(source or "manual")[:80],
+            "jurisdictionPreset": str(self.config.jurisdiction_preset),
+            "expiredSubjectsDeleted": 0,
+            "reviewedCandidatesDeleted": 0,
+            "pendingCandidatesDeleted": 0,
+            "auditEventsDeleted": 0,
+            "destructionReceipts": [],
+        }
+        if not enabled:
+            return result
+
+        for record in list(self.subject_consents().values()):
+            if not isinstance(record, dict) or not record.get("active"):
+                continue
+            if not release_is_expired(record, now=now):
+                continue
+            person_name = str(record.get("personName", "")).strip()
+            if not person_name:
+                continue
+            deleted = self.delete_subject_data(
+                person_name,
+                confirm=True,
+                reason="retention-release-expired",
+                source=source,
+            )
+            result["expiredSubjectsDeleted"] += 1
+            result["destructionReceipts"].append(deleted["receipt"])
+
+        report = self.retention_policy_report(now=now)
+        due = report.get("due") if isinstance(report.get("due"), dict) else {}
+        if int(due.get("reviewedCandidates", 0) or 0) > 0:
+            result["reviewedCandidatesDeleted"] = self.purge_old_candidates(
+                int(self.config.retention_reviewed_days),
+                statuses=["accepted", "rejected", "uncertain"],
+            )
+        if int(due.get("pendingCandidates", 0) or 0) > 0:
+            result["pendingCandidatesDeleted"] = self.purge_old_candidates(
+                int(self.config.retention_pending_days),
+                statuses=["pending"],
+            )
+        if int(due.get("auditEvents", 0) or 0) > 0:
+            audit_result = self.enforce_audit_retention(
+                int(self.config.retention_audit_days),
+                source=source,
+                now=now,
+            )
+            result["auditEventsDeleted"] = int(audit_result.get("deleted", 0) or 0)
+            result["auditCheckpointHash"] = str(audit_result.get("checkpointHash", ""))
+        if (
+            result["expiredSubjectsDeleted"]
+            or result["reviewedCandidatesDeleted"]
+            or result["pendingCandidatesDeleted"]
+            or result["auditEventsDeleted"]
+        ):
+            self._append_audit(
+                {
+                    "action": "enforce_retention_policy",
+                    "source": result["source"],
+                    "jurisdictionPreset": result["jurisdictionPreset"],
+                    "expiredSubjectsDeleted": result["expiredSubjectsDeleted"],
+                    "reviewedCandidatesDeleted": result["reviewedCandidatesDeleted"],
+                    "pendingCandidatesDeleted": result["pendingCandidatesDeleted"],
+                    "auditEventsDeleted": result["auditEventsDeleted"],
+                    "auditCheckpointHash": result.get("auditCheckpointHash", ""),
+                    "receiptIds": [row.get("receiptId", "") for row in result["destructionReceipts"]],
+                }
+            )
+        return result
 
     def export_safe_mode_audit(self, folder: Path | None = None) -> dict[str, Any]:
         export_root = (folder or self.root / "exports").expanduser().resolve()
@@ -6060,13 +9679,14 @@ class ProjectState:
             "policy": {
                 "safeMode": bool(self.config.safe_mode),
                 "safeModeThreshold": float(self.config.safe_mode_threshold),
+                "safeModeMultimodal": bool(self.config.safe_mode_multimodal),
                 "safeModeZeroAdmittance": bool(self.config.safe_mode_zero_admittance),
                 "faceCropCarveOutActive": not bool(self.config.safe_mode_zero_admittance),
                 "protectedMediaExcludedFromMatching": True,
                 "protectedMediaExcludedFromClustering": True,
                 "originalMediaIsNeverModified": True,
             },
-            "model": safety_model_report(),
+            "model": safety_model_report(multimodal_enabled=self.config.safe_mode_multimodal),
             "counts": {
                 "scanRuns": len(self.scan_history),
                 "safetyCacheEntries": int(scale.get("safetyCacheEntries", 0) or 0),
@@ -6076,6 +9696,7 @@ class ProjectState:
             "runs": run_rows,
             "recommendations": [
                 "Keep Safe Mode on for shared libraries.",
+                "Enable category-aware Safe Mode only when the validated quality model and longer scan time are acceptable.",
                 "Review Safe Mode audit counts after every large scan.",
             ],
         }
@@ -6110,7 +9731,9 @@ class ProjectState:
                         "createdAt": ref.created_at,
                     }
                 )
-        for candidate in self.candidates.values():
+        candidate_total = 0
+        for candidate in self._iter_authoritative_candidates(order="status"):
+            candidate_total += 1
             model = candidate.model_name or "unknown"
             candidate_models[model] = candidate_models.get(model, 0) + 1
             if self._model_family_key(model) != current_key:
@@ -6138,7 +9761,7 @@ class ProjectState:
             "modelPack": self.config.model_pack,
             "counts": {
                 "references": len(self.references),
-                "candidates": len(self.candidates),
+                "candidates": candidate_total,
                 "staleReferences": len(stale_references),
                 "staleCandidates": len(stale_candidates),
             },
@@ -6190,6 +9813,10 @@ class ProjectState:
             bucket = person_bucket(ref.person_name)
             person_key = str(ref.person_name or "").strip().lower() or "unnamed person"
             bucket["referenceCount"] += 1
+            if is_synthetic_age_reference(ref):
+                bucket["syntheticReferenceCount"] = int(bucket.get("syntheticReferenceCount", 0)) + 1
+            else:
+                bucket["realReferenceCount"] = int(bucket.get("realReferenceCount", 0)) + 1
             if self._compatible_reference_model_name(current, ref.model_name):
                 bucket["compatibleReferences"] += 1
             else:
@@ -6198,14 +9825,15 @@ class ProjectState:
             pose_key = {"three-quarter": "threeQuarter", "edge-face": "edgeFace"}.get(pose, pose)
             bucket["poseCounts"][pose_key] = int(bucket["poseCounts"].get(pose_key, 0)) + 1
             age = str(ref.age_bucket or "unknown").strip() or "unknown"
-            bucket["ageBuckets"][age] = int(bucket["ageBuckets"].get(age, 0)) + 1
+            age_key = f"synthetic:{age}" if is_synthetic_age_reference(ref) else age
+            bucket["ageBuckets"][age_key] = int(bucket["ageBuckets"].get(age_key, 0)) + 1
             quality = max(0.0, min(1.0, float(ref.quality or 0.0)))
             quality_sums[person_key] = quality_sums.get(person_key, 0.0) + quality
             bucket["bestQuality"] = max(float(bucket["bestQuality"]), quality)
             if len(bucket["sampleReferenceNames"]) < 3:
                 bucket["sampleReferenceNames"].append(Path(ref.source_path).name)
 
-        for candidate in self.candidates.values():
+        for candidate in self._iter_authoritative_candidates(order="status"):
             person_name = str(candidate.person_name or "").strip()
             if not person_name:
                 continue
@@ -6235,7 +9863,11 @@ class ProjectState:
             compatible_references = int(bucket["compatibleReferences"])
             other_model_references = int(bucket["otherModelReferences"])
             pose_counts = bucket["poseCounts"]
-            age_bucket_count = sum(1 for count in bucket["ageBuckets"].values() if int(count) > 0)
+            age_bucket_count = sum(
+                1
+                for age, count in bucket["ageBuckets"].items()
+                if not str(age).startswith("synthetic:") and int(count) > 0
+            )
             avg_quality = quality_sums.get(person_key, 0.0) / max(reference_count, 1)
             bucket["averageQuality"] = round(avg_quality, 4)
             bucket["bestQuality"] = round(float(bucket["bestQuality"]), 4)
@@ -6372,7 +10004,10 @@ class ProjectState:
                 "note": candidate.note,
                 "createdAt": candidate.created_at,
             }
-            for candidate in sorted(self.candidates.values(), key=lambda item: (item.status, item.person_name.lower(), -item.score))
+            for candidate in sorted(
+                self._iter_authoritative_candidates(order="status"),
+                key=lambda item: (item.status, item.person_name.lower(), -item.score),
+            )
         ]
         status_counts = {"pending": 0, "accepted": 0, "rejected": 0, "uncertain": 0}
         for row in candidates:
@@ -6430,12 +10065,13 @@ class ProjectState:
             raise ValueError("Export statuses must be selected from pending, accepted, rejected, and uncertain.")
         if candidate_ids:
             unique_ids = list(dict.fromkeys(str(candidate_id) for candidate_id in candidate_ids if str(candidate_id).strip()))
+            self._ensure_candidates_loaded(unique_ids)
             selected = [self.candidates[candidate_id] for candidate_id in unique_ids if candidate_id in self.candidates]
             missing = [candidate_id for candidate_id in unique_ids if candidate_id not in self.candidates]
             if missing:
                 raise KeyError(f"Candidate not found: {missing[0]}")
         else:
-            selected = [candidate for candidate in self.candidates.values() if candidate.status in status_set]
+            selected = list(self._iter_authoritative_candidates(statuses=status_set, order="status"))
         if not selected:
             raise ValueError("No matching review items are ready to export.")
 
@@ -6537,8 +10173,7 @@ class ProjectState:
     def accuracy_evaluation(self) -> dict[str, Any]:
         labeled = [
             candidate
-            for candidate in self.candidates.values()
-            if candidate.status in {"accepted", "rejected"}
+            for candidate in self._iter_authoritative_candidates(statuses={"accepted", "rejected"}, order="status")
         ]
         thresholds = {
             "reviewMore": float(self.config.thresholds.relaxed_child),
@@ -6850,6 +10485,8 @@ class ProjectState:
     # overlapping hard negative could push the wrong way; this is the documented fix.
     CALIBRATION_MIN_LABELS = 20
     CALIBRATION_MIN_PER_CLASS = 5
+    ADAPTIVE_CALIBRATION_MIN_LABELS = 80
+    ADAPTIVE_CALIBRATION_MIN_PER_CLASS = 20
     CALIBRATION_AUTO_STAGE_MIN_NEW_LABELS = 10
     ADAPTER_MIN_LABELS = 100
     ADAPTER_MIN_PER_CLASS = 25
@@ -7052,11 +10689,35 @@ class ProjectState:
         likely = min(likely, confident)
         relaxed = min(relaxed, likely)
         validation = self.validate_calibration_change(rows=rows)
+        adaptive_validation = validate_adaptive_calibration(
+            rows,
+            min_count=self.ADAPTIVE_CALIBRATION_MIN_LABELS,
+            min_per_class=self.ADAPTIVE_CALIBRATION_MIN_PER_CLASS,
+        )
+        adaptive_calibrator = None
+        if adaptive_validation.get("promote") is True:
+            adaptive_calibrator = fit_adaptive_linear(
+                rows,
+                min_count=self.ADAPTIVE_CALIBRATION_MIN_LABELS,
+                min_per_class=self.ADAPTIVE_CALIBRATION_MIN_PER_CLASS,
+                model_name=dominant_model,
+            )
+            if adaptive_calibrator is None:
+                adaptive_validation = {
+                    **adaptive_validation,
+                    "promote": False,
+                    "reason": "adaptive full-data fit failed; retaining Platt fallback",
+                    "finalFit": False,
+                }
+            else:
+                adaptive_validation = {**adaptive_validation, "finalFit": True}
+        adaptive_payload = adaptive_calibrator.to_payload() if adaptive_calibrator is not None else {}
         positives = int(sum(labels))
         negatives = len(labels) - positives
         previous = {
             "thresholds": asdict(self.config.thresholds),
             "calibrationPlatt": list(self.config.calibration_platt),
+            "calibrationAdaptive": dict(self.config.calibration_adaptive),
             "calibrationModel": str(self.config.calibration_model or ""),
         }
         payload = {
@@ -7067,6 +10728,15 @@ class ProjectState:
                 "relaxed_child": relaxed,
             },
             "platt": calibrator.to_list(),
+            "adaptive": adaptive_payload,
+            "adaptiveFallback": {
+                "active": not bool(adaptive_payload),
+                "reason": str(adaptive_validation.get("reason", "adaptive context unavailable")),
+                "contextRows": int(adaptive_validation.get("contextRows", 0) or 0),
+                "minimumRows": self.ADAPTIVE_CALIBRATION_MIN_LABELS,
+                "minimumPerClass": self.ADAPTIVE_CALIBRATION_MIN_PER_CLASS,
+                "fallbackOrder": ["person-platt", "global-platt", "raw-score-ordering"],
+            },
             "calibrationModel": dominant_model,
             "previousConfig": previous,
             "targetFmr": dict(self.CALIBRATION_TARGET_FMR),
@@ -7083,6 +10753,8 @@ class ProjectState:
             "negativeLabels": negatives,
             "labelsDroppedOtherModel": dropped,
             "thresholds": payload["thresholds"],
+            "adaptiveValidation": adaptive_validation,
+            "adaptiveActive": bool(adaptive_payload),
         }
         return {
             "payload": payload,
@@ -7110,11 +10782,24 @@ class ProjectState:
             raise ValueError("Calibration artifact is missing Platt parameters.")
         if platt and len(platt) != 2:
             raise ValueError("Calibration artifact has invalid Platt parameters.")
+        adaptive_payload = payload.get("adaptive", payload.get("calibrationAdaptive", {}))
+        if not isinstance(adaptive_payload, dict):
+            raise ValueError("Calibration artifact has invalid adaptive parameters.")
+        normalized_adaptive: dict[str, Any] = {}
+        calibration_model = str(payload.get("calibrationModel", payload.get("calibration_model", "")) or "")
+        if adaptive_payload:
+            adaptive = AdaptiveLinearCalibrator.from_payload(adaptive_payload)
+            if adaptive.dimension != 512:
+                raise ValueError("Calibration artifact adaptive dimension must be 512.")
+            if adaptive.model_name and calibration_model and adaptive.model_name != calibration_model:
+                raise ValueError("Calibration artifact adaptive model does not match its calibration scope.")
+            normalized_adaptive = adaptive.to_payload()
         self.config.thresholds.confident = self._threshold_payload_value(thresholds, "confident", "confident")
         self.config.thresholds.likely = self._threshold_payload_value(thresholds, "likely", "likely")
         self.config.thresholds.relaxed_child = self._threshold_payload_value(thresholds, "relaxed_child", "relaxedChild")
         self.config.calibration_platt = [float(platt[0]), float(platt[1])] if platt else []
-        self.config.calibration_model = str(payload.get("calibrationModel", payload.get("calibration_model", "")) or "")
+        self.config.calibration_adaptive = normalized_adaptive
+        self.config.calibration_model = calibration_model
 
     def apply_calibration_to_config(self) -> dict[str, Any]:
         # Replaces the (min_positive + max_negative)/2 midpoint with a probabilistic
@@ -7139,24 +10824,34 @@ class ProjectState:
                 "confident": self.config.thresholds.confident,
                 "relaxed_child": self.config.thresholds.relaxed_child,
                 "platt": self.config.calibration_platt,
+                "adaptive": bool(self.config.calibration_adaptive),
                 "calibration_model": self.config.calibration_model,
                 "labels": payload["labels"],
                 "labels_dropped_other_model": payload["labelsDroppedOtherModel"],
             }
         )
+        refreshed = self.refresh_review_candidate_priorities(statuses={"pending", "uncertain"})
         self.save()
-        return {"promoted": True, "validation": validation, "summary": self.calibration_summary(), "config": asdict(self.config)}
+        return {
+            "promoted": True,
+            "validation": validation,
+            "summary": self.calibration_summary(),
+            "config": asdict(self.config),
+            "reviewPrioritiesRefreshed": refreshed,
+        }
 
     def calibration_learning_status(self) -> dict[str, Any]:
         _, rows, dominant_model, dropped = self._calibration_scoped_rows()
+        artifacts = self.db.learned_artifact_rows(artifact_type="calibration", limit=10)
         return {
             "summary": self.calibration_summary(),
             "current": {
                 "thresholds": asdict(self.config.thresholds),
                 "calibrationPlatt": list(self.config.calibration_platt),
+                "calibrationAdaptive": dict(self.config.calibration_adaptive),
                 "calibrationModel": str(self.config.calibration_model or ""),
             },
-            "artifacts": self.db.learned_artifact_rows(artifact_type="calibration", limit=10),
+            "artifacts": self._learned_artifact_status_payloads(artifacts),
             "readiness": self._calibration_learning_readiness(rows, dominant_model, dropped),
         }
 
@@ -7173,7 +10868,7 @@ class ProjectState:
                 "artifactType": "calibration",
                 "status": status,
                 "modelName": payload["calibrationModel"],
-                "versionKey": "calibration-platt-fmr-v1",
+                "versionKey": "calibration-adaptive-fmr-v2",
                 "trainingDataHash": payload["trainingDataHash"],
                 "inputCount": payload["labels"],
                 "positiveCount": payload["positiveLabels"],
@@ -7299,6 +10994,7 @@ class ProjectState:
         self._apply_calibration_payload(payload)
         promoted_at = now_iso()
         self.db.update_learned_artifact_status(str(artifact["artifact_id"]), "promoted", promoted_at=promoted_at)
+        refreshed = self.refresh_review_candidate_priorities(statuses={"pending", "uncertain"})
         self._append_audit(
             {
                 "action": "promote_calibration_artifact",
@@ -7313,6 +11009,8 @@ class ProjectState:
                 "new_thresholds": payload.get("thresholds", {}),
                 "promoted_at": promoted_at,
                 "validation": validation,
+                "adaptive": bool(self.config.calibration_adaptive),
+                "review_priorities_refreshed": refreshed,
             }
         )
         self.save()
@@ -7322,6 +11020,7 @@ class ProjectState:
             "artifactHash": artifact.get("artifact_hash", ""),
             "promotedAt": promoted_at,
             "validation": validation,
+            "reviewPrioritiesRefreshed": refreshed,
             "summary": self.calibration_summary(),
             "config": asdict(self.config),
         }
@@ -7337,9 +11036,11 @@ class ProjectState:
         rollback_payload = {
             "thresholds": previous.get("thresholds", {}),
             "platt": previous.get("calibrationPlatt", []),
+            "adaptive": previous.get("calibrationAdaptive", {}),
             "calibrationModel": previous.get("calibrationModel", ""),
         }
         self._apply_calibration_payload(rollback_payload)
+        refreshed = self.refresh_review_candidate_priorities(statuses={"pending", "uncertain"})
         self.db.update_learned_artifact_status(str(artifact["artifact_id"]), "rolled_back")
         self._append_audit(
             {
@@ -7354,6 +11055,7 @@ class ProjectState:
             "artifactId": artifact["artifact_id"],
             "summary": self.calibration_summary(),
             "config": asdict(self.config),
+            "reviewPrioritiesRefreshed": refreshed,
         }
 
     def _adapter_scoped_rows(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str, int]:
@@ -7643,10 +11345,12 @@ class ProjectState:
 
     def embedding_adapter_learning_status(self) -> dict[str, Any]:
         _, rows, dominant_model, dropped = self._adapter_scoped_rows()
+        artifacts = self.db.learned_artifact_rows(artifact_type="embedding_adapter", limit=10)
+        active_artifact = self.db.latest_learned_artifact("embedding_adapter", status="promoted")
         return {
             "summary": self.db.training_example_summary(),
-            "artifacts": self.db.learned_artifact_rows(artifact_type="embedding_adapter", limit=10),
-            "activeArtifact": self.db.latest_learned_artifact("embedding_adapter", status="promoted"),
+            "artifacts": self._learned_artifact_status_payloads(artifacts),
+            "activeArtifact": self._learned_artifact_status_payload(active_artifact),
             "readiness": self._adapter_learning_readiness(rows, dominant_model, dropped),
             "coverage": self.embedding_adapter_context_coverage(rows),
         }
@@ -7827,27 +11531,81 @@ class ProjectState:
             flags=tuple(dict.fromkeys((*decision.flags, "embedding-adapter"))),
         )
 
-    def match_probability(self, score: float, model_name: str | None = None, person_name: str | None = None) -> float | None:
-        """Calibrated P(same identity) for a fused match score, or None if uncalibrated
-        OR stale: a calibrator fit on a different recognizer (model_name) must not be
-        applied to scores from the current one (Phase 3.4 -- different embedding spaces).
-        Prefers a per-identity calibrator (§5.6 personalization) when one exists."""
+    def _calibration_probability_version(self, source: str, payload: Any) -> str:
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        return f"{source}:{hashlib.sha256(encoded).hexdigest()[:16]}"
+
+    def match_probability_detail(
+        self,
+        score: float,
+        model_name: str | None = None,
+        person_name: str | None = None,
+        *,
+        pair_center: Any = None,
+        raw_cosine: float | None = None,
+    ) -> dict[str, Any]:
+        """Resolve adaptive, personalized, then global calibration with provenance."""
         if model_name and self.config.calibration_model and model_name != self.config.calibration_model:
-            return None
+            return {"probability": None, "source": "", "version": ""}
+        adaptive_payload = self.config.calibration_adaptive
+        if adaptive_payload and pair_center is not None and raw_cosine is not None:
+            try:
+                adaptive = AdaptiveLinearCalibrator.from_payload(adaptive_payload)
+                if not adaptive.model_name or not model_name or adaptive.model_name == model_name:
+                    probability = adaptive.probability(pair_center, float(raw_cosine))
+                    return {
+                        "probability": probability,
+                        "source": "adaptive-linear",
+                        "version": self._calibration_probability_version("adaptive-linear", adaptive_payload),
+                    }
+            except (TypeError, ValueError):
+                pass
         if person_name:
             per = self.config.calibration_platt_by_person.get(person_name)
             if per and len(per) == 2:
                 try:
-                    return PlattCalibrator.from_list(per).probability(float(score))
+                    return {
+                        "probability": PlattCalibrator.from_list(per).probability(float(score)),
+                        "source": "person-platt",
+                        "version": self._calibration_probability_version(
+                            "person-platt",
+                            {"person": person_name, "params": per, "model": self.config.calibration_model},
+                        ),
+                    }
                 except (TypeError, ValueError):
                     pass
         params = self.config.calibration_platt
         if not params or len(params) != 2:
-            return None
+            return {"probability": None, "source": "", "version": ""}
         try:
-            return PlattCalibrator.from_list(params).probability(float(score))
+            return {
+                "probability": PlattCalibrator.from_list(params).probability(float(score)),
+                "source": "global-platt",
+                "version": self._calibration_probability_version(
+                    "global-platt",
+                    {"params": params, "model": self.config.calibration_model},
+                ),
+            }
         except (TypeError, ValueError):
-            return None
+            return {"probability": None, "source": "", "version": ""}
+
+    def match_probability(
+        self,
+        score: float,
+        model_name: str | None = None,
+        person_name: str | None = None,
+        *,
+        pair_center: Any = None,
+        raw_cosine: float | None = None,
+    ) -> float | None:
+        """Calibrated P(same identity), with explicit adaptive-to-Platt fallback."""
+        return self.match_probability_detail(
+            score,
+            model_name,
+            person_name,
+            pair_center=pair_center,
+            raw_cosine=raw_cosine,
+        )["probability"]
 
     # Per-identity calibration needs MANY labels for ONE person, so the guard against
     # overfitting is a conservative per-identity label count (NOT the across-identity §6
@@ -7873,9 +11631,10 @@ class ProjectState:
             score_key="matchScore",
         )
         self.config.calibration_platt_by_person = {person: cal.to_list() for person, cal in per.items()}
-        self._append_audit({"action": "apply_personalized_calibration", "identities": len(per)})
+        refreshed = self.refresh_review_candidate_priorities(statuses={"pending", "uncertain"})
+        self._append_audit({"action": "apply_personalized_calibration", "identities": len(per), "review_priorities_refreshed": refreshed})
         self.save()
-        return {"identities": sorted(per.keys()), "count": len(per)}
+        return {"identities": sorted(per.keys()), "count": len(per), "reviewPrioritiesRefreshed": refreshed}
 
     def validate_calibration_change(self, rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """§6: held-out (by-identity) check that the GLOBAL Platt calibrator actually
@@ -7916,6 +11675,8 @@ class ProjectState:
         by_person: dict[str, list[list[float]]] = {}
         quals: dict[str, list[float]] = {}
         for ref in self.references.values():
+            if is_synthetic_age_reference(ref):
+                continue
             if not self._compatible_reference_model_name(str(model_name or ""), ref.model_name):
                 continue
             if isinstance(ref.vector, list) and ref.vector:
@@ -7932,7 +11693,12 @@ class ProjectState:
         vectors: list[list[float]] = []
         qualities: list[float] = []
         for ref in self.references.values():
-            if ref.person_name == person_name and isinstance(ref.vector, list) and ref.vector:
+            if (
+                ref.person_name == person_name
+                and not is_synthetic_age_reference(ref)
+                and isinstance(ref.vector, list)
+                and ref.vector
+            ):
                 vectors.append(ref.vector)
                 qualities.append(float(getattr(ref, "quality", 0.0) or 0.0))
         if not vectors:
@@ -7964,27 +11730,162 @@ class ProjectState:
             "byBand": {band: det_report(rows, score_key="rawCosine") for band, rows in buckets.items()},
         }
 
+    def _candidate_probability_detail(
+        self,
+        candidate: ReviewCandidate,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        resolver = self.match_probability
+        if getattr(resolver, "__func__", None) is not ProjectState.match_probability:
+            try:
+                probability = resolver(candidate.score, candidate.model_name, candidate.person_name)
+            except (TypeError, ValueError):
+                probability = None
+            return {"probability": probability, "source": "runtime-calibrator", "version": ""}
+        stored_probability = candidate.calibrated_probability
+        stored_source = str(candidate.calibration_source or "")
+        stored_version = str(candidate.calibration_version or "")
+        if (
+            stored_probability is not None
+            and math.isfinite(float(stored_probability))
+            and 0.0 <= float(stored_probability) <= 1.0
+            and stored_source
+            and stored_version
+        ):
+            if stored_source == "adaptive-linear" and self.config.calibration_adaptive:
+                expected = self._calibration_probability_version("adaptive-linear", self.config.calibration_adaptive)
+                try:
+                    adaptive = AdaptiveLinearCalibrator.from_payload(self.config.calibration_adaptive)
+                except (TypeError, ValueError):
+                    adaptive = None
+                model_current = not (
+                    candidate.model_name
+                    and self.config.calibration_model
+                    and candidate.model_name != self.config.calibration_model
+                )
+                adaptive_model_current = bool(
+                    adaptive is not None
+                    and (
+                        not adaptive.model_name
+                        or not candidate.model_name
+                        or adaptive.model_name == candidate.model_name
+                    )
+                )
+                if model_current and adaptive_model_current and stored_version == expected:
+                    return {
+                        "probability": float(stored_probability),
+                        "source": stored_source,
+                        "version": stored_version,
+                    }
+            elif stored_source in {"person-platt", "global-platt"}:
+                current = self.match_probability_detail(candidate.score, candidate.model_name, candidate.person_name)
+                if current["source"] == stored_source and current["version"] == stored_version:
+                    return {
+                        "probability": float(stored_probability),
+                        "source": stored_source,
+                        "version": stored_version,
+                    }
+        valid_context = context
+        if valid_context is not None and (
+            str(valid_context.get("bestRefId", "")) != str(candidate.best_ref_id or "")
+            or str(valid_context.get("modelName", "")) != str(candidate.model_name or "")
+        ):
+            valid_context = None
+        if valid_context is None and candidate.best_ref_id:
+            valid_context = self.db.candidate_match_context(
+                candidate.candidate_id,
+                best_ref_id=str(candidate.best_ref_id),
+                model_name=str(candidate.model_name),
+            )
+        return self.match_probability_detail(
+            candidate.score,
+            candidate.model_name,
+            candidate.person_name,
+            pair_center=valid_context.get("pairCenter") if valid_context else None,
+            raw_cosine=candidate.raw_cosine,
+        )
+
+    def _review_order_state(
+        self,
+        candidate: ReviewCandidate,
+        context: dict[str, Any] | None = None,
+    ) -> tuple[float, str, dict[str, Any]]:
+        lane = review_lane(
+            band=candidate.band,
+            align_error=candidate.align_error,
+            ied_px=candidate.ied_px,
+            quality=candidate.quality,
+        )
+        probability_detail = self._candidate_probability_detail(candidate, context)
+        priority = review_priority(
+            lane=lane,
+            probability=probability_detail["probability"],
+            score=candidate.score,
+        )
+        return priority, lane, probability_detail
+
+    def _review_order_for_candidate(
+        self,
+        candidate: ReviewCandidate,
+        context: dict[str, Any] | None = None,
+    ) -> tuple[float, str]:
+        priority, lane, _detail = self._review_order_state(candidate, context)
+        return priority, lane
+
+    def refresh_review_candidate_priorities(self, statuses: Iterable[str] | None = None) -> int:
+        """Recompute persisted review ordering against the current calibrators."""
+        status_set = {str(status or "").strip() for status in (statuses or []) if str(status or "").strip()} or None
+        refreshed: list[ReviewCandidate] = []
+        candidates = list(self._iter_authoritative_candidates(statuses=status_set, order="review"))
+        contexts = self.db.candidate_match_contexts(candidate.candidate_id for candidate in candidates)
+        for candidate in candidates:
+            priority, lane, detail = self._review_order_state(candidate, contexts.get(candidate.candidate_id))
+            probability = detail["probability"]
+            probability_unchanged = (
+                candidate.calibrated_probability is None and probability is None
+            ) or (
+                candidate.calibrated_probability is not None
+                and probability is not None
+                and abs(float(candidate.calibrated_probability) - float(probability)) <= 1e-12
+            )
+            if (
+                abs(float(candidate.review_priority or 0.0) - priority) <= 1e-9
+                and str(candidate.review_lane or "") == lane
+                and probability_unchanged
+                and str(candidate.calibration_source or "") == str(detail["source"])
+                and str(candidate.calibration_version or "") == str(detail["version"])
+            ):
+                continue
+            updated = replace(
+                candidate,
+                review_priority=priority,
+                review_lane=lane,
+                calibrated_probability=probability,
+                calibration_source=str(detail["source"]),
+                calibration_version=str(detail["version"]),
+            )
+            refreshed.append(updated)
+            if candidate.candidate_id in self.candidates:
+                self.candidates[candidate.candidate_id] = updated
+                self._mark_candidate_dirty(candidate.candidate_id)
+        if refreshed:
+            try:
+                self.db.upsert_candidates(refreshed)
+            except sqlite3.Error:
+                pass
+        return len(refreshed)
+
     def ordered_review_candidates(self, status: str = "pending", limit: int = 0) -> list[ReviewCandidate]:
         """Candidates ordered for minimum reviewer-clicks-to-find-the-match (Phase-4):
         likely-true matches first, information-limited (badly-aligned + sub-resolution,
         or near-zero quality) faces abstained to the bottom. Recomputed against the
         CURRENT calibrator so a re-calibration re-ranks the queue."""
-        items = [candidate for candidate in self.candidates.values() if candidate.status == status]
-
-        def priority(candidate: ReviewCandidate) -> float:
-            lane = review_lane(
-                band=candidate.band,
-                align_error=candidate.align_error,
-                ied_px=candidate.ied_px,
-                quality=candidate.quality,
-            )
-            return review_priority(
-                lane=lane,
-                probability=self.match_probability(candidate.score, candidate.model_name),
-                score=candidate.score,
-            )
-
-        items.sort(key=priority, reverse=True)
+        items = list(self._iter_authoritative_candidates(statuses={status}, order="review"))
+        contexts = self.db.candidate_match_contexts(candidate.candidate_id for candidate in items)
+        items.sort(
+            key=lambda candidate: self._review_order_for_candidate(candidate, contexts.get(candidate.candidate_id))[0],
+            reverse=True,
+        )
         return items[: int(limit)] if limit and limit > 0 else items
 
     def accuracy_fairness_report(self, cohort: str = "poseBucket") -> dict[str, Any]:
@@ -8012,7 +11913,10 @@ class ProjectState:
                 "mediaKind": candidate.media_kind,
                 "createdAt": candidate.created_at,
             }
-            for candidate in sorted(self.candidates.values(), key=lambda item: (item.status, item.person_name.lower(), -item.score))
+            for candidate in sorted(
+                self._iter_authoritative_candidates(statuses={"accepted", "rejected"}, order="status"),
+                key=lambda item: (item.status, item.person_name.lower(), -item.score),
+            )
             if candidate.status in {"accepted", "rejected"}
         ]
         payload = {
@@ -8300,10 +12204,29 @@ class ProjectState:
                 except OSError:
                     continue
         scale = self.scale_summary()
+        candidate_count = int(scale.get("reviewCandidateRows", 0) or 0)
+        if candidate_count < len(self.candidates):
+            candidate_count = len(self.candidates)
+        encryption = self.workspace_encryption_status()
+        database_encryption = encryption.get("database") if isinstance(encryption.get("database"), dict) else {}
+        encryption_active = bool(
+            encryption.get("enabled")
+            and encryption.get("migrationComplete")
+            and database_encryption.get("encryptedHeader")
+        )
+        recommendations = [
+            "Use Delete face data before handing this app folder to someone else.",
+            "Export what you need first; deleted face data cannot be restored unless you have a backup.",
+            "Keep source photos, generated previews, and old backups on an OS-encrypted volume.",
+        ]
+        if encryption_active:
+            recommendations.append("Keep the workspace recovery code separate from encrypted backups.")
+        else:
+            recommendations.append("Require workspace encryption before storing biometric templates in production.")
         return {
             "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "references": len(self.references),
-            "candidates": len(self.candidates),
+            "candidates": candidate_count,
             "scanHistory": len(self.scan_history),
             "generatedFiles": generated_files,
             "generatedBytes": generated_bytes,
@@ -8312,29 +12235,30 @@ class ProjectState:
             "calibrationLabels": int(scale.get("calibrationLabels", 0) or 0),
             "trainingExamples": int(scale.get("trainingExamples", 0) or 0),
             "learnedArtifacts": int(scale.get("learnedArtifacts", 0) or 0),
+            "relationshipNameReviews": int(scale.get("relationshipNameReviews", 0) or 0),
             "auditEvents": self._audit_event_count(),
-            # PC-03: be explicit that face embeddings and previews are stored
-            # unencrypted at rest and that Workspace Lock is an in-app access
-            # control, not on-disk encryption.
             "dataAtRest": {
-                "encrypted": False,
-                "biometricStorage": "Face embeddings, training examples, learned artifacts, and generated previews are stored unencrypted in the app folder.",
-                "workspaceLock": "Workspace Lock gates access inside the app; it does not encrypt files on disk.",
-                "backupEncryption": (
-                    "Available now: set VINTRACE_BACKUP_PASSPHRASE and workspace backups are encrypted at rest "
-                    "(AES-256-GCM, scrypt-derived key); verify/restore require the same passphrase."
-                    if backup_passphrase()
-                    else "Optional: set VINTRACE_BACKUP_PASSPHRASE to encrypt exported workspace backups at rest "
-                    "(AES-256-GCM). The live workspace itself is still unencrypted on disk."
+                "encrypted": encryption_active,
+                "keyId": str(database_encryption.get("keyId") or encryption.get("keyId") or ""),
+                "cipherVersion": str(database_encryption.get("cipherVersion") or ""),
+                "migrationComplete": bool(encryption.get("migrationComplete")),
+                "biometricStorage": (
+                    "Face embeddings, private review state, consent releases, audit events, training examples, and learned artifacts are protected by SQLCipher or authenticated workspace envelopes."
+                    if encryption_active
+                    else "Biometric workspace encryption is not active; production startup must fail closed before private templates are stored."
                 ),
-                "note": "Protect the app folder with OS full-disk/account encryption; another local user or process can read the raw files.",
+                "generatedMedia": "Source photos, generated preview/video-frame files, and operator-created evidence exports are ordinary media files outside the workspace-key encryption boundary.",
+                "workspaceLock": "Workspace Lock gates access inside the app; SQLCipher workspace encryption is a separate at-rest control.",
+                "backupEncryption": (
+                    "Workspace backups retain the SQLCipher database and authenticated biometric envelopes. The optional backup passphrase also encrypts the complete archive."
+                    if encryption_active and backup_passphrase()
+                    else "Workspace backups retain the SQLCipher database and authenticated biometric envelopes; keep the recovery code separate from the archive."
+                    if encryption_active
+                    else "Set VINTRACE_BACKUP_PASSPHRASE to encrypt complete exported backup archives with AES-256-GCM."
+                ),
+                "note": "Full-disk encryption remains necessary for source media, generated previews, evidence exports, snapshots, and retired plaintext remnants on SSD/copy-on-write storage.",
             },
-            "recommendations": [
-                "Use Delete face data before handing this app folder to someone else.",
-                "Export what you need first; deleted face data cannot be restored unless you have a backup.",
-                "Keep the app folder on an OS-encrypted volume — files at rest are not encrypted by Vintrace.",
-                "For portable backups, set VINTRACE_BACKUP_PASSPHRASE so exported backup ZIPs are encrypted at rest.",
-            ],
+            "recommendations": recommendations,
         }
 
     def delete_face_data(self, confirm: bool = False, include_audit: bool = False) -> dict[str, Any]:
@@ -8342,9 +12266,13 @@ class ProjectState:
             raise ValueError("Face data deletion requires confirm=true.")
         before = self.privacy_report()
         self._mark_references_deleted(list(self.references.keys()))
-        self._mark_candidates_deleted(list(self.candidates.keys()))
+        self._mark_candidates_deleted(self._authoritative_candidate_ids())
         self.references.clear()
         self.candidates.clear()
+        self._loaded_candidate_ids.clear()
+        self._loaded_candidate_payloads.clear()
+        self._candidate_dirty_ids.clear()
+        self._candidate_index_backed = False
         self.scan_history.clear()
         self.vector_store.rebuild({})
         self._invalidate_reference_indexes()
@@ -8396,7 +12324,7 @@ class ProjectState:
             skipped_unowned.append(str(self.previews_path))
 
         keep_video_frames: set[str] = set()
-        for candidate in self.candidates.values():
+        for candidate in self._iter_authoritative_candidates(order="created"):
             try:
                 source = Path(candidate.source_path).expanduser().resolve()
                 if self.video_frames_path in source.parents:
@@ -8670,7 +12598,7 @@ class ProjectState:
                             "ageBucket": ref.age_bucket,
                         }
                     )
-        for candidate in self.candidates.values():
+        for candidate in self._iter_authoritative_candidates(order="created"):
             source = candidate.media_source_path or candidate.source_path
             row = folder_row(source)
             row["candidates"] += 1
@@ -8729,8 +12657,7 @@ class ProjectState:
         audit_events = 0
         if self.audit_path.exists():
             try:
-                with self.audit_path.open("r", encoding="utf-8") as handle:
-                    audit_events = sum(1 for _ in handle)
+                audit_events = self._audit_event_count()
             except OSError:
                 audit_events = 0
         db_integrity = self.database_integrity()
@@ -8821,7 +12748,7 @@ class ProjectState:
                 row["missing"] += 1
             else:
                 row["bytes"] += size
-        for candidate in self.candidates.values():
+        for candidate in self._iter_authoritative_candidates(order="created"):
             source = candidate.media_source_path or candidate.source_path
             row = row_for(source)
             row["candidates"] += 1
@@ -8838,7 +12765,7 @@ class ProjectState:
             reverse=True,
         )[:max(1, min(1000, int(limit)))]
 
-    def preview_path_for(self, value: str | None, create: bool = True) -> str | None:
+    def preview_path_for(self, value: str | None, create: bool = True, max_edge: int = 768) -> str | None:
         if not value:
             return None
         source = Path(value).expanduser()
@@ -8846,11 +12773,15 @@ class ProjectState:
         # non-browser-renderable ones). Previously jpg/png/webp fell through to
         # here returning None, so the renderer used the full-resolution original
         # as the list thumbnail. Any image we can load gets a small cached preview.
+        # max_edge lets a caller (e.g. the mobile viewer) request a larger preview than
+        # the 768px list thumbnail; it is generated from the original, so it is honest up
+        # to the source's own resolution and never upscaled.
+        edge = max(128, int(max_edge or 768))
         suffix = source.suffix.lower()
         if not source.exists() or not source.is_file() or suffix not in IMAGE_EXTENSIONS | VIDEO_EXTENSIONS:
             return None
         try:
-            preview = self._preview_cache_path(source)
+            preview = self._preview_cache_path(source, edge)
             if not create and not preview.exists():
                 return None
             if not preview.exists() or preview.stat().st_size <= 0:
@@ -8868,7 +12799,7 @@ class ProjectState:
                     shutil.copy2(samples[0].path, temp)
                     temp.replace(preview)
                 else:
-                    write_preview_image(source, preview)
+                    write_preview_image(source, preview, max_edge=edge)
             return str(preview)
         except (ImageLoadError, VideoLoadError, OSError, ValueError):
             return None
@@ -8917,7 +12848,7 @@ class ProjectState:
         for ref in self.references.values():
             if maybe_prepare(ref.source_path):
                 return prepared
-        for candidate in self.candidates.values():
+        for candidate in self._iter_authoritative_candidates(order="created"):
             if maybe_prepare(candidate.source_path):
                 return prepared
             if maybe_prepare(candidate.best_ref_path):
@@ -9022,10 +12953,14 @@ class ProjectState:
             "truncated": len(seen) < len(dict.fromkeys(clean_values)),
         }
 
-    def _preview_cache_path(self, source: Path) -> Path:
+    def _preview_cache_path(self, source: Path, max_edge: int = 768) -> Path:
         stat = source.stat()
+        # The default 768 edge keeps the historical cache key byte-for-byte, so existing
+        # previews are not mass-regenerated. Larger edges (requested by the mobile viewer,
+        # which needs to zoom) cache under their own key alongside the small thumbnail.
+        edge_suffix = "" if int(max_edge) == 768 else f"|edge{int(max_edge)}"
         cache_key = hashlib.sha256(
-            f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|preview-v3".encode("utf-8")
+            f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|preview-v3{edge_suffix}".encode("utf-8")
         ).hexdigest()[:32]
         return self.previews_path / f"{cache_key}.jpg"
 
@@ -9037,6 +12972,8 @@ class ProjectState:
 
     def _candidate_duplicate_source(self, candidate: ReviewCandidate) -> str:
         if candidate.media_kind == "video" and candidate.media_source_path:
+            if candidate.video_track_id:
+                return f"video:{candidate.media_source_path}:track:{candidate.video_track_id}"
             return f"video:{candidate.media_source_path}"
         if candidate.source_hash:
             return f"sha256:{candidate.source_hash}"
@@ -9141,28 +13078,10 @@ class ProjectState:
         # Callers must already hold self._state_lock(). Reads only the file tail for speed.
         if not self.audit_path.exists():
             return (0, "")
-        try:
-            size = self.audit_path.stat().st_size
-            with self.audit_path.open("rb") as handle:
-                window = 65536
-                if size > window:
-                    handle.seek(size - window)
-                    handle.readline()  # discard the partial first line
-                chunk = handle.read()
-        except OSError:
-            return (0, "")
-        tip = (0, "")
-        for raw in chunk.split(b"\n"):
-            stripped = raw.strip()
-            if not stripped:
-                continue
-            try:
-                value = json.loads(stripped.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
-            if isinstance(value, dict) and isinstance(value.get("hash"), str) and value.get("hash"):
-                tip = (int(value.get("seq", 0) or 0), value["hash"])
-        return tip
+        for value in self._iter_audit_rows_reverse():
+            if isinstance(value.get("hash"), str) and value.get("hash"):
+                return (int(value.get("seq", 0) or 0), str(value["hash"]))
+        return (0, "")
 
     @staticmethod
     def _audit_person_ref(name: str) -> str:
@@ -9175,12 +13094,147 @@ class ProjectState:
             return ""
         return "sha256:" + hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:16]
 
+    @classmethod
+    def _minimize_audit_payload(cls, value: Any, field: str = "") -> Any:
+        normalized_field = field.casefold().replace("_", "").replace("-", "")
+        person_fields = {
+            "person",
+            "personname",
+            "expectedperson",
+            "actualperson",
+            "oldpersonname",
+            "newpersonname",
+            "signername",
+            "approvedby",
+            "operator",
+        }
+        people_fields = {
+            "people",
+            "memberpeople",
+            "includepeople",
+            "excludepeople",
+        }
+        if normalized_field in person_fields:
+            if isinstance(value, str):
+                return value if value.startswith("sha256:") else cls._audit_person_ref(value)
+            if isinstance(value, list):
+                return [cls._audit_person_ref(str(item)) for item in value if str(item).strip()]
+        if normalized_field in people_fields and isinstance(value, list):
+            return [cls._audit_person_ref(str(item)) for item in value if str(item).strip()]
+        if isinstance(value, dict):
+            return {
+                str(key): cls._minimize_audit_payload(item, str(key))
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._minimize_audit_payload(item) for item in value]
+        return value
+
+    def _pseudonymize_subject_audit(self, person_name: str) -> dict[str, Any]:
+        clean_name = str(person_name or "").strip()
+        if not clean_name or not self.audit_path.exists():
+            return {"redacted": 0, "checkpointHash": ""}
+        person_ref = self._audit_person_ref(clean_name)
+        pattern = re.compile(re.escape(clean_name), re.IGNORECASE)
+
+        def scrub(value: Any) -> tuple[Any, bool]:
+            if isinstance(value, str):
+                cleaned, count = pattern.subn(person_ref, value)
+                return cleaned, count > 0
+            if isinstance(value, list):
+                changed = False
+                cleaned_items: list[Any] = []
+                for item in value:
+                    cleaned, item_changed = scrub(item)
+                    cleaned_items.append(cleaned)
+                    changed = changed or item_changed
+                return cleaned_items, changed
+            if isinstance(value, dict):
+                changed = False
+                cleaned_row: dict[str, Any] = {}
+                for key, item in value.items():
+                    cleaned, item_changed = scrub(item)
+                    cleaned_row[str(key)] = cleaned
+                    changed = changed or item_changed
+                return cleaned_row, changed
+            return value, False
+
+        with self._state_lock():
+            rows = list(self._iter_audit_rows_forward())
+            if not rows:
+                return {"redacted": 0, "checkpointHash": ""}
+            prior_tail = next(
+                (str(row.get("hash", "")) for row in reversed(rows) if row.get("hash")),
+                "",
+            )
+            cleaned_rows: list[tuple[dict[str, Any], bool]] = []
+            affected_rows: list[dict[str, Any]] = []
+            for row in rows:
+                cleaned, changed = scrub(row)
+                assert isinstance(cleaned, dict)
+                cleaned_rows.append((cleaned, changed))
+                if changed:
+                    affected_rows.append(row)
+            if not affected_rows:
+                return {"redacted": 0, "checkpointHash": ""}
+
+            previous_hash = ""
+            rechained: list[dict[str, Any]] = []
+            for index, (row, changed) in enumerate(cleaned_rows, start=1):
+                next_row = {
+                    key: value
+                    for key, value in row.items()
+                    if key not in {"seq", "prevHash", "hash", "erasurePriorHash"}
+                }
+                if row.get("hash"):
+                    next_row["erasurePriorHash"] = str(row["hash"])
+                if changed:
+                    next_row["subjectErasureRedacted"] = True
+                    next_row["subjectRef"] = person_ref
+                next_row["seq"] = index
+                next_row["prevHash"] = previous_hash
+                next_row["hash"] = hashlib.sha256(
+                    self._audit_canonical(next_row).encode("utf-8")
+                ).hexdigest()
+                previous_hash = next_row["hash"]
+                rechained.append(next_row)
+
+            affected_digest = hashlib.sha256(
+                "\n".join(self._audit_canonical(row) for row in affected_rows).encode("utf-8")
+            ).hexdigest()
+            checkpoint: dict[str, Any] = {
+                "at": now_iso(),
+                "action": "audit_subject_erasure_checkpoint",
+                "subjectRef": person_ref,
+                "redactedEvents": len(affected_rows),
+                "priorChainTail": prior_tail,
+                "redactedEventsDigest": affected_digest,
+                "seq": len(rechained) + 1,
+                "prevHash": previous_hash,
+            }
+            checkpoint["hash"] = hashlib.sha256(
+                self._audit_canonical(checkpoint).encode("utf-8")
+            ).hexdigest()
+            rechained.append(checkpoint)
+
+            def rewrite(handle) -> None:
+                for row in rechained:
+                    encoded = self._encode_audit_line(row)
+                    handle.write(
+                        encoded.decode("ascii")
+                        if self.workspace_encryption.enabled
+                        else encoded.decode("utf-8")
+                    )
+
+            atomic_write(self.audit_path, rewrite)
+        return {"redacted": len(affected_rows), "checkpointHash": checkpoint["hash"]}
+
     def _append_audit(self, row: dict[str, object]) -> None:
         with self._state_lock():
             last_seq, last_hash = self._audit_tail_tip()
             audit_row: dict[str, Any] = {
                 "at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-                **row,
+                **self._minimize_audit_payload(row),
             }
             # Chain fields are authoritative and cannot be overridden by the caller-supplied row.
             audit_row["seq"] = last_seq + 1
@@ -9188,8 +13242,8 @@ class ProjectState:
             audit_row["hash"] = hashlib.sha256(
                 self._audit_canonical(audit_row).encode("utf-8")
             ).hexdigest()
-            with self.audit_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(audit_row) + "\n")
+            with self.audit_path.open("ab") as handle:
+                handle.write(self._encode_audit_line(audit_row))
                 # Durably flush the tamper-evident chain entry to disk. A plain
                 # close() only flushes to the kernel page cache; a crash/power
                 # loss in that window would drop the newest entry and break the
@@ -9214,19 +13268,21 @@ class ProjectState:
         prev_hash = ""
         index = 0
         try:
-            with self.audit_path.open("r", encoding="utf-8") as handle:
+            with self.audit_path.open("rb") as handle:
                 for raw in handle:
                     stripped = raw.strip()
                     if not stripped:
                         continue
                     index += 1
                     try:
-                        value = json.loads(stripped)
-                    except json.JSONDecodeError:
+                        value = self._decode_audit_line(stripped)
+                    except WorkspaceEncryptionError:
+                        if result["firstBreak"] is None:
+                            result["firstBreak"] = {"index": index, "reason": "encrypted-line-authentication"}
+                        continue
+                    if value is None:
                         if result["firstBreak"] is None:
                             result["firstBreak"] = {"index": index, "reason": "unparseable-line"}
-                        continue
-                    if not isinstance(value, dict):
                         continue
                     stored_hash = value.get("hash")
                     if not isinstance(stored_hash, str) or not stored_hash:
@@ -9275,6 +13331,105 @@ class ProjectState:
             "limit": limit,
             "offset": offset,
             "total": self._audit_event_count(),
+        }
+
+    @staticmethod
+    def _audit_event_timestamp(row: dict[str, Any]) -> datetime | None:
+        raw = str(row.get("at", "") or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def audit_events_due_for_retention(self, days: int, *, now: datetime | None = None) -> int:
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        cutoff = current.astimezone(timezone.utc).timestamp() - max(1, int(days)) * 86400
+        return sum(
+            1
+            for row in self._iter_audit_rows_forward()
+            if (timestamp := self._audit_event_timestamp(row)) is not None and timestamp.timestamp() < cutoff
+        )
+
+    def enforce_audit_retention(
+        self,
+        days: int,
+        *,
+        source: str = "retention-policy",
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        current = current.astimezone(timezone.utc)
+        retention_days = max(1, int(days))
+        cutoff = current.timestamp() - retention_days * 86400
+        with self._state_lock():
+            rows = list(self._iter_audit_rows_forward())
+            removed: list[dict[str, Any]] = []
+            retained: list[dict[str, Any]] = []
+            for row in rows:
+                timestamp = self._audit_event_timestamp(row)
+                (removed if timestamp is not None and timestamp.timestamp() < cutoff else retained).append(row)
+            if not removed:
+                return {"deleted": 0, "retained": len(rows), "checkpointHash": ""}
+            previous_tail = next(
+                (str(row.get("hash", "")) for row in reversed(rows) if row.get("hash")),
+                "",
+            )
+            removed_digest = hashlib.sha256(
+                "\n".join(self._audit_canonical(row) for row in removed).encode("utf-8")
+            ).hexdigest()
+            rechained: list[dict[str, Any]] = []
+            previous_hash = ""
+            for index, row in enumerate(retained, start=1):
+                next_row = {
+                    key: value
+                    for key, value in row.items()
+                    if key not in {"seq", "prevHash", "hash", "retentionPriorHash"}
+                }
+                if row.get("hash"):
+                    next_row["retentionPriorHash"] = str(row["hash"])
+                next_row["seq"] = index
+                next_row["prevHash"] = previous_hash
+                next_row["hash"] = hashlib.sha256(self._audit_canonical(next_row).encode("utf-8")).hexdigest()
+                previous_hash = next_row["hash"]
+                rechained.append(next_row)
+            checkpoint: dict[str, Any] = {
+                "at": current.isoformat(timespec="seconds").replace("+00:00", "Z"),
+                "action": "audit_retention_checkpoint",
+                "source": str(source or "retention-policy")[:80],
+                "retentionDays": retention_days,
+                "deletedEvents": len(removed),
+                "retainedEvents": len(retained),
+                "priorChainTail": previous_tail,
+                "deletedEventsDigest": removed_digest,
+                "deletedThrough": max(
+                    str(row.get("at", "")) for row in removed if str(row.get("at", ""))
+                ),
+                "seq": len(rechained) + 1,
+                "prevHash": previous_hash,
+            }
+            checkpoint["hash"] = hashlib.sha256(self._audit_canonical(checkpoint).encode("utf-8")).hexdigest()
+            rechained.append(checkpoint)
+
+            def rewrite(handle) -> None:
+                for row in rechained:
+                    encoded = self._encode_audit_line(row)
+                    handle.write(encoded.decode("ascii") if self.workspace_encryption.enabled else encoded.decode("utf-8"))
+
+            atomic_write(self.audit_path, rewrite)
+        return {
+            "deleted": len(removed),
+            "retained": len(retained),
+            "checkpointHash": checkpoint["hash"],
+            "deletedEventsDigest": removed_digest,
         }
 
     def _record_scan_run(
@@ -9343,7 +13498,10 @@ class ProjectState:
 
     def _read_json_array(self, path: Path) -> list[dict[str, object]]:
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
+            role = self._sensitive_file_role(path)
+            value = self.workspace_encryption.read_json(path, role=role) if role else json.loads(path.read_text(encoding="utf-8"))
+        except WorkspaceEncryptionError:
+            raise
         except (OSError, json.JSONDecodeError):
             archive_corrupt_file(path)
             return []
@@ -9356,7 +13514,10 @@ class ProjectState:
         if not path.exists():
             return {}
         try:
-            value = json.loads(path.read_text(encoding="utf-8"))
+            role = self._sensitive_file_role(path)
+            value = self.workspace_encryption.read_json(path, role=role) if role else json.loads(path.read_text(encoding="utf-8"))
+        except WorkspaceEncryptionError:
+            raise
         except (OSError, json.JSONDecodeError):
             archive_corrupt_file(path)
             return {}
@@ -9368,11 +13529,20 @@ class ProjectState:
     def _write_json_atomic(self, path: Path, value: object) -> None:
         # ER-02/MA-6: route through the shared atomic-write-with-fsync mechanism
         # while keeping the compact on-disk format.
-        atomic_write_text(path, json.dumps(value, separators=(",", ":")))
+        role = self._sensitive_file_role(path)
+        if role:
+            self.workspace_encryption.write_json_atomic(path, value, role=role)
+        else:
+            atomic_write_text(path, json.dumps(value, separators=(",", ":")))
 
     def _write_json_array_atomic(self, path: Path, rows: Iterable[object]) -> None:
         # Streams the array so a large candidate list never materializes as one
         # string; the shared mechanism adds durability (fsync) + atomic replace.
+        role = self._sensitive_file_role(path)
+        if role:
+            self.workspace_encryption.write_json_atomic(path, list(rows), role=role)
+            return
+
         def _stream(handle) -> None:
             handle.write("[")
             first = True
@@ -9386,19 +13556,198 @@ class ProjectState:
 
         atomic_write(path, _stream)
 
+    def _sensitive_file_role(self, path: Path) -> str:
+        try:
+            if path.expanduser().resolve() == self.content_credentials_identity_path.expanduser().resolve():
+                return "c2pa-signing-identity-v1"
+        except OSError:
+            pass
+        return {
+            self.consent_path.name: "consent-records-v1",
+            self.refs_path.name: "face-references-v1",
+            self.candidates_path.name: "review-candidates-v1",
+        }.get(path.name, "")
+
+    def _remove_plaintext_reference_vector_store(self) -> None:
+        secure_remove_file(self.vector_index_path)
+        secure_remove_file(Path(str(self.vector_index_path) + ".faiss"))
+        secure_remove_file(self.vector_index_path.with_suffix(self.vector_index_path.suffix + ".tmp"))
+        secure_remove_file(Path(str(self.vector_index_path) + ".faiss.tmp"))
+
+    def _migrate_sensitive_state_files(self) -> None:
+        if not self.workspace_encryption.enabled:
+            return
+        for path in (
+            self.consent_path,
+            self.refs_path,
+            self.candidates_path,
+            self.content_credentials_identity_path,
+        ):
+            if not path.exists():
+                continue
+            role = self._sensitive_file_role(path)
+            raw = path.read_bytes()
+            if self.workspace_encryption.is_encrypted_bytes(raw):
+                if len(self.workspace_encryption.key_candidates) <= 1:
+                    continue
+                plaintext = self.workspace_encryption.decrypt_bytes(raw, role=role)
+                self.workspace_encryption.write_bytes_atomic(path, plaintext, role=role)
+                continue
+            try:
+                parsed = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise WorkspaceEncryptionError(f"Cannot migrate malformed sensitive workspace file: {path.name}") from exc
+            expected_type = dict if path in {self.consent_path, self.content_credentials_identity_path} else list
+            if not isinstance(parsed, expected_type):
+                raise WorkspaceEncryptionError(f"Cannot migrate unexpected sensitive workspace file: {path.name}")
+            self.workspace_encryption.write_bytes_atomic(path, raw, role=role)
+        self._remove_plaintext_reference_vector_store()
+
+    def _audit_log_encryption_state(self) -> tuple[bool, bool, bool]:
+        if not self.audit_path.exists():
+            return False, False, False
+        has_rows = False
+        has_encrypted = False
+        has_plaintext = False
+        with self.audit_path.open("rb") as handle:
+            for raw in handle:
+                stripped = raw.strip()
+                if not stripped:
+                    continue
+                has_rows = True
+                if stripped.startswith(AUDIT_ENCRYPTED_PREFIX):
+                    has_encrypted = True
+                else:
+                    has_plaintext = True
+        return has_rows, has_encrypted, has_plaintext
+
+    def _migrate_audit_log_encryption(self, *, force: bool = False) -> None:
+        has_rows, has_encrypted, has_plaintext = self._audit_log_encryption_state()
+        if not has_rows:
+            return
+        if not self.workspace_encryption.enabled:
+            if has_encrypted:
+                raise WorkspaceEncryptionError(
+                    "The audit log is encrypted, but its OS-backed workspace key is unavailable."
+                )
+            return
+        if not force and not has_plaintext and len(self.workspace_encryption.key_candidates) <= 1:
+            return
+        with self._state_lock():
+            def rewrite(handle) -> None:
+                with self.audit_path.open("rb") as source:
+                    for index, raw in enumerate(source, start=1):
+                        if not raw.strip():
+                            continue
+                        value = self._decode_audit_line(raw)
+                        if value is None:
+                            raise WorkspaceEncryptionError(
+                                f"Cannot migrate malformed audit event at line {index}."
+                            )
+                        handle.write(self._encode_audit_line(value).decode("ascii"))
+
+            atomic_write(self.audit_path, rewrite)
+
+    def workspace_encryption_status(self) -> dict[str, Any]:
+        sensitive_files: list[dict[str, Any]] = []
+        for path in (
+            self.consent_path,
+            self.refs_path,
+            self.candidates_path,
+            self.content_credentials_identity_path,
+        ):
+            exists = path.exists()
+            encrypted = False
+            if exists:
+                try:
+                    with path.open("rb") as handle:
+                        encrypted = self.workspace_encryption.is_encrypted_bytes(handle.read(32))
+                except OSError:
+                    encrypted = False
+            sensitive_files.append({"name": path.name, "exists": exists, "encrypted": encrypted})
+        audit_has_rows, audit_has_encrypted, audit_has_plaintext = self._audit_log_encryption_state()
+        sensitive_files.append(
+            {
+                "name": self.audit_path.name,
+                "exists": self.audit_path.exists(),
+                "encrypted": bool((not audit_has_rows) or (audit_has_encrypted and not audit_has_plaintext)),
+                "format": "line-aes-256-gcm" if audit_has_rows and audit_has_encrypted and not audit_has_plaintext else "empty" if not audit_has_rows else "plaintext",
+            }
+        )
+        vector_paths = (self.vector_index_path, Path(str(self.vector_index_path) + ".faiss"))
+        status = self.db.encryption_status()
+        return {
+            **self.workspace_encryption.status(),
+            "database": status,
+            "sensitiveFiles": sensitive_files,
+            "plaintextVectorSidecars": [path.name for path in vector_paths if path.exists()],
+            "migrationComplete": bool(
+                (not self.workspace_encryption.enabled)
+                or (
+                    status.get("encryptedHeader")
+                    and all((not row["exists"]) or row["encrypted"] for row in sensitive_files)
+                    and not any(path.exists() for path in vector_paths)
+                )
+            ),
+        }
+
+    def rotate_workspace_database_key(self, new_key: bytes, *, source: str = "desktop-internal") -> dict[str, Any]:
+        if not self.workspace_encryption.enabled:
+            raise WorkspaceEncryptionError("Workspace database encryption is not active.")
+        plaintext_files: dict[Path, tuple[str, bytes]] = {}
+        for path in (
+            self.consent_path,
+            self.refs_path,
+            self.candidates_path,
+            self.content_credentials_identity_path,
+        ):
+            if not path.exists():
+                continue
+            role = self._sensitive_file_role(path)
+            plaintext_files[path] = (role, self.workspace_encryption.read_bytes(path, role=role))
+        old_key_id = self.workspace_encryption.key_id
+        self.db.rekey(new_key)
+        for path, (role, plaintext) in plaintext_files.items():
+            self.workspace_encryption.write_bytes_atomic(path, plaintext, role=role)
+        self._migrate_audit_log_encryption(force=True)
+        self._remove_plaintext_reference_vector_store()
+        result = self.workspace_encryption_status()
+        self._append_audit(
+            {
+                "action": "rotate_workspace_database_key",
+                "oldKeyId": old_key_id,
+                "newKeyId": self.workspace_encryption.key_id,
+                "source": str(source or "desktop-internal")[:80],
+                "migrationComplete": bool(result.get("migrationComplete")),
+            }
+        )
+        return result
+
     @contextmanager
     def _state_lock(self):
         self.root.mkdir(parents=True, exist_ok=True)
         start = time.monotonic()
+        lock_token = f"{os.getpid()}:{time.monotonic_ns()}:{os.urandom(8).hex()}"
         fd: int | None = None
+        stop_heartbeat = threading.Event()
+        heartbeat_thread: threading.Thread | None = None
+
+        def lock_payload() -> bytes:
+            return f"{lock_token} {now_iso()}\n".encode("utf-8")
+
         while True:
             try:
                 fd = os.open(str(self.lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, f"{os.getpid()} {now_iso()}\n".encode("utf-8"))
+                os.write(fd, lock_payload())
+                os.fsync(fd)
                 break
             except FileExistsError:
                 try:
-                    if time.time() - self.lock_path.stat().st_mtime > 45:
+                    stale_stat = self.lock_path.stat()
+                    if time.time() - stale_stat.st_mtime > 45:
+                        confirmed_stat = self.lock_path.stat()
+                        if confirmed_stat.st_mtime_ns != stale_stat.st_mtime_ns:
+                            continue
                         self.lock_path.unlink()
                         continue
                 except OSError:
@@ -9407,11 +13756,36 @@ class ProjectState:
                     raise TimeoutError("Workspace state is locked by another process.")
                 time.sleep(0.05)
         try:
+            heartbeat_interval = float(os.environ.get("VINTRACE_STATE_LOCK_HEARTBEAT_SECONDS", "15") or 15)
+        except ValueError:
+            heartbeat_interval = 15.0
+        heartbeat_interval = max(0.05, min(15.0, heartbeat_interval))
+
+        def heartbeat() -> None:
+            while not stop_heartbeat.wait(heartbeat_interval):
+                if fd is None:
+                    continue
+                try:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    os.ftruncate(fd, 0)
+                    os.write(fd, lock_payload())
+                    os.fsync(fd)
+                except OSError:
+                    continue
+
+        heartbeat_thread = threading.Thread(target=heartbeat, name="vintrace-state-lock-heartbeat", daemon=True)
+        heartbeat_thread.start()
+        try:
             yield
         finally:
+            stop_heartbeat.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=1)
             if fd is not None:
                 os.close(fd)
             try:
-                self.lock_path.unlink()
+                current = self.lock_path.read_text(encoding="utf-8")
+                if current.startswith(f"{lock_token} "):
+                    self.lock_path.unlink()
             except OSError:
                 pass

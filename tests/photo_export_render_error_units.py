@@ -39,6 +39,46 @@ def test_strict_render_failure_is_render_error_when_not_stripping_location() -> 
         assert row["targetPath"] == "", row
 
 
+def test_rendered_export_keeps_source_icc_when_target_conversion_fails() -> None:
+    from PIL import Image, ImageCms
+
+    with tempfile.TemporaryDirectory() as tmp:
+        api = _api(tmp)
+        source = Path(tmp) / "profiled.jpg"
+        source_profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("LAB")).tobytes()
+        target_profile = api._photo_export_srgb_profile_bytes()
+        Image.new("RGB", (32, 24), (150, 80, 40)).save(source, quality=95, icc_profile=source_profile)
+        imported = api.import_photos(
+            {"sourcePaths": [str(source)], "storageMode": "referenced", "sourceLabel": "Profiled"}
+        )
+        imported_path = imported["importedPaths"][0]
+        original_profile_to_profile = ImageCms.profileToProfile
+
+        def fail_profile_to_profile(*args, **kwargs):
+            raise RuntimeError("simulated color transform failure")
+
+        try:
+            ImageCms.profileToProfile = fail_profile_to_profile
+            result = api.export_photo_selection(
+                [imported_path],
+                export_variant="rendered",
+                render_format="png",
+                target_color_profile="srgb",
+                filename_mode="original",
+            )
+        finally:
+            ImageCms.profileToProfile = original_profile_to_profile
+
+        row = result["items"][0]
+        assert row["result"] == "rendered", row
+        assert row["targetColorProfile"] == "srgb", row
+        with Image.open(Path(row["targetPath"])) as output:
+            embedded = output.info.get("icc_profile")
+        assert embedded == source_profile, "unconverted pixels must keep their source ICC profile"
+        assert embedded != target_profile, "failed conversion must not embed the requested target profile"
+
+
 if __name__ == "__main__":
     test_strict_render_failure_is_render_error_when_not_stripping_location()
+    test_rendered_export_keeps_source_icc_when_target_conversion_fails()
     print("all photo_export_render_error_units tests passed")

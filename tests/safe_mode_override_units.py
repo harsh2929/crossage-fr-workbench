@@ -136,4 +136,45 @@ finally:
 
 check("dense skin masks still measure region size", region_calls == 1 and dense.largest_region_ratio == 0.75)
 
+guard_calls = 0
+lazy_guard = safety_module.SafetyAssessment(
+    sensitive=True,
+    score=0.9,
+    reason="lazy guard",
+    skin_ratio=0.8,
+    lower_skin_ratio=0.8,
+    largest_region_ratio=0.8,
+)
+lazy_spec = safety_module._SafetyModelSpec(  # noqa: SLF001 - direct model regression.
+    path=safety_module.Path("lazy-guard-test.onnx"),
+    model_name="lazy-guard-test",
+    source="test",
+    license="test",
+    input_size=384,
+    labels=("sfw", "nsfw"),
+    nsfw_index=1,
+    mean=(0.5, 0.5, 0.5),
+    std=(0.5, 0.5, 0.5),
+    interpolation="bilinear",
+    threshold_hint="test",
+)
+lazy_model = object.__new__(safety_module._OnnxSafetyModel)
+lazy_model.spec = lazy_spec
+
+
+def guard_factory() -> safety_module.SafetyAssessment:
+    global guard_calls
+    guard_calls += 1
+    return lazy_guard
+
+
+lazy_model._logits = lambda _image: safety_module.np.asarray([5.0, 0.0], dtype=safety_module.np.float32)
+confident_model = lazy_model.assess(None, threshold=0.58, heuristic_factory=guard_factory)
+check("confident ONNX safety score skips heuristic guard", guard_calls == 0 and confident_model.heuristic_score is None)
+
+lazy_model._logits = lambda _image: safety_module.np.asarray([0.0, 0.0], dtype=safety_module.np.float32)
+near_threshold = lazy_model.assess(None, threshold=0.58, heuristic_factory=guard_factory)
+check("near-threshold ONNX safety score runs heuristic guard", guard_calls == 1 and near_threshold.heuristic_score == lazy_guard.score)
+check("lazy heuristic guard can still raise sensitive verdict", near_threshold.sensitive is True and near_threshold.score == lazy_guard.score)
+
 print("\nall safe-mode-override tests passed")

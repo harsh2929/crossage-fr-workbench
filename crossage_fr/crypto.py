@@ -81,6 +81,54 @@ def encrypt_file(source: Path, target: Path, passphrase: str, chunk_size: int = 
         dst.write(encryptor.tag)
 
 
+def decrypt_file(source: Path, target: Path, passphrase: str, chunk_size: int = 1024 * 1024) -> None:
+    if not passphrase:
+        raise DecryptionError("A passphrase is required to decrypt this backup.")
+    with source.open("rb") as src:
+        header = src.read(len(MAGIC) + 1 + _SALT_LEN + _NONCE_LEN)
+        if len(header) < len(MAGIC) + 1 + _SALT_LEN + _NONCE_LEN or not is_encrypted(header):
+            raise DecryptionError("Not a Vintrace-encrypted blob.")
+        offset = len(MAGIC)
+        version = header[offset]
+        offset += 1
+        if version != _VERSION:
+            raise DecryptionError(f"Unsupported encryption version: {version}.")
+        salt = header[offset : offset + _SALT_LEN]
+        offset += _SALT_LEN
+        nonce = header[offset : offset + _NONCE_LEN]
+        tag_start = source.stat().st_size - 16
+        if tag_start < len(header):
+            raise DecryptionError("Encrypted backup is truncated.")
+        src.seek(tag_start)
+        tag = src.read(16)
+        key = _derive_key(passphrase, salt)
+        decryptor = Cipher(algorithms.AES(key), modes.GCM(nonce, tag)).decryptor()
+        decryptor.authenticate_additional_data(MAGIC)
+        src.seek(len(header))
+        remaining = tag_start - len(header)
+        try:
+            with target.open("wb") as dst:
+                while remaining > 0:
+                    chunk = src.read(min(max(1, int(chunk_size)), remaining))
+                    if not chunk:
+                        raise DecryptionError("Encrypted backup ended before the authentication tag.")
+                    remaining -= len(chunk)
+                    dst.write(decryptor.update(chunk))
+                dst.write(decryptor.finalize())
+        except DecryptionError:
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            raise
+        except InvalidTag as exc:
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            raise DecryptionError("Wrong passphrase or the backup has been modified.") from exc
+
+
 def decrypt_bytes(blob: bytes, passphrase: str) -> bytes:
     if not is_encrypted(blob):
         raise DecryptionError("Not a Vintrace-encrypted blob.")

@@ -405,7 +405,7 @@ test("desktop workbench renders and every primary control path works", async () 
   page.on("dialog", (dialog) => dialog.accept());
 
   await expect(page.getByText("Vintrace", { exact: true })).toBeVisible();
-  await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByText("Backend ready.")).toBeAttached({ timeout: 120_000 });
   const languageSelect = page.locator(".language-picker select");
   await languageSelect.selectOption("en");
   await expect(page.locator(".nav-list").getByRole("button", { name: "Library" })).toBeVisible();
@@ -443,7 +443,8 @@ test("desktop workbench renders and every primary control path works", async () 
   // Switch-workspace control — confirms the switch landed.
   await expect(page.getByText("Switch workspace")).toBeVisible({ timeout: 120_000 });
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
-  await expect(page.locator(".status-row").getByText("Ready", { exact: true })).toBeVisible();
+  await expect(page.getByText("Backend ready.")).toBeAttached();
+  await expect(page.locator(".settings-save-status")).toContainText("Saved");
 
   // Grant permission from its new home (Settings > Privacy & Safety) before
   // enrolling, so we never navigate away from the add-person panel mid-flow.
@@ -451,6 +452,7 @@ test("desktop workbench renders and every primary control path works", async () 
   await page.locator('input[aria-label="Permission for this app folder"]').click();
   await expect(page.getByRole("dialog", { name: "Confirm permission" })).toBeVisible();
   await page.getByRole("textbox", { name: "Optional note" }).fill("E2E operator consent.");
+  await page.getByRole("checkbox", { name: "I have read and acknowledge the current AI and biometric processing notice." }).check();
   await page.getByRole("button", { name: "Confirm permission" }).click();
 
   await gotoPeopleSection(page, "Add person");
@@ -675,6 +677,7 @@ test("desktop workbench renders and every primary control path works", async () 
   // Tools > Overview: everyday landing (onboarding + priorities + human-readable stats).
   await expect(page.getByText("First scan checklist")).toBeVisible();
   await expect(page.getByText("Friend test mode")).toBeVisible();
+  await page.locator(".tester-mode-panel > summary").click();
   await expect(page.getByRole("button", { name: /Open camera/ })).toBeVisible();
   await expect(page.getByText("Top 7 current priorities")).toBeVisible();
   await expect(page.locator(".dashboard-metrics").getByText("Files scanned", { exact: true })).toBeVisible();

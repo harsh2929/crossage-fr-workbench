@@ -3,6 +3,7 @@ export const APP_STORAGE_ISSUE_EVENT = "vintrace:storage-issue";
 export type AppStorageArea =
   | "language"
   | "onboarding"
+  | "agentDiscovery"
   | "savedScanSources"
   | "scanQueue"
   | "savedReviewViews"
@@ -51,6 +52,8 @@ export function appStorageAreaLabel(area: AppStorageArea) {
       return "language preference";
     case "onboarding":
       return "onboarding preference";
+    case "agentDiscovery":
+      return "agent platform discovery preference";
     case "savedScanSources":
       return "saved scan sources";
     case "scanQueue":

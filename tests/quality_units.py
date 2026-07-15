@@ -132,6 +132,9 @@ def test_flip_tta_quality_norm_uses_raw_averaged_template() -> None:
     assert abs(float(np.linalg.norm(vector)) - 1.0) < 1e-6
     assert np.allclose(face.embedding, expected_quality_embedding), face.embedding
     assert abs(float(np.linalg.norm(face.embedding)) - float(np.linalg.norm(expected_quality_embedding))) < 1e-6
+    assert eng.rec_model.calls == 2
+    assert face._vintrace_alignment["attempts"] == 0
+    assert face._vintrace_alignment["rescued"] is False
 
 
 def main() -> None:

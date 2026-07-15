@@ -9,6 +9,7 @@ import {
   ArrowLeft,
   ArrowRight,
   Archive,
+  Bot,
   BookOpen,
   Camera,
   Check,
@@ -42,8 +43,7 @@ import {
   ScanFace,
   Settings,
   ShieldCheck,
-  ShieldOff,
-  ShieldAlert,
+  Sparkles,
   SlidersHorizontal,
   Scissors,
   Timer,
@@ -55,7 +55,7 @@ import {
   Video,
   X
 } from "lucide-react";
-import { Suspense, lazy, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 // H9: the 1024px/1.46MB icon.png is the OS app-icon master (still read at
 // runtime by the Electron main process). The renderer only paints a ~40px logo,
@@ -65,7 +65,9 @@ import type {
   AccuracyValidationRun,
   AgeBucket,
   AgeReferenceGroup,
+  AgeTrajectoryResult,
   AppState,
+  AiDisclosureNotice,
   AuditChainStatus,
   Jurisdiction,
   ModelDistributionAudit,
@@ -79,10 +81,13 @@ import type {
   CandidateMediaPreviewValue,
   CandidateStatus,
   CommandResult,
+  CrossAgeTrajectoryBenchmarkResult,
   AccuracyEvaluation,
   CalibrationLearningArtifact,
   CalibrationLearningResult,
   CalibrationLearningStatus,
+  BiometricPolicyExportValue,
+  ComplianceStatus,
   EmbeddingAdapterStatus,
   SelfLearningRdStatus,
   LearningJobsResult,
@@ -114,6 +119,7 @@ import type {
   MediaTrashCleanupValue,
   MediaTrashReportValue,
   ModelDriftReport,
+  ModelLifecycleStatus,
   ModelCompatibilityReport,
   ModelSwitchDryRun,
   ModelIntegrityResult,
@@ -128,6 +134,7 @@ import type {
   ReferenceFace,
   ReferenceGapReport,
   RetentionPolicyReport,
+  RetentionEnforcementValue,
   ReleaseReadinessResult,
   ReviewCandidate,
   ReviewLedgerExportValue,
@@ -145,11 +152,14 @@ import type {
   UpdateChannel,
   ScanHistoryExportValue,
   SupportBundleValue,
+  SubjectDataDeletionValue,
+  SubjectReleaseInput,
   WorkspaceInventoryExportValue,
   WorkspaceBackupValue,
   WorkspaceBackupPruneValue,
   WorkspaceBackupRestoreValue,
   WorkspaceBackupVerification,
+  WorkspaceEncryptionStatus,
   WorkspaceLockStatus,
   WorkspaceHealth,
   WorkspaceListItem,
@@ -167,12 +177,25 @@ import type {
   PhotoDuplicateGroupDismissValue,
   PhotoEditStackValue,
   PhotoEditStackVersionValue,
+  PhotoContentCredentialSummary,
+  PhotoGenerativeApplyValue,
+  PhotoGenerativePreviewValue,
+  PhotoGenerativeStatus,
   PhotoFolderList,
   PhotoImportFailureDismissValue,
   PhotoImportFailureListValue,
   PhotoImportFailureRecoverValue,
   PhotoImportFailureRetryValue,
   PhotoImportResult,
+  PhotoSourceDiscoveryValue,
+  PhotoSourceJobStartValue,
+  PhotoSourceJobsValue,
+  PhotoSourceJobStatusValue,
+  PhotoSourcePeopleHint,
+  PhotoSourcePeopleHintsValue,
+  PhotoSourcePreviewValue,
+  PhotoSourceProvider,
+  PhotoSourceProviderStatus,
   PhotoImportSessionArchiveUpdateValue,
   PhotoImportSessionProvenanceUpdateValue,
   PhotoItem,
@@ -183,7 +206,13 @@ import type {
   PhotoSubjectCutoutExportValue,
   PhotoPortraitBlurExportValue,
   SemanticSearchPhotosValue,
+  PhotoLibraryAgentPlanExecution,
+  PhotoLibraryAgentResponse,
+  PhotoLibraryAgentStatus,
   PhotoMemory,
+  PhotoStory,
+  PhotoStoryExportValue,
+  PhotoStoryStatus,
   PhotoBackupRestoreRehearsalValue,
   PhotoLibraryBackupCheckValue,
   PhotoLibraryCatalogCleanupValue,
@@ -192,6 +221,7 @@ import type {
   PhotoLibraryPreviewSweepValue,
   PhotoLibraryRelinkValue,
   PhotoLibrarySettingsValue,
+  PhotoLibrarySearchItem,
   PhotoLibrarySearchResult,
   PhotoMediaPairCreateValue,
   PhotoMediaPairDeleteValue,
@@ -199,6 +229,8 @@ import type {
   PhotoOperation,
   PhotoOperationListValue,
   PhotoOperationUndoValue,
+  PhotoRelationshipNameReviewResult,
+  PhotoRelationshipNameSuggestionResult,
   PhotoReviewMoreSuggestionValue,
   PhotoRepairHistoryValue,
   OpenPathWithResult,
@@ -230,9 +262,29 @@ import {
 } from "./lib/calibrationArtifacts";
 import { computeScannedCounts, countExcludedBranches, excludeNode, includeNode } from "./lib/folderTreeSelection";
 import { filterPeople, groupReferencesByPerson, type Person } from "./lib/peopleGrouping";
+
+interface PhotoExportJobSnapshot<T> {
+  jobId?: string;
+  command?: string;
+  status?: string;
+  done?: boolean;
+  result?: CommandResult<T>;
+  error?: string;
+  message?: string;
+  progress?: Record<string, unknown>;
+}
+
+interface PhotoExportJobPayload<T> {
+  job?: PhotoExportJobSnapshot<T>;
+  jobs?: PhotoExportJobSnapshot<T>[];
+  counts?: Record<string, number>;
+  jobFound?: boolean;
+  jobStarted?: boolean;
+  jobCancelled?: boolean;
+  message?: string;
+}
 import { AppShell } from "./shell/AppShell";
 import { Sidebar } from "./shell/Sidebar";
-import { StatusRow } from "./shell/StatusRow";
 import {
   tabs,
   type TabKey,
@@ -247,22 +299,32 @@ import {
   legacyTabTarget,
 } from "./shell/navModel";
 
-const PhotosView = lazy(() => import("./views/PhotosView").then((module) => ({ default: module.PhotosView })));
-const SearchView = lazy(() => import("./shell/SearchView").then((module) => ({ default: module.SearchView })));
-const McpAgentsPanel = lazy(() => import("./shell/McpAgentsPanel").then((module) => ({ default: module.McpAgentsPanel })));
-const SafeModeReview = lazy(() => import("./views/SafeModeReview"));
-import { SectionTabs } from "./shell/SectionTabs";
+const loadPhotosViewModule = () => import("./views/PhotosView").then((module) => ({ default: module.PhotosView }));
+const loadSearchViewModule = () => import("./shell/SearchView").then((module) => ({ default: module.SearchView }));
+const loadMcpAgentsPanelModule = () => import("./shell/McpAgentsPanel").then((module) => ({ default: module.McpAgentsPanel }));
+const loadSafeModeSettingsPanelModule = () => import("./shell/SafeModeSettingsPanel").then((module) => ({ default: module.SafeModeSettingsPanel }));
+const AgentDiscoveryBanner = lazy(() => import("./shell/AgentDiscoveryBanner").then((module) => ({ default: module.AgentDiscoveryBanner })));
+const PhotosView = lazy(loadPhotosViewModule);
+const SearchView = lazy(loadSearchViewModule);
+const McpAgentsPanel = lazy(loadMcpAgentsPanelModule);
+const SafeModeSettingsPanel = lazy(loadSafeModeSettingsPanelModule);
+const ModelLifecyclePanel = lazy(() => import("./shell/ModelLifecyclePanel").then((module) => ({
+  default: module.ModelLifecyclePanel,
+})));
+const SectionTabs = lazy(() => import("./shell/SectionTabs").then((module) => ({ default: module.SectionTabs })));
+const StatusRow = lazy(() => import("./shell/StatusRow").then((module) => ({ default: module.StatusRow })));
+const ConsentRetentionPanel = lazy(() => import("./shell/ConsentRetentionPanel").then((module) => ({
+  default: module.ConsentRetentionPanel,
+})));
 import { useSaveSettle } from "./shell/useSaveSettle";
 import { useThrottledCountRoll } from "./shell/useCountRoll";
-import { photoReviewMoreCandidateReasons } from "./views/photoGroupReview";
+import { photoReviewMoreCandidateReasons } from "./lib/photoReviewMoreReasons";
 import {
-  normalizeReviewFocusHistory,
-  removeReviewFocusHistoryItem,
-  reviewFocusHistoryStorageKey,
-  upsertReviewFocusHistory,
+  useReviewFocusHistoryState,
   type ReviewFocusHistoryRecord
-} from "./views/reviewFocusHistory";
+} from "./appReviewFocusHistoryState";
 import type { PhotoSlideshowProject, PhotoSlideshowThemeTemplate } from "./views/photoSlideshowProjects";
+import type { PhotoCullingStatus } from "./views/photoBurstStacks";
 import { initBootBackground } from "./lib/bootBackground";
 import { formatErrorMessage, formatUiMessage, languageOptions, localizeDom, normalizeLanguage, preloadLanguage, translate, translateUiText } from "./i18n";
 import type { LanguageCode, TranslationKey, UiMessageKey } from "./i18n";
@@ -272,6 +334,7 @@ import {
   recordAppStorageIssue,
   type AppStorageDiagnostic
 } from "./appStorageDiagnostics";
+import { applySequencedState, commandStateFromResult } from "./appStateSequencer";
 import {
   asRecord,
   booleanSetting,
@@ -313,12 +376,57 @@ import {
 } from "./appToolState";
 import { useFolderTreeSelectionState } from "./appFolderTreeState";
 import { useAppPhotoBridgeState, useAppRuntimeStatusState } from "./appRuntimeState";
+import { scanProgressIsActive, setScanProgressSnapshot, useScanProgress } from "./scanProgressStore";
+import {
+  readInitialLanguage,
+  readAgentDiscoverySeen,
+  readOnboardingDismissed,
+  readPhotoImportFlag,
+  writeLanguage,
+  writeAgentDiscoverySeen,
+  writeOnboardingDismissed,
+  writePhotoImportFlag
+} from "./appPreferencesState";
+import {
+  readMediaActionDestinations,
+  upsertMediaActionDestination,
+  writeMediaActionDestinations
+} from "./appMediaDestinationsState";
+import { readReviewPref, writeReviewPref } from "./appReviewSessionState";
+
+function photoDestinationId(tab: TabKey, peopleSection?: PeopleSection): string | null {
+  return PHOTO_TAB_ACTIVE_ID[tab] || (tab === "people" && peopleSection === "browse" ? "people" : null);
+}
+
+// Preserve the expensive Photos controller and its loaded catalog while another
+// top-level route is visible. While hidden, the exact cached React element is
+// reused so parent state updates bail out before re-rendering the 20k-line view;
+// when shown again it receives the latest props without remounting or reloading.
+function CachedRoute({
+  active,
+  warm = false,
+  children,
+}: {
+  active: boolean;
+  warm?: boolean;
+  children: ReactNode;
+}) {
+  const cachedChildren = useRef<ReactNode>(null);
+  if (active || (warm && cachedChildren.current === null)) {
+    cachedChildren.current = children;
+  }
+
+  if (cachedChildren.current === null) return null;
+  return (
+    <div className="route-cache" hidden={!active} aria-hidden={!active || undefined}>
+      {cachedChildren.current}
+    </div>
+  );
+}
 
 type UiMessageValue = string | number | { text: string | number; localize: true };
 type UiMessageValues = Record<string, UiMessageValue>;
 type NoticeState = { tone: "ok" | "warn" | "error"; text: string; messageKey?: UiMessageKey; values?: UiMessageValues; errorCode?: string; action?: string };
-
-const languageStorageKey = "vintrace:language";
 
 let imperativeLanguage: LanguageCode = "en";
 
@@ -351,6 +459,19 @@ function errorDetails(error: unknown, fallback = "The action failed.") {
     code: String(objectError.code || parseErrorCodeFromText(raw) || ""),
     action: String(objectError.action || "")
   };
+}
+
+function isAppStateResult(value: unknown): value is AppState {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<AppState>;
+  return Boolean(
+    typeof candidate.workspace === "string"
+    && candidate.counts
+    && candidate.config
+    && candidate.config.thresholds
+    && Array.isArray(candidate.references)
+    && Array.isArray(candidate.candidates)
+  );
 }
 
 function currentIntlLocale() {
@@ -425,8 +546,8 @@ function protectedSummary(count: number) {
 }
 
 
-const ageBuckets: AgeBucket[] = ["child", "adolescent", "adult", "unknown"];
-const referenceAgeBuckets: AgeBucket[] = ["child", "adolescent", "adult"];
+const ageBuckets: AgeBucket[] = ["child", "adolescent", "adult", "older-adult", "senior", "unknown"];
+const referenceAgeBuckets: AgeBucket[] = ["child", "adolescent", "adult", "older-adult", "senior"];
 const reviewStatuses: CandidateStatus[] = ["accepted", "rejected", "uncertain"];
 
 function reviewStatusLabel(status: CandidateStatus | "all") {
@@ -467,6 +588,8 @@ function ageBucketLabel(bucket: AgeBucket) {
   if (bucket === "child") return "Child";
   if (bucket === "adolescent") return "Teen";
   if (bucket === "adult") return "Adult";
+  if (bucket === "older-adult") return "Older adult";
+  if (bucket === "senior") return "Senior";
   return "Not sure";
 }
 
@@ -558,10 +681,8 @@ const DEFAULT_SAFE_MODE_PROFILE_THRESHOLDS: Record<string, number> = {
 type AgeFolderMap = Record<AgeBucket, string>;
 
 function emptyAgeFolders(): AgeFolderMap {
-  return { child: "", adolescent: "", adult: "", unknown: "" };
+  return { child: "", adolescent: "", adult: "", "older-adult": "", senior: "", unknown: "" };
 }
-
-const onboardingStorageKey = "vintrace:onboarding:v1";
 
 type CameraMode = "idle" | "starting" | "live" | "capturing" | "error";
 
@@ -669,41 +790,6 @@ type ReviewFocus = {
 };
 
 type PendingExternalIntent = Extract<ExternalOpenPayload, { type: "scan-files" }>;
-
-function readInitialLanguage(): LanguageCode {
-  try {
-    const saved = window.localStorage.getItem(languageStorageKey);
-    if (saved) return normalizeLanguage(saved);
-  } catch (error) {
-    recordAppStorageIssue("language", "read", languageStorageKey, error);
-  }
-  return normalizeLanguage(typeof navigator !== "undefined" ? navigator.language : "en");
-}
-
-function writeLanguage(language: LanguageCode) {
-  try {
-    window.localStorage.setItem(languageStorageKey, language);
-  } catch (error) {
-    recordAppStorageIssue("language", "write", languageStorageKey, error);
-  }
-}
-
-function readOnboardingDismissed() {
-  try {
-    return window.localStorage.getItem(onboardingStorageKey) === "dismissed";
-  } catch (error) {
-    recordAppStorageIssue("onboarding", "read", onboardingStorageKey, error);
-    return false;
-  }
-}
-
-function writeOnboardingDismissed() {
-  try {
-    window.localStorage.setItem(onboardingStorageKey, "dismissed");
-  } catch (error) {
-    recordAppStorageIssue("onboarding", "write", onboardingStorageKey, error);
-  }
-}
 
 const initialCameraDiagnostics: CameraDiagnostics = {
   score: 0,
@@ -930,33 +1016,6 @@ function formatTimestampDateTime(value: unknown) {
   return formatDateTime(new Date(timestamp).toISOString());
 }
 
-function readReviewFocusHistory(workspace: string | null | undefined): ReviewFocusHistoryRecord[] {
-  const key = reviewFocusHistoryStorageKey(workspace);
-  try {
-    const raw = window.localStorage.getItem(key) || "[]";
-    // Guard against a pathologically large payload freezing the main thread in
-    // JSON.parse (localStorage is user-writable in Electron). Legitimate values
-    // are capped to a handful of small records on write.
-    if (raw.length > 262144) {
-      recordAppStorageIssue("reviewFocusHistory", "read", key, new Error("Stored payload exceeded the 256 KiB safety limit."));
-      return [];
-    }
-    return normalizeReviewFocusHistory(JSON.parse(raw));
-  } catch (error) {
-    recordAppStorageIssue("reviewFocusHistory", "read", key, error);
-    return [];
-  }
-}
-
-function writeReviewFocusHistory(workspace: string | null | undefined, history: ReviewFocusHistoryRecord[]) {
-  const key = reviewFocusHistoryStorageKey(workspace);
-  try {
-    window.localStorage.setItem(key, JSON.stringify(normalizeReviewFocusHistory(history)));
-  } catch (error) {
-    recordAppStorageIssue("reviewFocusHistory", "write", key, error);
-  }
-}
-
 function formatNumber(value: number) {
   return new Intl.NumberFormat(currentIntlLocale(), { maximumFractionDigits: 0 }).format(value);
 }
@@ -1080,16 +1139,26 @@ function candidateMediaPath(candidate: ReviewCandidate | null | undefined) {
 
 function candidateSourceLabel(candidate: ReviewCandidate) {
   if (!isVideoCandidate(candidate)) return basename(candidate.sourcePath);
+  if (candidate.videoTrackId) {
+    return `${basename(candidate.mediaSourcePath)} @ ${formatMediaTimestamp(candidate.videoTrackStartMs)}-${formatMediaTimestamp(candidate.videoTrackEndMs)}`;
+  }
   return `${basename(candidate.mediaSourcePath)} @ ${formatMediaTimestamp(candidate.videoTimestampMs)}`;
 }
 
 function candidateSourceTitle(candidate: ReviewCandidate) {
   if (!isVideoCandidate(candidate)) return candidate.sourcePath;
-  return [
+  const rows = [
     `Video: ${candidate.mediaSourcePath}`,
     `Moment: ${formatMediaTimestamp(candidate.videoTimestampMs)}`,
     `Extracted frame: ${candidate.sourcePath}`
-  ].join("\n");
+  ];
+  if (candidate.videoTrackId) {
+    rows.splice(1, 1,
+      `Track: ${formatMediaTimestamp(candidate.videoTrackStartMs)}-${formatMediaTimestamp(candidate.videoTrackEndMs)}`,
+      `Keyframes: ${candidate.videoTrackKeyframeIndices?.length ?? 0} of ${candidate.videoTrackFrameCount ?? 0} sampled observations`
+    );
+  }
+  return rows.join("\n");
 }
 
 function candidateRiskFlags(candidate: ReviewCandidate) {
@@ -1122,6 +1191,7 @@ function candidateRiskLabels(candidate: ReviewCandidate) {
   if (flags.has("single-reference-hard-pose")) labels.push("Hard angle");
   if (flags.has("pose-reranked")) labels.push("Pose check");
   if (flags.has("cross-age-gap")) labels.push("Cross-age gap");
+  if (flags.has("video-track-template")) labels.push("Track pooled");
   return [...new Set(labels)];
 }
 
@@ -1302,11 +1372,22 @@ function normalizeAppState(incoming: AppState, previous: AppState | null): AppSt
     verificationDetectorSize: finiteInteger(rawConfig.verificationDetectorSize, previousConfig?.verificationDetectorSize ?? preset.verificationDetectorSize, 320, 1024),
     performanceMode: safeText(rawConfig.performanceMode, previousConfig?.performanceMode ?? "auto"),
     learningMode: normalizeLearningMode(rawConfig.learningMode ?? previousConfig?.learningMode ?? "manual"),
+    perSubjectConsent: booleanSetting(rawConfig.perSubjectConsent, previousConfig?.perSubjectConsent ?? false),
+    jurisdictionPreset: safeText(rawConfig.jurisdictionPreset, previousConfig?.jurisdictionPreset ?? "standard"),
+    retentionReviewedDays: finiteInteger(rawConfig.retentionReviewedDays, previousConfig?.retentionReviewedDays ?? 90, 1, 3650),
+    retentionPendingDays: finiteInteger(rawConfig.retentionPendingDays, previousConfig?.retentionPendingDays ?? 365, 1, 3650),
+    retentionAuditDays: finiteInteger(rawConfig.retentionAuditDays, previousConfig?.retentionAuditDays ?? 365, 1, 3650),
+    retentionEnforcementEnabled: booleanSetting(
+      rawConfig.retentionEnforcementEnabled,
+      previousConfig?.retentionEnforcementEnabled ?? false
+    ),
     effectivePerformanceMode: safeText(rawConfig.effectivePerformanceMode, previousConfig?.effectivePerformanceMode ?? "balanced"),
     effectiveFaceDetectorSize: finiteInteger(rawConfig.effectiveFaceDetectorSize, previousConfig?.effectiveFaceDetectorSize ?? preset.faceDetectorSize, 320, 1024),
     effectiveTwoPassScan: booleanSetting(rawConfig.effectiveTwoPassScan, previousConfig?.effectiveTwoPassScan ?? preset.twoPassScan),
     effectiveVerificationDetectorSize: finiteInteger(rawConfig.effectiveVerificationDetectorSize, previousConfig?.effectiveVerificationDetectorSize ?? preset.verificationDetectorSize, 320, 1024),
     safeMode: booleanSetting(rawConfig.safeMode, previousConfig?.safeMode ?? preset.safeMode),
+    safeModeMultimodal: booleanSetting(rawConfig.safeModeMultimodal, previousConfig?.safeModeMultimodal ?? false),
+    safeModeZeroAdmittance: booleanSetting(rawConfig.safeModeZeroAdmittance, previousConfig?.safeModeZeroAdmittance ?? false),
     safeModeThreshold: finiteNumber(rawConfig.safeModeThreshold, previousConfig?.safeModeThreshold ?? preset.safeModeThreshold, 0, 1),
     safeModeProfile: (typeof rawConfig.safeModeProfile === "string" ? rawConfig.safeModeProfile : undefined) ?? previousConfig?.safeModeProfile ?? "custom",
     storageBudgetBytes: finiteNumber(rawConfig.storageBudgetBytes, previousConfig?.storageBudgetBytes ?? 0, 0),
@@ -1420,6 +1501,10 @@ function normalizeAppState(incoming: AppState, previous: AppState | null): AppSt
     references: Array.isArray(raw.references) ? raw.references as AppState["references"] : previous?.references ?? [],
     candidates: Array.isArray(raw.candidates) ? raw.candidates as AppState["candidates"] : previous?.candidates ?? [],
     referenceSuggestions: Array.isArray(raw.referenceSuggestions) ? raw.referenceSuggestions as AppState["referenceSuggestions"] : previous?.referenceSuggestions ?? [],
+    syntheticEnrollmentReviews: Array.isArray(raw.syntheticEnrollmentReviews) ? raw.syntheticEnrollmentReviews as AppState["syntheticEnrollmentReviews"] : previous?.syntheticEnrollmentReviews ?? [],
+    syntheticEnrollmentScreen: asRecord(raw.syntheticEnrollmentScreen) ? raw.syntheticEnrollmentScreen as unknown as AppState["syntheticEnrollmentScreen"] : previous?.syntheticEnrollmentScreen,
+    syntheticAgeImageReviews: Array.isArray(raw.syntheticAgeImageReviews) ? raw.syntheticAgeImageReviews as AppState["syntheticAgeImageReviews"] : previous?.syntheticAgeImageReviews ?? [],
+    syntheticAgeImageReviewStatus: asRecord(raw.syntheticAgeImageReviewStatus) ? raw.syntheticAgeImageReviewStatus as unknown as AppState["syntheticAgeImageReviewStatus"] : previous?.syntheticAgeImageReviewStatus,
     config
   };
 }
@@ -1518,17 +1603,21 @@ export default function App() {
   const [language, setLanguage] = useState<LanguageCode>(() => readInitialLanguage());
   const [state, setState] = useState<AppState | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("library");
+  const [photosActiveId, setPhotosActiveId] = useState("all");
+  const [photoSearchOpenRequest, setPhotoSearchOpenRequest] = useState<(PhotoLibrarySearchItem & { requestId: number }) | null>(null);
   const [toolsSection, setToolsSection] = useState<ToolsSection>("overview");
   const [peopleSection, setPeopleSection] = useState<PeopleSection>("browse");
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
+  const [agentDiscoverySeen, setAgentDiscoverySeen] = useState(() => readAgentDiscoverySeen());
   const [photosReloadSignal, setPhotosReloadSignal] = useState(0);
   const [busy, setBusy] = useState<string | null>("Starting local engine");
   const [bootError, setBootError] = useState<string | null>(null);
   const [bootStartedAt, setBootStartedAt] = useState(() => Date.now());
   const [notice, setNotice] = useState<NoticeState | null>(null);
+  const [startupAnnouncement, setStartupAnnouncement] = useState("");
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
   const [reviewFocus, setReviewFocus] = useState<ReviewFocus | null>(null);
-  const [reviewFocusHistory, setReviewFocusHistory] = useState<ReviewFocusHistoryRecord[]>([]);
+  const { reviewFocusHistory, addReviewFocusHistory, removeReviewFocusHistory } = useReviewFocusHistoryState(state?.workspace);
   const [selectedRefId, setSelectedRefId] = useState<string | null>(null);
   const [personName, setPersonName] = useState("");
   const [ageBucket, setAgeBucket] = useState<AgeBucket>("unknown");
@@ -1541,6 +1630,17 @@ export default function App() {
   const [ageGroupFolders, setAgeGroupFolders] = useState<AgeFolderMap>(() => emptyAgeFolders());
   const [scanFolder, setScanFolder] = useState("");
   const [settings, setSettings] = useState<SettingsDraft | null>(null);
+
+  // Successful operations should confirm and get out of the way. Keeping the
+  // startup-ready toast mounted indefinitely covered the first Library row in
+  // compact windows and made transient feedback feel like permanent chrome.
+  useEffect(() => {
+    if (notice?.tone !== "ok") return undefined;
+    const timer = window.setTimeout(() => {
+      setNotice((current) => current === notice ? null : current);
+    }, 1800);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
   const {
     lastPhotoExternalEditorPath,
     setLastPhotoExternalEditorPath,
@@ -1564,12 +1664,14 @@ export default function App() {
     setInstallerDiagnostics,
     workspaceLock,
     setWorkspaceLock,
+    workspaceEncryption,
+    setWorkspaceEncryption,
+    workspaceRecoveryCode,
+    setWorkspaceRecoveryCode,
     duplicatePeople,
     setDuplicatePeople,
     reviewRuleResult,
     setReviewRuleResult,
-    scanProgress,
-    setScanProgress,
     localScanMarkers,
     setLocalScanMarkers,
     modelDownloadProgress,
@@ -1608,9 +1710,6 @@ export default function App() {
   const [savedScanSources, setSavedScanSources] = useState<SavedScanSource[]>([]);
   const [scanQueue, setScanQueue] = useState<ScanQueueItem[]>([]);
   const [scanQueueRunning, setScanQueueRunning] = useState(false);
-  useEffect(() => {
-    setReviewFocusHistory(readReviewFocusHistory(state?.workspace));
-  }, [state?.workspace]);
   const {
     backupVerification,
     setBackupVerification,
@@ -1638,6 +1737,8 @@ export default function App() {
     setJurisdictions,
     jurisdictionDisclaimer,
     setJurisdictionDisclaimer,
+    complianceStatus,
+    setComplianceStatus,
     accuracyValidationHistory,
     setAccuracyValidationHistory,
     storageIo,
@@ -1650,6 +1751,8 @@ export default function App() {
     setRuntimeSelfTest,
     modelIntegrity,
     setModelIntegrity,
+    modelLifecycleStatus,
+    setModelLifecycleStatus,
     runtimeBenchmark,
     setRuntimeBenchmark,
     releaseReadiness,
@@ -1693,19 +1796,17 @@ export default function App() {
     latencySamples,
     setLatencySamples,
   } = useAppToolPanelState();
-  // The jurisdiction catalog is a static backend table; fetch it once on mount.
-  useEffect(() => {
-    void loadJurisdictions();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
   const [performanceChoice, setPerformanceChoiceState] = useState<PerformanceChoice>("auto");
   const [consentPrompt, setConsentPrompt] = useState<ConsentPrompt | null>(null);
   const [reviewUndo, setReviewUndo] = useState<ReviewUndo | null>(null);
   const [pendingExternalIntent, setPendingExternalIntent] = useState<PendingExternalIntent | null>(null);
   const [lastPreflight, setLastPreflight] = useState<{ folder: string; at: number; ready: boolean } | null>(null);
   const [dismissedRecoveryRunId, setDismissedRecoveryRunId] = useState("");
+  const [liveScanActive, setLiveScanActive] = useState(false);
+  const [scanRuntimePressure, setScanRuntimePressure] = useState("");
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [checkedOnboarding, setCheckedOnboarding] = useState(false);
+  const [settingsSaveStatus, setSettingsSaveStatus] = useState<"saved" | "dirty" | "saving" | "error">("saved");
   const workspaceRef = useRef<HTMLElement | null>(null);
   const watchStatusRef = useRef<FolderWatchStatus>(initialWatchStatus);
   const startupRequestId = useRef(0);
@@ -1721,13 +1822,20 @@ export default function App() {
   const ipcSendSeqRef = useRef(0);
   const ipcAppliedSeqRef = useRef(0);
   const rendererReadySentRef = useRef(false);
+  const routePreloadStartedRef = useRef(false);
+  const photosModulePreloadStartedRef = useRef(false);
+  const workspaceListLoadedForRef = useRef("");
+  const jurisdictionCatalogLoadedRef = useRef(false);
+  const complianceLoadedForRef = useRef("");
+  const disclosurePromptedForRef = useRef("");
+  const photosRouteActiveRef = useRef(true);
   const memoryPressureNoticeRef = useRef("");
   const languageLoadSeqRef = useRef(0);
   const appCommandHandlerRef = useRef<(command: AppCommand) => void | Promise<void>>(() => undefined);
   const externalOpenHandlerRef = useRef<(payload: ExternalOpenPayload) => void | Promise<void>>(() => undefined);
   const performanceMode = useMemo(() => resolvePerformanceMode(performanceChoice, state?.platform), [performanceChoice, state?.platform]);
   const performanceProfile = performanceProfiles[performanceMode];
-  const memoryPressureActive = scanProgress?.memoryPressure === "high" || scanProgress?.memoryPressure === "critical";
+  const memoryPressureActive = scanRuntimePressure === "high" || scanRuntimePressure === "critical";
   const runtimePerformanceProfile = memoryPressureActive ? performanceProfiles.fast : performanceProfile;
   const latencySummary = useMemo(() => summarizeLatency(latencySamples), [latencySamples]);
   const t = useMemo(() => (key: TranslationKey, values?: Record<string, string | number>) => translate(language, key, values), [language]);
@@ -1780,6 +1888,76 @@ export default function App() {
     window.addEventListener(APP_STORAGE_ISSUE_EVENT, handleStorageIssue);
     return () => window.removeEventListener(APP_STORAGE_ISSUE_EVENT, handleStorageIssue);
   }, []);
+
+  useEffect(() => {
+    let timeout = 0;
+    let idleCallback = 0;
+    let frame = 0;
+    let cancelled = false;
+    const preloadInteractiveRouteModules = () => {
+      if (cancelled) return;
+      void Promise.allSettled([
+        loadSearchViewModule(),
+        loadMcpAgentsPanelModule(),
+      ]);
+    };
+    const preloadPhotosModule = () => {
+      if (cancelled || photosModulePreloadStartedRef.current) return;
+      photosModulePreloadStartedRef.current = true;
+      void loadPhotosViewModule();
+    };
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    // Search and Agents are small but dev-time module graph evaluation is still
+    // visible on first navigation, so warm them immediately after the first
+    // boot paint. Keep the much larger Photos chunk on the idle lane.
+    frame = window.requestAnimationFrame(() => {
+      preloadInteractiveRouteModules();
+      if (idleWindow.requestIdleCallback) {
+        idleCallback = idleWindow.requestIdleCallback(preloadPhotosModule, { timeout: 1_200 });
+      } else {
+        timeout = window.setTimeout(preloadPhotosModule, 350);
+      }
+    });
+    return () => {
+      cancelled = true;
+      if (frame) window.cancelAnimationFrame(frame);
+      if (timeout) window.clearTimeout(timeout);
+      if (idleCallback) idleWindow.cancelIdleCallback?.(idleCallback);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!state?.workspace || routePreloadStartedRef.current) return;
+    let timeout = 0;
+    let idleCallback = 0;
+    let cancelled = false;
+    const preloadRoutes = () => {
+      if (cancelled || routePreloadStartedRef.current) return;
+      routePreloadStartedRef.current = true;
+      void Promise.allSettled([
+        loadSearchViewModule(),
+        loadMcpAgentsPanelModule(),
+        loadSafeModeSettingsPanelModule(),
+      ]);
+    };
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    if (idleWindow.requestIdleCallback) {
+      idleCallback = idleWindow.requestIdleCallback(preloadRoutes, { timeout: 2_000 });
+    } else {
+      timeout = window.setTimeout(preloadRoutes, 700);
+    }
+    return () => {
+      cancelled = true;
+      if (timeout) window.clearTimeout(timeout);
+      if (idleCallback) idleWindow.cancelIdleCallback?.(idleCallback);
+    };
+  }, [state?.workspace]);
 
   function confirmDialogMessage(messageKey: UiMessageKey, values: UiMessageValues, fallback: string): Promise<boolean> {
     // H5: route the localized confirmation through the in-app dialog host.
@@ -1852,13 +2030,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (language === "en") return;
+    const root = document.getElementById("root") || document.body;
+    // Cached routes can be translated while hidden without React seeing the
+    // changed text. Restore their tracked English sources before skipping the
+    // non-English mutation observer, otherwise React may later reconcile
+    // English against English and leave the translated DOM in place.
+    if (language === "en") {
+      localizeDom(root, language);
+      return;
+    }
     let frame = 0;
     let localizing = false;
-    const root = document.getElementById("root") || document.body;
     const pendingRoots = new Set<ParentNode>();
+    const maxPendingRoots = 80;
     const addPendingRoot = (target: ParentNode) => {
       if (target === root) {
+        pendingRoots.clear();
+        pendingRoots.add(root);
+        return;
+      }
+      if (pendingRoots.size >= maxPendingRoots) {
         pendingRoots.clear();
         pendingRoots.add(root);
         return;
@@ -1881,6 +2072,8 @@ export default function App() {
       if (!node) return;
       const target = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
       if (!target || !root.contains(target)) return;
+      const element = target instanceof Element ? target : target.parentElement;
+      if (element?.closest(".route-cache[hidden]")) return;
       addPendingRoot(target as ParentNode);
     };
     const scheduleLocalization = (target?: ParentNode) => {
@@ -1934,8 +2127,20 @@ export default function App() {
   }, [activeTab]);
 
   useEffect(() => {
+    if (!notice || notice.tone === "error" || busy) return;
+    const timeout = window.setTimeout(
+      () => setNotice((current) => current === notice ? null : current),
+      notice.tone === "ok" ? 3_500 : 6_000,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [busy, notice]);
+
+  useEffect(() => {
     setSavedScanSources(readSavedScanSources(state?.workspace));
     setScanQueue(readScanQueue(state?.workspace));
+    jurisdictionCatalogLoadedRef.current = false;
+    complianceLoadedForRef.current = "";
+    setComplianceStatus(null);
   }, [state?.workspace]);
 
   useEffect(() => {
@@ -1945,7 +2150,7 @@ export default function App() {
   }, [state?.workspace]);
 
   useEffect(() => {
-    if (!state?.workspace || publicDatasetCatalog) return;
+    if (activeTab !== "settings" || settingsSection !== "advanced" || !state?.workspace || publicDatasetCatalog) return;
     window.crossAge.invoke<PublicDatasetCatalog>("public_dataset_catalog", {})
       .then((catalog) => setPublicDatasetCatalog(catalog))
       .catch((error) => {
@@ -1956,19 +2161,34 @@ export default function App() {
           message: error instanceof Error ? error.message : String(error)
         });
       });
-  }, [state?.workspace, publicDatasetCatalog]);
+  }, [activeTab, settingsSection, state?.workspace, publicDatasetCatalog]);
 
   useEffect(() => {
-    let cancelled = false;
-    window.crossAge.listExternalEditors()
-      .then((result) => {
-        if (!cancelled) setPhotoExternalEditors(Array.isArray(result.editors) ? result.editors : []);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (activeTab !== "settings" || settingsSection !== "privacy" || jurisdictionCatalogLoadedRef.current) return;
+    jurisdictionCatalogLoadedRef.current = true;
+    void loadJurisdictions();
+  }, [activeTab, settingsSection]);
+
+  useEffect(() => {
+    if (activeTab !== "settings" || settingsSection !== "privacy" || !state?.workspace) return;
+    if (complianceLoadedForRef.current === state.workspace) return;
+    complianceLoadedForRef.current = state.workspace;
+    void loadComplianceStatus(true);
+  }, [activeTab, settingsSection, state?.workspace]);
+
+  useEffect(() => {
+    if (!state?.workspace || !state.consent?.recorded || state.consent.aiDisclosure?.acknowledged) return;
+    if (disclosurePromptedForRef.current === state.workspace || consentPrompt) return;
+    disclosurePromptedForRef.current = state.workspace;
+    setConsentPrompt({ requestedValue: true, scope: state.workspace });
+  }, [consentPrompt, state?.consent?.aiDisclosure?.acknowledged, state?.consent?.recorded, state?.workspace]);
+
+  useEffect(() => {
+    if (activeTab !== "settings" || settingsSection !== "general" || !state?.workspace) return;
+    if (workspaceListLoadedForRef.current === state.workspace) return;
+    workspaceListLoadedForRef.current = state.workspace;
+    void loadWorkspaces();
+  }, [activeTab, settingsSection, state?.workspace]);
 
   useEffect(() => {
     const unsubscribeBackend = window.crossAge.onBackendError((message) => {
@@ -1989,7 +2209,7 @@ export default function App() {
     const flushScanProgress = () => {
       scanProgressRaf = 0;
       if (pendingScanProgress) {
-        setScanProgress(pendingScanProgress);
+        setScanProgressSnapshot(pendingScanProgress);
         pendingScanProgress = null;
       }
     };
@@ -2005,11 +2225,16 @@ export default function App() {
         }
         return;
       }
+      if (event.name !== "scan") return;
       pendingScanProgress = event.payload;
+      const nextScanActive = scanProgressIsActive(event.payload);
+      setLiveScanActive((current) => current === nextScanActive ? current : nextScanActive);
       if (!scanProgressRaf) {
         scanProgressRaf = window.requestAnimationFrame(flushScanProgress);
       }
       const pressure = String(event.payload.memoryPressure || "");
+      const nextRuntimePressure = nextScanActive && (pressure === "high" || pressure === "critical") ? pressure : "";
+      setScanRuntimePressure((current) => current === nextRuntimePressure ? current : nextRuntimePressure);
       if ((pressure === "high" || pressure === "critical") && memoryPressureNoticeRef.current !== pressure) {
         memoryPressureNoticeRef.current = pressure;
         setNotice({
@@ -2094,36 +2319,38 @@ export default function App() {
     setBootError(null);
     setBootStartedAt(Date.now());
     setBusy("Starting local engine");
+    setStartupAnnouncement("");
     setNotice(null);
-    window.crossAge
-      .getSystemIntegration()
-      .then(setSystemIntegration)
-      .catch(() => undefined);
-    window.crossAge
-      .getUpdateStatus()
-      .then(setUpdateStatus)
-      .catch(() => undefined);
-    window.crossAge
-      .getPhotoSources()
-      .then(setPhotoSources)
-      .catch(() => undefined);
-    window.crossAge
-      .getWorkspaceLockStatus()
-      .then(setWorkspaceLock)
-      .catch(() => undefined);
+    // Resolve secondary startup data concurrently and commit it in one React
+    // batch. Previously each independently-resolving promise re-rendered the
+    // active Photos tree during its first interactive second.
+    void Promise.all([
+      window.crossAge.getSystemIntegration().catch(() => null),
+      window.crossAge.getUpdateStatus().catch(() => null),
+      window.crossAge.getPhotoSources().catch(() => null),
+      window.crossAge.getWorkspaceLockStatus().catch(() => null),
+      window.crossAge.getWorkspaceEncryptionStatus().catch(() => null),
+      window.crossAge.listExternalEditors().catch(() => null),
+    ]).then(([integration, nextUpdateStatus, sources, nextWorkspaceLock, nextWorkspaceEncryption, editors]) => {
+      if (requestId !== startupRequestId.current) return;
+      if (integration) setSystemIntegration(integration);
+      if (nextUpdateStatus) setUpdateStatus(nextUpdateStatus);
+      if (sources) setPhotoSources(sources);
+      if (nextWorkspaceLock) setWorkspaceLock(nextWorkspaceLock);
+      if (nextWorkspaceEncryption) setWorkspaceEncryption(nextWorkspaceEncryption);
+      if (editors) setPhotoExternalEditors(Array.isArray(editors.editors) ? editors.editors : []);
+    });
     try {
       const next = await window.crossAge.getInitialState();
       if (requestId !== startupRequestId.current) return;
       const safeNext = normalizeAppState(next, appStateRef.current);
       recordLatency("Startup", "initial_state", startedAt);
       applyState(safeNext);
-      void loadWorkspaces();
-      setNotice({ tone: "ok", text: "Backend ready." });
-      const startupMode = resolvePerformanceMode(normalizePerformanceChoice(safeNext.config.performanceMode), safeNext.platform);
-      const startupPreviewLimit = performanceProfiles[startupMode].previewWarmupLimit;
-      if (startupPreviewLimit > 0) {
-        window.setTimeout(() => warmPreviewCache(startupPreviewLimit), 240);
-      }
+      // Startup completion is important to assistive technology, but it is not
+      // an operation the user initiated and must not cover normal workspace
+      // controls as a persistent toast.
+      setStartupAnnouncement("Backend ready.");
+      setNotice(null);
     } catch (error) {
       if (requestId !== startupRequestId.current) return;
       const message = error instanceof Error ? error.message : String(error);
@@ -2257,6 +2484,7 @@ export default function App() {
       verificationDetectorSize: next.config.verificationDetectorSize,
       learningMode: normalizeLearningMode(next.config.learningMode),
       safeMode: next.config.safeMode,
+      safeModeMultimodal: next.config.safeModeMultimodal ?? false,
       safeModeZeroAdmittance: next.config.safeModeZeroAdmittance ?? false,
       safeModeThreshold: next.config.safeModeThreshold,
       safeModeProfile: next.config.safeModeProfile,
@@ -2285,6 +2513,7 @@ export default function App() {
 
   function updateSettingsDraft(value: SettingsDraft) {
     settingsDirtyRef.current = true;
+    setSettingsSaveStatus("dirty");
     setSettings(value);
   }
 
@@ -2299,15 +2528,86 @@ export default function App() {
     setNotice(null);
     try {
       const result = await window.crossAge.invoke<T>(command, params);
-      const maybeCommand = result as CommandResult;
-      const maybeState = result as AppState;
-      const nextState = maybeCommand.state ? (maybeCommand.state as AppState) : maybeState.counts ? maybeState : null;
-      // Only apply if this reply is at least as new as the last applied one.
-      if (nextState && sendSeq >= ipcAppliedSeqRef.current) {
-        ipcAppliedSeqRef.current = sendSeq;
-        applyState(nextState);
-      }
+      const applyResult = applySequencedState({
+        state: commandStateFromResult<AppState>(result, isAppStateResult),
+        sendSeq,
+        appliedSeq: ipcAppliedSeqRef.current,
+        applyState,
+      });
+      ipcAppliedSeqRef.current = applyResult.appliedSeq;
       return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const details = errorDetails(error, message);
+      const alreadyRecorded = Boolean(error && typeof error === "object" && (error as { __crossageDiagnosticRecorded?: boolean }).__crossageDiagnosticRecorded);
+      if (!alreadyRecorded) {
+        recordRendererDiagnostic({
+          type: "renderer_action_failed",
+          level: "error",
+          category: "renderer",
+          actionLabel: label,
+          command,
+          message: details.text,
+          stack: error instanceof Error ? error.stack || "" : "",
+          code: details.code
+        });
+      }
+      if (error && typeof error === "object") {
+        (error as { __crossageDiagnosticRecorded?: boolean }).__crossageDiagnosticRecorded = true;
+      }
+      setNotice({ tone: "error", text: details.text, errorCode: details.code, action: details.action });
+      throw error;
+    } finally {
+      recordLatency(label, command, startedAt);
+      if (!options.quiet) setBusy(null);
+    }
+  }
+
+  async function runPhotoExportJob<T>(
+    label: string,
+    command: string,
+    params: Record<string, unknown>
+  ): Promise<CommandResult<T>> {
+    setBusy(label);
+    setNotice(null);
+    try {
+      const queued = await invoke<CommandResult<PhotoExportJobPayload<T>>>(
+        label,
+        "start_photo_export_job",
+        { command, params },
+        { quiet: true }
+      );
+      let job = queued.value?.job;
+      const jobId = String(job?.jobId || "");
+      if (!jobId) {
+        throw new Error("Photo export job did not return a job id.");
+      }
+      const startedAt = performance.now();
+      for (let attempt = 0; attempt < 7200; attempt += 1) {
+        if (job?.status === "completed") {
+          if (job.result && typeof job.result === "object" && "value" in job.result) {
+            return job.result;
+          }
+          return { value: job.result as T };
+        }
+        if (job?.status === "failed" || job?.status === "cancelled") {
+          throw new Error(job.error || job.message || `Photo export job ${job.status}.`);
+        }
+        if (performance.now() - startedAt > 60 * 60 * 1000) {
+          throw new Error("Photo export job timed out.");
+        }
+        const delayMs = attempt < 10 ? 120 : attempt < 40 ? 250 : 750;
+        await new Promise<void>((resolve) => window.setTimeout(resolve, delayMs));
+        const status = await window.crossAge.invoke<CommandResult<PhotoExportJobPayload<T>>>(
+          "photo_export_job_status",
+          { jobId, includeResult: true }
+        );
+        job = status.value?.job;
+        if (!job) {
+          throw new Error("Photo export job status was not found.");
+        }
+      }
+      throw new Error("Photo export job polling limit exceeded.");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const details = errorDetails(error, message);
@@ -2327,8 +2627,7 @@ export default function App() {
       setNotice({ tone: "error", text: details.text, errorCode: details.code, action: details.action });
       throw error;
     } finally {
-      recordLatency(label, command, startedAt);
-      if (!options.quiet) setBusy(null);
+      setBusy(null);
     }
   }
 
@@ -2375,6 +2674,24 @@ export default function App() {
   const setPhotoBurstSelection = useCallback(
     (params: Record<string, unknown>) =>
       window.crossAge.invoke<{ value: unknown }>("set_photo_burst_selection", params),
+    []
+  );
+
+  const photoCullingStatus = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: PhotoCullingStatus }>("photo_culling_status", params),
+    []
+  );
+
+  const analyzePhotoBurstCulling = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("analyze_photo_burst_culling", params),
+    []
+  );
+
+  const applyPhotoCullingRecommendation = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: unknown }>("apply_photo_culling_recommendation", params),
     []
   );
 
@@ -2454,6 +2771,20 @@ export default function App() {
     []
   );
 
+  const suggestPhotoRelationshipNames = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: PhotoRelationshipNameSuggestionResult }>("suggest_photo_relationship_names", params),
+    []
+  );
+
+  async function reviewPhotoRelationshipNameSuggestion(params: Record<string, unknown>) {
+    return invoke<CommandResult<PhotoRelationshipNameReviewResult>>(
+      String(params.decision || "") === "applied" ? "Merging suggested person" : "Dismissing identity suggestion",
+      "review_photo_relationship_name_suggestion",
+      params,
+    );
+  }
+
   const savePhotoPetProfile = useCallback(
     (params: Record<string, unknown>) =>
       window.crossAge.invoke<{ value: unknown }>("save_photo_pet_profile", params),
@@ -2484,9 +2815,21 @@ export default function App() {
     []
   );
 
+  const bulkAssignPhotoPet = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { assigned?: number; failed?: number; items?: unknown[]; failures?: unknown[] } }>("bulk_assign_photo_pet", params),
+    []
+  );
+
   const dismissPhotoPetReview = useCallback(
     (params: Record<string, unknown>) =>
       window.crossAge.invoke<{ value: unknown }>("dismiss_photo_pet_review", params),
+    []
+  );
+
+  const bulkDismissPhotoPetReview = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { dismissed?: number; failed?: number; items?: unknown[]; failures?: unknown[] } }>("bulk_dismiss_photo_pet_review", params),
     []
   );
 
@@ -2553,6 +2896,12 @@ export default function App() {
   const reorderPhotoAlbumFolderChildren = useCallback(
     (params: Record<string, unknown>) =>
       window.crossAge.invoke<{ value: unknown }>("reorder_photo_album_folder_children", params),
+    []
+  );
+
+  const photoAlbumSourceOrder = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { albumId?: string; sourcePaths?: string[]; total?: number } }>("photo_album_source_order", params),
     []
   );
 
@@ -2643,6 +2992,49 @@ export default function App() {
   const deletePhotoEditStackVersion = useCallback(
     (params: Record<string, unknown>) =>
       window.crossAge.invoke<{ value: { versionId: string; assetId: string; sourcePath: string; deleted: number; previous?: PhotoEditStackVersionValue } }>("delete_photo_edit_stack_version", params),
+    []
+  );
+
+  const photoGenerativeStatus = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: PhotoGenerativeStatus }>("photo_generative_status", params),
+    []
+  );
+
+  const inspectPhotoContentCredentials = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{
+        value: {
+          assetId: string;
+          scope: "active" | "original";
+          metadataKey: "contentCredentials" | "editContentCredentials";
+          contentCredentials: PhotoContentCredentialSummary;
+        };
+      }>("inspect_photo_content_credentials", params),
+    []
+  );
+
+  const installPhotoGenerativePack = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { installed: boolean; status: PhotoGenerativeStatus } }>("install_photo_generative_pack", params),
+    []
+  );
+
+  const renderPhotoGenerativePreview = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoGenerativePreviewValue }>("render_photo_generative_preview", params),
+    []
+  );
+
+  const applyPhotoGenerativeEdit = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoGenerativeApplyValue }>("apply_photo_generative_edit", params),
+    []
+  );
+
+  const discardPhotoGenerativePreview = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { previewId: string; assetId?: string; discarded: boolean; removed?: boolean } }>("discard_photo_generative_preview", params),
     []
   );
 
@@ -2867,6 +3259,35 @@ export default function App() {
     []
   );
 
+  const photoVlmStatus = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: Record<string, unknown> }>("photo_vlm_status", params),
+    []
+  );
+
+  const photoLibraryAgentStatus = useCallback(
+    () => window.crossAge.invoke<{ value: PhotoLibraryAgentStatus }>("photo_library_agent_status", {}),
+    []
+  );
+
+  const queryPhotoLibraryAgent = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoLibraryAgentResponse }>("query_photo_library_agent", params),
+    []
+  );
+
+  const executePhotoLibraryAgentPlan = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoLibraryAgentPlanExecution }>("execute_photo_library_agent_plan", params),
+    []
+  );
+
+  const installPhotoVlm = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: Record<string, unknown> }>("install_photo_vlm", params),
+    []
+  );
+
   const indexPhotoObjects = useCallback(
     (params: Record<string, unknown>) =>
       window.crossAge.invoke<{ value: Record<string, unknown> }>("index_photo_objects", params),
@@ -2933,6 +3354,12 @@ export default function App() {
     []
   );
 
+  const photoUserMemorySourceOrder = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { memoryId?: string; sourcePaths?: string[]; total?: number } }>("photo_user_memory_source_order", params),
+    []
+  );
+
   const savePhotoUserMemory = useCallback(
     (params: Record<string, unknown>) =>
       window.crossAge.invoke<{ value: PhotoMemory }>("save_photo_user_memory", params),
@@ -2942,6 +3369,57 @@ export default function App() {
   const deletePhotoUserMemory = useCallback(
     (params: Record<string, unknown>) =>
       window.crossAge.invoke<{ value: { memoryId: string; deleted: number } }>("delete_photo_user_memory", params),
+    []
+  );
+
+  const photoStoryStatus = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: PhotoStoryStatus }>("photo_story_status", params),
+    []
+  );
+
+  const photoStories = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: { stories: PhotoStory[]; total: number; memoryId?: string; offline: boolean } }>("photo_stories", params),
+    []
+  );
+
+  const generatePhotoStory = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { story: PhotoStory; idempotentReplay: boolean; offline: boolean } }>("generate_photo_story", params),
+    []
+  );
+
+  const savePhotoStory = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { story: PhotoStory; saved: boolean; unchanged: boolean } }>("save_photo_story", params),
+    []
+  );
+
+  const deletePhotoStory = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { storyId: string; deleted: number } }>("delete_photo_story", params),
+    []
+  );
+
+  const restorePhotoStoryVersion = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { story: PhotoStory; restored: boolean; versionId: string } }>("restore_photo_story_version", params),
+    []
+  );
+
+  const exportPhotoStory = useCallback(
+    async (params: Record<string, unknown>) => {
+      const result = await window.crossAge.invoke<{ value: PhotoStoryExportValue }>("export_photo_story", params);
+      if (result.value?.markdownPath) await window.crossAge.revealPath(result.value.markdownPath);
+      return result;
+    },
+    []
+  );
+
+  const createPhotoStorySlideshow = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { story: PhotoStory; project: PhotoSlideshowProject; offline: boolean } }>("create_photo_story_slideshow", params),
     []
   );
 
@@ -3046,11 +3524,7 @@ export default function App() {
     if (!value) return null;
     const warningCount = value.failedCount || 0;
     if ((value.importedCount || 0) > 0) {
-      try {
-        window.localStorage?.setItem("vintrace.hasImportedPhotos", "1");
-      } catch (error) {
-        recordAppStorageIssue("photoImportFlag", "write", "vintrace.hasImportedPhotos", error);
-      }
+      writePhotoImportFlag();
     }
     setNotice({
       tone: warningCount ? "warn" : "ok",
@@ -3058,6 +3532,137 @@ export default function App() {
     });
     return value;
   }
+
+  const getPhotoSourceProviderStatus = useCallback(
+    (provider: PhotoSourceProvider) => {
+      if (provider === "lightroom_catalog" || provider === "capture_one_catalog") {
+        return window.crossAge.getDamCatalogStatus(provider);
+      }
+      return window.crossAge.invoke<{ value: PhotoSourceProviderStatus }>(
+        provider === "apple_photos" ? "apple_photos_status" : "windows_photo_source_status",
+        {}
+      );
+    },
+    []
+  );
+
+  const listPhotoSourceLibraries = useCallback(
+    (provider: PhotoSourceProvider) => {
+      if (provider === "lightroom_catalog" || provider === "capture_one_catalog") {
+        return window.crossAge.listDamCatalogs(provider);
+      }
+      return window.crossAge.invoke<{ value: PhotoSourceDiscoveryValue }>(
+        provider === "apple_photos" ? "list_apple_photos_libraries" : "list_windows_photo_folders",
+        {}
+      );
+    },
+    []
+  );
+
+  const previewPhotoSource = useCallback(
+    (provider: PhotoSourceProvider, params: Record<string, unknown>) => {
+      if (provider === "lightroom_catalog" || provider === "capture_one_catalog") {
+        return window.crossAge.previewDamCatalog({
+          ...params,
+          provider,
+          libraryPath: String(params.libraryPath || ""),
+        });
+      }
+      return window.crossAge.invoke<{ value: PhotoSourcePreviewValue | PhotoSourceJobStartValue }>(
+        provider === "apple_photos" ? "preview_apple_photos_library" : "preview_windows_photo_folder",
+        params
+      );
+    },
+    []
+  );
+
+  const importPhotoSource = useCallback(
+    (provider: PhotoSourceProvider, params: Record<string, unknown>) => {
+      if (provider === "lightroom_catalog" || provider === "capture_one_catalog") {
+        return window.crossAge.importDamCatalog({
+          ...params,
+          provider,
+          libraryPath: String(params.libraryPath || ""),
+        });
+      }
+      return window.crossAge.invoke<{ value: PhotoSourceJobStartValue }>(
+        provider === "apple_photos" ? "import_apple_photos_library" : "import_windows_photo_folder",
+        params
+      );
+    },
+    []
+  );
+
+  const syncPhotoSource = useCallback(
+    (provider: PhotoSourceProvider, params: Record<string, unknown>) => {
+      if (provider === "lightroom_catalog" || provider === "capture_one_catalog") {
+        return window.crossAge.syncDamCatalog({
+          ...params,
+          provider,
+          libraryPath: String(params.libraryPath || ""),
+        });
+      }
+      return window.crossAge.invoke<{ value: PhotoSourceJobStartValue }>(
+        provider === "apple_photos" ? "sync_apple_photos_library" : "sync_windows_photo_folder",
+        params
+      );
+    },
+    []
+  );
+
+  const exportApplePhotoSourceAssets = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoSourceJobStartValue }>("export_apple_photos_assets", params),
+    []
+  );
+
+  const listPhotoSourceJobs = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: PhotoSourceJobsValue }>("photo_source_jobs", params),
+    []
+  );
+
+  const getPhotoSourceJobStatus = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoSourceJobStatusValue }>("photo_source_job_status", params),
+    []
+  );
+
+  const cancelPhotoSourceJob = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoSourceJobStartValue["job"] }>("cancel_photo_source_job", params),
+    []
+  );
+
+  const retryPhotoSourceJob = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoSourceJobStartValue }>("retry_photo_source_job", params),
+    []
+  );
+
+  const dismissPhotoSourceJob = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: { jobId: string; deleted: boolean } }>("dismiss_photo_source_job", params),
+    []
+  );
+
+  const listPhotoSourcePeopleHints = useCallback(
+    (params: Record<string, unknown> = {}) =>
+      window.crossAge.invoke<{ value: PhotoSourcePeopleHintsValue }>("list_photo_source_people_hints", params),
+    []
+  );
+
+  const reviewPhotoSourcePeopleHint = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoSourcePeopleHint }>("review_photo_source_people_hint", params),
+    []
+  );
+
+  const revokePhotoSourceConsent = useCallback(
+    (params: Record<string, unknown>) =>
+      window.crossAge.invoke<{ value: PhotoSourceJobStartValue }>("revoke_photo_source_consent", params),
+    []
+  );
 
   async function choosePhotoImportFiles() {
     const picked = await window.crossAge.chooseImages();
@@ -3254,7 +3859,7 @@ export default function App() {
       return null;
     }
     const { revealAfterExport = true, ...exportOptions } = options;
-    const result = await invoke<CommandResult<PhotoSelectionExportValue>>(
+    const result = await runPhotoExportJob<PhotoSelectionExportValue>(
       action === "move" ? "Moving selected photos" : action === "copy" ? "Copying selected photos" : "Exporting selected photos",
       "export_photo_selection",
       { sourcePaths: paths, action, folder: folder || "", ...exportOptions }
@@ -3299,7 +3904,7 @@ export default function App() {
       setNotice({ tone: "warn", text: "Select photos before exporting a contact sheet." });
       return null;
     }
-    const result = await invoke<CommandResult<PhotoContactSheetExportValue>>(
+    const result = await runPhotoExportJob<PhotoContactSheetExportValue>(
       "Exporting contact sheet",
       "export_photo_contact_sheet",
       { sourcePaths: paths, ...options }
@@ -3317,7 +3922,7 @@ export default function App() {
   }
 
   async function exportPhotoVideoFrame(params: Record<string, unknown>) {
-    const result = await invoke<CommandResult<PhotoVideoFrameExportValue>>(
+    const result = await runPhotoExportJob<PhotoVideoFrameExportValue>(
       "Exporting video frame",
       "export_photo_video_frame",
       params
@@ -3334,7 +3939,7 @@ export default function App() {
   }
 
   async function exportPhotoVideoTrim(params: Record<string, unknown>) {
-    const result = await invoke<CommandResult<PhotoVideoTrimExportValue>>(
+    const result = await runPhotoExportJob<PhotoVideoTrimExportValue>(
       "Exporting video trim",
       "export_photo_video_trim",
       params
@@ -3354,7 +3959,7 @@ export default function App() {
   }
 
   async function exportPhotoLiveMotion(params: Record<string, unknown>) {
-    const result = await invoke<CommandResult<PhotoLiveMotionExportValue>>(
+    const result = await runPhotoExportJob<PhotoLiveMotionExportValue>(
       "Exporting Live Photo motion",
       "export_photo_live_motion",
       params
@@ -3369,7 +3974,7 @@ export default function App() {
   }
 
   async function exportPhotoSubjectCutout(params: Record<string, unknown>) {
-    const result = await invoke<CommandResult<PhotoSubjectCutoutExportValue>>(
+    const result = await runPhotoExportJob<PhotoSubjectCutoutExportValue>(
       "Exporting subject cutout",
       "export_photo_subject_cutout",
       params
@@ -3393,7 +3998,7 @@ export default function App() {
   }
 
   async function exportPhotoPortraitBlur(params: Record<string, unknown>) {
-    const result = await invoke<CommandResult<PhotoPortraitBlurExportValue>>(
+    const result = await runPhotoExportJob<PhotoPortraitBlurExportValue>(
       "Exporting portrait blur",
       "export_photo_portrait_blur",
       params
@@ -3418,6 +4023,15 @@ export default function App() {
       { quiet: true }
     );
     return result ?? null;
+  }
+
+  function openSearchResultInLibrary(item: PhotoLibrarySearchItem) {
+    setPhotoSearchOpenRequest((current) => ({
+      ...item,
+      requestId: (current?.requestId || 0) + 1,
+    }));
+    setPhotosActiveId(item.kind === "folder" && item.folderId ? item.folderId : "all");
+    setActiveTab("library");
   }
 
   async function setPhotoLiveKeyPhoto(params: Record<string, unknown>) {
@@ -3502,11 +4116,7 @@ export default function App() {
         candidateIds: ids,
         label
       });
-      setReviewFocusHistory((current) => {
-        const next = upsertReviewFocusHistory(current, { label, candidateIds: ids });
-        writeReviewFocusHistory(state?.workspace, next);
-        return next;
-      });
+      addReviewFocusHistory({ label, candidateIds: ids });
       setSelectedCandidateId(ids[0]);
       legacyNavigate("review");
       setNotice({ tone: "ok", text: `Opened Review for ${ids.length} selected match${ids.length === 1 ? "" : "es"}.` });
@@ -3532,14 +4142,6 @@ export default function App() {
       window.crossAge.invoke<CommandResult<PhotoReviewMoreSuggestionValue>>("suggest_photo_review_more_candidates", params),
     []
   );
-
-  function removeReviewFocusHistory(recordId: string) {
-    setReviewFocusHistory((current) => {
-      const next = removeReviewFocusHistoryItem(current, recordId);
-      writeReviewFocusHistory(state?.workspace, next);
-      return next;
-    });
-  }
 
   async function queryCandidates(params: Record<string, unknown>) {
     const startedAt = performance.now();
@@ -3660,10 +4262,15 @@ export default function App() {
 
   async function switchWorkspace(path: string) {
     if (!path) return;
+    if (settingsDirtyRef.current && !await confirmDialog("Discard unsaved settings and switch app folders?")) return;
     await window.crossAge.stopFolderWatch();
     settingsDirtyRef.current = false;
+    setSettingsSaveStatus("saved");
+    setWorkspaceEncryption(null);
+    setWorkspaceRecoveryCode("");
     await invoke<AppState>("Switching app folder", "set_workspace", { path });
     await refreshWorkspaceLockStatus();
+    await refreshWorkspaceEncryptionStatus();
     await loadWorkspaces();
     setNotice({ tone: "ok", text: "Workspace switched. Please confirm permission again." });
   }
@@ -3671,10 +4278,15 @@ export default function App() {
   async function chooseWorkspace() {
     const folder = await window.crossAge.chooseFolder();
     if (!folder) return;
+    if (settingsDirtyRef.current && !await confirmDialog("Discard unsaved settings and open another app folder?")) return;
     await window.crossAge.stopFolderWatch();
     settingsDirtyRef.current = false;
+    setSettingsSaveStatus("saved");
+    setWorkspaceEncryption(null);
+    setWorkspaceRecoveryCode("");
     await invoke<AppState>("Opening app folder", "set_workspace", { path: folder });
     await refreshWorkspaceLockStatus();
+    await refreshWorkspaceEncryptionStatus();
     await loadWorkspaces();
     setNotice({ tone: "ok", text: "App folder opened. Please confirm permission again." });
   }
@@ -3856,9 +4468,10 @@ export default function App() {
       return;
     }
     await invoke<AppState>("Updating permission", "set_consent", { value, source: "desktop", operator: "desktop user" });
+    await loadComplianceStatus(true);
   }
 
-  async function confirmConsent(note: string) {
+  async function confirmConsent(note: string, aiDisclosureAcknowledged: boolean) {
     if (!consentPrompt) return;
     const scope = consentPrompt.scope;
     setConsentPrompt(null);
@@ -3867,8 +4480,10 @@ export default function App() {
       source: "desktop",
       operator: "desktop user",
       note: note || `Confirmed for ${scope}`,
-      scope
+      scope,
+      release: { aiDisclosureAcknowledged }
     });
+    await loadComplianceStatus(true);
   }
 
   async function chooseEnrollImages() {
@@ -3904,7 +4519,7 @@ export default function App() {
   }
 
   async function handleEnrollDrop(files: File[]) {
-    const paths = files.map((file) => window.crossAge.getPathForFile(file)).filter(Boolean);
+    const paths = files.map((file) => getPathForFile(file)).filter(Boolean);
     if (!paths.length) return;
     const media = await window.crossAge.prepareMedia(paths);
     const fileItems = media
@@ -3938,14 +4553,85 @@ export default function App() {
     const paths = enrollStaging.map((item) => item.path);
     const result = await invoke<CommandResult>("Adding photos", "enroll_paths", { personName: name, ageBucket, paths });
     const added = result.added ?? 0;
+    const reviews = result.reviews ?? 0;
     const skipped = result.errors?.length ?? 0;
     setEnrollStaging([]);
     const skippedText = skipped ? ` ${skipped} skipped (no face found).` : "";
-    setNotice({ tone: added ? "ok" : "warn", text: `Added ${added} photo${added === 1 ? "" : "s"} to ${name}.${skippedText}` });
+    const reviewText = reviews ? ` ${reviews} held for authenticity review.` : "";
+    setNotice({ tone: added ? "ok" : "warn", text: `Added ${added} photo${added === 1 ? "" : "s"} to ${name}.${reviewText}${skippedText}` });
   }
 
   async function removeReference(refId: string) {
     await invoke<AppState>("Deleting photo", "delete_reference", { refId });
+  }
+
+  async function updateAgeBridge(person: string, remove: boolean) {
+    if (remove) {
+      const confirmed = await confirmDialog(`Remove the local synthetic age bridge for ${person}? Real saved photos will stay unchanged.`);
+      if (!confirmed) return;
+      const result = await invoke<CommandResult<AgeTrajectoryResult>>(
+        "Removing age bridge",
+        "remove_age_trajectory_references",
+        { personName: person }
+      );
+      setNotice({ tone: "ok", text: `Removed ${result.value?.removed ?? 0} synthetic age reference${result.value?.removed === 1 ? "" : "s"}.` });
+      return;
+    }
+    const confirmed = await confirmDialog(
+      `Build a local synthetic age bridge for ${person}? This derives removable face embeddings between real age ranges. It creates no portrait, uses no external aging model, and remains review-only.`
+    );
+    if (!confirmed) return;
+    const result = await invoke<CommandResult<AgeTrajectoryResult>>(
+      "Building age bridge",
+      "build_age_trajectory_references",
+      { personName: person, acknowledgeEmbeddingDerivation: true }
+    );
+    const added = result.value?.added ?? 0;
+    const retained = result.value?.retained ?? 0;
+    setNotice({
+      tone: added || retained ? "ok" : "warn",
+      text: added || retained
+        ? `Age bridge ready with ${result.value?.syntheticReferences ?? added + retained} synthetic reference${result.value?.syntheticReferences === 1 ? "" : "s"}.`
+        : "No missing age range could be bridged. Add real photos from age ranges farther apart."
+    });
+  }
+
+  async function generateSyntheticAgeImage(person: string, targetAgeBucket: AgeBucket) {
+    const confirmed = await confirmDialog(
+      `Generate a private AI age reference for ${person} in the ${ageBucketLabel(targetAgeBucket)} range? It is a synthetic review aid, not an authentic photo or prediction. Nothing enters matching until you approve it. The verified local model pack is about 23 GB and requires at least 48 GiB of memory.`
+    );
+    if (!confirmed) return;
+    const result = await invoke<CommandResult<{
+      staged: number;
+      rejected: number;
+      skipped: number;
+      errors?: Array<{ targetAgeBucket?: string; error?: string }>;
+    }>>(
+      "Generating synthetic age reference",
+      "generate_synthetic_age_image_reviews",
+      {
+        personName: person,
+        targetAgeBuckets: [targetAgeBucket],
+        acknowledgeAiAgeGeneration: true,
+        source: "desktop",
+      }
+    );
+    const staged = result.value?.staged ?? 0;
+    const rejected = result.value?.rejected ?? 0;
+    const skipped = result.value?.skipped ?? 0;
+    const firstError = result.value?.errors?.[0]?.error;
+    setNotice({
+      tone: staged ? "ok" : "warn",
+      text: staged
+        ? "Synthetic age reference staged for identity review."
+        : firstError
+          ? `Synthetic age reference was not staged: ${firstError}`
+          : rejected
+            ? "The generated portrait did not pass identity safety checks and was deleted."
+            : skipped
+              ? "An active review already exists for this source and age range."
+              : "No synthetic age reference was staged."
+    });
   }
 
   function addMoreForPerson(name: string) {
@@ -3972,8 +4658,10 @@ export default function App() {
       ...enrollScopeParams()
     });
     const added = result.added ?? 0;
+    const reviews = result.reviews ?? 0;
     const skipped = skippedSummary(result.errors?.length ?? 0);
-    setNoticeMessage("ok", "notice.savedFacePhotosAdded", { count: added, skipped: localizeUiMessageValue(skipped) }, `Added ${added} saved face photo${added === 1 ? "" : "s"}.${skipped}`);
+    const reviewText = reviews ? ` ${reviews} held for authenticity review.` : "";
+    setNotice({ tone: added ? "ok" : "warn", text: `Added ${added} saved face photo${added === 1 ? "" : "s"}.${reviewText}${skipped}` });
   }
 
   async function enrollAgeGroups() {
@@ -3993,9 +4681,11 @@ export default function App() {
       groups
     });
     const added = result.added ?? 0;
+    const reviews = result.reviews ?? 0;
     const skipped = skippedSummary(result.errors?.length ?? 0);
     const groupCount = result.value?.groups ?? groups.length;
-    setNoticeMessage("ok", "notice.savedFacePhotosAddedAcrossAges", { count: added, groups: groupCount, skipped: localizeUiMessageValue(skipped) }, `Added ${added} saved face photo${added === 1 ? "" : "s"} across ${groupCount} age folder${groupCount === 1 ? "" : "s"}.${skipped}`);
+    const reviewText = reviews ? ` ${reviews} held for authenticity review.` : "";
+    setNotice({ tone: added ? "ok" : "warn", text: `Added ${added} saved face photo${added === 1 ? "" : "s"} across ${groupCount} age folder${groupCount === 1 ? "" : "s"}.${reviewText}${skipped}` });
   }
 
   async function scan() {
@@ -4052,6 +4742,17 @@ export default function App() {
     if (result.metrics?.cancelled) {
       const processed = result.metrics.processed ?? 0;
       setNoticeMessage("warn", "notice.scanCancelled", { processed }, `Scan cancelled after ${processed} file(s). Resume will skip completed files.`);
+      return;
+    }
+    const scanErrors = Math.max(result.metrics?.errors ?? 0, result.errors?.length ?? 0);
+    if (scanErrors > 0) {
+      const processed = result.metrics?.processed ?? 0;
+      setNotice({
+        tone: processed > scanErrors ? "warn" : "error",
+        text: processed > scanErrors
+          ? `Scan finished with ${scanErrors} file issue${scanErrors === 1 ? "" : "s"}. Found ${found} possible match${found === 1 ? "" : "es"}.`
+          : "Folder could not be scanned. Check that it still exists and is readable."
+      });
       return;
     }
     setNoticeMessage("ok", "notice.possibleMatchesFound", { count: found, skipped: localizeUiMessageValue(skipped), protected: localizeUiMessageValue(protectedText) }, `Found ${found} possible match${found === 1 ? "" : "es"}.${skipped}${protectedText}`);
@@ -4211,6 +4912,7 @@ export default function App() {
     }
     try {
       const status = await window.crossAge.startFolderWatch(scanFolder);
+      setScanProgressSnapshot(null);
       applyWatchStatus(status);
       setNotice({ tone: "ok", text: "Vintrace will watch this folder for new files." });
     } catch (error) {
@@ -4235,6 +4937,7 @@ export default function App() {
     legacyNavigate("scan");
     try {
       const status = await window.crossAge.startFolderWatch(folder);
+      setScanProgressSnapshot(null);
       applyWatchStatus(status);
       setNotice({ tone: "ok", text: "Vintrace will watch this folder for new files." });
     } catch (error) {
@@ -4375,10 +5078,14 @@ export default function App() {
       if (payload.source === "protocol" && !await confirmDialog(`Open this app folder from an external link?\n\n${payload.path}`)) {
         return;
       }
+      if (settingsDirtyRef.current && !await confirmDialog("Discard unsaved settings and open the requested app folder?")) return;
       await window.crossAge.stopFolderWatch();
       settingsDirtyRef.current = false;
+      setSettingsSaveStatus("saved");
       await invoke<AppState>("Opening app folder", "set_workspace", { path: payload.path });
+      setWorkspaceRecoveryCode("");
       await refreshWorkspaceLockStatus();
+      await refreshWorkspaceEncryptionStatus();
       setNotice({ tone: "ok", text: "App folder opened from the system." });
       return;
     }
@@ -4648,6 +5355,22 @@ export default function App() {
     setNotice({ tone: "ok", text: value?.blocked ? "This image/person false match will be suppressed in future scans." : "Feedback saved." });
   }
 
+  async function bulkBlockFalseMatches(candidateIds: string[], options: { confirm?: boolean } = {}) {
+    const ids = [...new Set(candidateIds.map((id) => id.trim()).filter(Boolean))];
+    if (!ids.length) return;
+    if (
+      options.confirm !== false &&
+      !await confirmDialog(`Stop suggesting ${ids.length} selected image/person match${ids.length === 1 ? "" : "es"} again? The selected rows will be rejected.`)
+    ) return;
+    const result = await invoke<CommandResult<{ updated?: number; blocked?: number }>>(
+      "Saving feedback",
+      "bulk_block_false_matches",
+      { candidateIds: ids }
+    );
+    const updated = result.value?.updated ?? ids.length;
+    setNotice({ tone: "ok", text: `Removed ${updated} selected match${updated === 1 ? "" : "es"} from future suggestions.` });
+  }
+
   async function reassignCandidatePerson(candidateId: string, personName: string) {
     const target = personName.trim();
     if (!target) {
@@ -4660,6 +5383,27 @@ export default function App() {
       clearReference: true
     });
     setNotice({ tone: "ok", text: `Moved match to ${target}.` });
+  }
+
+  async function bulkReassignCandidatePerson(candidateIds: string[], personName: string) {
+    const ids = [...new Set(candidateIds.map((id) => id.trim()).filter(Boolean))];
+    const target = personName.trim();
+    if (!ids.length) return;
+    if (!target) {
+      setNotice({ tone: "warn", text: "Enter the person this match belongs to." });
+      return;
+    }
+    const result = await invoke<CommandResult<{ updated?: number; personName?: string }>>(
+      "Moving matches",
+      "bulk_reassign_candidate_person",
+      {
+        candidateIds: ids,
+        personName: target,
+        clearReference: true
+      }
+    );
+    const updated = result.value?.updated ?? ids.length;
+    setNotice({ tone: "ok", text: `Moved ${updated} match${updated === 1 ? "" : "es"} to ${target}.` });
   }
 
   async function deleteReference() {
@@ -4696,7 +5440,15 @@ export default function App() {
 
   async function stageReferenceSuggestions() {
     if (!await confirmDialog("Find accepted matches that are safe to suggest as saved person photos? Suggestions still require approval.")) return;
-    const result = await invoke<CommandResult<{ staged?: number; rejected?: unknown[]; skipped?: unknown[] }>>("Finding reference suggestions", "stage_reference_suggestions", { limit: 20 });
+    const result = await invoke<CommandResult<{ staged?: number; rejected?: unknown[]; skipped?: unknown[]; queuedJob?: { jobId?: string }; job?: { jobId?: string }; message?: string }>>("Finding reference suggestions", "stage_reference_suggestions", { limit: 20 });
+    const queuedJob = result.value?.queuedJob || result.value?.job;
+    if (queuedJob?.jobId) {
+      setNotice({
+        tone: "ok",
+        text: result.value?.message || "Reference suggestion staging queued.",
+      });
+      return;
+    }
     const staged = finiteInteger(result.value?.staged, 0, 0, Number.MAX_SAFE_INTEGER);
     const rejected = Array.isArray(result.value?.rejected) ? result.value.rejected.length : 0;
     setNotice({
@@ -4721,6 +5473,59 @@ export default function App() {
       reason: "Rejected from People view."
     });
     setNotice({ tone: "ok", text: "Suggested reference rejected." });
+  }
+
+  async function approveSyntheticEnrollmentReview(artifactId: string) {
+    if (!artifactId) return;
+    const confirmed = await confirmDialog(
+      "Add this held face as a saved person photo? The source, face, quality, and local authenticity score will be checked again. Approval records an explicit human override when the warning remains."
+    );
+    if (!confirmed) return;
+    const result = await invoke<CommandResult<{ humanOverride?: boolean }>>(
+      "Approving enrollment review",
+      "approve_synthetic_enrollment_review",
+      { artifactId, allowSyntheticOverride: true }
+    );
+    setNotice({
+      tone: "ok",
+      text: result.value?.humanOverride
+        ? "Saved after explicit authenticity review."
+        : "Saved after authenticity recheck."
+    });
+  }
+
+  async function rejectSyntheticEnrollmentReview(artifactId: string) {
+    if (!artifactId) return;
+    await invoke<CommandResult>(
+      "Rejecting enrollment review",
+      "reject_synthetic_enrollment_review",
+      { artifactId, reason: "Rejected from People view." }
+    );
+    setNotice({ tone: "ok", text: "Held enrollment rejected." });
+  }
+
+  async function approveSyntheticAgeImageReview(artifactId: string) {
+    if (!artifactId) return;
+    const confirmed = await confirmDialog(
+      "Approve this AI-generated age portrait as a synthetic matching reference? Vintrace will recheck consent, source and output hashes, face count, identity similarity, quality, and nearest-person margin. It remains labeled synthetic and cannot count as an authentic capture."
+    );
+    if (!confirmed) return;
+    await invoke<CommandResult>(
+      "Approving synthetic age reference",
+      "approve_synthetic_age_image_review",
+      { artifactId, operator: "desktop user", acknowledgeVisualReview: true }
+    );
+    setNotice({ tone: "ok", text: "Synthetic age reference approved after identity recheck." });
+  }
+
+  async function rejectSyntheticAgeImageReview(artifactId: string) {
+    if (!artifactId) return;
+    await invoke<CommandResult>(
+      "Deleting synthetic age reference",
+      "reject_synthetic_age_image_review",
+      { artifactId, reason: "Rejected from People view." }
+    );
+    setNotice({ tone: "ok", text: "Synthetic age reference rejected and its private image deleted." });
   }
 
   async function purgeReviewedCandidates() {
@@ -5056,10 +5861,15 @@ export default function App() {
   }
 
   async function setJurisdictionPreset(preset: string) {
+    const selected = jurisdictions.find((item) => item.id === preset);
+    const label = selected?.label ?? preset;
+    if (!await confirmDialog(
+      `Apply ${label}? This changes consent requirements, retention windows, and automatic deletion policy. Existing publication evidence may become stale.`
+    )) return;
     const result = await invoke<CommandResult<{ preset: string; label: string; retentionReviewedDays: number }>>(
       "Applying jurisdiction preset",
       "set_jurisdiction_preset",
-      { preset }
+      { preset, confirm: true }
     );
     const value = result.value;
     if (value) {
@@ -5068,6 +5878,9 @@ export default function App() {
         text: `Applied ${value.label}: reviewed-match retention ${value.retentionReviewedDays} days. Operator default, not legal advice — confirm with counsel.`
       });
     }
+    await loadComplianceStatus(true);
+    await loadRetentionPolicyReport();
+    await invoke<AppState>("Refreshing policy state", "get_state", {}, { quiet: true });
   }
 
   // Authoritative jurisdiction catalog (presets + per-preset posture + the legal
@@ -5082,6 +5895,132 @@ export default function App() {
       setJurisdictionDisclaimer(result?.disclaimer ?? "");
     } catch {
       // Non-fatal: the select falls back to its own static labels if the catalog fails.
+    }
+  }
+
+  async function loadComplianceStatus(quiet = false) {
+    try {
+      const result = quiet
+        ? await window.crossAge.invoke<ComplianceStatus>("compliance_status", {})
+        : await invoke<ComplianceStatus>("Checking compliance evidence", "compliance_status");
+      setComplianceStatus(result);
+      if (!quiet) {
+        setNotice({
+          tone: result.evidenceReady ? "ok" : "warn",
+          text: result.evidenceReady
+            ? "Consent, disclosure, and policy evidence are current."
+            : "Compliance evidence needs review; processing remains governed by the selected preset."
+        });
+      }
+      return result;
+    } catch (error) {
+      complianceLoadedForRef.current = "";
+      if (!quiet) setErrorNotice(error, "Could not load compliance evidence.");
+      return null;
+    }
+  }
+
+  async function acknowledgeAiDisclosure() {
+    if (!await confirmDialog(
+      "Confirm that you reviewed the current Vintrace AI and biometric notice, including probabilistic matching, human review, local storage, and generative-edit disclosure."
+    )) return;
+    await invoke<CommandResult>("Recording disclosure", "acknowledge_ai_disclosure", {
+      confirm: true,
+      operator: "desktop user",
+      source: "desktop"
+    });
+    await loadComplianceStatus(true);
+    setNotice({ tone: "ok", text: "AI and biometric notice acknowledgement recorded." });
+  }
+
+  async function saveSubjectRelease(release: SubjectReleaseInput) {
+    await invoke<AppState>("Saving written release", "set_consent", {
+      value: true,
+      personName: release.personName,
+      source: "desktop",
+      operator: "desktop user",
+      lawfulBasis: release.lawfulBasis,
+      release: {
+        signerName: release.signerName,
+        signerRole: release.signerRole,
+        specificPurpose: release.specificPurpose,
+        collectionTermDays: release.collectionTermDays,
+        lawfulBasis: release.lawfulBasis,
+        writtenNoticeAcknowledged: release.writtenNoticeAcknowledged,
+        electronicSignatureAccepted: release.electronicSignatureAccepted,
+        aiDisclosureAcknowledged: release.aiDisclosureAcknowledged,
+        note: "Electronic written release recorded in Vintrace."
+      }
+    });
+    await loadComplianceStatus(true);
+    setNotice({ tone: "ok", text: `Written release recorded for ${release.personName}.` });
+  }
+
+  async function deleteComplianceSubject(personName: string) {
+    if (!await confirmDialog(
+      `Revoke ${personName}'s release and permanently delete their saved face templates, match rows, labels, learned data, and private caches? Original photos and videos will not be deleted.`
+    )) return;
+    const result = await invoke<{ deleted: SubjectDataDeletionValue; state: AppState }>(
+      "Deleting subject data",
+      "delete_subject_data",
+      {
+        personName,
+        confirm: true,
+        reason: "operator-subject-request",
+        source: "desktop"
+      }
+    );
+    await loadComplianceStatus(true);
+    setNotice({
+      tone: "ok",
+      text: `Deleted private face data for ${personName}; original media was preserved. Destruction receipt ${result.deleted.receipt.receiptId}.`
+    });
+  }
+
+  async function exportBiometricPolicy() {
+    const result = await invoke<CommandResult<BiometricPolicyExportValue>>(
+      "Exporting retention policy",
+      "export_biometric_retention_policy"
+    );
+    if (!result.value) {
+      setNotice({ tone: "error", text: "Retention policy export did not return a path." });
+      return;
+    }
+    setNotice({ tone: "ok", text: `Publication files exported for policy ${result.value.policyVersion}.` });
+    await window.crossAge.revealPath(result.value.htmlPath);
+  }
+
+  async function recordBiometricPolicyPublication(publicUrl: string, approvedBy: string) {
+    if (!await confirmDialog(
+      `Record ${publicUrl} as the public location of the current policy approved by ${approvedBy}? Vintrace verifies the URL format but cannot verify the remote page contents.`
+    )) return;
+    await invoke<CommandResult>("Recording policy publication", "record_biometric_policy_publication", {
+      publicUrl,
+      approvedBy,
+      confirm: true,
+      source: "desktop"
+    });
+    await loadComplianceStatus(true);
+    setNotice({ tone: "ok", text: "Current biometric retention policy publication recorded." });
+  }
+
+  async function enforceBiometricRetention() {
+    if (!await confirmDialog(
+      "Enforce the selected retention schedule now? Expired subject templates and overdue match rows will be permanently deleted. Original media will remain unchanged."
+    )) return;
+    const result = await invoke<CommandResult<RetentionEnforcementValue>>(
+      "Enforcing retention policy",
+      "enforce_retention_policy",
+      { confirm: true, source: "desktop" }
+    );
+    await loadComplianceStatus(true);
+    await loadRetentionPolicyReport();
+    const value = result.value;
+    if (value) {
+      setNotice({
+        tone: "ok",
+        text: `Retention enforced: ${value.expiredSubjectsDeleted} expired subject${value.expiredSubjectsDeleted === 1 ? "" : "s"} and ${value.reviewedCandidatesDeleted + value.pendingCandidatesDeleted} match row${value.reviewedCandidatesDeleted + value.pendingCandidatesDeleted === 1 ? "" : "s"} removed.`
+      });
     }
   }
 
@@ -5172,6 +6111,29 @@ export default function App() {
     const result = await invoke<ModelIntegrityResult>("Checking models", "model_integrity");
     setModelIntegrity(result);
     setNotice({ tone: result.ok ? "ok" : "warn", text: result.ok ? "Model integrity check passed." : "Model integrity check found items to review." });
+  }
+
+  async function runModelLifecycleEvaluation() {
+    const result = await invoke<ModelLifecycleStatus>("Running model lifecycle gate", "run_model_lifecycle_evaluation");
+    setModelLifecycleStatus(result);
+    setNotice({
+      tone: result.ready ? "ok" : "warn",
+      text: result.ready
+        ? `Model lifecycle gate passed for ${result.counts.passed} installed component${result.counts.passed === 1 ? "" : "s"}.`
+        : `Model lifecycle gate found ${result.counts.blocked} blocked component${result.counts.blocked === 1 ? "" : "s"}.`,
+    });
+  }
+
+  async function rollbackModelConfiguration() {
+    const approved = await confirmDialog("Restore the previous verified face model, caption-model tier, and multimodal safety route? Current model files will not be deleted.");
+    if (!approved) return;
+    const result = await invoke<{ rolledBack: boolean; status: ModelLifecycleStatus }>(
+      "Restoring previous model routes",
+      "rollback_model_configuration",
+      { confirm: true },
+    );
+    setModelLifecycleStatus(result.status);
+    setNotice({ tone: "ok", text: "Previous verified model routes restored." });
   }
 
   async function runModelDriftReport() {
@@ -5281,9 +6243,22 @@ export default function App() {
   }
 
   function persistSavedScanSources(next: SavedScanSource[]) {
-    const sorted = next.sort((a, b) => b.lastUsedAt - a.lastUsedAt).slice(0, 40);
+    const sorted = [...next].sort((a, b) => b.lastUsedAt - a.lastUsedAt).slice(0, 40);
     setSavedScanSources(sorted);
     writeSavedScanSources(state?.workspace, sorted);
+  }
+
+  function touchSavedScanSource(path: string) {
+    const now = Date.now();
+    setSavedScanSources((current) => {
+      if (!current.some((source) => source.path === path)) return current;
+      const sorted = current
+        .map((source) => source.path === path ? { ...source, lastUsedAt: now } : source)
+        .sort((a, b) => b.lastUsedAt - a.lastUsedAt)
+        .slice(0, 40);
+      writeSavedScanSources(state?.workspace, sorted);
+      return sorted;
+    });
   }
 
   function persistScanQueue(next: ScanQueueItem[]) {
@@ -5410,15 +6385,24 @@ export default function App() {
             setNotice({ tone: "warn", text: "Queue stopped because the scan was cancelled." });
             break;
           }
+          const scanErrors = Math.max(result.metrics?.errors ?? 0, result.errors?.length ?? 0);
+          if (scanErrors > 0) {
+            const processed = result.metrics?.processed ?? 0;
+            updateItem(item.id, {
+              status: "error",
+              message: processed > scanErrors
+                ? `Scanned with ${scanErrors} file issue${scanErrors === 1 ? "" : "s"}. Check the folder, then retry.`
+                : "Folder could not be scanned. Check that it still exists and is readable."
+            });
+            continue;
+          }
           completed += 1;
           updateItem(item.id, {
             status: "done",
             lastUsedAt: Date.now(),
             message: `Found ${result.added ?? 0} possible match${(result.added ?? 0) === 1 ? "" : "es"}`
           });
-          if (savedScanSources.some((source) => source.path === item.path)) {
-            persistSavedScanSources(savedScanSources.map((source) => source.path === item.path ? { ...source, lastUsedAt: Date.now() } : source));
-          }
+          touchSavedScanSource(item.path);
         } catch (error) {
           updateItem(item.id, { status: "error", message: error instanceof Error ? error.message : String(error) });
         }
@@ -5507,6 +6491,46 @@ export default function App() {
     }
   }
 
+  async function refreshWorkspaceEncryptionStatus() {
+    try {
+      const status = await window.crossAge.getWorkspaceEncryptionStatus();
+      setWorkspaceEncryption(status);
+      return status;
+    } catch (error) {
+      setErrorNotice(error);
+      return null;
+    }
+  }
+
+  async function rotateWorkspaceEncryptionKey() {
+    if (!await confirmDialog("Rotate this app folder's data-encryption key? Connected agents must restart afterward.")) return;
+    setBusy("Rotating data-encryption key");
+    try {
+      const status = await window.crossAge.rotateWorkspaceEncryptionKey();
+      setWorkspaceEncryption(status);
+      setNotice({ tone: "ok", text: "Data-encryption key rotated." });
+    } catch (error) {
+      setErrorNotice(error);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function createWorkspaceRecoveryCode() {
+    if (workspaceEncryption?.recoveryConfigured && !await confirmDialog("Replace the current agent recovery code? Existing standalone agent connections will need the new code.")) return;
+    setBusy("Creating agent recovery code");
+    try {
+      const result = await window.crossAge.createWorkspaceRecoveryCode();
+      setWorkspaceEncryption(result.status);
+      setWorkspaceRecoveryCode(result.recoveryCode);
+      setNotice({ tone: "ok", text: "New agent recovery code created." });
+    } catch (error) {
+      setErrorNotice(error);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function enableWorkspaceLock() {
     try {
       const status = await window.crossAge.enableWorkspaceLock();
@@ -5589,7 +6613,8 @@ export default function App() {
     const result = await invoke<{ history: AccuracyValidationRun[] }>(
       "Loading validation history",
       "accuracy_validation_history",
-      { limit: 20 }
+      { limit: 20 },
+      { quiet: true }
     );
     setAccuracyValidationHistory(result.history ?? []);
   }
@@ -5618,6 +6643,7 @@ export default function App() {
     candidateImages: number;
     downloadIfMissing?: boolean;
     includeVideos?: boolean;
+    acknowledgeDatasetTerms?: boolean;
   }) {
     const autoDownloadDatasets = new Set(["lfw", "cfp"]);
     if (!options.folder && !autoDownloadDatasets.has(options.datasetId)) {
@@ -5633,7 +6659,8 @@ export default function App() {
       candidateImages: options.candidateImages,
       downloadIfMissing: Boolean(options.downloadIfMissing),
       includeVideos: Boolean(options.includeVideos),
-      includeDistractors: true
+      includeDistractors: true,
+      acknowledgeDatasetTerms: Boolean(options.acknowledgeDatasetTerms)
     });
     if (result.value) {
       setPublicDatasetBenchmark(result.value);
@@ -5646,6 +6673,39 @@ export default function App() {
     }
   }
 
+  async function runCrossAgeTrajectoryBenchmark(options: {
+    datasetId: string;
+    folder: string;
+    maxIdentities: number;
+    candidateImages: number;
+    acknowledgeDatasetTerms: boolean;
+  }): Promise<CrossAgeTrajectoryBenchmarkResult | null> {
+    if (!options.folder.trim()) {
+      setNotice({ tone: "warn", text: "Choose an authorized local dataset folder first." });
+      return null;
+    }
+    const result = await invoke<CommandResult<CrossAgeTrajectoryBenchmarkResult>>(
+      "Comparing age bridge",
+      "run_cross_age_trajectory_benchmark",
+      {
+        datasetId: options.datasetId,
+        folder: options.folder,
+        maxIdentities: options.maxIdentities,
+        candidateImages: options.candidateImages,
+        referenceImages: 2,
+        includeDistractors: true,
+        acknowledgeDatasetTerms: options.acknowledgeDatasetTerms
+      }
+    );
+    if (!result.value) return null;
+    setNotice({
+      tone: result.value.status === "pass" ? "ok" : "error",
+      text: `Age-bridge comparison ${result.value.status}: ${result.value.comparison.improvements} improved, ${result.value.comparison.regressions} regressed.`
+    });
+    void window.crossAge.revealPath(result.value.reportPath);
+    return result.value;
+  }
+
   async function runPublicDatasetModelComparison(options: {
     datasetId: string;
     folder: string;
@@ -5653,6 +6713,7 @@ export default function App() {
     candidateImages: number;
     downloadIfMissing?: boolean;
     includeVideos?: boolean;
+    acknowledgeDatasetTerms?: boolean;
   }) {
     const autoDownloadDatasets = new Set(["lfw", "cfp"]);
     if (!options.folder && !autoDownloadDatasets.has(options.datasetId)) {
@@ -5667,7 +6728,8 @@ export default function App() {
       candidateImages: options.candidateImages,
       downloadIfMissing: Boolean(options.downloadIfMissing),
       includeVideos: Boolean(options.includeVideos),
-      includeDistractors: true
+      includeDistractors: true,
+      acknowledgeDatasetTerms: Boolean(options.acknowledgeDatasetTerms)
     });
     if (result.value) {
       setPublicDatasetModelComparison(result.value);
@@ -6017,6 +7079,7 @@ export default function App() {
       learningMode: draft.learningMode,
       performanceMode: performanceChoice,
       safeMode: draft.safeMode,
+      safeModeMultimodal: draft.safeModeMultimodal ?? false,
       safeModeZeroAdmittance: draft.safeModeZeroAdmittance ?? false,
       safeModeThreshold: draft.safeModeThreshold,
       safeModeProfile: draft.safeModeProfile ?? "custom",
@@ -6029,25 +7092,32 @@ export default function App() {
   }
 
   async function saveSettingsDraftIfDirty(label = "Saving settings") {
-    if (!settings || !settingsDirtyRef.current) return false;
+    if (!settings || !settingsDirtyRef.current) {
+      setSettingsSaveStatus("saved");
+      return false;
+    }
     const wasDirty = settingsDirtyRef.current;
     settingsDirtyRef.current = false;
+    setSettingsSaveStatus("saving");
     try {
       await invoke<AppState>(label, "save_settings", settingsPayload(settings));
+      setSettingsSaveStatus("saved");
       return true;
     } catch (error) {
       settingsDirtyRef.current = wasDirty;
+      setSettingsSaveStatus("error");
       throw error;
     }
   }
 
   async function saveSettings() {
-    if (!settings) return;
+    if (!settings) return false;
     try {
       await saveSettingsDraftIfDirty("Saving settings");
       setNotice({ tone: "ok", text: "Settings saved." });
+      return true;
     } catch {
-      return;
+      return false;
     }
   }
 
@@ -6074,11 +7144,14 @@ export default function App() {
     };
     const wasDirty = settingsDirtyRef.current;
     settingsDirtyRef.current = false;
+    setSettingsSaveStatus("saving");
     try {
       await invoke<AppState>("Saving ignored files", "save_settings", settingsPayload(nextSettings));
+      setSettingsSaveStatus("saved");
       setNoticeMessage("ok", "notice.issueFilesIgnored", { count: uniquePaths.length }, `Ignored ${uniquePaths.length} file${uniquePaths.length === 1 ? "" : "s"} for future scans.`);
     } catch {
       settingsDirtyRef.current = wasDirty;
+      setSettingsSaveStatus("error");
     }
   }
 
@@ -6105,6 +7178,7 @@ export default function App() {
       const wrapper = asRecord(parsed);
       const nextSettings = coerceSettingsProfile(wrapper && "settings" in wrapper ? wrapper.settings : parsed, settings);
       settingsDirtyRef.current = true;
+      setSettingsSaveStatus("dirty");
       setSettings(nextSettings);
       setNotice({ tone: "ok", text: "Settings profile applied. Review it, then save settings." });
     } catch (error) {
@@ -6144,7 +7218,7 @@ export default function App() {
   // scan starts, from any tab -- not only the Scan tab's ScanActivity controls.
   const scanInFlight = Boolean(
     (busy && /scan|resum|retry/i.test(busy)) ||
-    (scanProgress && !["complete", "cancelled", "error"].includes(scanProgress.phase))
+    liveScanActive
   );
   const scanCancelRequested = Boolean(localScanMarkers?.cancelRequested);
   const enrollDisabled = !canProcess || !personName.trim() || !enrollFolder.trim();
@@ -6188,11 +7262,30 @@ export default function App() {
     setShowOnboarding(true);
   }
 
+  function markAgentDiscoverySeen() {
+    writeAgentDiscoverySeen();
+    setAgentDiscoverySeen(true);
+  }
+
+  function selectPhotoDestination(tab: TabKey, destinationId: string) {
+    if (tab === "library" && activeTab !== tab && photosActiveId !== destinationId) {
+      // Switching back to the large Library should reveal its preserved DOM in
+      // the urgent navigation commit. Reconcile the destination state after the
+      // first paint so a large catalog cannot delay visible tab feedback.
+      startTransition(() => setPhotosActiveId(destinationId));
+      return;
+    }
+    setPhotosActiveId(destinationId);
+  }
+
   // Photos-first navigation. Centralizes tab + sub-section switching so legacy
   // recognition deep-links (Dashboard/Scan/Review/Enroll) resolve to their new
   // homes (Tools / People & Pets) in one place.
   function navigateTo(target: NavTarget) {
+    const destinationId = photoDestinationId(target.tab, target.peopleSection ?? peopleSection);
+    if (destinationId) selectPhotoDestination(target.tab, destinationId);
     setActiveTab(target.tab);
+    if (target.tab === "agents") markAgentDiscoverySeen();
     if (target.toolsSection) setToolsSection(target.toolsSection);
     if (target.peopleSection) setPeopleSection(target.peopleSection);
     if (target.settingsSection) setSettingsSection(target.settingsSection);
@@ -6229,6 +7322,7 @@ export default function App() {
   }
 
   const navMeta: NavMeta = {
+    agents: agentDiscoverySeen ? undefined : { label: "New", tone: "blue" },
     people: state.counts.pending
       ? { label: `${state.counts.pending}`, tone: "amber" }
       : { label: `${state.counts.references}`, tone: state.counts.references ? "green" : "blue" },
@@ -6237,17 +7331,9 @@ export default function App() {
   };
   // Photos-first body routing: Library/Memories/Albums (and People → Browse) all
   // render the single shared PhotosView, seeded to the right rail section.
-  const photosTabActiveId: string | null =
-    activeTab === "library"
-      ? "all"
-      : activeTab === "memories"
-      ? "memories"
-      : activeTab === "albums"
-      ? "albums"
-      : activeTab === "people" && peopleSection === "browse"
-      ? "people"
-      : null;
+  const photosTabActiveId = photoDestinationId(activeTab, peopleSection);
   const showPhotosBody = !workspaceLocked && photosTabActiveId !== null;
+  photosRouteActiveRef.current = showPhotosBody;
 
   return (
     <AppShell
@@ -6257,12 +7343,20 @@ export default function App() {
           tabs={tabs}
           activeTab={activeTab}
           onSelect={(key) => {
+            const destinationId = photoDestinationId(key, key === "people" ? "browse" : peopleSection);
+            const reselectingCurrentDestination = Boolean(
+              destinationId && key === activeTab && photosActiveId === destinationId
+            );
+            if (destinationId) selectPhotoDestination(key, destinationId);
             setActiveTab(key);
+            if (key === "agents") markAgentDiscoverySeen();
             if (key === "tools") setToolsSection("overview");
             else if (key === "people") setPeopleSection("browse");
             else if (key === "settings") setSettingsSection("general");
-            // Re-selecting a photos-backed tab refreshes its rail + grid.
-            if (key === "library" || key === "memories" || key === "albums" || key === "people") {
+            // A deliberate reselect refreshes external changes. Ordinary tab
+            // switches reuse the already-loaded catalog and never fan out a
+            // second set of rail/settings/grid requests.
+            if (reselectingCurrentDestination) {
               setPhotosReloadSignal((signal) => signal + 1);
             }
           }}
@@ -6282,19 +7376,38 @@ export default function App() {
         />
       }
     >
-        <StatusRow
-          busy={busy}
-          uiText={uiText}
-          scanInFlight={scanInFlight}
-          cancelActiveScan={cancelActiveScan}
-          scanCancelRequested={scanCancelRequested}
-          notice={notice}
-          language={language}
-          formatErrorMessage={formatErrorMessage}
-          uiMessage={uiMessage}
-          t={t}
-          isDemoMode={isDemoMode}
-        />
+        <div className="a11y-live-region" role="status" aria-live="polite" aria-atomic="true">
+          {startupAnnouncement}
+        </div>
+        {(busy || notice) && (
+          <Suspense fallback={null}>
+            <StatusRow
+              busy={busy}
+              uiText={uiText}
+              scanInFlight={scanInFlight}
+              cancelActiveScan={cancelActiveScan}
+              resumeActiveScan={resumeActiveScan}
+              scanCancelRequested={scanCancelRequested}
+              scanPaused={Boolean(state.scanJob?.paused || localScanMarkers?.paused)}
+              notice={notice}
+              language={language}
+              formatErrorMessage={formatErrorMessage}
+              uiMessage={uiMessage}
+              t={t}
+              isDemoMode={isDemoMode}
+            />
+          </Suspense>
+        )}
+
+        {!workspaceLocked && !agentDiscoverySeen && activeTab === "library" && (
+          <Suspense fallback={null}>
+            <AgentDiscoveryBanner
+              uiText={uiText}
+              onExplore={() => navigateTo({ tab: "agents" })}
+              onDismiss={markAgentDiscoverySeen}
+            />
+          </Suspense>
+        )}
 
         {workspaceLocked && workspaceLock && (
           <WorkspaceLockGate
@@ -6304,6 +7417,7 @@ export default function App() {
           />
         )}
 
+        <Suspense fallback={null}>
         {!workspaceLocked && activeTab === "tools" && (
           <SectionTabs
             ariaLabel="Tools sections"
@@ -6314,7 +7428,7 @@ export default function App() {
               { key: "diagnostics", label: t("nav.toolsDiagnostics") },
             ]}
             active={toolsSection}
-            onSelect={setToolsSection}
+            onSelect={(section) => setToolsSection(section as ToolsSection)}
           />
         )}
         {!workspaceLocked && activeTab === "people" && (
@@ -6326,7 +7440,10 @@ export default function App() {
               { key: "review", label: t("nav.review") },
             ]}
             active={peopleSection}
-            onSelect={setPeopleSection}
+            onSelect={(section) => {
+              if (section === "browse") setPhotosActiveId("people");
+              setPeopleSection(section as PeopleSection);
+            }}
           />
         )}
         {!workspaceLocked && activeTab === "settings" && settings && (
@@ -6341,8 +7458,19 @@ export default function App() {
               { key: "advanced", label: uiText("Advanced") },
             ]}
             active={settingsSection}
-            onSelect={setSettingsSection}
+            onSelect={(section) => {
+              setSettingsSection(section as SettingsSection);
+              if (section === "agents") markAgentDiscoverySeen();
+            }}
           />
+        )}
+        </Suspense>
+        {!workspaceLocked && (
+          <CachedRoute active={activeTab === "agents"} warm>
+            <Suspense fallback={<RouteFallback uiText={uiText} label="Loading AI Agents" />}>
+              <McpAgentsPanel active={activeTab === "agents"} copyText={copyText} uiText={uiText} />
+            </Suspense>
+          </CachedRoute>
         )}
         {!workspaceLocked && activeTab === "people" && peopleSection === "enroll" && (
           <EnrollView
@@ -6365,9 +7493,15 @@ export default function App() {
             deletePerson={deletePerson}
             deletePhoto={removeReference}
             addMoreForPerson={addMoreForPerson}
+            updateAgeBridge={updateAgeBridge}
+            generateSyntheticAgeImage={generateSyntheticAgeImage}
             stageReferenceSuggestions={stageReferenceSuggestions}
             approveReferenceSuggestion={approveReferenceSuggestion}
             rejectReferenceSuggestion={rejectReferenceSuggestion}
+            approveSyntheticEnrollmentReview={approveSyntheticEnrollmentReview}
+            rejectSyntheticEnrollmentReview={rejectSyntheticEnrollmentReview}
+            approveSyntheticAgeImageReview={approveSyntheticAgeImageReview}
+            rejectSyntheticAgeImageReview={rejectSyntheticAgeImageReview}
             busy={Boolean(busy)}
             language={language}
             t={t}
@@ -6401,7 +7535,6 @@ export default function App() {
             pauseScan={pauseActiveScan}
             resumeScan={resumeActiveScan}
             localScanMarkers={localScanMarkers}
-            scanProgress={scanProgress}
             watchStatus={watchStatus}
             clearQueue={clearQueue}
             disabled={scanDisabled}
@@ -6441,7 +7574,6 @@ export default function App() {
           <Dashboard
             section={toolsSection}
             state={state}
-            scanProgress={scanProgress}
             watchStatus={watchStatus}
             latencySamples={latencySamples}
             latencySummary={latencySummary}
@@ -6449,6 +7581,7 @@ export default function App() {
             performanceChoice={performanceChoice}
             performanceProfile={performanceProfile}
             navigate={legacyNavigate}
+            openDiagnostics={() => navigateTo({ tab: "settings", settingsSection: "storage" })}
             chooseWorkspace={chooseWorkspace}
             runWorkspaceHealth={runWorkspaceHealth}
             requestConsent={() => setConsent(true).catch(setErrorNotice)}
@@ -6504,18 +7637,28 @@ export default function App() {
             openPath={openCandidatePath}
             reviewUndo={reviewUndo}
             undoReview={undoLastReview}
+            onAddPerson={() => setPeopleSection("enroll")}
+            onScan={() => { setActiveTab("tools"); setToolsSection("scan"); }}
             renderBatchSize={runtimePerformanceProfile.reviewBatchSize}
             showListThumbnails={runtimePerformanceProfile.showListThumbnails}
             busy={Boolean(busy)}
           />
         )}
-        {showPhotosBody && (
-          <Suspense fallback={<RouteFallback uiText={uiText} label="Loading Photos" />}>
-            <PhotosView
-              key="photos-main"
-              initialActiveId={photosTabActiveId ?? "all"}
+        {!workspaceLocked && (
+          <CachedRoute active={showPhotosBody}>
+            <Suspense fallback={<RouteFallback uiText={uiText} label="Loading Photos" />}>
+              <PhotosView
+                key="photos-main"
+                initialActiveId={photosTabActiveId ?? "all"}
+                activeId={photosActiveId}
+                onActiveIdChange={setPhotosActiveId}
+                routeActiveRef={photosRouteActiveRef}
+                searchOpenRequest={photoSearchOpenRequest}
             reloadSignal={photosReloadSignal}
-            onRequestPeopleSection={(section) => { setActiveTab("people"); setPeopleSection(section); }}
+            onRequestPeopleSection={(section) => {
+              setActiveTab("people");
+              setPeopleSection(section);
+            }}
             listPhotoFolders={listPhotoFolders}
             listPhotoFolderItems={listPhotoFolderItems}
             listPhotoDateBuckets={listPhotoDateBuckets}
@@ -6524,6 +7667,9 @@ export default function App() {
             validatePhotoColorProfile={validatePhotoColorProfile}
             listPhotoBurstStacks={listPhotoBurstStacks}
             setPhotoBurstSelection={setPhotoBurstSelection}
+            photoCullingStatus={photoCullingStatus}
+            analyzePhotoBurstCulling={analyzePhotoBurstCulling}
+            applyPhotoCullingRecommendation={applyPhotoCullingRecommendation}
             listPhotoKeywords={listPhotoKeywords}
             listPhotoSavedFilters={listPhotoSavedFilters}
             savePhotoSavedFilter={savePhotoSavedFilter}
@@ -6535,12 +7681,16 @@ export default function App() {
             mergePhotoDuplicates={mergePhotoDuplicates}
             dismissPhotoDuplicateGroup={dismissPhotoDuplicateGroup}
             savePhotoPersonProfile={savePhotoPersonProfile}
+            suggestPhotoRelationshipNames={suggestPhotoRelationshipNames}
+            reviewPhotoRelationshipNameSuggestion={reviewPhotoRelationshipNameSuggestion}
             savePhotoPetProfile={savePhotoPetProfile}
             savePhotoPlaceProfile={savePhotoPlaceProfile}
             savePhotoUtilityProfile={savePhotoUtilityProfile}
             renamePhotoPet={renamePhotoPet}
             assignPhotoPet={assignPhotoPet}
+            bulkAssignPhotoPet={bulkAssignPhotoPet}
             dismissPhotoPetReview={dismissPhotoPetReview}
+            bulkDismissPhotoPetReview={bulkDismissPhotoPetReview}
             savePhotoPeopleGroup={savePhotoPeopleGroup}
             deletePhotoPeopleGroup={deletePhotoPeopleGroup}
             savePhotoAlbum={savePhotoAlbum}
@@ -6552,6 +7702,7 @@ export default function App() {
             deletePhotoAlbumFolder={deletePhotoAlbumFolder}
             movePhotoAlbumToFolder={movePhotoAlbumToFolder}
             reorderPhotoAlbumFolderChildren={reorderPhotoAlbumFolderChildren}
+            photoAlbumSourceOrder={photoAlbumSourceOrder}
             addPhotoAlbumItems={addPhotoAlbumItems}
             removePhotoAlbumItems={removePhotoAlbumItems}
             reorderPhotoAlbumItems={reorderPhotoAlbumItems}
@@ -6592,6 +7743,8 @@ export default function App() {
             photoOcrIndexStatus={photoOcrIndexStatus}
             indexPhotoBarcodes={indexPhotoBarcodes}
             photoBarcodeIndexStatus={photoBarcodeIndexStatus}
+            photoVlmStatus={photoVlmStatus}
+            installPhotoVlm={installPhotoVlm}
             indexPhotoObjects={indexPhotoObjects}
             photoObjectIndexStatus={photoObjectIndexStatus}
             enqueuePhotoIndexingJob={enqueuePhotoIndexingJob}
@@ -6603,8 +7756,17 @@ export default function App() {
             photoCurationPreferences={photoCurationPreferences}
             savePhotoCurationPreferences={savePhotoCurationPreferences}
             photoUserMemories={photoUserMemories}
+            photoUserMemorySourceOrder={photoUserMemorySourceOrder}
             savePhotoUserMemory={savePhotoUserMemory}
             deletePhotoUserMemory={deletePhotoUserMemory}
+            photoStoryStatus={photoStoryStatus}
+            photoStories={photoStories}
+            generatePhotoStory={generatePhotoStory}
+            savePhotoStory={savePhotoStory}
+            deletePhotoStory={deletePhotoStory}
+            restorePhotoStoryVersion={restorePhotoStoryVersion}
+            exportPhotoStory={exportPhotoStory}
+            createPhotoStorySlideshow={createPhotoStorySlideshow}
             listPhotoSlideshowProjects={photoSlideshowProjects}
             listPhotoSlideshowThemeTemplates={photoSlideshowThemeTemplates}
             savePhotoSlideshowThemeTemplate={savePhotoSlideshowThemeTemplate}
@@ -6616,6 +7778,35 @@ export default function App() {
             exportPhotoSlideshow={exportPhotoSlideshow}
             exportPhotoMemoryMovie={exportPhotoMemoryMovie}
             importPhotos={importPhotos}
+            getPhotoTetherStatus={window.crossAge.getPhotoTetherStatus}
+            startPhotoTether={window.crossAge.startPhotoTether}
+            stopPhotoTether={window.crossAge.stopPhotoTether}
+            resumePhotoTether={window.crossAge.resumePhotoTether}
+            capturePhotoTether={window.crossAge.capturePhotoTether}
+            subscribePhotoTether={window.crossAge.onPhotoTether}
+            getPhotoSourceProviderStatus={getPhotoSourceProviderStatus}
+            listPhotoSourceLibraries={listPhotoSourceLibraries}
+            previewPhotoSource={previewPhotoSource}
+            importPhotoSource={importPhotoSource}
+            syncPhotoSource={syncPhotoSource}
+            chooseDamCatalog={window.crossAge.chooseDamCatalog}
+            chooseOpenPhotoCatalog={window.crossAge.chooseOpenPhotoCatalog}
+            getPhotoCatalogStatus={window.crossAge.getPhotoCatalogStatus}
+            inspectOpenPhotoCatalog={window.crossAge.inspectOpenPhotoCatalog}
+            exportOpenPhotoCatalog={window.crossAge.exportOpenPhotoCatalog}
+            importOpenPhotoCatalog={window.crossAge.importOpenPhotoCatalog}
+            cancelOpenPhotoCatalog={window.crossAge.cancelOpenPhotoCatalog}
+            subscribePhotoCatalogProgress={window.crossAge.onScanProgress}
+            exportApplePhotoSourceAssets={exportApplePhotoSourceAssets}
+            listPhotoSourceJobs={listPhotoSourceJobs}
+            getPhotoSourceJobStatus={getPhotoSourceJobStatus}
+            cancelPhotoSourceJob={cancelPhotoSourceJob}
+            retryPhotoSourceJob={retryPhotoSourceJob}
+            dismissPhotoSourceJob={dismissPhotoSourceJob}
+            listPhotoSourcePeopleHints={listPhotoSourcePeopleHints}
+            reviewPhotoSourcePeopleHint={reviewPhotoSourcePeopleHint}
+            revokePhotoSourceConsent={revokePhotoSourceConsent}
+            openPhotoPrivacySettings={() => window.crossAge.openPhotoPrivacySettings()}
             photoSources={photoSources}
             refreshPhotoSources={refreshPhotoSources}
             chooseImportFiles={choosePhotoImportFiles}
@@ -6651,12 +7842,21 @@ export default function App() {
             createPhotoEditStackVersion={createPhotoEditStackVersion}
             restorePhotoEditStackVersion={restorePhotoEditStackVersion}
             deletePhotoEditStackVersion={deletePhotoEditStackVersion}
+            photoGenerativeStatus={photoGenerativeStatus}
+            inspectPhotoContentCredentials={inspectPhotoContentCredentials}
+            installPhotoGenerativePack={installPhotoGenerativePack}
+            renderPhotoGenerativePreview={renderPhotoGenerativePreview}
+            applyPhotoGenerativeEdit={applyPhotoGenerativeEdit}
+            discardPhotoGenerativePreview={discardPhotoGenerativePreview}
             duplicatePhotoAssetVersion={duplicatePhotoAssetVersion}
             duplicatePhotoAssetRenderedVersion={duplicatePhotoAssetRenderedVersion}
             exportPhotoLiveMotion={exportPhotoLiveMotion}
             exportPhotoSubjectCutout={exportPhotoSubjectCutout}
             exportPhotoPortraitBlur={exportPhotoPortraitBlur}
             semanticSearchPhotos={semanticSearchPhotos}
+            photoLibraryAgentStatus={photoLibraryAgentStatus}
+            queryPhotoLibraryAgent={queryPhotoLibraryAgent}
+            executePhotoLibraryAgentPlan={executePhotoLibraryAgentPlan}
             setPhotoLiveKeyPhoto={setPhotoLiveKeyPhoto}
             resetPhotoLiveKeyPhoto={resetPhotoLiveKeyPhoto}
             setPhotoVideoPoster={setPhotoVideoPoster}
@@ -6668,7 +7868,9 @@ export default function App() {
             suggestPhotoReviewMoreCandidates={suggestPhotoReviewMoreCandidates}
             reviewCandidate={(status, candidate) => review(status, candidate, true)}
             blockFalseMatch={blockFalseMatch}
+            bulkBlockFalseMatches={bulkBlockFalseMatches}
             reassignCandidatePerson={reassignCandidatePerson}
+            bulkReassignCandidatePerson={bulkReassignCandidatePerson}
             renamePerson={renamePerson}
             reviewCandidates={state.candidates}
             duplicatePeople={duplicatePeople}
@@ -6680,24 +7882,31 @@ export default function App() {
             copyText={copyText}
             busy={Boolean(busy)}
               appShortcutCommand={photoAppShortcutCommand}
-            />
-          </Suspense>
+              />
+            </Suspense>
+          </CachedRoute>
         )}
-        {!workspaceLocked && activeTab === "search" && (
-          <Suspense fallback={<RouteFallback uiText={uiText} label="Loading Search" />}>
-            <SearchView
-              searchPhotoLibrary={searchPhotoLibrary}
-              semanticSearchPhotos={semanticSearchPhotos}
-              t={t}
-              uiText={uiText}
-            />
-          </Suspense>
+        {!workspaceLocked && (
+          <CachedRoute active={activeTab === "search"} warm>
+            <Suspense fallback={<RouteFallback uiText={uiText} label="Loading Search" />}>
+              <SearchView
+                active={activeTab === "search"}
+                searchPhotoLibrary={searchPhotoLibrary}
+                semanticSearchPhotos={semanticSearchPhotos}
+                onOpenResult={openSearchResultInLibrary}
+                t={t}
+                uiText={uiText}
+              />
+            </Suspense>
+          </CachedRoute>
         )}
-        {!workspaceLocked && activeTab === "settings" && settings && (
-          <SettingsView
+        {!workspaceLocked && settings && (
+          <CachedRoute active={activeTab === "settings"}>
+            <SettingsView
             section={settingsSection}
             state={state}
             settings={settings}
+            saveStatus={settingsSaveStatus}
             setSettings={updateSettingsDraft}
             saveSettings={saveSettings}
             busy={Boolean(busy)}
@@ -6777,6 +7986,14 @@ export default function App() {
             verifyAuditChain={verifyAuditChain}
             jurisdictions={jurisdictions}
             jurisdictionDisclaimer={jurisdictionDisclaimer}
+            complianceStatus={complianceStatus}
+            loadComplianceStatus={loadComplianceStatus}
+            acknowledgeAiDisclosure={acknowledgeAiDisclosure}
+            saveSubjectRelease={saveSubjectRelease}
+            deleteComplianceSubject={deleteComplianceSubject}
+            exportBiometricPolicy={exportBiometricPolicy}
+            recordBiometricPolicyPublication={recordBiometricPolicyPublication}
+            enforceBiometricRetention={enforceBiometricRetention}
             runtimeSelfTest={runtimeSelfTest}
             runRuntimeSelfTest={runRuntimeSelfTest}
             runtimeBenchmark={runtimeBenchmark}
@@ -6809,6 +8026,7 @@ export default function App() {
             choosePublicDatasetFolder={choosePublicDatasetFolder}
             inspectPublicDataset={inspectPublicDataset}
             runPublicDatasetBenchmark={runPublicDatasetBenchmark}
+            runCrossAgeTrajectoryBenchmark={runCrossAgeTrajectoryBenchmark}
             runPublicDatasetModelComparison={runPublicDatasetModelComparison}
             applyModelRecommendation={applyModelRecommendation}
             applyCalibration={applyCalibration}
@@ -6832,7 +8050,6 @@ export default function App() {
             performanceProfile={performanceProfile}
             latencySamples={latencySamples}
             latencySummary={latencySummary}
-            scanProgress={scanProgress}
             clearLatencySamples={clearLatencySamples}
             copyPerformanceReport={copyPerformanceReport}
             warmPreviewsNow={() => warmPreviewCache(runtimePerformanceProfile.manualPreviewLimit, true)}
@@ -6846,6 +8063,9 @@ export default function App() {
             runInstallerDiagnostics={runInstallerDiagnostics}
             modelIntegrity={modelIntegrity}
             runModelIntegrity={runModelIntegrity}
+            modelLifecycleStatus={modelLifecycleStatus}
+            runModelLifecycleEvaluation={runModelLifecycleEvaluation}
+            rollbackModelConfiguration={rollbackModelConfiguration}
             modelDriftReport={modelDriftReport}
             runModelDriftReport={runModelDriftReport}
             referenceGapReport={referenceGapReport}
@@ -6857,15 +8077,20 @@ export default function App() {
             reviewRuleResult={reviewRuleResult}
             applyReviewRules={applyReviewRules}
             workspaceLock={workspaceLock}
+            workspaceEncryption={workspaceEncryption}
+            workspaceRecoveryCode={workspaceRecoveryCode}
             enableWorkspaceLock={enableWorkspaceLock}
             lockWorkspace={lockWorkspace}
             unlockWorkspace={unlockWorkspace}
             disableWorkspaceLock={disableWorkspaceLock}
+            rotateWorkspaceEncryptionKey={rotateWorkspaceEncryptionKey}
+            createWorkspaceRecoveryCode={createWorkspaceRecoveryCode}
             getSensitiveAuthStatus={getPhotosSensitiveAuthStatus}
             authenticateSensitiveAccess={authenticatePhotosSensitiveAccess}
-          />
+            />
+          </CachedRoute>
         )}
-        {showOnboarding && (
+        {showOnboarding && !consentPrompt && (
           <OnboardingGuide
             state={state}
             t={t}
@@ -6880,6 +8105,8 @@ export default function App() {
           <ConsentSheet
             scope={consentPrompt.scope}
             t={t}
+            uiText={uiText}
+            notice={state?.consent?.aiDisclosure?.notice}
             onCancel={() => setConsentPrompt(null)}
             onConfirm={confirmConsent}
           />
@@ -7162,15 +8389,10 @@ function OnboardingGuide({
   const hasScan = state.scanTotals.runs > 0 || state.candidates.length > 0;
   const hasReviewed = state.counts.reviewed > 0;
   const safeModeReady = state.config.safeMode;
-  let hasPhotos = false;
-  try {
-    hasPhotos = window.localStorage?.getItem("vintrace.hasImportedPhotos") === "1";
-  } catch (error) {
-    recordAppStorageIssue("photoImportFlag", "read", "vintrace.hasImportedPhotos", error);
-    hasPhotos = false;
-  }
-  const completed = [hasWorkspace, state.consentOnFile, hasPhotos, hasReferences, hasScan, hasReviewed, safeModeReady].filter(Boolean).length;
-  const progress = Math.round((completed / 7) * 100);
+  const hasPhotos = readPhotoImportFlag();
+  const hasExploredAgents = readAgentDiscoverySeen();
+  const completed = [hasWorkspace, state.consentOnFile, hasPhotos, hasReferences, hasScan, hasReviewed, safeModeReady, hasExploredAgents].filter(Boolean).length;
+  const progress = Math.round((completed / 8) * 100);
 
   const steps: Array<{
     title: string;
@@ -7235,6 +8457,14 @@ function OnboardingGuide({
       icon: Settings,
       actionLabel: t("onboarding.safe.action"),
       action: () => navigate("settings")
+    },
+    {
+      title: t("onboarding.agents.title"),
+      detail: t("onboarding.agents.detail"),
+      status: hasExploredAgents,
+      icon: Bot,
+      actionLabel: t("onboarding.agents.action"),
+      action: () => navigate("agents")
     }
   ];
 
@@ -7298,15 +8528,20 @@ function OnboardingGuide({
 function ConsentSheet({
   scope,
   t,
+  uiText,
+  notice,
   onCancel,
   onConfirm
 }: {
   scope: string;
   t(key: TranslationKey, values?: Record<string, string | number>): string;
+  uiText(value: string): string;
+  notice?: AiDisclosureNotice;
   onCancel(): void;
-  onConfirm(note: string): void | Promise<void>;
+  onConfirm(note: string, aiDisclosureAcknowledged: boolean): void | Promise<void>;
 }) {
   const [note, setNote] = useState("");
+  const [acknowledged, setAcknowledged] = useState(false);
   return (
     <ModalFrame titleId="consent-title" className="consent-sheet" onEscape={onCancel}>
         <div className="panel-title">
@@ -7318,6 +8553,15 @@ function ConsentSheet({
           <strong title={scope}>{scope}</strong>
         </div>
         <p className="compact">{t("consent.body")}</p>
+        {notice && (
+          <section className="consent-ai-notice" aria-labelledby="consent-ai-notice-title">
+            <strong id="consent-ai-notice-title">{uiText(notice.title)}</strong>
+            <p>{uiText(notice.summary)}</p>
+            <p>{uiText(notice.decisionBoundary)}</p>
+            <p>{uiText(notice.dataFlow)}</p>
+            <p>{uiText(notice.generatedContent)}</p>
+          </section>
+        )}
         <label>{t("consent.note")}
           <textarea
             aria-label={t("consent.note")}
@@ -7327,12 +8571,20 @@ function ConsentSheet({
             maxLength={800}
           />
         </label>
+        <label className="consent-acknowledgement">
+          <input
+            type="checkbox"
+            checked={acknowledged}
+            onChange={(event) => setAcknowledged(event.currentTarget.checked)}
+          />
+          <span>{uiText("I have read and acknowledge the current AI and biometric processing notice.")}</span>
+        </label>
         <div className="button-row consent-sheet-actions">
           <button className="secondary" type="button" onClick={onCancel}>
             <X size={17} />
             <span>{t("consent.cancel")}</span>
           </button>
-          <button className="primary" type="button" onClick={() => void onConfirm(note.trim())}>
+          <button className="primary" type="button" disabled={!acknowledged} onClick={() => void onConfirm(note.trim(), acknowledged)}>
             <ShieldCheck size={17} />
             <span>{t("consent.confirm")}</span>
           </button>
@@ -7508,7 +8760,6 @@ function PhotoAssetIndexInspector({
 function Dashboard({
   section,
   state,
-  scanProgress,
   watchStatus,
   latencySamples,
   latencySummary,
@@ -7516,6 +8767,7 @@ function Dashboard({
   performanceChoice,
   performanceProfile,
   navigate,
+  openDiagnostics,
   chooseWorkspace,
   runWorkspaceHealth,
   requestConsent,
@@ -7539,7 +8791,6 @@ function Dashboard({
 }: {
   section: ToolsSection;
   state: AppState;
-  scanProgress: ScanProgress | null;
   watchStatus: FolderWatchStatus;
   latencySamples: LatencySample[];
   latencySummary: LatencySummary;
@@ -7547,6 +8798,7 @@ function Dashboard({
   performanceChoice: PerformanceChoice;
   performanceProfile: PerformanceProfile;
   navigate(tab: LegacyTab): void;
+  openDiagnostics(): void;
   chooseWorkspace(): void;
   runWorkspaceHealth(): void;
   requestConsent(): void;
@@ -7646,6 +8898,7 @@ function Dashboard({
     { label: "Safe Mode", ok: state.config.safeMode, value: state.config.safeMode ? "On" : "Off" },
     { label: "Folder watch", ok: watchStatus.active, value: watchStatus.active ? "Watching" : "Idle" }
   ];
+  const readinessReadyCount = readiness.filter((item) => item.ok).length;
   const metrics = [
     { label: "Needs review", value: formatNumber(state.counts.pending), detail: `${formatRate(reviewCompletion)} reviewed`, tone: "amber", tier: "everyday" },
     { label: "Files scanned", value: formatNumber(totals.processed), detail: `${formatNumber(totals.runs)} scans`, tone: "blue", tier: "everyday" },
@@ -7659,11 +8912,6 @@ function Dashboard({
     { label: "Last scan", value: totals.lastCompletedAt ? formatDateTime(totals.lastCompletedAt) : "None", detail: `${formatDuration(totals.durationMs)} total runtime`, tone: "neutral", tier: "everyday" }
   ];
   const overviewMetrics = metrics.filter((metric) => metric.tier === "everyday");
-  const heroVisualStyle = {
-    "--review-progress": `${Math.round(reviewCompletion * 100)}%`,
-    "--match-progress": `${Math.round(matchRate * 100)}%`,
-    "--protect-progress": `${Math.round(protectedRate * 100)}%`
-  } as CSSProperties;
   const singleBucketPeople = allReferencesByPerson.filter((person) => person.buckets.length < 2).length;
   const rankedUseCases: Array<{ rank: number; label: string; status: string; tab: LegacyTab; tone: "green" | "amber" | "rose" | "blue" }> = [
     {
@@ -7722,43 +8970,55 @@ function Dashboard({
       <div className="panel dashboard-hero">
         <div>
           <span className="section-kicker">Home</span>
-          <h1>{state.references.length ? state.scanTotals.runs ? "Review possible matches" : "Ready for your first scan" : "Start with a person"}</h1>
+          <h1>{!state.consentOnFile ? "Confirm permission to begin" : state.references.length ? state.scanTotals.runs ? "Review possible matches" : "Ready for your first scan" : "Start with a person"}</h1>
           <p>
-            {state.counts.pending
+            {!state.consentOnFile
+              ? "Confirm that you have permission to use these photos before adding people or scanning."
+              : state.counts.pending
               ? `${state.counts.pending} possible match${state.counts.pending === 1 ? "" : "es"} need your decision.`
               : state.counts.candidates
                 ? "All possible matches have decisions."
                 : "Add photos of a person, scan a folder, and review what Vintrace finds."}
           </p>
         </div>
-        <div className="dashboard-visual" style={heroVisualStyle} aria-hidden="true">
-          <span className="visual-orbit review" />
-          <span className="visual-orbit match" />
-          <span className="visual-orbit protect" />
-          <i />
-        </div>
         <div className="dashboard-actions">
-          <button className="secondary" onClick={() => navigate("scan")}>
-            <ScanLine size={17} />
-            <span>Scan</span>
-          </button>
-          <button className="secondary" onClick={() => navigate("review")} disabled={!state.counts.candidates}>
-            <ShieldCheck size={17} />
-            <span>Review matches</span>
-          </button>
-          <button className="secondary" onClick={() => navigate("enroll")}>
-            <UserPlus size={17} />
-            <span>Add person</span>
-          </button>
+          {!state.consentOnFile ? (
+            <button className="primary" onClick={requestConsent}>
+              <ShieldCheck size={17} />
+              <span>Confirm permission</span>
+            </button>
+          ) : !state.references.length ? (
+            <button className="primary" onClick={() => navigate("enroll")}>
+              <UserPlus size={17} />
+              <span>Add person</span>
+            </button>
+          ) : state.counts.pending ? (
+            <button className="primary" onClick={() => navigate("review")}>
+              <ShieldCheck size={17} />
+              <span>Review matches</span>
+            </button>
+          ) : (
+            <button className="primary" onClick={() => navigate("scan")}>
+              <ScanLine size={17} />
+              <span>Scan photos</span>
+            </button>
+          )}
+          {state.references.length > 0 && (
+            <button className="secondary" onClick={() => navigate("enroll")}>
+              <UserPlus size={17} />
+              <span>Add person</span>
+            </button>
+          )}
+          {state.counts.candidates > 0 && !state.counts.pending && (
+            <button className="secondary" onClick={() => navigate("review")}>
+              <ShieldCheck size={17} />
+              <span>Review history</span>
+            </button>
+          )}
         </div>
-        <div className="readiness-strip">
-          {readiness.map((item) => (
-            <span className={item.ok ? "readiness-pill ok" : "readiness-pill warn"} key={item.label}>
-              <Check size={14} />
-              <span>{item.label}</span>
-              <strong>{item.value}</strong>
-            </span>
-          ))}
+        <div className="dashboard-hero-progress" aria-label={`${readinessReadyCount} of ${readiness.length} setup checks ready`}>
+          <span><i style={{ width: `${Math.round((readinessReadyCount / readiness.length) * 100)}%` }} /></span>
+          <small>{readinessReadyCount} of {readiness.length} ready</small>
         </div>
       </div>
 
@@ -7804,7 +9064,6 @@ function Dashboard({
       {section === "diagnostics" && (
       <BackgroundJobCenter
         state={state}
-        scanProgress={scanProgress}
         watchStatus={watchStatus}
         modelDownloadProgress={modelDownloadProgress}
         updateStatus={updateStatus}
@@ -7820,20 +9079,8 @@ function Dashboard({
       />
       )}
 
-      {(section === "overview" || section === "diagnostics") && (
-      <div className="metrics dashboard-metrics reveal-stagger">
-        {(section === "overview" ? overviewMetrics : metrics).map((metric) => (
-          <div className="metric" key={metric.label}>
-            <span>{metric.label}</span>
-            <strong className={metric.tone}>{metric.value}</strong>
-            <small>{metric.detail}</small>
-          </div>
-        ))}
-      </div>
-      )}
-
       {section === "diagnostics" && (
-      <div className="panel dashboard-span">
+      <div className="panel dashboard-span diagnostics-health-summary">
         <div className="panel-title"><Activity size={18} /> Health summary</div>
         <div className="workspace-health-grid">
           {healthSummary.map((item) => (
@@ -7849,12 +9096,46 @@ function Dashboard({
             <Database size={17} />
             <span>Check health</span>
           </button>
-          <button className="secondary" onClick={() => navigate("settings")}>
+          <button className="secondary" onClick={openDiagnostics}>
             <Gauge size={17} />
             <span>Open diagnostics</span>
           </button>
         </div>
       </div>
+      )}
+
+      {(section === "overview" || section === "diagnostics") && (
+      <div className="metrics dashboard-metrics reveal-stagger">
+        {overviewMetrics.map((metric) => (
+          <div className="metric" key={metric.label}>
+            <span>{metric.label}</span>
+            <strong className={metric.tone}>{metric.value}</strong>
+            <small>{metric.detail}</small>
+          </div>
+        ))}
+      </div>
+      )}
+
+      {section === "diagnostics" && (
+      <details className="panel diagnostics-engineer-metrics">
+        <summary>
+          <Activity size={17} />
+          <span>
+            <strong>Performance details</strong>
+            <small>Video, match quality, command timing, and runtime mode</small>
+          </span>
+          <ChevronRight size={16} />
+        </summary>
+        <div className="metrics">
+          {metrics.filter((metric) => metric.tier === "engineer").map((metric) => (
+            <div className="metric" key={metric.label}>
+              <span>{metric.label}</span>
+              <strong className={metric.tone}>{metric.value}</strong>
+              <small>{metric.detail}</small>
+            </div>
+          ))}
+        </div>
+      </details>
       )}
 
       {section === "overview" && (
@@ -7876,7 +9157,7 @@ function Dashboard({
       {section === "diagnostics" && (
       <div className="panel dashboard-span">
         <div className="panel-title"><Activity size={18} /> Live scan stream</div>
-        <ScanActivity progress={scanProgress} watchStatus={watchStatus} cancelScan={cancelScan} pauseScan={pauseScan} resumeScan={resumeScan} scanPaused={Boolean(state.scanJob?.paused || localScanMarkers?.paused)} />
+        <ScanActivity watchStatus={watchStatus} cancelScan={cancelScan} pauseScan={pauseScan} resumeScan={resumeScan} scanPaused={Boolean(state.scanJob?.paused || localScanMarkers?.paused)} />
       </div>
       )}
 
@@ -8047,31 +9328,37 @@ function TesterModePanel({
   ];
   const next = steps.find((step) => !step.done && !step.disabled) ?? steps[2];
   return (
-    <div className="panel tester-mode-panel">
-      <div className="tester-mode-copy">
-        <span className="section-kicker">Friend test mode</span>
-        <h2>Simple setup for a first test</h2>
+    <details className="panel tester-mode-panel">
+      <summary>
+        <div className="tester-mode-copy">
+          <span className="section-kicker">Friend test mode</span>
+          <strong>Simple setup for a first test</strong>
+          <small>Optional guided path · Next: {next.actionLabel}</small>
+        </div>
+        <ChevronRight size={17} />
+      </summary>
+      <div className="tester-mode-body">
         <p>Use this path when sharing Vintrace with someone who only needs to install, add a person, scan a folder, and review results.</p>
+        <div className="tester-mode-steps">
+          {steps.map((step) => (
+            <button key={step.label} className={step.done ? "tester-step done" : "tester-step"} onClick={step.action} disabled={step.disabled} type="button">
+              <span>{step.done ? <Check size={15} /> : <ChevronRight size={15} />}</span>
+              <strong>{step.label}</strong>
+              <small>{step.value}</small>
+              <em>{step.actionLabel}</em>
+            </button>
+          ))}
+        </div>
+        <div className="tester-mode-note">
+          <ShieldCheck size={16} />
+          <span>Vintrace will not change original photos during scan. It stores review data locally and waits for manual decisions.</span>
+        </div>
+        <button className="primary tester-mode-next" onClick={next.action} disabled={next.disabled} type="button">
+          <ChevronRight size={16} />
+          <span>{next.actionLabel}</span>
+        </button>
       </div>
-      <div className="tester-mode-steps">
-        {steps.map((step) => (
-          <button key={step.label} className={step.done ? "tester-step done" : "tester-step"} onClick={step.action} disabled={step.disabled} type="button">
-            <span>{step.done ? <Check size={15} /> : <ChevronRight size={15} />}</span>
-            <strong>{step.label}</strong>
-            <small>{step.value}</small>
-            <em>{step.actionLabel}</em>
-          </button>
-        ))}
-      </div>
-      <div className="tester-mode-note">
-        <ShieldCheck size={16} />
-        <span>Vintrace will not change original photos during scan. It stores review data locally and waits for manual decisions.</span>
-      </div>
-      <button className="primary tester-mode-next" onClick={next.action} disabled={next.disabled} type="button">
-        <ChevronRight size={16} />
-        <span>{next.actionLabel}</span>
-      </button>
-    </div>
+    </details>
   );
 }
 
@@ -8140,30 +9427,36 @@ function FirstScanGuide({
   const readyCount = steps.filter((step) => step.done).length;
   const nextStep = steps.find((step) => !step.done) ?? steps[3];
   return (
-    <div className="panel first-scan-guide">
-      <div className="first-scan-copy">
-        <span className="section-kicker">Start here</span>
-        <h2>First scan checklist</h2>
+    <details className="panel first-scan-guide">
+      <summary>
+        <div className="first-scan-copy">
+          <span className="section-kicker">Setup details</span>
+          <strong>First scan checklist</strong>
+          <small>Next: {nextStep.title}</small>
+        </div>
+        <div className="first-scan-progress" aria-label={`${readyCount} of ${steps.length} first scan steps complete`}>
+          <strong>{readyCount}/{steps.length}</strong>
+          <span>ready</span>
+        </div>
+        <ChevronRight size={17} />
+      </summary>
+      <div className="first-scan-guide-body">
         <p>Follow these steps once. After that, you can scan, watch folders, add more people, and review matches in any order.</p>
+        <div className="first-scan-steps">
+          {steps.map((step) => (
+            <button key={step.number} className={step.done ? "first-scan-step done" : "first-scan-step"} onClick={step.action} type="button">
+              <span>{step.done ? <Check size={15} /> : step.number}</span>
+              <strong>{step.title}</strong>
+              <small>{step.detail}</small>
+            </button>
+          ))}
+        </div>
+        <button className="primary first-scan-next" onClick={nextStep.action} type="button">
+          <ChevronRight size={16} />
+          <span>{nextStep.actionLabel}</span>
+        </button>
       </div>
-      <div className="first-scan-progress" aria-label={`${readyCount} of ${steps.length} first scan steps complete`}>
-        <strong>{readyCount}/{steps.length}</strong>
-        <span>ready</span>
-      </div>
-      <div className="first-scan-steps">
-        {steps.map((step) => (
-          <button key={step.number} className={step.done ? "first-scan-step done" : "first-scan-step"} onClick={step.action} type="button">
-            <span>{step.done ? <Check size={15} /> : step.number}</span>
-            <strong>{step.title}</strong>
-            <small>{step.detail}</small>
-          </button>
-        ))}
-      </div>
-      <button className="primary first-scan-next" onClick={nextStep.action} type="button">
-        <ChevronRight size={16} />
-        <span>{nextStep.actionLabel}</span>
-      </button>
-    </div>
+    </details>
   );
 }
 
@@ -8210,7 +9503,8 @@ function ModelSwitchWizard({
   const targetPackage = modelPackages.find((item) => item.pack === targetPack);
   const stagedSwitch = targetPack !== currentPack;
   const hasReferences = state.counts.references > 0;
-  const targetInstalled = Boolean(targetPackage?.available || (state.modelSetup?.ready && state.modelSetup.currentPack === targetPack));
+  const activeModelReady = Boolean(state.modelSetup?.ready && !state.modelSetup?.fallbackActive);
+  const targetInstalled = Boolean(targetPackage?.available || (activeModelReady && state.modelSetup?.currentPack === targetPack));
   const targetDownloading = Boolean(
     modelDownloadProgress?.pack === targetPack
     && !["complete", "error"].includes(String(modelDownloadProgress.phase))
@@ -8233,30 +9527,30 @@ function ModelSwitchWizard({
   const rollbackLabel = modelPackages.find((item) => item.pack === rollbackPack)?.label ?? rollbackPack;
   const targetLabel = targetPackage?.label ?? targetPack;
   const currentLabel = currentPackage?.label ?? currentPack;
-  const validationReady = !stagedSwitch && staleReferences !== null;
+  const validationReady = !stagedSwitch && activeModelReady && staleReferences !== null;
   const modelRoot = state.config.modelRoot || state.modelSetup?.modelRoot || state.modelSetup?.defaultRoot || "";
   const activeDryRun = dryRunPlan?.targetPack === targetPack ? dryRunPlan : null;
   const dryRunOk = Boolean(activeDryRun && !activeDryRun.blockers.length);
   const stepItems = [
     {
       label: "Choose model",
-      detail: stagedSwitch ? `${currentLabel} -> ${targetLabel}` : `${targetLabel} is active`,
-      state: targetPack ? "done" : "active"
+      detail: stagedSwitch ? `${currentLabel} -> ${targetLabel}` : activeModelReady ? `${targetLabel} is active` : `${targetLabel} selected for setup`,
+      state: activeModelReady || stagedSwitch ? "done" : "warn"
     },
     {
       label: "Install files",
-      detail: targetInstalled ? "Model files are available" : targetDownloading ? `${Math.round(modelDownloadProgress?.percent ?? 0)}% downloaded` : "Download before saving",
-      state: targetInstalled ? "done" : targetDownloading ? "active" : "warn"
+      detail: targetInstalled ? activeModelReady || stagedSwitch ? "Model files are available" : "Files installed; runtime setup required" : targetDownloading ? `${Math.round(modelDownloadProgress?.percent ?? 0)}% downloaded` : "Download before saving",
+      state: targetInstalled && (activeModelReady || stagedSwitch) ? "done" : targetDownloading ? "active" : "warn"
     },
     {
       label: "Save switch",
-      detail: stagedSwitch ? "Save to make this the active recognizer" : "Active recognizer is saved",
-      state: stagedSwitch ? "active" : "done"
+      detail: stagedSwitch ? "Save to make this the active recognizer" : activeModelReady ? "Active recognizer is saved" : "Finish setup to activate this recognizer",
+      state: stagedSwitch ? "active" : activeModelReady ? "done" : "warn"
     },
     {
       label: "Backfill saved photos",
-      detail: !hasReferences ? "No saved people yet" : backfillCount ? `${formatNumber(backfillCount)} saved photo${backfillCount === 1 ? "" : "s"} need embeddings` : `${formatNumber(compatibleReferences)} / ${formatNumber(totalReferences)} compatible`,
-      state: backfillCount ? "warn" : "done"
+      detail: !activeModelReady ? "Finish setup before backfill" : !hasReferences ? "No saved people yet" : backfillCount ? `${formatNumber(backfillCount)} saved photo${backfillCount === 1 ? "" : "s"} need embeddings` : `${formatNumber(compatibleReferences)} / ${formatNumber(totalReferences)} compatible`,
+      state: !activeModelReady || backfillCount ? "warn" : "done"
     },
     {
       label: "Validate",
@@ -8272,12 +9566,12 @@ function ModelSwitchWizard({
   }
 
   return (
-    <div className={stagedSwitch || needsBackfill ? "model-switch-wizard warn" : "model-switch-wizard"}>
+    <div className={stagedSwitch || needsBackfill || !activeModelReady ? "model-switch-wizard warn" : "model-switch-wizard"}>
       <div className="panel-title compact-title">
         <HardDrive size={18} />
         <span>Model switch guide</span>
         <div className="spacer" />
-        <small>{stagedSwitch ? "Pending save" : needsBackfill ? "Backfill needed" : "Ready"}</small>
+        <small>{stagedSwitch ? "Pending save" : !activeModelReady ? "Setup required" : needsBackfill ? "Backfill needed" : "Ready"}</small>
       </div>
       <div className="model-switch-summary">
         <span>
@@ -8398,7 +9692,7 @@ function ModelSwitchWizard({
           <RefreshCcw size={17} />
           <span>Backfill saved photos</span>
         </button>
-        <button className="secondary" onClick={validateModelState} disabled={busy || stagedSwitch} type="button">
+        <button className="secondary" onClick={validateModelState} disabled={busy || stagedSwitch || !activeModelReady} type="button" title={!activeModelReady ? "Finish model setup before validation" : undefined}>
           <Activity size={17} />
           <span>Validate switch</span>
         </button>
@@ -8451,7 +9745,9 @@ function ModelSetupCard({
       ? "Download needs attention"
       : downloading
         ? "Installing face model"
-        : "Face model needed";
+        : selected?.available
+          ? "Face model unavailable"
+          : "Face model needed";
   const statusTone = ready ? "green" : progress?.phase === "error" ? "rose" : downloading ? "blue" : "amber";
 
   return (
@@ -8463,7 +9759,9 @@ function ModelSetupCard({
           <p>
             {ready
               ? "Vintrace is using a local face model. Downloads are verified before install and stay on this device."
-              : "Install a local face model once so shared DMG and EXE builds can run the full matching pipeline after first launch."}
+              : selected?.available
+                ? "The model files are downloaded, but full matching could not start. Review the message below, then retry setup."
+                : "Install the local face model once to enable the full matching pipeline on this device."}
           </p>
         </div>
         <span className={`model-state ${statusTone}`}>{ready ? "Ready" : downloading ? `${Math.round(percentValue)}%` : "Setup"}</span>
@@ -8477,31 +9775,11 @@ function ModelSetupCard({
             )) : <option value="antelopev2">Recommended accuracy</option>}
           </select>
         </label>
-        <label>Download folder
-          <input value={root} readOnly title={root} aria-label="Model download folder" />
-        </label>
+        <div className="model-storage-location">
+          <span>Storage location</span>
+          <strong>{root ? basename(root) : "Default local folder"}</strong>
+        </div>
       </div>
-
-      {selected && (
-        <div className="model-package-detail">
-          <span><strong>{selected.detail}</strong></span>
-          <span>Download: {formatBytes(selected.size_bytes)}</span>
-          <span>Checksum: SHA-256</span>
-          <span>{selected.available ? "Installed" : selected.missing.slice(0, 1).join(", ") || "Ready to download"}</span>
-          {selected.pose_aware && <span>Pose-aware: profile and three-quarter checks</span>}
-          {selected.thresholds && <span>Suggested likely threshold: {percent(selected.thresholds.likely ?? selected.thresholds.review ?? 0)}</span>}
-          {governance && <span>Use: {governance.humanReviewRequired ? "Review-assisted" : "Automated"} • {governance.accuracyTier}</span>}
-          {governance && <span>Release: {governance.redistributionRisk === "needs-license-review" ? "License review needed" : governance.redistributionRisk}</span>}
-        </div>
-      )}
-
-      {governance && (
-        <div className="health-list model-governance-list">
-          <span>{governance.intendedUse}</span>
-          {governance.limitations.slice(0, 2).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
-          {governance.validation.slice(0, 1).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
-        </div>
-      )}
 
       {progress && (
         <div className={progress.phase === "error" ? "model-progress error" : "model-progress"}>
@@ -8513,16 +9791,16 @@ function ModelSetupCard({
         </div>
       )}
 
-      {!ready && !downloading && (
-        <div className="model-offline-note">
-          <AlertCircle size={16} />
-          <span>{localizeImperativeText(setup?.offlineMessage || "Internet is needed once for the face model. If you are offline, the app can open in simple matching mode and retry later.")}</span>
-        </div>
-      )}
       {fallbackReason && (
         <div className="model-offline-note">
           <AlertCircle size={16} />
           <span>{localizeImperativeText(fallbackReason)}</span>
+        </div>
+      )}
+      {!ready && !downloading && !selected?.available && (
+        <div className="model-offline-note">
+          <AlertCircle size={16} />
+          <span>{localizeImperativeText(setup?.offlineMessage || "Internet is needed once to download the face model. Simple matching remains available until setup finishes.")}</span>
         </div>
       )}
 
@@ -8533,7 +9811,7 @@ function ModelSetupCard({
         </button>
         <button className="primary" onClick={() => void downloadModel(selectedPack, root)} disabled={busy || downloading || !selectedPack} type="button">
           {downloading ? <Loader2 className="spin" size={17} /> : <DownloadIcon />}
-          <span>{progress?.phase === "error" ? "Retry download" : ready ? "Download again" : "Download model"}</span>
+          <span>{progress?.phase === "error" ? "Retry download" : ready ? "Download again" : selected?.available ? "Retry setup" : "Download model"}</span>
         </button>
         {progress?.phase === "error" && (
           <button className="secondary" onClick={() => void downloadModel(selectedPack, root, true)} disabled={busy || downloading} type="button">
@@ -8542,6 +9820,32 @@ function ModelSetupCard({
           </button>
         )}
       </div>
+      {selected && (
+        <details className="model-package-disclosure">
+          <summary>
+            <span>Model details</span>
+            <small>{selected.available ? ready ? "Active" : "Files downloaded" : formatBytes(selected.size_bytes)}</small>
+            <ChevronRight size={16} aria-hidden="true" />
+          </summary>
+          <div className="model-package-detail">
+            <span><strong>{selected.detail}</strong></span>
+            <span>Download: {formatBytes(selected.size_bytes)}</span>
+            <span>Checksum: SHA-256</span>
+            <span>{selected.available ? ready ? "Active" : "Files downloaded" : selected.missing.slice(0, 1).join(", ") || "Ready to download"}</span>
+            {selected.pose_aware && <span>Pose-aware: profile and three-quarter checks</span>}
+            {selected.thresholds && <span>Suggested likely threshold: {percent(selected.thresholds.likely ?? selected.thresholds.review ?? 0)}</span>}
+            {governance && <span>Use: {governance.humanReviewRequired ? "Review-assisted" : "Automated"} • {governance.accuracyTier}</span>}
+            {governance && <span>Release: {governance.redistributionRisk === "needs-license-review" ? "License review needed" : governance.redistributionRisk}</span>}
+          </div>
+          {governance && (
+            <div className="health-list model-governance-list">
+              <span>{governance.intendedUse}</span>
+              {governance.limitations.slice(0, 2).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+              {governance.validation.slice(0, 1).map((item) => <span key={item}>{localizeImperativeText(item)}</span>)}
+            </div>
+          )}
+        </details>
+      )}
     </div>
   );
 }
@@ -8867,12 +10171,22 @@ function PersonCard(props: {
   onDeletePerson(name: string): void;
   onDeletePhoto(refId: string): void;
   onAddMore(name: string): void;
+  onAgeBridge(name: string, remove: boolean): void;
+  onGenerateAgeImage(name: string, targetAgeBucket: AgeBucket): void;
+  uiText(source: string): string;
   busy: boolean;
 }) {
   const { person } = props;
   const [expanded, setExpanded] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(person.name);
+  const missingAgeBuckets = referenceAgeBuckets.filter((bucket) => !person.ageCoverage.includes(bucket));
+  const [targetAgeBucket, setTargetAgeBucket] = useState<AgeBucket>(missingAgeBuckets[0] ?? "adult");
+  useEffect(() => {
+    if (!missingAgeBuckets.includes(targetAgeBucket) && missingAgeBuckets[0]) {
+      setTargetAgeBucket(missingAgeBuckets[0]);
+    }
+  }, [missingAgeBuckets, targetAgeBucket]);
   const shown = expanded ? person.photos : person.photos.slice(0, 5);
   const overflow = person.count - shown.length;
   const commitRename = () => {
@@ -8904,13 +10218,24 @@ function PersonCard(props: {
         )}
         <div className="person-coverage">
           {person.ageCoverage.length
-            ? person.ageCoverage.map((bucket) => <span key={bucket} className="age-chip">{ageBucketLabel(bucket)}</span>)
+            ? person.ageCoverage.map((bucket) => <span key={bucket} className="age-chip">{props.uiText(ageBucketLabel(bucket))}</span>)
             : <span className="age-chip muted">no age tag</span>}
+          {person.embeddingAgeCount > 0 ? <span className="age-chip">{person.embeddingAgeCount} {props.uiText("bridge")}</span> : null}
+          {person.generatedAgeCount > 0 ? <span className="age-chip ai-generated-chip">{person.generatedAgeCount} {props.uiText("AI age")}</span> : null}
         </div>
         <span className="person-count" title={`${person.count} photo${person.count === 1 ? "" : "s"}`}>{person.count}</span>
         <div className="person-actions">
           <button className="icon-button" title="Rename" aria-label={`Rename ${person.name}`} onClick={() => { setDraft(person.name); setRenaming(true); }} disabled={props.busy}><Pencil size={15} /></button>
           <button className="icon-button" title="Add more photos" aria-label={`Add more photos for ${person.name}`} onClick={() => props.onAddMore(person.name)} disabled={props.busy}><Plus size={15} /></button>
+          {person.ageCoverage.length >= 2 || person.syntheticAgeCount > 0 ? (
+            <button
+              className="icon-button"
+              title={person.syntheticAgeCount > 0 ? "Remove synthetic age bridge" : "Build synthetic age bridge"}
+              aria-label={`${person.syntheticAgeCount > 0 ? "Remove" : "Build"} synthetic age bridge for ${person.name}`}
+              onClick={() => props.onAgeBridge(person.name, person.syntheticAgeCount > 0)}
+              disabled={props.busy}
+            ><ScanFace size={15} /></button>
+          ) : null}
           <button className="icon-button danger" title="Delete person" aria-label={`Delete ${person.name}`} onClick={() => props.onDeletePerson(person.name)} disabled={props.busy}><Trash2 size={15} /></button>
         </div>
       </div>
@@ -8922,6 +10247,31 @@ function PersonCard(props: {
           <button className="person-more" onClick={() => setExpanded(true)} aria-label={`Show ${overflow} more photos`}>+{overflow}</button>
         )}
       </div>
+      {expanded && missingAgeBuckets.length ? (
+        <div className="person-age-augmentation">
+          <div>
+            <strong>{props.uiText("AI age reference")}</strong>
+            <small>{props.uiText("Synthetic, private, and approval required")}</small>
+          </div>
+          <select
+            value={targetAgeBucket}
+            onChange={(event) => setTargetAgeBucket(event.currentTarget.value as AgeBucket)}
+            aria-label={`${props.uiText("Target age range")}: ${person.name}`}
+            disabled={props.busy}
+          >
+            {missingAgeBuckets.map((bucket) => <option key={bucket} value={bucket}>{props.uiText(ageBucketLabel(bucket))}</option>)}
+          </select>
+          <button
+            className="secondary compact-action"
+            type="button"
+            onClick={() => props.onGenerateAgeImage(person.name, targetAgeBucket)}
+            disabled={props.busy}
+          >
+            <Sparkles size={15} />
+            <span>{props.uiText("Generate")}</span>
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -8975,6 +10325,117 @@ function ReferenceSuggestionsPanel(props: {
   );
 }
 
+function SyntheticEnrollmentReviewsPanel(props: {
+  reviews: NonNullable<AppState["syntheticEnrollmentReviews"]>;
+  screen: AppState["syntheticEnrollmentScreen"];
+  onApprove(artifactId: string): void;
+  onReject(artifactId: string): void;
+  busy: boolean;
+}) {
+  const staged = props.reviews.filter((item) => item.status === "staged");
+  if (!staged.length) return null;
+  return (
+    <div className="reference-suggestions" role="region" aria-label="Enrollment authenticity reviews">
+      <div className="reference-suggestions-head">
+        <div>
+          <strong>Enrollment review</strong>
+          <small>
+            {formatNumber(staged.length)} held &middot; {props.screen?.verified ? "Local screen verified" : "Screen unavailable"}
+          </small>
+        </div>
+        {props.screen?.verified ? <ShieldCheck size={18} aria-hidden="true" /> : <AlertCircle size={18} aria-hidden="true" />}
+      </div>
+      <div className="reference-suggestion-list">
+        {staged.slice(0, 8).map((item) => (
+          <div className="reference-suggestion-row" key={item.artifactId}>
+            <div className="suggestion-thumb">
+              {item.previewUrl ? <img src={item.previewUrl} alt="" loading="lazy" decoding="async" /> : <ImageIcon size={18} />}
+            </div>
+            <div>
+              <strong>{item.personName || "Unknown person"}</strong>
+              <small>
+                {item.stableScore == null ? "Screen unavailable" : `${percent(item.stableScore)} review score`}
+                {` · ${percent(item.quality)} quality`}
+                {item.createdAt ? ` · ${formatDateTime(item.createdAt)}` : ""}
+              </small>
+            </div>
+            <div className="suggestion-actions">
+              <button
+                className="secondary compact-action"
+                onClick={() => props.onApprove(item.artifactId)}
+                disabled={props.busy || !item.sourceAvailable}
+                type="button"
+              >
+                <Check size={15} />
+                <span>Approve</span>
+              </button>
+              <button className="ghost compact-action" onClick={() => props.onReject(item.artifactId)} disabled={props.busy} type="button">
+                <X size={15} />
+                <span>Reject</span>
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SyntheticAgeImageReviewsPanel(props: {
+  reviews: NonNullable<AppState["syntheticAgeImageReviews"]>;
+  onApprove(artifactId: string): void;
+  onReject(artifactId: string): void;
+  uiText(source: string): string;
+  busy: boolean;
+}) {
+  const staged = props.reviews.filter((item) => item.status === "staged");
+  if (!staged.length) return null;
+  return (
+    <div className="reference-suggestions synthetic-age-reviews" role="region" aria-label={props.uiText("Synthetic age-reference reviews")}>
+      <div className="reference-suggestions-head">
+        <div>
+          <strong>{props.uiText("Synthetic age review")}</strong>
+          <small>{formatNumber(staged.length)} {props.uiText("awaiting approval")}</small>
+        </div>
+        <Sparkles size={18} aria-hidden="true" />
+      </div>
+      <div className="reference-suggestion-list">
+        {staged.slice(0, 8).map((item) => (
+          <div className="reference-suggestion-row synthetic-age-review-row" key={item.artifactId}>
+            <div className="suggestion-thumb synthetic-age-thumb">
+              {item.generatedUrl ? <img src={item.generatedUrl} alt={`${props.uiText("AI-generated age reference")}: ${item.personName} (${props.uiText(ageBucketLabel(item.targetAgeBucket))})`} loading="lazy" decoding="async" /> : <ImageIcon size={18} />}
+              <span>AI</span>
+            </div>
+            <div>
+              <strong>{item.personName || "Unknown person"} · {props.uiText(ageBucketLabel(item.targetAgeBucket))}</strong>
+              <small>
+                {`${percent(item.targetIdentityCosine)} ${props.uiText("identity")} · ${percent(item.quality)} ${props.uiText("quality")}`}
+                {item.identityMargin == null ? "" : ` · ${percent(item.identityMargin)} ${props.uiText("margin")}`}
+                {item.createdAt ? ` · ${formatDateTime(item.createdAt)}` : ""}
+              </small>
+            </div>
+            <div className="suggestion-actions">
+              <button
+                className="secondary compact-action"
+                onClick={() => props.onApprove(item.artifactId)}
+                disabled={props.busy || !item.generatedAvailable || item.reasons.length > 0}
+                type="button"
+              >
+                <Check size={15} />
+                <span>{props.uiText("Approve")}</span>
+              </button>
+              <button className="ghost compact-action" onClick={() => props.onReject(item.artifactId)} disabled={props.busy} type="button">
+                <Trash2 size={15} />
+                <span>{props.uiText("Delete")}</span>
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function PeopleGallery(props: {
   references: AppState["references"];
   referenceSuggestions: NonNullable<AppState["referenceSuggestions"]>;
@@ -8984,16 +10445,26 @@ function PeopleGallery(props: {
   onDeletePerson(name: string): void;
   onDeletePhoto(refId: string): void;
   onAddMore(name: string): void;
+  onAgeBridge(name: string, remove: boolean): void;
+  onGenerateAgeImage(name: string, targetAgeBucket: AgeBucket): void;
   stageReferenceSuggestions(): void;
   approveReferenceSuggestion(artifactId: string): void;
   rejectReferenceSuggestion(artifactId: string): void;
+  syntheticEnrollmentReviews: NonNullable<AppState["syntheticEnrollmentReviews"]>;
+  syntheticEnrollmentScreen: AppState["syntheticEnrollmentScreen"];
+  approveSyntheticEnrollmentReview(artifactId: string): void;
+  rejectSyntheticEnrollmentReview(artifactId: string): void;
+  syntheticAgeImageReviews: NonNullable<AppState["syntheticAgeImageReviews"]>;
+  approveSyntheticAgeImageReview(artifactId: string): void;
+  rejectSyntheticAgeImageReview(artifactId: string): void;
+  uiText(source: string): string;
   busy: boolean;
 }) {
   const people = useMemo(() => groupReferencesByPerson(props.references), [props.references]);
   const filtered = useMemo(() => filterPeople(people, props.search), [people, props.search]);
-  const totalPhotos = props.references.length;
+  const totalPhotos = props.references.filter((ref) => ref.referenceKind !== "synthetic-age-trajectory").length;
   return (
-    <div className="panel table-panel people-gallery">
+    <div className={people.length ? "panel table-panel people-gallery" : "panel table-panel people-gallery is-empty"}>
       <div className="panel-title">
         <Users size={18} /> People you&rsquo;ve added
         <span className="title-count">{people.length}</span>
@@ -9005,8 +10476,28 @@ function PeopleGallery(props: {
           </div>
         )}
       </div>
+      <SyntheticEnrollmentReviewsPanel
+        reviews={props.syntheticEnrollmentReviews}
+        screen={props.syntheticEnrollmentScreen}
+        onApprove={props.approveSyntheticEnrollmentReview}
+        onReject={props.rejectSyntheticEnrollmentReview}
+        busy={props.busy}
+      />
+      <SyntheticAgeImageReviewsPanel
+        reviews={props.syntheticAgeImageReviews}
+        onApprove={props.approveSyntheticAgeImageReview}
+        onReject={props.rejectSyntheticAgeImageReview}
+        uiText={props.uiText}
+        busy={props.busy}
+      />
       {people.length === 0 ? (
-        <EmptyState icon={Users} label="No people added yet" detail="Add your first person on the left &mdash; name them and drop in a few photos." />
+        <div className="people-gallery-first-empty" role="note">
+          <Users size={18} />
+          <span>
+            <strong>No people added yet</strong>
+            <small>Finish the steps on this page. Saved people and their photos will appear here.</small>
+          </span>
+        </div>
       ) : filtered.length === 0 ? (
         <EmptyState icon={Search} label="No matches" detail={`No people match “${props.search.trim()}”.`} />
       ) : (
@@ -9028,6 +10519,9 @@ function PeopleGallery(props: {
                 onDeletePerson={props.onDeletePerson}
                 onDeletePhoto={props.onDeletePhoto}
                 onAddMore={props.onAddMore}
+                onAgeBridge={props.onAgeBridge}
+                onGenerateAgeImage={props.onGenerateAgeImage}
+                uiText={props.uiText}
                 busy={props.busy}
               />
             ))}
@@ -9058,9 +10552,15 @@ function EnrollView(props: {
   deletePerson(name: string): void;
   deletePhoto(refId: string): void;
   addMoreForPerson(name: string): void;
+  updateAgeBridge(name: string, remove: boolean): void;
+  generateSyntheticAgeImage(name: string, targetAgeBucket: AgeBucket): void;
   stageReferenceSuggestions(): void;
   approveReferenceSuggestion(artifactId: string): void;
   rejectReferenceSuggestion(artifactId: string): void;
+  approveSyntheticEnrollmentReview(artifactId: string): void;
+  rejectSyntheticEnrollmentReview(artifactId: string): void;
+  approveSyntheticAgeImageReview(artifactId: string): void;
+  rejectSyntheticAgeImageReview(artifactId: string): void;
   busy: boolean;
   language: LanguageCode;
   t(key: TranslationKey, values?: Record<string, string | number>): string;
@@ -9094,10 +10594,20 @@ function EnrollView(props: {
         onDeletePerson={props.deletePerson}
         onDeletePhoto={props.deletePhoto}
         onAddMore={props.addMoreForPerson}
+        onAgeBridge={props.updateAgeBridge}
+        onGenerateAgeImage={props.generateSyntheticAgeImage}
         referenceSuggestions={props.state.referenceSuggestions ?? []}
         stageReferenceSuggestions={props.stageReferenceSuggestions}
         approveReferenceSuggestion={props.approveReferenceSuggestion}
         rejectReferenceSuggestion={props.rejectReferenceSuggestion}
+        syntheticEnrollmentReviews={props.state.syntheticEnrollmentReviews ?? []}
+        syntheticEnrollmentScreen={props.state.syntheticEnrollmentScreen}
+        approveSyntheticEnrollmentReview={props.approveSyntheticEnrollmentReview}
+        rejectSyntheticEnrollmentReview={props.rejectSyntheticEnrollmentReview}
+        syntheticAgeImageReviews={props.state.syntheticAgeImageReviews ?? []}
+        approveSyntheticAgeImageReview={props.approveSyntheticAgeImageReview}
+        rejectSyntheticAgeImageReview={props.rejectSyntheticAgeImageReview}
+        uiText={props.uiText}
         busy={props.busy}
       />
     </section>
@@ -9106,11 +10616,13 @@ function EnrollView(props: {
 
 function ReferenceCoverageCoach({ references }: { references: AppState["references"] }) {
   const rows = Object.entries(
-    references.reduce<Record<string, Record<AgeBucket, { count: number; quality: number }>>>((people, ref) => {
+    references.filter((ref) => ref.referenceKind !== "synthetic-age-trajectory").reduce<Record<string, Record<AgeBucket, { count: number; quality: number }>>>((people, ref) => {
       people[ref.personName] ??= {
         child: { count: 0, quality: 0 },
         adolescent: { count: 0, quality: 0 },
         adult: { count: 0, quality: 0 },
+        "older-adult": { count: 0, quality: 0 },
+        senior: { count: 0, quality: 0 },
         unknown: { count: 0, quality: 0 }
       };
       people[ref.personName][ref.ageBucket].count += 1;
@@ -9182,7 +10694,6 @@ function ScanView(props: {
   pauseScan(): void;
   resumeScan(): void;
   localScanMarkers: { cancelRequested: boolean; paused: boolean } | null;
-  scanProgress: ScanProgress | null;
   watchStatus: FolderWatchStatus;
   clearQueue(): void;
   disabled: boolean;
@@ -9214,7 +10725,9 @@ function ScanView(props: {
   ignoreIssuePaths(paths: string[]): void;
   selectCandidate(id: string): void;
 }) {
-  const scanActive = Boolean(props.scanProgress && !["complete", "cancelled", "error"].includes(props.scanProgress.phase));
+  const scanProgress = useScanProgress();
+  const scanActive = scanProgressIsActive(scanProgress);
+  const scanPaused = Boolean(props.state.scanJob?.paused || props.localScanMarkers?.paused);
   const readiness = [
     { label: "Permission", ok: props.state.consentOnFile },
     { label: "Person added", ok: props.state.references.length > 0 },
@@ -9228,7 +10741,7 @@ function ScanView(props: {
         <div className="field">
           <label htmlFor="scan-folder">Folder to search</label>
           <div className="path-input">
-            <input id="scan-folder" aria-label="Scan folder" title={props.scanFolder} value={props.scanFolder} onChange={(event) => props.setScanFolder(event.currentTarget.value)} />
+            <input id="scan-folder" aria-label="Scan folder" title={props.scanFolder} data-allow-overflow value={props.scanFolder} onChange={(event) => props.setScanFolder(event.currentTarget.value)} />
             <button className="icon-button" onClick={props.chooseFolder} disabled={props.busy} title="Choose folder" aria-label="Choose scan folder"><FolderOpen size={17} /></button>
           </div>
         </div>
@@ -9254,25 +10767,30 @@ function ScanView(props: {
             <span>Check folder</span>
           </button>
         </div>
+        {(scanActive || scanPaused) && (
         <div className="button-row scan-action-row" role="group" aria-label="Scan controls">
-          <button className="secondary danger" onClick={props.cancelScan} disabled={!scanActive}>
+          <button className="secondary danger" onClick={props.cancelScan} disabled={!scanActive && !scanPaused}>
             <X size={17} />
             <span>Cancel scan</span>
           </button>
-          <button className="secondary" onClick={props.pauseScan} disabled={!scanActive || props.state.scanJob?.paused}>
+          <button className="secondary" onClick={props.pauseScan} disabled={!scanActive || scanPaused}>
             <Pause size={17} />
             <span>Pause</span>
           </button>
-          <button className="secondary" onClick={props.resumeScan} disabled={!props.state.scanJob?.paused}>
+          <button className="secondary" onClick={props.resumeScan} disabled={!scanPaused}>
             <Play size={17} />
             <span>Resume</span>
           </button>
         </div>
+        )}
+        {(props.state.candidates.length > 0 || props.watchStatus.active || !props.disabled) && (
         <div className="button-row scan-action-row">
-          <button className="secondary danger" onClick={props.clearQueue} disabled={!props.state.candidates.length || props.busy}>
-            <Trash2 size={17} />
-            <span>Clear results</span>
-          </button>
+          {props.state.candidates.length > 0 && (
+            <button className="secondary danger" onClick={props.clearQueue} disabled={props.busy}>
+              <Trash2 size={17} />
+              <span>Clear results</span>
+            </button>
+          )}
           {props.watchStatus.active ? (
             <button className="secondary active-scan" onClick={props.stopWatchFolder} disabled={props.busy}>
               <Activity size={17} />
@@ -9285,6 +10803,7 @@ function ScanView(props: {
             </button>
           )}
         </div>
+        )}
         <div className="readiness-list" aria-label="Scan readiness">
           {readiness.map((item) => (
             <span key={item.label} className={item.ok ? "pill green" : "pill neutral"}>{item.label}</span>
@@ -9305,6 +10824,7 @@ function ScanView(props: {
           onDismiss={props.clearPendingExternalIntent}
         />
         <FolderPreflight analysis={props.folderAnalysis} />
+        {(props.savedScanSources.length > 0 || props.scanFolder.trim()) && (
         <SavedScanSourcesPanel
           sources={props.savedScanSources}
           busy={props.busy}
@@ -9313,6 +10833,8 @@ function ScanView(props: {
           useSource={props.useSavedScanSource}
           removeSource={props.removeSavedScanSource}
         />
+        )}
+        {(props.scanQueue.length > 0 || props.scanFolder.trim()) && (
         <ScanQueuePanel
           queue={props.scanQueue}
           busy={props.busy}
@@ -9325,13 +10847,14 @@ function ScanView(props: {
           clearCompleted={props.clearCompletedScanQueueItems}
           retryFailed={props.retryFailedScanQueueItems}
         />
+        )}
         <SystemPhotosPanel
           sources={props.photoSources}
           busy={props.busy}
           refresh={props.refreshPhotoSources}
           useSource={props.usePhotoSource}
         />
-        <ScanActivity progress={props.scanProgress} watchStatus={props.watchStatus} cancelScan={props.cancelScan} pauseScan={props.pauseScan} resumeScan={props.resumeScan} scanPaused={Boolean(props.state.scanJob?.paused || props.localScanMarkers?.paused)} />
+        <ScanActivity watchStatus={props.watchStatus} cancelScan={props.cancelScan} pauseScan={props.pauseScan} resumeScan={props.resumeScan} scanPaused={Boolean(props.state.scanJob?.paused || props.localScanMarkers?.paused)} />
         <ScanIssueCenter
           analysis={props.folderAnalysis}
           scanHistory={props.state.scanHistory}
@@ -9448,12 +10971,11 @@ function SavedScanSourcesPanel({
               onClick={() => useSource(source)}
               disabled={busy}
               type="button"
-              title={source.path}
             >
               <span>
                 <strong>{source.label}</strong>
                 <small>Last used {formatTimestampDateTime(source.lastUsedAt)}</small>
-                <em>{source.path}</em>
+                <em>{basename(source.path) || "Saved folder"}</em>
               </span>
               <ChevronRight size={17} />
             </button>
@@ -9531,7 +11053,7 @@ function ScanQueuePanel({
           <div className={`scan-queue-row ${item.status}`} key={item.id}>
             <span>
               <strong>{item.label}</strong>
-              <small title={item.path}>{item.path}</small>
+              <small>{basename(item.path) || "Queued folder"}</small>
               {item.message ? <em>{localizeImperativeText(item.message)}</em> : null}
             </span>
             <i>{item.status}</i>
@@ -9579,12 +11101,11 @@ function SystemPhotosPanel({
             onClick={() => useSource(source)}
             disabled={busy || !source.available}
             type="button"
-            title={source.path}
           >
             <span>
               <strong>{source.label}</strong>
               <small>{source.detail}</small>
-              <em>{source.available ? source.path : "Not found on this computer"}</em>
+              <em>{source.available ? basename(source.path) || "Available on this computer" : "Not found on this computer"}</em>
             </span>
             {source.available ? <ChevronRight size={17} /> : <AlertCircle size={17} />}
           </button>
@@ -9708,6 +11229,9 @@ function CameraScanner(props: {
     let stream: MediaStream | null = null;
     try {
       streamRef.current?.getTracks().forEach((track) => track.stop());
+      if (window.crossAge.testCameraError) {
+        throw new DOMException("Camera permission was denied.", "NotAllowedError");
+      }
       stream = window.crossAge.testCamera
         ? createSyntheticCameraStream()
         : await navigator.mediaDevices.getUserMedia({
@@ -9856,7 +11380,7 @@ function CameraScanner(props: {
           <div className="scanner-idle">
             <span className="scanner-glyph"><Camera size={32} /></span>
             <strong>{error || "Camera standby"}</strong>
-            <span>{error ? "Check camera permission, then try again." : matchReady ? "Ready to capture and match locally." : "Ready to capture now. Add people later to match it."}</span>
+            <span>{error ? "Check camera permission, then try again." : matchReady ? "Start the camera to capture and match locally." : "Start the camera to capture a photo. Matching waits for permission and a saved person."}</span>
           </div>
         )}
       </div>
@@ -9874,8 +11398,17 @@ function CameraScanner(props: {
             </label>
           ))}
         </div>
-        <div className="scanner-suggestions">
-          {(live ? diagnostics.issues : [matchReady ? "Use the camera to add a fresh review photo." : "Camera capture is available now; matching starts after you add people and confirm permission."]).map((issue) => (
+        <div className="scanner-suggestions" aria-label="Camera readiness">
+          {!live && !error && (
+            <>
+              <span className="camera-readiness-row ready"><strong>Capture</strong><small>Available after Start camera</small></span>
+              <span className={matchReady ? "camera-readiness-row ready" : "camera-readiness-row waiting"}>
+                <strong>Matching</strong>
+                <small>{matchReady ? "Ready on this device" : !props.state.consentOnFile && !props.state.references.length ? "Confirm permission and add a person" : !props.state.consentOnFile ? "Confirm permission first" : "Add a person first"}</small>
+              </span>
+            </>
+          )}
+          {(live ? diagnostics.issues : error ? ["Camera access needs attention before capture."] : []).map((issue) => (
             <span key={issue}>{issue}</span>
           ))}
           {lastCapture && <span title={lastCapture.filePath}>Saved {basename(lastCapture.filePath)}{lastCapture.matched ? `, ${lastCapture.added ?? 0} possible match${(lastCapture.added ?? 0) === 1 ? "" : "es"}` : ""}</span>}
@@ -10138,20 +11671,19 @@ function FolderPreflight({ analysis }: { analysis: FolderAnalysis | null }) {
 }
 
 function ScanActivity({
-  progress,
   watchStatus,
   cancelScan,
   pauseScan,
   resumeScan,
   scanPaused
 }: {
-  progress: ScanProgress | null;
   watchStatus: FolderWatchStatus;
   cancelScan(): void;
   pauseScan(): void;
   resumeScan(): void;
   scanPaused: boolean;
 }) {
+  const progress = useScanProgress();
   const [etaOpen, setEtaOpen] = useState(false);
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [clock, setClock] = useState(Date.now());
@@ -10169,6 +11701,8 @@ function ScanActivity({
     ? "Watching"
     : watchStatus.sweeping
       ? "Catch-up"
+    : watchStatus.active
+      ? "Watching"
     : scanPaused || progress?.phase === "paused"
       ? "Paused"
     : progress?.phase === "cancelled"
@@ -10291,7 +11825,6 @@ function ScanActivity({
 
 function BackgroundJobCenter({
   state,
-  scanProgress,
   watchStatus,
   modelDownloadProgress,
   updateStatus,
@@ -10306,7 +11839,6 @@ function BackgroundJobCenter({
   busy
 }: {
   state: AppState;
-  scanProgress: ScanProgress | null;
   watchStatus: FolderWatchStatus;
   modelDownloadProgress: ModelDownloadProgress | null;
   updateStatus: UpdateStatus | null;
@@ -10320,7 +11852,8 @@ function BackgroundJobCenter({
   scanPaused: boolean;
   busy: boolean;
 }) {
-  const scanActive = Boolean(scanProgress && !["complete", "cancelled", "error"].includes(scanProgress.phase));
+  const scanProgress = useScanProgress();
+  const scanActive = scanProgressIsActive(scanProgress);
   const scanTotal = Math.max(0, scanProgress?.total ?? 0);
   const scanProcessed = Math.max(0, scanProgress?.processed ?? 0);
   const scanPercent = scanTotal ? Math.min(100, Math.round((scanProcessed / scanTotal) * 100)) : scanActive ? 12 : 0;
@@ -10348,12 +11881,23 @@ function BackgroundJobCenter({
     secondaryDisabled?: boolean;
   }> = [];
 
-  if (scanActive || watchStatus.active) {
+  if (watchStatus.active) {
     jobs.push({
       key: "scan",
       icon: Search,
-      label: scanPaused || scanProgress?.phase === "paused" ? "Scan paused" : watchStatus.scanning ? "Folder watch scanning" : "Scan running",
-      detail: scanTotal ? `${formatNumber(scanProcessed)} of ${formatNumber(scanTotal)} files` : (scanProgress?.message || watchStatus.message || "Working through the selected folder"),
+      label: watchStatus.scanning ? "Folder watch scanning" : "Watching folder",
+      detail: watchStatus.message || (watchStatus.scanning ? "Checking new media files" : "Waiting for new media files"),
+      percent: watchStatus.scanning ? scanPercent : 0,
+      tone: watchStatus.scanning ? "blue" : "green",
+      actionLabel: "Open scan",
+      action: () => navigate("scan")
+    });
+  } else if (scanActive) {
+    jobs.push({
+      key: "scan",
+      icon: Search,
+      label: scanPaused || scanProgress?.phase === "paused" ? "Scan paused" : "Scan running",
+      detail: scanTotal ? `${formatNumber(scanProcessed)} of ${formatNumber(scanTotal)} files` : (scanProgress?.message || "Working through the selected folder"),
       percent: scanPercent,
       tone: scanPaused || scanProgress?.phase === "paused" ? "amber" : "blue",
       actionLabel: scanPaused || scanProgress?.phase === "paused" ? "Resume" : "Pause",
@@ -10455,15 +11999,19 @@ function BackgroundJobCenter({
                   </div>
                 )}
               </div>
-              {job.actionLabel && (
-                <button className="ghost compact-action" onClick={job.action} disabled={job.disabled} type="button">
-                  {job.actionLabel}
-                </button>
-              )}
-              {job.secondaryLabel && (
-                <button className="ghost compact-action danger" onClick={job.secondaryAction} disabled={job.secondaryDisabled} type="button">
-                  {job.secondaryLabel}
-                </button>
+              {(job.actionLabel || job.secondaryLabel) && (
+                <div className="job-actions">
+                  {job.actionLabel && (
+                    <button className="ghost compact-action" onClick={job.action} disabled={job.disabled} type="button">
+                      {job.actionLabel}
+                    </button>
+                  )}
+                  {job.secondaryLabel && (
+                    <button className="ghost compact-action danger" onClick={job.secondaryAction} disabled={job.secondaryDisabled} type="button">
+                      {job.secondaryLabel}
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           );
@@ -10478,28 +12026,6 @@ const PEOPLE_CHIP_CAP = 60;
 // Group result rows each mount a media thumbnail. Keep copy/count backed by the
 // full result set, but bound the rows rendered in Review.
 const GROUP_RESULT_RENDER_CAP = 80;
-
-// M4: small session-scoped store for the review filter context (kept separate
-// from workspace recognition state; cleared on app restart like other UI prefs).
-function readReviewPref<T>(key: string, fallback: T): T {
-  try {
-    const raw = window.sessionStorage.getItem(`vintrace:review:${key}`);
-    if (raw == null) return fallback;
-    return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-function writeReviewPref(values: Record<string, unknown>) {
-  try {
-    for (const [key, value] of Object.entries(values)) {
-      window.sessionStorage.setItem(`vintrace:review:${key}`, JSON.stringify(value));
-    }
-  } catch {
-    // Persisting review prefs is best effort.
-  }
-}
 
 function ReviewView(props: {
   state: AppState;
@@ -10533,6 +12059,8 @@ function ReviewView(props: {
   openPath(candidatePath?: string | null): void | Promise<void>;
   reviewUndo: ReviewUndo | null;
   undoReview(): void | Promise<void>;
+  onAddPerson(): void;
+  onScan(): void;
   renderBatchSize: number;
   showListThumbnails: boolean;
   busy: boolean;
@@ -10608,14 +12136,7 @@ function ReviewView(props: {
 
   useEffect(() => {
     setSavedViews(readSavedReviewViews(props.state.workspace));
-    const key = `vintrace:media-destinations:${props.state.workspace || "default"}`;
-    try {
-      const rows = JSON.parse(window.localStorage.getItem(key) || "[]");
-      setMediaActionDestinations(Array.isArray(rows) ? rows.filter((item) => typeof item === "string").slice(0, 6) : []);
-    } catch (error) {
-      recordAppStorageIssue("mediaDestinations", "read", key, error);
-      setMediaActionDestinations([]);
-    }
+    setMediaActionDestinations(readMediaActionDestinations(props.state.workspace));
     setMediaActionDestination("");
     setMediaActionPreview(null);
   }, [props.state.workspace]);
@@ -11038,11 +12559,6 @@ function ReviewView(props: {
     setSelectedIds(new Set(visibleCandidates.map((candidate) => candidate.candidateId)));
   }
 
-  function selectAllFiltered() {
-    if (!filteredCandidates.length) return;
-    setSelectedIds(new Set(filteredCandidates.map((candidate) => candidate.candidateId)));
-  }
-
   function activateSmartBatch(batch: typeof reviewSummary.smartBatches[number]["key"]) {
     setSelectReviewedAfterLoad(false);
     if (batch === "decision") {
@@ -11136,16 +12652,10 @@ function ReviewView(props: {
   }
 
   function rememberMediaActionDestination(folder: string) {
-    const clean = folder.trim();
-    if (!clean) return;
-    const next = [clean, ...mediaActionDestinations.filter((item) => item !== clean)].slice(0, 6);
+    const next = upsertMediaActionDestination(mediaActionDestinations, folder);
+    if (next === mediaActionDestinations) return;
     setMediaActionDestinations(next);
-    const key = `vintrace:media-destinations:${props.state.workspace || "default"}`;
-    try {
-      window.localStorage.setItem(key, JSON.stringify(next));
-    } catch (error) {
-      recordAppStorageIssue("mediaDestinations", "write", key, error);
-    }
+    writeMediaActionDestinations(props.state.workspace, next);
   }
 
   async function chooseMediaActionDestination() {
@@ -11252,6 +12762,30 @@ function ReviewView(props: {
       `${index + 1}. ${row.label}\n   People: ${row.people.join(", ")}\n   Matches: ${row.candidates.length}\n   Path: ${row.sourcePath}`
     ));
     props.copyText([header, "", ...lines].join("\n"), "Group results");
+  }
+
+  if (!props.state.counts.candidates && !pagedLoading) {
+    return (
+      <section className="review-page review-empty-page">
+        <div className="panel review-empty-hero">
+          <span className="review-empty-icon"><ShieldCheck size={28} /></span>
+          <span className="section-kicker">Review</span>
+          <h1>No matches to review yet</h1>
+          <p>Add someone you want to find, then scan a photo folder. Possible matches will appear here for quick, private decisions.</p>
+          <div className="button-row">
+            <button type="button" className="primary" onClick={props.onAddPerson}>
+              <UserPlus size={17} />
+              <span>Add person</span>
+            </button>
+            <button type="button" className="secondary" onClick={props.onScan}>
+              <ScanLine size={17} />
+              <span>Scan photos</span>
+            </button>
+          </div>
+          <small><Lock size={13} /> Face matching and review stay on this device.</small>
+        </div>
+      </section>
+    );
   }
 
   return (
@@ -11480,7 +13014,7 @@ function ReviewView(props: {
             ))}
           </div>
         )}
-        <div className="smart-batch-strip" role="group" aria-label="Smart review batches">
+        <div className="smart-batch-strip" role="group" aria-label="Smart review batches" tabIndex={0}>
           {reviewSummary.smartBatches.map((batch) => (
             <button key={batch.key} className="smart-batch" onClick={() => activateSmartBatch(batch.key)} type="button" disabled={!batch.count}>
               <span>{batch.label}</span>
@@ -11517,7 +13051,6 @@ function ReviewView(props: {
         </div>
         <div className="bulk-bar">
           <button className="ghost compact-action" onClick={selectVisible} disabled={!visibleCandidates.length || props.busy}>Select shown</button>
-          <button className="ghost compact-action" onClick={selectAllFiltered} disabled={!filteredCandidates.length || props.busy}>Select loaded</button>
           <span>{selectedIds.size} selected</span>
           <button className="secondary" onClick={() => bulkStatus("accepted")} disabled={!selectedIds.size || props.busy}><Check size={16} /><span>Looks right</span></button>
           <button className="secondary" onClick={() => bulkStatus("rejected")} disabled={!selectedIds.size || props.busy}><X size={16} /><span>Not a match</span></button>
@@ -11832,7 +13365,7 @@ function ReviewView(props: {
               </div>
               <p className="source-path" title={candidateSourceTitle(activeCandidate)}>
                 {isVideoCandidate(activeCandidate)
-                  ? `Video ${activeCandidate.mediaSourcePath} at ${formatMediaTimestamp(activeCandidate.videoTimestampMs)}`
+                  ? `Video ${candidateSourceLabel(activeCandidate)}`
                   : activeCandidate.sourcePath}
                 {isVideoCandidate(activeCandidate) && <span>Extracted frame: {activeCandidate.sourcePath}</span>}
               </p>
@@ -11864,14 +13397,11 @@ function ReviewView(props: {
               <div className="identity-move-row">
                 <input
                   aria-label="Move match to person"
-                  list="known-people"
+
                   placeholder="Person name"
                   value={identityTarget}
                   onChange={(event) => setIdentityTarget(event.currentTarget.value)}
                 />
-                <datalist id="known-people">
-                  {knownPeople.map((person) => <option key={person} value={person} />)}
-                </datalist>
                 <button className="secondary" onClick={() => void moveActiveCandidate()} disabled={props.busy || !identityTarget.trim()} type="button">
                   <Users size={17} />
                   <span>Move match</span>
@@ -12035,7 +13565,14 @@ function CandidateExplanation({ candidate, state }: { candidate: ReviewCandidate
   const rows = [
     { label: "Why shown", value: candidate.band === "clustered review" ? "Similar photos were grouped together" : `${scoreTarget} match strength` },
     { label: "Photo quality", value: `${scoreLabel(candidate.quality)} ${qualityTarget}` },
-    { label: "Media", value: isVideoCandidate(candidate) ? `Video @ ${formatMediaTimestamp(candidate.videoTimestampMs)}` : "Image" },
+    {
+      label: "Media",
+      value: isVideoCandidate(candidate)
+        ? candidate.videoTrackId
+          ? `Video track ${formatMediaTimestamp(candidate.videoTrackStartMs)}-${formatMediaTimestamp(candidate.videoTrackEndMs)} · ${candidate.videoTrackKeyframeIndices?.length ?? 0} keyframes`
+          : `Video @ ${formatMediaTimestamp(candidate.videoTimestampMs)}`
+        : "Image"
+    },
     { label: "Saved person", value: bestReference ? `${bestReference.personName} • ${ageBucketLabel(bestReference.ageBucket)}` : "No saved person photo" },
     { label: "Saved photo", value: bestReference ? basename(bestReference.sourcePath) : candidate.band === "clustered review" ? "Similar group only" : "Unavailable" },
     { label: "Saved photo strength", value: `${referenceStrength.score}/100 ${referenceStrength.status}` },
@@ -12065,7 +13602,7 @@ function CandidateExplanation({ candidate, state }: { candidate: ReviewCandidate
         {rows.map((row) => (
           <span key={row.label}>
             <small>{row.label}</small>
-            <strong>{row.value}</strong>
+            <strong title={row.value}>{row.value}</strong>
           </span>
         ))}
       </div>
@@ -12128,8 +13665,9 @@ function SettingsView(props: {
   section: SettingsSection;
   state: AppState;
   settings: SettingsDraft;
+  saveStatus: "saved" | "dirty" | "saving" | "error";
   setSettings(value: SettingsDraft): void;
-  saveSettings(): void;
+  saveSettings(): Promise<boolean>;
   busy: boolean;
   platformSummary: string;
   systemIntegration: SystemIntegration | null;
@@ -12207,6 +13745,14 @@ function SettingsView(props: {
   verifyAuditChain(): void;
   jurisdictions: Jurisdiction[];
   jurisdictionDisclaimer: string;
+  complianceStatus: ComplianceStatus | null;
+  loadComplianceStatus(quiet?: boolean): void | Promise<ComplianceStatus | null>;
+  acknowledgeAiDisclosure(): void | Promise<void>;
+  saveSubjectRelease(release: SubjectReleaseInput): void | Promise<void>;
+  deleteComplianceSubject(personName: string): void | Promise<void>;
+  exportBiometricPolicy(): void | Promise<void>;
+  recordBiometricPolicyPublication(publicUrl: string, approvedBy: string): void | Promise<void>;
+  enforceBiometricRetention(): void | Promise<void>;
   runtimeSelfTest: RuntimeSelfTestResult | null;
   runRuntimeSelfTest(): void;
   runtimeBenchmark: RuntimeBenchmarkResult | null;
@@ -12235,11 +13781,12 @@ function SettingsView(props: {
   rollbackEmbeddingAdapter(artifactId?: string): void;
   generateAccuracyValidationPack(): void;
   accuracyValidationHistory: AccuracyValidationRun[];
-  loadAccuracyValidationHistory(): void;
+  loadAccuracyValidationHistory(): void | Promise<void>;
   choosePublicDatasetFolder(): Promise<string | null>;
   inspectPublicDataset(options: { datasetId: string; folder: string; includeVideos?: boolean }): void | Promise<void>;
-  runPublicDatasetBenchmark(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; downloadIfMissing?: boolean; includeVideos?: boolean }): void | Promise<void>;
-  runPublicDatasetModelComparison(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; downloadIfMissing?: boolean; includeVideos?: boolean }): void | Promise<void>;
+  runPublicDatasetBenchmark(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; downloadIfMissing?: boolean; includeVideos?: boolean; acknowledgeDatasetTerms?: boolean }): void | Promise<void>;
+  runCrossAgeTrajectoryBenchmark(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; acknowledgeDatasetTerms: boolean }): Promise<CrossAgeTrajectoryBenchmarkResult | null>;
+  runPublicDatasetModelComparison(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; downloadIfMissing?: boolean; includeVideos?: boolean; acknowledgeDatasetTerms?: boolean }): void | Promise<void>;
   applyModelRecommendation(pack: string): void | Promise<void>;
   applyCalibration(): void;
   applyPersonalizedCalibration(): void;
@@ -12262,7 +13809,6 @@ function SettingsView(props: {
   performanceProfile: PerformanceProfile;
   latencySamples: LatencySample[];
   latencySummary: LatencySummary;
-  scanProgress: ScanProgress | null;
   clearLatencySamples(): void;
   copyPerformanceReport(): void;
   warmPreviewsNow(): void;
@@ -12276,6 +13822,9 @@ function SettingsView(props: {
   runInstallerDiagnostics(): void;
   modelIntegrity: ModelIntegrityResult | null;
   runModelIntegrity(): void;
+  modelLifecycleStatus: ModelLifecycleStatus | null;
+  runModelLifecycleEvaluation(): void;
+  rollbackModelConfiguration(): void;
   modelDriftReport: ModelDriftReport | null;
   runModelDriftReport(): void;
   referenceGapReport: ReferenceGapReport | null;
@@ -12287,10 +13836,14 @@ function SettingsView(props: {
   reviewRuleResult: ReviewRulesApplyResult | null;
   applyReviewRules(): void;
   workspaceLock: WorkspaceLockStatus | null;
+  workspaceEncryption: WorkspaceEncryptionStatus | null;
+  workspaceRecoveryCode: string;
   enableWorkspaceLock(): void;
   lockWorkspace(): void;
   unlockWorkspace(): void;
   disableWorkspaceLock(): void;
+  rotateWorkspaceEncryptionKey(): void;
+  createWorkspaceRecoveryCode(): void;
   getSensitiveAuthStatus(): Promise<PhotoSensitiveAuthStatus | null>;
   authenticateSensitiveAccess(reason: string): Promise<PhotoSensitiveAuthResult | null>;
 }) {
@@ -12299,90 +13852,8 @@ function SettingsView(props: {
   const [renameTarget, setRenameTarget] = useState("");
   // Wave P0: the Save-settings button flashes a success settle when a save fires.
   const { settle: settleSave, settling: isSaveSettling } = useSaveSettle();
-  // Stage 1c/1b: calibrate Safe Mode to the user's own library from example folders.
-  const [safeCalibBusy, setSafeCalibBusy] = useState(false);
-  const [safeCalibResult, setSafeCalibResult] = useState("");
-  async function calibrateSafeModeFromFolders() {
-    const bridge = window.crossAge;
-    if (!bridge?.chooseFolder || !bridge?.invoke) return;
-    setSafeCalibResult("");
-    const sensitivePick = await bridge.chooseFolder();
-    const sensitivePath = typeof sensitivePick === "string" ? sensitivePick : (sensitivePick as { path?: string } | null)?.path;
-    if (!sensitivePath) return;
-    const safePick = await bridge.chooseFolder();
-    const safePath = typeof safePick === "string" ? safePick : (safePick as { path?: string } | null)?.path;
-    if (!safePath) return;
-    setSafeCalibBusy(true);
-    try {
-      const res = (await bridge.invoke("calibrate_safe_mode", {
-        folders: [
-          { path: sensitivePath, sensitive: true },
-          { path: safePath, sensitive: false },
-        ],
-      })) as { ok?: boolean; temperature?: number; sampleCount?: number; reason?: string; nllBefore?: number; nllAfter?: number };
-      setSafeCalibResult(
-        res?.ok
-          ? `Calibrated on ${res.sampleCount ?? 0} images — temperature ${Number(res.temperature ?? 1).toFixed(2)} (error ${Number(res.nllBefore ?? 0).toFixed(3)} → ${Number(res.nllAfter ?? 0).toFixed(3)}).`
-          : res?.reason || "Calibration needs more labeled examples."
-      );
-    } catch (error) {
-      setSafeCalibResult(error instanceof Error ? error.message : "Calibration failed.");
-    } finally {
-      setSafeCalibBusy(false);
-    }
-  }
-  async function resetSafeModeCalibration() {
-    const bridge = window.crossAge;
-    if (!bridge?.invoke) return;
-    setSafeCalibBusy(true);
-    try {
-      await bridge.invoke("calibrate_safe_mode", { reset: true });
-      setSafeCalibResult("Calibration reset to the raw model (temperature 1.0).");
-    } catch (error) {
-      setSafeCalibResult(error instanceof Error ? error.message : "Reset failed.");
-    } finally {
-      setSafeCalibBusy(false);
-    }
-  }
-  // Stage 2: install the optional "explain why flagged" detector (NudeNet, AGPL —
-  // a model the user downloads themselves; nothing is bundled or sent anywhere).
-  const [explainBusy, setExplainBusy] = useState(false);
-  const [explainStatus, setExplainStatus] = useState("");
-  async function installExplainerFromFile() {
-    const bridge = window.crossAge;
-    if (!bridge?.chooseModelFile || !bridge?.invoke) return;
-    const acknowledged = window.confirm(
-      "NudeNet is licensed AGPL-3.0. This installs a model you downloaded yourself (nothing is bundled or redistributed), and you must comply with the AGPL, including its source-offer obligation. Continue?"
-    );
-    if (!acknowledged) return;
-    const pick = await bridge.chooseModelFile();
-    const modelPath = typeof pick === "string" ? pick : (pick as { path?: string } | null)?.path;
-    if (!modelPath) return;
-    setExplainBusy(true);
-    try {
-      const res = (await bridge.invoke("install_safety_explainer", {
-        sourcePath: modelPath,
-        modelName: "nudenet-explainer",
-        license: "AGPL-3.0",
-        confirmAgpl: true,
-        format: "nudenet",
-        inputSize: 640,
-      })) as { ok?: boolean; modelName?: string; reason?: string };
-      setExplainStatus(
-        res?.ok
-          ? `Explainer installed (${res.modelName ?? "model"}). Flagged photos can now show which regions triggered Safe Mode.`
-          : res?.reason || "Install failed."
-      );
-    } catch (error) {
-      setExplainStatus(error instanceof Error ? error.message : "Install failed.");
-    } finally {
-      setExplainBusy(false);
-    }
-  }
   const [retentionDays, setRetentionDays] = useState(90);
   const safeModel = props.state.safeModeModel;
-  const safeExplain = props.state.safeModeExplain;
-  const [safeReviewOpen, setSafeReviewOpen] = useState(false);
   const modelCompatibility = props.state.modelCompatibility;
 
   useEffect(() => {
@@ -12445,6 +13916,7 @@ function SettingsView(props: {
   }
   const safeModeRelaxed = props.state.config.safeMode && (
     !props.settings.safeMode ||
+    ((props.state.config.safeModeMultimodal ?? false) && !(props.settings.safeModeMultimodal ?? false)) ||
     props.settings.safeModeThreshold > props.state.config.safeModeThreshold + 0.001 ||
     ((props.state.config.safeModeZeroAdmittance ?? false) && !(props.settings.safeModeZeroAdmittance ?? false))
   );
@@ -12456,8 +13928,7 @@ function SettingsView(props: {
       const proceed = await confirmDialog("This change makes Safe Mode less protective. Continue only if you want likely intimate media to be filtered less aggressively.");
       if (!proceed) return;
     }
-    props.saveSettings();
-    settleSave("settings");
+    if (await props.saveSettings()) settleSave("settings");
   }
   function setModelPack(value: string) {
     const selectedPack = modelPackages.find((item) => item.pack === value);
@@ -12495,6 +13966,7 @@ function SettingsView(props: {
       `Face scan detail: ${props.state.config.faceDetectorSize}`,
       `High-detail recheck: ${props.state.config.twoPassScan ? props.state.config.verificationDetectorSize : "Off"}`,
       `Safe Mode: ${props.state.config.safeMode ? "On" : "Off"}`,
+      `Category-aware Safe Mode: ${props.state.config.safeModeMultimodal ? "On" : "Off"}`,
       `People: ${props.people.join(", ") || "None"}`
     ].join("\n"), "App summary");
   }
@@ -12502,9 +13974,22 @@ function SettingsView(props: {
     Boolean(props.state.candidateWindow?.truncated && props.state.counts.reviewed > 0);
   return (
     <section className="page-grid">
+      <div className={`settings-save-status is-${props.saveStatus}`} role="status" aria-live="polite">
+        <span>
+          <i aria-hidden="true" />
+          <strong>{props.saveStatus === "saved" ? "Saved" : props.saveStatus === "dirty" ? "Unsaved changes" : props.saveStatus === "saving" ? "Saving…" : "Save failed"}</strong>
+          <small>{props.saveStatus === "saved" ? "Settings match this app folder." : props.saveStatus === "dirty" ? "Review and save when ready." : props.saveStatus === "saving" ? "Writing changes to this app folder." : "Changes remain unsaved. Try again."}</small>
+        </span>
+        {(props.saveStatus === "dirty" || props.saveStatus === "error") && (
+          <button type="button" className="secondary compact-action" onClick={() => void requestSaveSettings()} disabled={props.busy || validationMessages.length > 0}>
+            <Save size={15} />
+            <span>Save now</span>
+          </button>
+        )}
+      </div>
       {props.section === "agents" && (
         <Suspense fallback={<RouteFallback uiText={props.uiText} label="Loading AI Agents" />}>
-          <McpAgentsPanel copyText={props.copyText} />
+          <McpAgentsPanel active copyText={props.copyText} uiText={props.uiText} variant="settings" />
         </Suspense>
       )}
       {props.section === "general" && (<>
@@ -12581,122 +14066,18 @@ function SettingsView(props: {
             <Slider label="Likely match" value={props.settings.thresholds.likely} onChange={(value) => setThreshold("likely", value)} />
             <Slider label="Review more" value={props.settings.thresholds.relaxedChild} onChange={(value) => setThreshold("relaxedChild", value)} />
             <Slider label="Photo quality minimum" value={props.settings.thresholds.qualityMin} onChange={(value) => setThreshold("qualityMin", value)} />
-            <label className="switch-row">
-              <span>
-                <strong>Safe Mode</strong>
-                <small>Protect likely intimate media from matching, thumbnails, and similar-photo groups.</small>
-              </span>
-              <input
-                type="checkbox"
-                checked={props.settings.safeMode}
-                onChange={(event) => setCustomSettings({ safeMode: event.currentTarget.checked })}
-                aria-label="Safe Mode"
+            <Suspense fallback={<RouteFallback uiText={props.uiText} label="Loading Safe Mode settings" />}>
+              <SafeModeSettingsPanel
+                settings={props.settings}
+                safeModeModel={safeModel}
+                safeModeExplain={props.state.safeModeExplain}
+                profileThresholds={safeModeProfileThresholds}
+                setCustomSettings={setCustomSettings}
+                getSensitiveAuthStatus={props.getSensitiveAuthStatus}
+                authenticateSensitiveAccess={props.authenticateSensitiveAccess}
+                uiText={props.uiText}
               />
-            </label>
-            <label className="switch-row">
-              <span>
-                <strong>{props.uiText("Safe Mode profile")}</strong>
-                <small>{props.uiText("Privacy-first catches more sensitive content (more false positives on swimwear/medical); Permissive minimizes them. Custom uses the slider below.")}</small>
-              </span>
-              <select
-                value={props.settings.safeModeProfile ?? "custom"}
-                disabled={!props.settings.safeMode}
-                aria-label="Safe Mode profile"
-                onChange={(event) => {
-                  const profile = event.currentTarget.value;
-                  setCustomSettings(
-                    profile in safeModeProfileThresholds
-                      ? { safeModeProfile: profile, safeModeThreshold: safeModeProfileThresholds[profile as keyof typeof safeModeProfileThresholds] }
-                      : { safeModeProfile: "custom" }
-                  );
-                }}
-              >
-                <option value="privacy">{props.uiText("Privacy-first (aggressive)")}</option>
-                <option value="balanced">{props.uiText("Balanced")}</option>
-                <option value="permissive">{props.uiText("Permissive (fewer false positives)")}</option>
-                <option value="custom">{props.uiText("Custom")}</option>
-              </select>
-            </label>
-            <Slider
-              label={props.uiText("Safe Mode sensitivity")}
-              value={props.settings.safeModeThreshold}
-              onChange={(value) => setCustomSettings({ safeModeThreshold: value, safeModeProfile: "custom" })}
-            />
-            <label className="switch-row">
-              <span>
-                <strong>{props.uiText("Calibrate to your library")}</strong>
-                <small>{props.uiText("Vendor accuracy claims don't transfer — fit Safe Mode to your own photos. Pick a folder of sensitive examples, then a folder of safe examples; everything stays on this device.")}</small>
-              </span>
-              <span className="settings-inline-actions">
-                <button type="button" className="secondary compact-action" disabled={!props.settings.safeMode || safeCalibBusy} onClick={() => void calibrateSafeModeFromFolders()}>
-                  {safeCalibBusy ? props.uiText("Calibrating...") : props.uiText("Calibrate...")}
-                </button>
-                <button type="button" className="ghost compact-action" disabled={safeCalibBusy} onClick={() => void resetSafeModeCalibration()}>
-                  {props.uiText("Reset")}
-                </button>
-              </span>
-            </label>
-            {safeCalibResult && <p className="muted safe-calib-result" role="status" aria-live="polite">{safeCalibResult}</p>}
-            <label className="switch-row">
-              <span>
-                <strong>{props.uiText("Explain why flagged (optional)")}</strong>
-                <small>{props.uiText("Install an on-device body-part detector to see which regions triggered Safe Mode. NudeNet is AGPL-3.0 — download it yourself, then install the .onnx here. Nothing is bundled or sent anywhere.")}</small>
-              </span>
-              <button type="button" className="secondary compact-action" disabled={explainBusy} onClick={() => void installExplainerFromFile()}>
-                {explainBusy ? props.uiText("Installing...") : safeExplain?.available ? props.uiText("Replace explainer...") : props.uiText("Install explainer...")}
-              </button>
-            </label>
-            <p className={`explainer-install-status ${safeExplain?.available ? "is-installed" : "is-absent"}`} role="status">
-              {safeExplain?.available ? (
-                <>
-                  <ShieldCheck size={14} aria-hidden="true" />
-                  <span>
-                    Installed: <strong>{safeExplain.modelName || "explainer model"}</strong>
-                    {safeExplain.license && safeExplain.license !== "unknown" ? ` (${safeExplain.license})` : ""}. “Why flagged?” is available on revealed sensitive photos.
-                  </span>
-                </>
-              ) : (
-                <>
-                  <ShieldOff size={14} aria-hidden="true" />
-                  <span>Not installed — the “Why flagged?” overlay stays hidden until you add a model.</span>
-                </>
-              )}
-            </p>
-            {explainStatus && <p className="muted safe-calib-result" role="status" aria-live="polite">{explainStatus}</p>}
-            <label className="switch-row">
-              <span>
-                <strong>{props.uiText("Review flagged photos")}</strong>
-                <small>{props.uiText("See every photo Safe Mode marked sensitive and correct false positives. Your keep/allow choices override the classifier and stay on this device.")}</small>
-              </span>
-              <button type="button" className="secondary compact-action" onClick={() => setSafeReviewOpen(true)}>
-                <ShieldAlert size={16} /> {props.uiText("Review...")}
-              </button>
-            </label>
-            {safeReviewOpen && (
-              <Suspense fallback={<RouteFallback uiText={props.uiText} label="Loading Safe Mode review" />}>
-                <SafeModeReview
-                  open={safeReviewOpen}
-                  onClose={() => setSafeReviewOpen(false)}
-                  invoke={window.crossAge.invoke}
-                  getSensitiveAuthStatus={props.getSensitiveAuthStatus}
-                  authenticateSensitiveAccess={props.authenticateSensitiveAccess}
-                  uiText={props.uiText}
-                />
-              </Suspense>
-            )}
-            <label className="switch-row">
-              <span>
-                <strong>Zero-admittance (strict)</strong>
-                <small>Never let borderline-sensitive images enter matching, even a centered single-face portrait. Recommended for child-safety / CSAM victim-ID work.</small>
-              </span>
-              <input
-                type="checkbox"
-                checked={props.settings.safeModeZeroAdmittance ?? false}
-                disabled={!props.settings.safeMode}
-                onChange={(event) => setCustomSettings({ safeModeZeroAdmittance: event.currentTarget.checked })}
-                aria-label="Safe Mode zero-admittance"
-              />
-            </label>
+            </Suspense>
             <label>Group similar photos when at least
               <input
                 type="number"
@@ -12835,6 +14216,15 @@ function SettingsView(props: {
         chooseModelRoot={props.chooseModelRoot}
         downloadModel={props.downloadModel}
       />
+      <Suspense fallback={null}>
+        <ModelLifecyclePanel
+          report={props.modelLifecycleStatus}
+          busy={props.busy}
+          uiText={props.uiText}
+          onRun={props.runModelLifecycleEvaluation}
+          onRollbackConfiguration={props.rollbackModelConfiguration}
+        />
+      </Suspense>
       <VideoDecoderPanel
         report={props.state.videoDecoder}
         settings={props.settings}
@@ -12876,23 +14266,10 @@ function SettingsView(props: {
         profile={props.performanceProfile}
         latencySamples={props.latencySamples}
         latencySummary={props.latencySummary}
-        scanProgress={props.scanProgress}
         busy={props.busy}
         warmPreviewsNow={props.warmPreviewsNow}
         copyPerformanceReport={props.copyPerformanceReport}
         clearLatencySamples={props.clearLatencySamples}
-      />
-      </>)}
-      {props.section === "storage" && (<>
-      <ScaleReadinessPanel state={props.state} pruneScanManifests={props.pruneScanManifests} pruneResult={props.scanManifestPruneResult} busy={props.busy} />
-      <StorageIoPanel
-        result={props.storageIo}
-        path={props.storageIoPath}
-        setPath={props.setStorageIoPath}
-        workspace={props.state.workspace}
-        busy={props.busy}
-        runStorageIoBenchmark={props.runStorageIoBenchmark}
-        chooseFolder={props.chooseFolder}
       />
       </>)}
       {props.section === "advanced" && (<>
@@ -12926,6 +14303,7 @@ function SettingsView(props: {
         chooseDatasetFolder={props.choosePublicDatasetFolder}
         inspectDataset={props.inspectPublicDataset}
         runDatasetBenchmark={props.runPublicDatasetBenchmark}
+        runCrossAgeBenchmark={props.runCrossAgeTrajectoryBenchmark}
         runModelComparison={props.runPublicDatasetModelComparison}
         applyModelRecommendation={props.applyModelRecommendation}
         applyCalibration={props.applyCalibration}
@@ -12949,6 +14327,21 @@ function SettingsView(props: {
       </>)}
       {props.section === "advanced" && (<>
       <ReleaseReadinessPanel result={props.releaseReadiness} busy={props.busy} runReleaseReadiness={props.runReleaseReadiness} />
+      <details className="settings-technical-disclosure">
+        <summary><Gauge size={17} /><span><strong>Technical storage readiness</strong><small>Large-library internals and drive speed</small></span><ChevronRight size={16} aria-hidden="true" /></summary>
+        <div className="settings-technical-disclosure-body">
+          <ScaleReadinessPanel state={props.state} pruneScanManifests={props.pruneScanManifests} pruneResult={props.scanManifestPruneResult} busy={props.busy} />
+          <StorageIoPanel
+            result={props.storageIo}
+            path={props.storageIoPath}
+            setPath={props.setStorageIoPath}
+            workspace={props.state.workspace}
+            busy={props.busy}
+            runStorageIoBenchmark={props.runStorageIoBenchmark}
+            chooseFolder={props.chooseFolder}
+          />
+        </div>
+      </details>
       </>)}
       {props.section === "general" && (<>
       <UpdateCenterPanel
@@ -13110,6 +14503,14 @@ function SettingsView(props: {
         unlock={props.unlockWorkspace}
         disable={props.disableWorkspaceLock}
       />
+      <WorkspaceEncryptionPanel
+        status={props.workspaceEncryption}
+        recoveryCode={props.workspaceRecoveryCode}
+        busy={props.busy}
+        rotate={props.rotateWorkspaceEncryptionKey}
+        createRecoveryCode={props.createWorkspaceRecoveryCode}
+        copyRecoveryCode={() => props.copyText(props.workspaceRecoveryCode, "Agent recovery code")}
+      />
       </>)}
       {props.section === "storage" && (<>
       <div className="panel settings-panel data-ops-panel">
@@ -13248,6 +14649,16 @@ function SettingsView(props: {
         setJurisdictionPreset={props.setJurisdictionPreset}
         jurisdictions={props.jurisdictions}
         jurisdictionDisclaimer={props.jurisdictionDisclaimer}
+        complianceStatus={props.complianceStatus}
+        people={props.people}
+        uiText={props.uiText}
+        loadComplianceStatus={props.loadComplianceStatus}
+        acknowledgeAiDisclosure={props.acknowledgeAiDisclosure}
+        saveSubjectRelease={props.saveSubjectRelease}
+        deleteComplianceSubject={props.deleteComplianceSubject}
+        exportBiometricPolicy={props.exportBiometricPolicy}
+        recordBiometricPolicyPublication={props.recordBiometricPolicyPublication}
+        enforceBiometricRetention={props.enforceBiometricRetention}
         exportCompliancePack={props.exportCompliancePack}
         exportExaminationReport={props.exportExaminationReport}
         loadPrivacyReport={props.loadPrivacyReport}
@@ -13436,7 +14847,12 @@ function StorageBudgetPanel({
   const budgetBytes = settings.storageBudgetBytes ?? 0;
   const budgetGb = budgetBytes > 0 ? Math.round((budgetBytes / gib) * 10) / 10 : 0;
   const storageBytes = health?.storageBytes ?? state.scale?.dbBytes ?? 0;
-  const overBudget = health?.storageOverBudgetBytes ?? Math.max(0, storageBytes - budgetBytes);
+  // A zero budget is the explicit "unlimited" state. Backend health can retain
+  // an older over-budget measurement until the next refresh, so do not surface
+  // that stale value when no limit is currently configured.
+  const overBudget = budgetBytes > 0
+    ? (health?.storageOverBudgetBytes ?? Math.max(0, storageBytes - budgetBytes))
+    : 0;
   const budgetPercent = budgetBytes > 0 ? Math.min(1, storageBytes / budgetBytes) : 0;
   function updateBudgetGb(value: number) {
     const nextGb = Math.max(0, Math.min(10_240, Number.isFinite(value) ? value : 0));
@@ -13699,7 +15115,7 @@ function InstallerDiagnosticsPanel({
 }) {
   const staleCount = (modelDriftReport?.counts.staleReferences ?? 0) + (modelDriftReport?.counts.staleCandidates ?? 0);
   return (
-    <div className={result?.ok ? "panel settings-panel runtime-test-panel ok" : "panel settings-panel runtime-test-panel warn"}>
+    <div className={result?.ok ? "panel settings-panel runtime-test-panel installer-readiness-panel ok" : "panel settings-panel runtime-test-panel installer-readiness-panel warn"}>
       <div className="panel-title"><KeyRound size={18} /> First-run readiness</div>
       {result ? (
         <>
@@ -14091,9 +15507,74 @@ function WorkspaceLockPanel({
             <span>Lock now</span>
           </button>
         )}
-        <button className="secondary danger" onClick={disable} disabled={busy || !enabled || locked}>
-          <Trash2 size={17} />
-          <span>Turn off</span>
+        {enabled && !locked && (
+          <button className="ghost compact-action danger" onClick={disable} disabled={busy}>
+            <Trash2 size={17} />
+            <span>Turn off lock</span>
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WorkspaceEncryptionPanel({
+  status,
+  recoveryCode,
+  busy,
+  rotate,
+  createRecoveryCode,
+  copyRecoveryCode,
+}: {
+  status: WorkspaceEncryptionStatus | null;
+  recoveryCode: string;
+  busy: boolean;
+  rotate(): void;
+  createRecoveryCode(): void;
+  copyRecoveryCode(): void;
+}) {
+  const [showRecoveryCode, setShowRecoveryCode] = useState(false);
+  const complete = Boolean(status?.enabled && status?.migrationComplete);
+  const sensitiveFiles = status?.sensitiveFiles ?? [];
+  const encryptedFiles = sensitiveFiles.filter((item) => !item.exists || item.encrypted).length;
+  const cipherVersion = status?.database?.cipherVersion || "";
+  return (
+    <div className={status && !complete ? "panel settings-panel runtime-test-panel warn" : "panel settings-panel"}>
+      <div className="panel-title">
+        <ShieldCheck size={18} /> Data encryption
+        <div className="spacer" />
+        <span className={complete ? "status accepted" : status ? "status pending" : "status pending"}>
+          {complete ? "encrypted" : status ? "attention" : "checking"}
+        </span>
+      </div>
+      <dl className="mini-list">
+        <dt>Database</dt><dd>{status?.database?.enabled ? `SQLCipher${cipherVersion ? ` ${cipherVersion}` : ""}` : "Checking"}</dd>
+        <dt>Sensitive files</dt><dd>{status ? `${encryptedFiles}/${sensitiveFiles.length} encrypted` : "Checking"}</dd>
+        <dt>Key</dt><dd>{status?.keyId ? status.keyId.slice(0, 12) : "Unavailable"}</dd>
+        <dt>Agent recovery</dt><dd>{status?.recoveryConfigured ? "Configured" : "Not configured"}</dd>
+      </dl>
+      {recoveryCode && (
+        <div className="field">
+          <label htmlFor="workspace-recovery-code">New agent recovery code</label>
+          <div className="path-input recovery-code-row">
+            <input id="workspace-recovery-code" type={showRecoveryCode ? "text" : "password"} readOnly value={recoveryCode} />
+            <button className="icon-button" type="button" onClick={() => setShowRecoveryCode((value) => !value)} title={showRecoveryCode ? "Hide recovery code" : "Show recovery code"} aria-label={showRecoveryCode ? "Hide recovery code" : "Show recovery code"}>
+              {showRecoveryCode ? <EyeOff size={17} /> : <Eye size={17} />}
+            </button>
+            <button className="icon-button" type="button" onClick={copyRecoveryCode} title="Copy recovery code" aria-label="Copy recovery code">
+              <CopyIcon size={17} />
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="button-row">
+        <button className="secondary" onClick={createRecoveryCode} disabled={busy || !complete}>
+          <KeyRound size={17} />
+          <span>{status?.recoveryConfigured ? "Replace agent code" : "Create agent code"}</span>
+        </button>
+        <button className="secondary" onClick={rotate} disabled={busy || !complete}>
+          <RefreshCcw size={17} />
+          <span>Rotate key</span>
         </button>
       </div>
     </div>
@@ -14127,7 +15608,7 @@ function StorageIoPanel({
       <label className="switch-row">
         <span>
           <strong>Folder</strong>
-          <small title={target}>{target || "Choose a folder to test."}</small>
+          <small>{target ? `${path.trim() ? "Selected folder" : "Current app folder"} · ${basename(target) || "Local storage"}` : "Choose a folder to test."}</small>
         </span>
         <button className="secondary" onClick={() => void chooseFolder(setPath)} disabled={busy} title="Choose a folder to test">
           <FolderOpen size={17} />
@@ -14410,6 +15891,7 @@ function AccuracyLabPanel({
   chooseDatasetFolder,
   inspectDataset,
   runDatasetBenchmark,
+  runCrossAgeBenchmark,
   runModelComparison,
   applyModelRecommendation,
   applyCalibration,
@@ -14444,11 +15926,12 @@ function AccuracyLabPanel({
   rollbackEmbeddingAdapter(artifactId?: string): void;
   generateAccuracyValidationPack(): void;
   validationHistory: AccuracyValidationRun[];
-  loadValidationHistory(): void;
+  loadValidationHistory(): void | Promise<void>;
   chooseDatasetFolder(): Promise<string | null>;
   inspectDataset(options: { datasetId: string; folder: string; includeVideos?: boolean }): void | Promise<void>;
-  runDatasetBenchmark(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; downloadIfMissing?: boolean; includeVideos?: boolean }): void | Promise<void>;
-  runModelComparison(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; downloadIfMissing?: boolean; includeVideos?: boolean }): void | Promise<void>;
+  runDatasetBenchmark(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; downloadIfMissing?: boolean; includeVideos?: boolean; acknowledgeDatasetTerms?: boolean }): void | Promise<void>;
+  runCrossAgeBenchmark(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; acknowledgeDatasetTerms: boolean }): Promise<CrossAgeTrajectoryBenchmarkResult | null>;
+  runModelComparison(options: { datasetId: string; folder: string; maxIdentities: number; candidateImages: number; downloadIfMissing?: boolean; includeVideos?: boolean; acknowledgeDatasetTerms?: boolean }): void | Promise<void>;
   applyModelRecommendation(pack: string): void | Promise<void>;
   applyCalibration(): void;
   applyPersonalizedCalibration(): void;
@@ -14466,6 +15949,9 @@ function AccuracyLabPanel({
   const [datasetCandidateImages, setDatasetCandidateImages] = useState(3);
   const [datasetDownloadPublic, setDatasetDownloadPublic] = useState(true);
   const [datasetIncludeVideos, setDatasetIncludeVideos] = useState(false);
+  const [datasetTermsAcknowledged, setDatasetTermsAcknowledged] = useState(false);
+  const [crossAgeBenchmark, setCrossAgeBenchmark] = useState<CrossAgeTrajectoryBenchmarkResult | null>(null);
+  const [validationHistoryLoading, setValidationHistoryLoading] = useState(false);
   const learningLoadedRef = useRef(false);
   const datasets = datasetCatalog?.datasets ?? [];
   const selectedDataset = datasets.find((item) => item.datasetId === datasetId) ?? datasets[0] ?? null;
@@ -14568,6 +16054,8 @@ function AccuracyLabPanel({
   const importDisabled = busy || !importText.trim();
   const trainingImportDisabled = busy || !trainingImportText.trim();
   const canRunDataset = !busy && Boolean(datasetFolder.trim() || canAutoPrepareDataset);
+  const crossAgeDataset = new Set(["agedb", "calfw", "fgnet"]).has(datasetId);
+  const canRunCrossAge = !busy && crossAgeDataset && Boolean(datasetFolder.trim()) && datasetTermsAcknowledged;
   const preferredMatrixKeys = [
     "all",
     "age:cross-age",
@@ -14593,8 +16081,16 @@ function AccuracyLabPanel({
     void Promise.resolve(refreshLearning()).catch(() => undefined);
     void Promise.resolve(refreshAdapterLearning()).catch(() => undefined);
     void Promise.resolve(refreshSelfLearningRdStatus()).catch(() => undefined);
-    void Promise.resolve(loadValidationHistory()).catch(() => undefined);
+    void refreshValidationHistory();
   }, [refreshLearning, refreshAdapterLearning, refreshSelfLearningRdStatus, loadValidationHistory]);
+  async function refreshValidationHistory() {
+    setValidationHistoryLoading(true);
+    try {
+      await Promise.resolve(loadValidationHistory());
+    } finally {
+      setValidationHistoryLoading(false);
+    }
+  }
   async function submitImport() {
     if (!importText.trim()) return;
     await importAccuracyLabels(importText);
@@ -14620,8 +16116,20 @@ function AccuracyLabPanel({
       maxIdentities: datasetMaxIdentities,
       candidateImages: datasetCandidateImages,
       downloadIfMissing: datasetDownloadPublic,
-      includeVideos: datasetIncludeVideos
+      includeVideos: datasetIncludeVideos,
+      acknowledgeDatasetTerms: datasetTermsAcknowledged
     });
+  }
+
+  async function runSelectedCrossAgeBenchmark() {
+    const result = await runCrossAgeBenchmark({
+      datasetId,
+      folder: datasetFolder,
+      maxIdentities: datasetMaxIdentities,
+      candidateImages: datasetCandidateImages,
+      acknowledgeDatasetTerms: datasetTermsAcknowledged
+    });
+    if (result) setCrossAgeBenchmark(result);
   }
   async function runSelectedModelComparison() {
     await runModelComparison({
@@ -14630,7 +16138,8 @@ function AccuracyLabPanel({
       maxIdentities: datasetMaxIdentities,
       candidateImages: datasetCandidateImages,
       downloadIfMissing: datasetDownloadPublic,
-      includeVideos: datasetIncludeVideos
+      includeVideos: datasetIncludeVideos,
+      acknowledgeDatasetTerms: datasetTermsAcknowledged
     });
   }
   return (
@@ -14876,9 +16385,9 @@ function AccuracyLabPanel({
           <p className="compact">No validation runs yet — create a validation pack to record one.</p>
         )}
         <div className="button-row">
-          <button className="ghost compact-action" onClick={loadValidationHistory} disabled={busy} type="button">
-            <RefreshCcw size={16} />
-            <span>Refresh history</span>
+          <button className="ghost compact-action" onClick={() => void refreshValidationHistory()} disabled={busy || validationHistoryLoading} type="button">
+            <RefreshCcw className={validationHistoryLoading ? "spin" : ""} size={16} />
+            <span>{validationHistoryLoading ? "Loading history" : "Refresh history"}</span>
           </button>
         </div>
       </details>
@@ -14887,7 +16396,7 @@ function AccuracyLabPanel({
         <div className="settings-form-grid">
           <label>
             <span>Dataset</span>
-            <select value={datasetId} onChange={(event) => setDatasetId(event.currentTarget.value)}>
+            <select value={datasetId} onChange={(event) => { setDatasetId(event.currentTarget.value); setDatasetTermsAcknowledged(false); setCrossAgeBenchmark(null); }}>
               {(datasets.length ? datasets : [{ datasetId: "lfw", shortName: "LFW", name: "Labeled Faces in the Wild" } as PublicDatasetCatalogEntry]).map((dataset) => (
                 <option key={dataset.datasetId} value={dataset.datasetId}>{dataset.shortName}</option>
               ))}
@@ -14928,6 +16437,12 @@ function AccuracyLabPanel({
             <SlidersHorizontal size={17} />
             <span>Compare model packs</span>
           </button>
+          {crossAgeDataset ? (
+            <button className="secondary" onClick={() => void runSelectedCrossAgeBenchmark()} disabled={!canRunCrossAge} type="button">
+              <Sparkles size={17} />
+              <span>Compare age bridge</span>
+            </button>
+          ) : null}
         </div>
         <div className="settings-toggle-row">
           <label>
@@ -14938,6 +16453,12 @@ function AccuracyLabPanel({
             <input type="checkbox" checked={datasetIncludeVideos} onChange={(event) => setDatasetIncludeVideos(event.currentTarget.checked)} />
             <span>Include video files when identities also have image references</span>
           </label>
+          {crossAgeDataset ? (
+            <label>
+              <input type="checkbox" checked={datasetTermsAcknowledged} onChange={(event) => setDatasetTermsAcknowledged(event.currentTarget.checked)} />
+              <span>I am authorized to use this local research dataset and accept its benchmark-only terms</span>
+            </label>
+          ) : null}
         </div>
         {datasetFolder ? <small className="path-chip" title={datasetFolder}>{datasetFolder}</small> : null}
         {datasetInspection ? (
@@ -14946,6 +16467,28 @@ function AccuracyLabPanel({
             <span><small>Images</small><strong>{formatNumber(datasetInspection.imageCount)}</strong></span>
             <span><small>Videos</small><strong>{formatNumber(datasetInspection.videoCount)}</strong></span>
             <span><small>Checked</small><strong>{formatNumber(datasetInspection.entriesChecked)}</strong></span>
+          </div>
+        ) : null}
+        {crossAgeBenchmark ? (
+          <div className="validation-pack-card">
+            <div className="panel-title compact-title">
+              <Sparkles size={16} />
+              <span>Age bridge {crossAgeBenchmark.protocolVersion}</span>
+              <div className="spacer" />
+              <span className={crossAgeBenchmark.status === "pass" ? "status accepted" : "status pending"}>{crossAgeBenchmark.status}</span>
+            </div>
+            <div className="workspace-health-grid compact-grid">
+              <span><small>Evaluated</small><strong>{formatNumber(crossAgeBenchmark.comparison.evaluated)}</strong></span>
+              <span><small>Generated refs</small><strong>{formatNumber(crossAgeBenchmark.comparison.generatedReferences)}</strong></span>
+              <span><small>Synthetic best</small><strong>{formatNumber(crossAgeBenchmark.comparison.syntheticBestMatches)}</strong></span>
+              <span><small>Strong synth support</small><strong>{formatNumber(crossAgeBenchmark.comparison.syntheticTruePositiveEvidence)}</strong></span>
+              <span><small>Genuine scores up</small><strong>{formatNumber(crossAgeBenchmark.comparison.genuineScoreImproved)}</strong></span>
+              <span><small>Improved</small><strong>{formatNumber(crossAgeBenchmark.comparison.improvements)}</strong></span>
+              <span><small>Regressed</small><strong>{formatNumber(crossAgeBenchmark.comparison.regressions)}</strong></span>
+              <span><small>Identity changes</small><strong>{formatNumber(crossAgeBenchmark.comparison.identityChanges)}</strong></span>
+              <span><small>Precision delta</small><strong>{crossAgeBenchmark.comparison.precisionDelta >= 0 ? "+" : ""}{percent(crossAgeBenchmark.comparison.precisionDelta)}</strong></span>
+              <span><small>Recall delta</small><strong>{crossAgeBenchmark.comparison.recallDelta >= 0 ? "+" : ""}{percent(crossAgeBenchmark.comparison.recallDelta)}</strong></span>
+            </div>
           </div>
         ) : null}
         {datasetBenchmark ? (
@@ -15294,8 +16837,13 @@ function DiagnosticsPanel({
   const topCodes = summary
     ? Object.entries(summary.byCode || {}).sort((left, right) => right[1] - left[1]).slice(0, 4)
     : [];
-  const reportPreview = report ? JSON.stringify(report, null, 2) : "";
-  const trimmedPreview = reportPreview.length > 12000 ? `${reportPreview.slice(0, 12000)}\n... preview trimmed; exported JSON contains the full report ...` : reportPreview;
+  const reportPreview = useMemo(() => (report ? JSON.stringify(report, null, 2) : ""), [report]);
+  const trimmedPreview = useMemo(
+    () => reportPreview.length > 12000
+      ? `${reportPreview.slice(0, 12000)}\n... preview trimmed; exported JSON contains the full report ...`
+      : reportPreview,
+    [reportPreview]
+  );
   return (
     <div className="panel settings-panel diagnostics-panel">
       <div className="panel-title"><FileText size={18} /> Error reports</div>
@@ -15384,6 +16932,16 @@ function PrivacyControlPanel({
   setJurisdictionPreset,
   jurisdictions,
   jurisdictionDisclaimer,
+  complianceStatus,
+  people,
+  uiText,
+  loadComplianceStatus,
+  acknowledgeAiDisclosure,
+  saveSubjectRelease,
+  deleteComplianceSubject,
+  exportBiometricPolicy,
+  recordBiometricPolicyPublication,
+  enforceBiometricRetention,
   exportCompliancePack,
   exportExaminationReport,
   loadPrivacyReport,
@@ -15402,6 +16960,16 @@ function PrivacyControlPanel({
   setJurisdictionPreset(preset: string): void;
   jurisdictions: Jurisdiction[];
   jurisdictionDisclaimer: string;
+  complianceStatus: ComplianceStatus | null;
+  people: string[];
+  uiText(source: string): string;
+  loadComplianceStatus(quiet?: boolean): void | Promise<ComplianceStatus | null>;
+  acknowledgeAiDisclosure(): void | Promise<void>;
+  saveSubjectRelease(release: SubjectReleaseInput): void | Promise<void>;
+  deleteComplianceSubject(personName: string): void | Promise<void>;
+  exportBiometricPolicy(): void | Promise<void>;
+  recordBiometricPolicyPublication(publicUrl: string, approvedBy: string): void | Promise<void>;
+  enforceBiometricRetention(): void | Promise<void>;
   exportCompliancePack(): void;
   exportExaminationReport(): void;
   loadPrivacyReport(): void;
@@ -15411,7 +16979,7 @@ function PrivacyControlPanel({
   deleteFaceData(includeAudit?: boolean): void;
 }) {
   return (
-    <div className="panel settings-panel data-ops-panel">
+    <div className="panel settings-panel data-ops-panel privacy-controls-panel">
       <div className="panel-title"><EyeOff size={18} /> Privacy controls</div>
       <label className="switch-row">
         <span>
@@ -15456,6 +17024,21 @@ function PrivacyControlPanel({
         );
       })()}
       {jurisdictionDisclaimer && <small className="compact">{jurisdictionDisclaimer}</small>}
+      <Suspense fallback={<div className="compliance-governance"><p className="compact">{uiText("Loading compliance evidence")}</p></div>}>
+        <ConsentRetentionPanel
+          status={complianceStatus}
+          busy={busy}
+          people={people}
+          uiText={uiText}
+          refresh={() => { void loadComplianceStatus(false); }}
+          acknowledgeDisclosure={acknowledgeAiDisclosure}
+          saveRelease={saveSubjectRelease}
+          deleteSubject={deleteComplianceSubject}
+          exportPolicy={exportBiometricPolicy}
+          recordPublication={recordBiometricPolicyPublication}
+          enforceRetention={enforceBiometricRetention}
+        />
+      </Suspense>
       {report ? (
         <>
           <div className="workspace-health-grid">
@@ -15511,15 +17094,27 @@ function PrivacyControlPanel({
           <FileText size={17} />
           <span>Examination report</span>
         </button>
-        <button className="secondary danger" onClick={() => deleteFaceData(false)} disabled={busy}>
-          <Trash2 size={17} />
-          <span>Delete face data</span>
-        </button>
-        <button className="secondary danger" onClick={() => deleteFaceData(true)} disabled={busy}>
-          <Trash2 size={17} />
-          <span>Delete face data and history</span>
-        </button>
       </div>
+      <details className="privacy-danger-zone">
+        <summary>
+          <Trash2 size={17} />
+          <span><strong>Delete local face data</strong><small>Permanent removal options</small></span>
+          <ChevronRight size={16} aria-hidden="true" />
+        </summary>
+        <div className="privacy-danger-zone-body">
+          <p className="compact">These actions remove generated face data from this app folder. Your original photos are not deleted.</p>
+          <div className="button-row">
+            <button className="secondary danger" onClick={() => deleteFaceData(false)} disabled={busy}>
+              <Trash2 size={17} />
+              <span>Delete face data</span>
+            </button>
+            <button className="secondary danger" onClick={() => deleteFaceData(true)} disabled={busy}>
+              <Trash2 size={17} />
+              <span>Delete face data and history</span>
+            </button>
+          </div>
+        </div>
+      </details>
     </div>
   );
 }
@@ -15645,7 +17240,6 @@ function PerformanceCenter({
   profile,
   latencySamples,
   latencySummary,
-  scanProgress,
   busy,
   warmPreviewsNow,
   copyPerformanceReport,
@@ -15658,12 +17252,12 @@ function PerformanceCenter({
   profile: PerformanceProfile;
   latencySamples: LatencySample[];
   latencySummary: LatencySummary;
-  scanProgress: ScanProgress | null;
   busy: boolean;
   warmPreviewsNow(): void;
   copyPerformanceReport(): void;
   clearLatencySamples(): void;
 }) {
+  const scanProgress = useScanProgress();
   const recent = latencySamples.slice(0, 5);
   const budgetLabel = formatDuration(profile.slowCommandMs);
   const platform = state.platform;
@@ -15923,11 +17517,13 @@ function CandidateIdentity({ candidate, showThumbnail = true, showReviewProvenan
         {showThumbnail && candidate.sourceUrl && !failed ? <img loading="lazy" decoding="async" width={44} height={44} src={candidate.sourceUrl} alt="" onError={() => setFailed(true)} /> : video ? <Video size={18} /> : <ImageIcon size={18} />}
       </span>
       <span>
-        <strong>{candidate.personName}</strong>
-        <small>{detail ? `${matchBandLabel(candidate.band)} • ${detail}` : matchBandLabel(candidate.band)}</small>
+        <strong title={candidate.personName}>{candidate.personName}</strong>
+        <small title={detail ? `${matchBandLabel(candidate.band)} • ${detail}` : matchBandLabel(candidate.band)}>
+          {detail ? `${matchBandLabel(candidate.band)} • ${detail}` : matchBandLabel(candidate.band)}
+        </small>
         {reviewProvenanceChips.length > 0 && (
           <span className="review-provenance-chips" aria-label="Review More provenance">
-            {reviewProvenanceChips.map((reason) => <small key={`${candidate.candidateId}:${reason}`}>{reason}</small>)}
+            {reviewProvenanceChips.map((reason) => <small key={`${candidate.candidateId}:${reason}`} title={reason}>{reason}</small>)}
           </span>
         )}
       </span>

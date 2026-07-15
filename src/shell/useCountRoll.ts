@@ -2,7 +2,7 @@
 // returns a bumpKey that increments on each real change (use as the element
 // `key` to replay the CSS bump) and the change direction. Skips the initial
 // mount and no-op changes, so the count only bumps when it actually moves.
-import { useEffect, useRef, useState } from "react";
+import { useRef } from "react";
 import { nextCountRollState, shouldThrottledBump, type CountDirection, type CountRollState } from "../lib/countRoll";
 
 export function useCountRoll(value: number): { bumpKey: number; direction: CountDirection } {
@@ -23,18 +23,16 @@ export function useCountRoll(value: number): { bumpKey: number; direction: Count
  * intervalMs, so the capsule bumps at a readable cadence instead of every frame.
  */
 export function useThrottledCountRoll(value: number, intervalMs = 300): { bumpKey: number } {
-  const [bumpKey, setBumpKey] = useState(0);
+  const bumpKeyRef = useRef(0);
   const lastBumpRef = useRef(0);
   const prevRef = useRef<number | undefined>(undefined);
 
-  useEffect(() => {
-    const now = Date.now();
-    if (shouldThrottledBump(prevRef.current, value, lastBumpRef.current, now, intervalMs)) {
-      lastBumpRef.current = now;
-      setBumpKey((k) => k + 1);
-    }
-    prevRef.current = value;
-  }, [value, intervalMs]);
+  const now = Date.now();
+  if (shouldThrottledBump(prevRef.current, value, lastBumpRef.current, now, intervalMs)) {
+    lastBumpRef.current = now;
+    bumpKeyRef.current += 1;
+  }
+  prevRef.current = value;
 
-  return { bumpKey };
+  return { bumpKey: bumpKeyRef.current };
 }

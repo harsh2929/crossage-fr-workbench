@@ -1,0 +1,20 @@
+{
+  "name": "Vintrace Mobile",
+  "short_name": "Vintrace",
+  "description": "Read-only access to a private Vintrace photo library.",
+  "id": "/mobile/",
+  "start_url": "/mobile/",
+  "scope": "/mobile/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f4f6f7",
+  "theme_color": "#17191c",
+  "icons": [
+    {
+      "src": "/mobile/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

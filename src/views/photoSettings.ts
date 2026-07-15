@@ -1,8 +1,9 @@
-import type { PhotoLibrarySettingsValue, PhotoManagedRootProfile } from "../types";
+import type { PhotoLibraryRootProfile, PhotoLibrarySettingsValue, PhotoManagedRootPolicy, PhotoManagedRootProfile } from "../types";
 
 export type PhotoVideoAutoplayMode = "off" | "muted" | "sound";
 export type PhotoHdrViewingMode = "auto" | "standard" | "hdr";
 export type PhotoIndexingPowerMode = "low" | "balanced" | "performance";
+export type PhotoVisionModelTier = "auto" | "quality" | "low-memory";
 
 export const PHOTO_LOCAL_SETTINGS_KEY = "vintrace.photos.localSettings";
 
@@ -39,6 +40,37 @@ export interface PhotoManagedRootProfileRow {
   details: string[];
 }
 
+export interface PhotoLibraryRootProfileRow {
+  key: string;
+  profileId: string;
+  profile: PhotoLibraryRootProfile;
+  name: string;
+  path: string;
+  badges: PhotoManagedRootProfileBadge[];
+  details: string[];
+}
+
+export interface PhotoLibraryViewOption {
+  key: string;
+  value: string;
+  path: string;
+  profileId: string;
+  label: string;
+  detail: string;
+}
+
+export interface PhotoLibraryRootProfileRowOptions {
+  activeLibraryRoot?: unknown;
+  activeLibraryRootProfileId?: unknown;
+  formatCount?: (value: number) => string;
+  text?: (value: string) => string;
+}
+
+export interface PhotoLibraryViewOptionOptions {
+  activeLibraryRoot?: unknown;
+  text?: (value: string) => string;
+}
+
 export type PhotoHdrEffectiveDisplayMode = "standard" | "hdr";
 export type PhotoHdrDisplayBadgeTone = "ok" | "warn" | "muted";
 
@@ -73,6 +105,7 @@ export interface PhotoLocalSettings {
   backgroundIndexingPaused: boolean;
   backgroundIndexingAutoRun: boolean;
   indexingPowerMode: PhotoIndexingPowerMode;
+  visionModelTier: PhotoVisionModelTier;
   railPreferences: PhotoRailPreferences;
 }
 
@@ -110,6 +143,7 @@ const DEFAULT_PHOTO_LOCAL_SETTINGS: PhotoLocalSettings = {
   backgroundIndexingPaused: false,
   backgroundIndexingAutoRun: true,
   indexingPowerMode: "balanced",
+  visionModelTier: "auto",
   railPreferences: DEFAULT_PHOTO_RAIL_PREFERENCES,
 };
 
@@ -180,6 +214,19 @@ const PHOTO_HDR_METADATA_TERMS = [
   "display p3 hdr",
 ];
 
+export const PHOTO_HDR_RUNTIME_QUERIES = ["(dynamic-range: high)", "(video-dynamic-range: high)"] as const;
+
+export function browserAdvertisesPhotoHdr(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+  return PHOTO_HDR_RUNTIME_QUERIES.some((query) => {
+    try {
+      return window.matchMedia(query).matches;
+    } catch {
+      return false;
+    }
+  });
+}
+
 function asBoolean(value: unknown, fallback: boolean) {
   return typeof value === "boolean" ? value : fallback;
 }
@@ -194,6 +241,10 @@ function normalizeHdrViewingMode(value: unknown): PhotoHdrViewingMode {
 
 function normalizeIndexingPowerMode(value: unknown): PhotoIndexingPowerMode {
   return value === "low" || value === "performance" || value === "balanced" ? value : DEFAULT_PHOTO_LOCAL_SETTINGS.indexingPowerMode;
+}
+
+function normalizeVisionModelTier(value: unknown): PhotoVisionModelTier {
+  return value === "quality" || value === "low-memory" || value === "auto" ? value : DEFAULT_PHOTO_LOCAL_SETTINGS.visionModelTier;
 }
 
 function normalizeSensitiveSessionLockMinutes(value: unknown): number {
@@ -256,6 +307,14 @@ function rootConflictBadgeLabel(kind: unknown): string {
 
 function photoCountLabel(count: number): string {
   return `${count.toLocaleString()} ${count === 1 ? "photo" : "photos"}`;
+}
+
+function photoSettingsText(options: { text?: (value: string) => string } | undefined, value: string): string {
+  return options?.text ? options.text(value) : value;
+}
+
+function photoSettingsCount(options: { formatCount?: (value: number) => string } | undefined, value: number): string {
+  return options?.formatCount ? options.formatCount(value) : value.toLocaleString();
 }
 
 function cleanPasscodeToken(value: unknown): string {
@@ -373,6 +432,7 @@ export function normalizePhotoLocalSettings(value: unknown): PhotoLocalSettings 
     backgroundIndexingPaused: asBoolean(record.backgroundIndexingPaused, DEFAULT_PHOTO_LOCAL_SETTINGS.backgroundIndexingPaused),
     backgroundIndexingAutoRun: asBoolean(record.backgroundIndexingAutoRun, DEFAULT_PHOTO_LOCAL_SETTINGS.backgroundIndexingAutoRun),
     indexingPowerMode: normalizeIndexingPowerMode(record.indexingPowerMode),
+    visionModelTier: normalizeVisionModelTier(record.visionModelTier),
     railPreferences: normalizePhotoRailPreferences(record.railPreferences),
   };
 }
@@ -579,6 +639,185 @@ export function buildPhotoManagedRootProfileRows(settings: PhotoLibrarySettingsV
         details: details.slice(0, 4),
       };
     });
+}
+
+export function photoManagedRootPolicyDefaults(profile: PhotoManagedRootProfile | null | undefined): PhotoManagedRootPolicy {
+  const policy: Partial<NonNullable<PhotoManagedRootProfile["policy"]>> = profile?.policy || {};
+  return {
+    keepFolderOrganizationDefault: Boolean(policy.keepFolderOrganizationDefault),
+    externalBackupCovered: Boolean(policy.externalBackupCovered),
+    externalBackupLabel: cleanSettingsString(policy.externalBackupLabel),
+    externalBackupCheckedAt: cleanSettingsString(policy.externalBackupCheckedAt),
+  };
+}
+
+export function findPhotoManagedRootProfile(
+  settings: PhotoLibrarySettingsValue | null | undefined,
+  rootPath?: string,
+): PhotoManagedRootProfile | null {
+  const cleanRoot = cleanSettingsString(rootPath || settings?.defaultManagedRoot);
+  if (!cleanRoot) return null;
+  return (settings?.managedRoots || []).find((profile) => cleanSettingsString(profile.path) === cleanRoot) || null;
+}
+
+export function buildPhotoLibraryRootProfileRows(
+  settings: PhotoLibrarySettingsValue | null | undefined,
+  options: PhotoLibraryRootProfileRowOptions = {},
+): PhotoLibraryRootProfileRow[] {
+  const seen = new Set<string>();
+  const activeRoot = cleanSettingsString(options.activeLibraryRoot);
+  const activeProfileId = cleanSettingsString(options.activeLibraryRootProfileId);
+  return (settings?.libraryRoots || [])
+    .map((profile) => {
+      const path = cleanSettingsString(profile.path);
+      if (!path) return null;
+      const profileId = cleanSettingsString(profile.profileId);
+      const key = profileId || path;
+      const name = cleanSettingsString(profile.name) || fallbackFileName(path) || photoSettingsText(options, "Library root");
+      const assetCount = Math.max(0, Number(profile.assetCount || 0) || 0);
+      const issue = cleanSettingsString(profile.issue);
+      const policyWarnings = [...(profile.policyWarnings || [])].filter((warning, index, warnings) => {
+        const message = cleanSettingsString(warning?.message);
+        return Boolean(message) && warnings.findIndex((candidate) => cleanSettingsString(candidate?.message) === message) === index;
+      });
+      const rootConflictMessage = cleanSettingsString(profile.rootConflictMessage || policyWarnings[0]?.message);
+      const rootConflictKind = cleanSettingsString(profile.rootConflictKind || policyWarnings[0]?.kind);
+      const viewing = Boolean(profileId && activeProfileId === profileId) || Boolean(activeRoot && activeRoot === path);
+      const badges: PhotoManagedRootProfileBadge[] = [
+        { key: "view-only", label: photoSettingsText(options, "View only") },
+      ];
+      const details: string[] = [];
+      if (typeof profile.assetCount !== "undefined") {
+        badges.push({
+          key: "assets",
+          label: `${photoSettingsCount(options, assetCount)} ${photoSettingsText(options, assetCount === 1 ? "photo" : "photos")}`,
+        });
+      }
+      if (viewing) badges.push({ key: "viewing", label: photoSettingsText(options, "Viewing"), tone: "ok" });
+      if (rootConflictMessage) {
+        badges.push({
+          key: "root-conflict",
+          label: photoSettingsText(options, rootConflictBadgeLabel(rootConflictKind)),
+          tone: "warn",
+          title: rootConflictMessage,
+        });
+        details.push(rootConflictMessage);
+      }
+      policyWarnings.forEach((warning) => {
+        const message = cleanSettingsString(warning?.message);
+        const action = cleanSettingsString(warning?.action);
+        const detail = action ? `${message} ${action}` : message;
+        if (detail && !details.includes(detail)) details.push(detail);
+      });
+      if (issue) {
+        badges.push({ key: "issue", label: photoSettingsText(options, "Needs repair"), tone: "warn", title: issue });
+        details.push(issue);
+      } else if (profile.exists === true && profile.isDirectory !== false) {
+        details.push(photoSettingsText(options, "Available library folder."));
+      }
+      return { key, profileId, profile, name, path, badges, details };
+    })
+    .filter((row): row is PhotoLibraryRootProfileRow => {
+      if (!row || seen.has(row.path)) return false;
+      seen.add(row.path);
+      return true;
+    });
+}
+
+export function buildPhotoLibraryViewOptions(
+  managedRootRows: readonly PhotoManagedRootProfileRow[] | null | undefined,
+  libraryRootRows: readonly PhotoLibraryRootProfileRow[] | null | undefined,
+  options: PhotoLibraryViewOptionOptions = {},
+): PhotoLibraryViewOption[] {
+  const output: PhotoLibraryViewOption[] = [
+    {
+      key: "all",
+      value: "",
+      path: "",
+      profileId: "",
+      label: photoSettingsText(options, "All libraries"),
+      detail: photoSettingsText(options, "All libraries"),
+    },
+  ];
+  const seen = new Set<string>([""]);
+  for (const row of managedRootRows || []) {
+    if (!row.path || seen.has(row.path)) continue;
+    seen.add(row.path);
+    const profileId = cleanSettingsString(row.profile.profileId || row.key);
+    output.push({
+      key: `managed:${row.key}`,
+      value: profileId ? `managed:${profileId}` : `root:${row.path}`,
+      path: row.path,
+      profileId,
+      label: row.name,
+      detail: photoSettingsText(options, "Managed root"),
+    });
+  }
+  for (const row of libraryRootRows || []) {
+    if (!row.path || seen.has(row.path)) continue;
+    seen.add(row.path);
+    const profileId = cleanSettingsString(row.profile.profileId || row.profileId || row.key);
+    output.push({
+      key: `view:${row.key}`,
+      value: profileId ? `view:${profileId}` : `root:${row.path}`,
+      path: row.path,
+      profileId,
+      label: row.name,
+      detail: photoSettingsText(options, "Library root"),
+    });
+  }
+  const activeRoot = cleanSettingsString(options.activeLibraryRoot);
+  if (activeRoot && !seen.has(activeRoot)) {
+    output.push({
+      key: `active:${activeRoot}`,
+      value: `root:${activeRoot}`,
+      path: activeRoot,
+      profileId: "",
+      label: fallbackFileName(activeRoot) || photoSettingsText(options, "Selected library"),
+      detail: photoSettingsText(options, "Custom"),
+    });
+  }
+  return output;
+}
+
+export function photoActiveLibraryScopeValue(
+  libraryViewOptions: readonly PhotoLibraryViewOption[] | null | undefined,
+  activeLibraryRoot?: unknown,
+  activeLibraryRootProfileId?: unknown,
+): string {
+  const root = cleanSettingsString(activeLibraryRoot);
+  if (!root) return "";
+  const profileId = cleanSettingsString(activeLibraryRootProfileId);
+  if (profileId) {
+    const profileOption = (libraryViewOptions || []).find((option) => option.profileId === profileId);
+    if (profileOption) return profileOption.value;
+  }
+  const rootOption = (libraryViewOptions || []).find((option) => option.path === root);
+  return rootOption?.value || `root:${root}`;
+}
+
+export function photoActiveLibraryRootLabel(
+  activeLibraryRoot: unknown,
+  managedRootRows: readonly PhotoManagedRootProfileRow[] | null | undefined,
+  libraryRootRows: readonly PhotoLibraryRootProfileRow[] | null | undefined,
+  options: { text?: (value: string) => string } = {},
+): string {
+  const root = cleanSettingsString(activeLibraryRoot);
+  if (!root) return photoSettingsText(options, "All libraries");
+  const profile = (managedRootRows || []).find((row) => row.path === root)
+    || (libraryRootRows || []).find((row) => row.path === root);
+  return profile?.name || fallbackFileName(root) || photoSettingsText(options, "Selected library");
+}
+
+export function photoManagedRootCoverageByPath(
+  status: PhotoLibrarySettingsValue["backupPolicyStatus"] | null | undefined,
+): Map<string, PhotoManagedRootCoverage> {
+  const entries: Array<[string, PhotoManagedRootCoverage]> = [];
+  for (const coverage of status?.rootCoverage || []) {
+    const path = cleanSettingsString(coverage.path);
+    if (path) entries.push([path, coverage]);
+  }
+  return new Map(entries);
 }
 
 export function photoSensitivePasscodeConfigured(settings: PhotoLocalSettings): boolean {

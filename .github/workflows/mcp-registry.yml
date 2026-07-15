@@ -1,0 +1,100 @@
+name: MCP Registry
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing release tag containing both platform MCPB assets"
+        required: true
+        type: string
+      dry_run:
+        description: "Validate and retain server.json without publishing"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: vintrace-mcp-registry-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Validate and publish Registry descriptor
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      MCP_PUBLISHER_VERSION: "1.8.0"
+      MCP_PUBLISHER_SHA256: "1370446bbe74d562608e8005a6ccce02d146a661fbd78674e11cc70b9618d6cf"
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          test -n "$RELEASE_TAG"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the tagged source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Download immutable MCPB release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          mkdir -p dist/registry-assets
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "Vintrace-*.mcpb" --dir dist/registry-assets
+          compgen -G "dist/registry-assets/Vintrace-darwin-*.mcpb" >/dev/null
+          compgen -G "dist/registry-assets/Vintrace-win32-*.mcpb" >/dev/null
+
+      - name: Bind descriptor to tag and asset hashes
+        shell: bash
+        run: |
+          args=()
+          for asset in dist/registry-assets/*.mcpb; do args+=(--asset "$asset"); done
+          npm run mcp:registry:prepare -- --tag "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --output dist/server.json "${args[@]}"
+
+      - name: Install verified official publisher
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/mcp-publisher.tar.gz"
+          curl --fail --location --silent --show-error "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz" --output "$archive"
+          echo "${MCP_PUBLISHER_SHA256}  $archive" | sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP" mcp-publisher
+          echo "MCP_PUBLISHER=$RUNNER_TEMP/mcp-publisher" >> "$GITHUB_ENV"
+
+      - name: Validate against the official Registry
+        run: |
+          "$MCP_PUBLISHER" validate dist/server.json
+
+      - name: Upload validated descriptor
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vintrace-mcp-registry-${{ steps.release.outputs.tag }}
+          if-no-files-found: error
+          path: dist/server.json
+
+      - name: Authenticate with GitHub OIDC
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          "$MCP_PUBLISHER" login github-oidc
+
+      - name: Publish immutable descriptor
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          "$MCP_PUBLISHER" publish dist/server.json

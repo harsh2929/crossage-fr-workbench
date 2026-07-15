@@ -5,7 +5,7 @@
 import type { AgeBucket, ReferenceFace } from "../types";
 
 // Display order for age coverage chips; "unknown" is intentionally excluded.
-const AGE_ORDER: AgeBucket[] = ["child", "adolescent", "adult"];
+const AGE_ORDER: AgeBucket[] = ["child", "adolescent", "adult", "older-adult", "senior"];
 
 export interface Person {
   name: string;
@@ -13,6 +13,9 @@ export interface Person {
   count: number;
   ageCoverage: AgeBucket[]; // present buckets, child->adult order, no "unknown"
   averageQuality: number;
+  syntheticAgeCount: number;
+  embeddingAgeCount: number;
+  generatedAgeCount: number;
 }
 
 /** Which of child/adolescent/adult are represented, in display order. */
@@ -36,7 +39,9 @@ export function groupReferencesByPerson(refs: ReferenceFace[]): Person[] {
     }
   }
   const people: Person[] = [];
-  for (const [name, photos] of byName) {
+  for (const [name, references] of byName) {
+    const photos = references.filter((ref) => ref.referenceKind !== "synthetic-age-trajectory");
+    if (!photos.length) continue;
     const sorted = [...photos].sort((a, b) => b.quality - a.quality);
     const averageQuality = sorted.reduce((sum, photo) => sum + photo.quality, 0) / sorted.length;
     people.push({
@@ -45,6 +50,9 @@ export function groupReferencesByPerson(refs: ReferenceFace[]): Person[] {
       count: sorted.length,
       ageCoverage: ageCoverageOf(sorted),
       averageQuality,
+      syntheticAgeCount: references.length - photos.length,
+      embeddingAgeCount: references.filter((ref) => ref.referenceKind === "synthetic-age-trajectory" && !ref.syntheticMethodVersion?.startsWith("qwen-image-edit-")).length,
+      generatedAgeCount: references.filter((ref) => ref.referenceKind === "synthetic-age-trajectory" && ref.syntheticMethodVersion?.startsWith("qwen-image-edit-")).length,
     });
   }
   people.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));

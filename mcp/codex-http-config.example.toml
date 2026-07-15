@@ -1,0 +1,13 @@
+[mcp_servers.vintrace]
+url = "http://127.0.0.1:8765/mcp"
+bearer_token_env_var = "VINTRACE_MCP_TOKEN"
+startup_timeout_sec = 20
+tool_timeout_sec = 600
+default_tools_approval_mode = "writes"
+enabled = true
+
+[mcp_servers.vintrace.tools.get_image_preview]
+approval_mode = "prompt"
+
+[mcp_servers.vintrace.tools.run_destructive_image_action]
+approval_mode = "prompt"

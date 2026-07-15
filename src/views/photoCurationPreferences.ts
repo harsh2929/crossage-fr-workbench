@@ -1,4 +1,4 @@
-import type { PhotoCurationPreferencesValue, PhotoItem, PhotoMemory } from "../types";
+import type { PhotoCurationPreferencesValue, PhotoFolder, PhotoItem, PhotoMemory } from "../types";
 
 export type PhotoCurationPreferenceKind = "person" | "place" | "date" | "content";
 
@@ -55,6 +55,10 @@ function cleanPhotoCurationSourcePaths(value: unknown): string[] {
     values.push(clean);
   });
   return values.slice(0, 500);
+}
+
+function cleanPhotoMemoryId(value: unknown): string {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, 128);
 }
 
 function cleanPhotoMemoryRemovedItems(value: unknown): Record<string, string[]> {
@@ -168,7 +172,7 @@ export function photoMemoryPreferenceActive(
   key: "favoriteMemories" | "hiddenMemories",
   memoryId: string,
 ): boolean {
-  const needle = String(memoryId || "").trim().toLocaleLowerCase();
+  const needle = cleanPhotoMemoryId(memoryId).toLocaleLowerCase();
   if (!needle) return false;
   return normalizePhotoCurationPreferences(value || EMPTY_PHOTO_CURATION_PREFERENCES)[key]
     .some((item) => item.toLocaleLowerCase() === needle);
@@ -181,7 +185,7 @@ export function setPhotoMemoryPreference(
   active: boolean,
 ): PhotoCurationPreferencesValue {
   const preferences = normalizePhotoCurationPreferences(value || EMPTY_PHOTO_CURATION_PREFERENCES);
-  const clean = String(memoryId || "").replace(/\s+/g, " ").trim().slice(0, 128);
+  const clean = cleanPhotoMemoryId(memoryId);
   const nextValues = preferences[key].filter((item) => item.toLocaleLowerCase() !== clean.toLocaleLowerCase());
   if (active && clean) nextValues.push(clean);
   return normalizePhotoCurationPreferences({ ...preferences, [key]: nextValues });
@@ -191,7 +195,7 @@ export function photoMemoryRemovedItems(
   value: PhotoCurationPreferencesValue | null | undefined,
   memoryId: string,
 ): string[] {
-  const clean = String(memoryId || "").replace(/\s+/g, " ").trim().slice(0, 128);
+  const clean = cleanPhotoMemoryId(memoryId);
   if (!clean) return [];
   return normalizePhotoCurationPreferences(value || EMPTY_PHOTO_CURATION_PREFERENCES).memoryRemovedItems[clean] || [];
 }
@@ -202,7 +206,7 @@ export function addPhotoMemoryRemovedItems(
   sourcePaths: string[],
 ): PhotoCurationPreferencesValue {
   const preferences = normalizePhotoCurationPreferences(value || EMPTY_PHOTO_CURATION_PREFERENCES);
-  const clean = String(memoryId || "").replace(/\s+/g, " ").trim().slice(0, 128);
+  const clean = cleanPhotoMemoryId(memoryId);
   if (!clean) return preferences;
   const existing = preferences.memoryRemovedItems[clean] || [];
   const next = cleanPhotoCurationSourcePaths([...existing, ...sourcePaths]);
@@ -217,10 +221,203 @@ export function clearPhotoMemoryRemovedItems(
   memoryId: string,
 ): PhotoCurationPreferencesValue {
   const preferences = normalizePhotoCurationPreferences(value || EMPTY_PHOTO_CURATION_PREFERENCES);
-  const clean = String(memoryId || "").replace(/\s+/g, " ").trim().slice(0, 128);
+  const clean = cleanPhotoMemoryId(memoryId);
   if (!clean || !preferences.memoryRemovedItems[clean]) return preferences;
   const { [clean]: _removed, ...remaining } = preferences.memoryRemovedItems;
   return normalizePhotoCurationPreferences({ ...preferences, memoryRemovedItems: remaining });
+}
+
+export type PhotoMemoryRemovedSourcesDraft = {
+  sourcePaths: string[];
+  preferences: PhotoCurationPreferencesValue;
+  remaining: number;
+  shouldExitMemory: boolean;
+};
+
+export type PhotoMemoryRemovedSourcesDraftInput = {
+  preferences: PhotoCurationPreferencesValue | null | undefined;
+  memoryId: string;
+  sourcePaths: unknown;
+  memorySourcePaths?: unknown;
+  fallbackCount?: unknown;
+};
+
+export function photoMemoryRemovedSourcesDraft(input: PhotoMemoryRemovedSourcesDraftInput): PhotoMemoryRemovedSourcesDraft | null {
+  const memoryId = cleanPhotoMemoryId(input.memoryId);
+  const sourcePaths = cleanPhotoCurationSourcePaths(input.sourcePaths);
+  if (!memoryId || !sourcePaths.length) return null;
+  const preferences = addPhotoMemoryRemovedItems(input.preferences, memoryId, sourcePaths);
+  const removed = new Set(photoMemoryRemovedItems(preferences, memoryId));
+  const memorySourcePaths = cleanPhotoCurationSourcePaths(input.memorySourcePaths);
+  const fallbackCount = Math.max(0, Number(input.fallbackCount) || 0);
+  const remaining = memorySourcePaths.length
+    ? memorySourcePaths.filter((sourcePath) => !removed.has(sourcePath)).length
+    : Math.max(0, fallbackCount - sourcePaths.length);
+  return {
+    sourcePaths,
+    preferences,
+    remaining,
+    shouldExitMemory: remaining < 2,
+  };
+}
+
+export type PhotoUserMemoryDetails = {
+  memoryId: string;
+  userCreated: boolean;
+  title: string;
+  saveTitle: string;
+  subtitle: string;
+  coverSourcePath: string;
+  movieSettings: PhotoMemory["movieSettings"] | null;
+  hasMovieSettings: boolean;
+};
+
+export function photoUserMemoryDetails(folder: Pick<PhotoFolder, "memoryId" | "name" | "memory"> | null | undefined): PhotoUserMemoryDetails {
+  const memory = folder?.memory || null;
+  const movieSettings = memory?.movieSettings && typeof memory.movieSettings === "object" ? memory.movieSettings : null;
+  const memoryId = cleanPhotoMemoryId(folder?.memoryId || memory?.memoryId || "");
+  return {
+    memoryId,
+    userCreated: Boolean(memory?.userCreated || memoryId.startsWith("user:")),
+    title: String(memory?.name || folder?.name || ""),
+    saveTitle: String(folder?.name || memory?.name || ""),
+    subtitle: String(memory?.subtitle || ""),
+    coverSourcePath: String(memory?.coverSourcePath || ""),
+    movieSettings,
+    hasMovieSettings: Boolean(movieSettings && Object.keys(movieSettings).length),
+  };
+}
+
+export function photoUserMemoryDetailsDirty(
+  details: Pick<PhotoUserMemoryDetails, "userCreated" | "title" | "subtitle"> | null | undefined,
+  titleDraft: unknown,
+  subtitleDraft: unknown,
+): boolean {
+  return Boolean(details?.userCreated)
+    && (
+      String(titleDraft || "").trim() !== String(details?.title || "").trim()
+      || String(subtitleDraft || "").trim() !== String(details?.subtitle || "").trim()
+    );
+}
+
+export type PhotoUserMemoryDetailsSaveDraft = {
+  memoryId: string;
+  name: string;
+  subtitle: string;
+  coverSourcePath: string;
+};
+
+export function photoUserMemoryDetailsSaveDraft(input: {
+  details: Pick<PhotoUserMemoryDetails, "memoryId" | "userCreated" | "title" | "subtitle" | "coverSourcePath"> & { saveTitle?: string } | null | undefined;
+  titleDraft?: unknown;
+  defaultTitle?: unknown;
+  subtitleDraft?: unknown;
+  coverSourcePath?: unknown;
+  fallbackName?: unknown;
+}): PhotoUserMemoryDetailsSaveDraft | null {
+  const memoryId = cleanPhotoMemoryId(input.details?.memoryId || "");
+  if (!memoryId || !input.details?.userCreated) return null;
+  const fallbackName = String(input.fallbackName || "").trim();
+  const currentTitle = String(input.details.title || "").trim();
+  const defaultTitle = String(input.defaultTitle || "").trim();
+  const currentSubtitle = String(input.details.subtitle || "").trim();
+  const titleDraft = input.titleDraft === undefined ? (defaultTitle || currentTitle) : String(input.titleDraft || "").trim();
+  const subtitleDraft = input.subtitleDraft === undefined ? currentSubtitle : String(input.subtitleDraft || "").trim();
+  const coverSourcePath = input.coverSourcePath === undefined
+    ? String(input.details.coverSourcePath || "").trim()
+    : String(input.coverSourcePath || "").trim();
+  return {
+    memoryId,
+    name: titleDraft || currentTitle || fallbackName,
+    subtitle: subtitleDraft,
+    coverSourcePath,
+  };
+}
+
+export type PhotoUserMemoryCreateDraft = {
+  name: string;
+  subtitle: string;
+  sourcePaths: string[];
+  coverSourcePath: string;
+};
+
+export type PhotoMemoriesFeedState<T extends PhotoFolder = PhotoFolder> = {
+  memoryFolders: T[];
+  featuredMemory: T | null;
+  onThisDayMemories: T[];
+  gridMemories: T[];
+};
+
+export function photoUserMemoryCreateDraft(input: {
+  sourcePaths: unknown;
+  nameDraft?: unknown;
+  defaultName?: unknown;
+  activeName?: unknown;
+  sourceLabel?: unknown;
+  selected?: boolean;
+  labels?: {
+    memory?: string;
+    selection?: string;
+    currentView?: string;
+  };
+  minSourceCount?: number;
+}): PhotoUserMemoryCreateDraft | null {
+  const sourcePaths = cleanPhotoCurationSourcePaths(input.sourcePaths);
+  const minSourceCount = Math.max(1, Math.round(Number(input.minSourceCount ?? 2) || 2));
+  if (sourcePaths.length < minSourceCount) return null;
+  const labels = {
+    memory: input.labels?.memory || "Memory",
+    selection: input.labels?.selection || "Selection",
+    currentView: input.labels?.currentView || "Current view",
+  };
+  const activeName = String(input.activeName || "").trim();
+  const name = String(input.nameDraft || "").trim()
+    || String(input.defaultName || "").trim()
+    || activeName
+    || labels.memory;
+  const subtitle = String(input.sourceLabel || "").trim()
+    || (input.selected ? labels.selection : activeName || labels.currentView);
+  return {
+    name,
+    subtitle,
+    sourcePaths,
+    coverSourcePath: sourcePaths[0] || "",
+  };
+}
+
+export function buildPhotoMemoriesFeedState<T extends PhotoFolder>(
+  folders: T[],
+  now: Date = new Date(),
+): PhotoMemoriesFeedState<T> {
+  const memoryFolders = folders.filter((folder) => folder.kind === "memory");
+  const featuredMemory = memoryFolders.length
+    ? [...memoryFolders].sort((a, b) => {
+      const favorite = Number(Boolean(b.memory?.favorite)) - Number(Boolean(a.memory?.favorite));
+      if (favorite) return favorite;
+      const hint = String(a.memory?.sortHint || "").localeCompare(String(b.memory?.sortHint || ""));
+      if (hint) return hint;
+      return String(b.memory?.endDate || b.memory?.startDate || "").localeCompare(String(a.memory?.endDate || a.memory?.startDate || ""));
+    })[0] || null
+    : null;
+  const monthDay = Number.isFinite(now.getTime())
+    ? `${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`
+    : "";
+  const onThisDayMemories = monthDay
+    ? memoryFolders
+      .filter((folder) => {
+        const start = String(folder.memory?.startDate || "").slice(5, 10);
+        const end = String(folder.memory?.endDate || "").slice(5, 10);
+        return start === monthDay || end === monthDay;
+      })
+      .slice(0, 12)
+    : [];
+  const surfacedIds = new Set([featuredMemory?.id, ...onThisDayMemories.map((folder) => folder.id)].filter(Boolean));
+  return {
+    memoryFolders,
+    featuredMemory,
+    onThisDayMemories,
+    gridMemories: memoryFolders.filter((folder) => !surfacedIds.has(folder.id)),
+  };
 }
 
 function photoItemDateKey(item: PhotoItem | null | undefined): string {

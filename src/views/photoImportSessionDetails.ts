@@ -1,4 +1,5 @@
-import type { PhotoImportSession } from "../types";
+import type { PhotoFolder, PhotoImportSession, PhotoImportSourceKind } from "../types";
+import { normalizeExternalPhotoImportSourceKind, photoImportSourceLabel } from "./photoImportAccess";
 
 export type PhotoImportSessionDetail = {
   key: string;
@@ -35,6 +36,10 @@ export type PhotoImportSessionSummary = {
 
 export type PhotoImportHistoryStatusFilter = "all" | "completed" | "issues" | "failed" | "running";
 export type PhotoImportHistoryStorageFilter = "all" | "managed" | "referenced";
+export type PhotoImportStorageMode = "referenced" | "managed";
+export type PendingPhotoImportEntry = { path: string; isDir?: boolean; sourceKind?: PhotoImportSourceKind; sourceLabel?: string; sourceDetail?: string };
+
+export const PHOTO_IMPORT_HISTORY_RENDER_LIMIT = 40;
 
 export type PhotoImportHistoryFilters = {
   query?: string;
@@ -43,6 +48,61 @@ export type PhotoImportHistoryFilters = {
   status?: PhotoImportHistoryStatusFilter;
   storage?: PhotoImportHistoryStorageFilter;
   showArchived?: boolean;
+};
+
+export type PhotoImportHistorySourceOption = {
+  value: string;
+  label: string;
+};
+
+export type PhotoImportHistoryState = {
+  allSummaries: PhotoImportSessionSummary[];
+  scopedSummaries: PhotoImportSessionSummary[];
+  sourceOptions: PhotoImportHistorySourceOption[];
+  filteredSummaries: PhotoImportSessionSummary[];
+  archivableSummaries: PhotoImportSessionSummary[];
+  visibleSummaries: PhotoImportSessionSummary[];
+  queryFiltersActive: boolean;
+  filtersActive: boolean;
+  total: number;
+  visibleTotal: number;
+  matchedTotal: number;
+};
+
+export type PhotoImportHistoryStateInput = {
+  activeId: string;
+  activeFolder?: Pick<PhotoFolder, "id" | "importSessions" | "archivedImportSessions" | "importSessionCount" | "archivedImportSessionCount"> | null;
+  folders: Array<Pick<PhotoFolder, "id" | "importSession">>;
+  libraryRoot?: string;
+  query?: string;
+  status?: PhotoImportHistoryStatusFilter;
+  storage?: PhotoImportHistoryStorageFilter;
+  sourceKind?: string;
+  showArchived?: boolean;
+  limit?: number;
+};
+
+export type PhotoActiveImportSessionInput = {
+  activeId: string;
+  activeFolder?: Pick<PhotoFolder, "id" | "importSession"> | null;
+  folders: Array<Pick<PhotoFolder, "id" | "importSession">>;
+};
+
+export type PhotoImportHistoryCountLabelFormatters = {
+  formatCount?: (value: number) => string;
+  text?: (value: string) => string;
+};
+
+export type PhotoImportHistoryProvenanceEditDraft = {
+  importId: string;
+  sourceKind: PhotoImportSourceKind;
+  sourceLabel: string;
+  sourceDetail: string;
+};
+
+export type PhotoImportHistoryProvenancePayloadResult = {
+  payload: Record<string, unknown> | null;
+  error: string;
 };
 
 function cleanString(value: unknown): string {
@@ -61,6 +121,14 @@ function cleanPathPrefix(value: unknown): string {
 function cleanNumber(value: unknown): number {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? Math.round(number) : 0;
+}
+
+function labelText(formatters: PhotoImportHistoryCountLabelFormatters, value: string): string {
+  return formatters.text ? formatters.text(value) : value;
+}
+
+function labelCount(formatters: PhotoImportHistoryCountLabelFormatters, value: number): string {
+  return formatters.formatCount ? formatters.formatCount(value) : String(value);
 }
 
 function metadataRecord(session: PhotoImportSession): Record<string, unknown> {
@@ -217,6 +285,85 @@ export function buildPhotoImportSessionSummary(session: PhotoImportSession | nul
   };
 }
 
+export function photoActiveImportSessionRecord(input: PhotoActiveImportSessionInput): PhotoImportSession | null {
+  const activeId = cleanString(input.activeId);
+  if (input.activeFolder?.importSession) return input.activeFolder.importSession;
+  if (activeId.startsWith("import:")) {
+    return input.folders.find((folder) => folder.id === activeId)?.importSession || null;
+  }
+  if (activeId === "lastImport") {
+    return input.folders.find((folder) => folder.id.startsWith("import:") && folder.importSession)?.importSession || null;
+  }
+  return null;
+}
+
+export function photoImportHistoryProvenanceEditDraft(session: PhotoImportSessionSummary): PhotoImportHistoryProvenanceEditDraft {
+  const sourceKind = normalizeExternalPhotoImportSourceKind(session.sourceKind);
+  return {
+    importId: cleanString(session.importId),
+    sourceKind,
+    sourceLabel: cleanString(session.sourceLabel) || photoImportSourceLabel(sourceKind, ""),
+    sourceDetail: cleanString(session.sourceDetail),
+  };
+}
+
+export function photoImportHistoryProvenancePayload(input: {
+  importId?: unknown;
+  sourceKind?: unknown;
+  sourceLabel?: unknown;
+  sourceDetail?: unknown;
+}): PhotoImportHistoryProvenancePayloadResult {
+  const importId = cleanString(input.importId);
+  if (!importId) return { payload: null, error: "" };
+  const sourceLabel = cleanString(input.sourceLabel);
+  if (!sourceLabel) return { payload: null, error: "Source label is required." };
+  return {
+    payload: {
+      importId,
+      sourceKind: normalizeExternalPhotoImportSourceKind(cleanString(input.sourceKind)),
+      sourceLabel,
+      sourceDetail: cleanString(input.sourceDetail),
+    },
+    error: "",
+  };
+}
+
+export function photoImportHistoryBulkProvenancePayload(input: {
+  importIds: unknown[];
+  sourceKind?: unknown;
+  sourceLabel?: unknown;
+  sourceDetail?: unknown;
+}): Record<string, unknown> | null {
+  const importIds = Array.from(new Set((input.importIds || []).map(cleanString).filter(Boolean)));
+  if (!importIds.length) return null;
+  const payload: Record<string, unknown> = {
+    importIds,
+    sourceKind: normalizeExternalPhotoImportSourceKind(cleanString(input.sourceKind)),
+  };
+  const sourceLabel = cleanString(input.sourceLabel);
+  if (sourceLabel) payload.sourceLabel = sourceLabel;
+  const sourceDetail = cleanString(input.sourceDetail);
+  if (sourceDetail) payload.sourceDetail = sourceDetail;
+  return payload;
+}
+
+export function photoImportHistoryArchivePayload(importIds: unknown[], archive = true): Record<string, unknown> | null {
+  const cleanIds = Array.from(new Set((importIds || []).map(cleanString).filter(Boolean)));
+  if (!cleanIds.length) return null;
+  return {
+    importIds: cleanIds,
+    archive,
+    reason: archive ? "Archived from import history" : "",
+  };
+}
+
+export function photoImportHistoryArchiveNextActiveId(activeId: unknown, importIds: unknown[], archive = true): string {
+  const cleanActiveId = cleanString(activeId);
+  const cleanIds = new Set((importIds || []).map(cleanString).filter(Boolean));
+  if (archive && Array.from(cleanIds).some((importId) => cleanActiveId === `import:${importId}`)) return "imports";
+  return cleanActiveId;
+}
+
 function importSessionSortKey(summary: PhotoImportSessionSummary): string {
   return summary.completedAt || summary.updatedAt || summary.startedAt || "";
 }
@@ -299,4 +446,116 @@ export function filterPhotoImportSessionSummaries(
     const searchText = summarySearchText(summary);
     return queryTokens.every((token) => searchText.includes(token));
   });
+}
+
+export function photoImportHistorySourceOptions(summaries: PhotoImportSessionSummary[]): PhotoImportHistorySourceOption[] {
+  const byKind = new Map<string, string>();
+  summaries.forEach((session) => {
+    if (!session.sourceKind || byKind.has(session.sourceKind)) return;
+    byKind.set(session.sourceKind, session.sourceKindLabel);
+  });
+  return Array.from(byKind.entries())
+    .map(([value, label]) => ({ value, label }))
+    .sort((a, b) => a.label.localeCompare(b.label) || a.value.localeCompare(b.value));
+}
+
+export function buildPhotoImportHistoryState(input: PhotoImportHistoryStateInput): PhotoImportHistoryState {
+  const activeId = cleanString(input.activeId);
+  const activeFolder = input.activeFolder || null;
+  const limit = Math.max(0, Math.round(Number(input.limit ?? PHOTO_IMPORT_HISTORY_RENDER_LIMIT)));
+  const isImportHistoryActive = activeId === "imports" || activeId === "recentlyImported";
+  const aggregateSessions = isImportHistoryActive && Array.isArray(activeFolder?.importSessions)
+    ? activeFolder.importSessions
+    : [];
+  const archivedSessions = activeId === "imports" && Array.isArray(activeFolder?.archivedImportSessions)
+    ? activeFolder.archivedImportSessions
+    : [];
+  const fallbackSessions = (input.folders || []).map((folder) => folder.importSession);
+  const sourceSessions = aggregateSessions.length || archivedSessions.length
+    ? [...aggregateSessions, ...archivedSessions]
+    : fallbackSessions;
+  const sourceLimit = Math.max(aggregateSessions.length + archivedSessions.length || fallbackSessions.length, PHOTO_IMPORT_HISTORY_RENDER_LIMIT);
+  const allSummaries = isImportHistoryActive
+    ? buildPhotoImportSessionSummaries(sourceSessions, sourceLimit)
+    : [];
+  const scopedSummaries = filterPhotoImportSessionSummaries(allSummaries, {
+    libraryRoot: input.libraryRoot,
+    showArchived: input.showArchived,
+  });
+  const sourceOptions = photoImportHistorySourceOptions(scopedSummaries);
+  const filteredSummaries = filterPhotoImportSessionSummaries(scopedSummaries, {
+    query: input.query,
+    status: input.status,
+    storage: input.storage,
+    sourceKind: input.sourceKind,
+    showArchived: input.showArchived,
+  });
+  const archivableSummaries = filteredSummaries.filter((session) => !session.archived && session.status !== "running");
+  const visibleSummaries = filteredSummaries.slice(0, limit);
+  const status = input.status || "all";
+  const storage = input.storage || "all";
+  const sourceKind = cleanLower(input.sourceKind || "all") || "all";
+  const queryFiltersActive = Boolean(cleanString(input.query) || status !== "all" || storage !== "all" || sourceKind !== "all");
+  const filtersActive = queryFiltersActive || Boolean(input.showArchived);
+  const total = isImportHistoryActive
+    ? Math.max(
+      cleanNumber(activeFolder?.importSessionCount) + (input.showArchived ? cleanNumber(activeFolder?.archivedImportSessionCount) : 0),
+      scopedSummaries.length,
+    )
+    : 0;
+  const visibleTotal = cleanString(input.libraryRoot) ? scopedSummaries.length : total;
+  const matchedTotal = filtersActive ? filteredSummaries.length : visibleTotal;
+  return {
+    allSummaries,
+    scopedSummaries,
+    sourceOptions,
+    filteredSummaries,
+    archivableSummaries,
+    visibleSummaries,
+    queryFiltersActive,
+    filtersActive,
+    total,
+    visibleTotal,
+    matchedTotal,
+  };
+}
+
+export function photoImportHistoryCountLabel(
+  state: Pick<PhotoImportHistoryState, "matchedTotal" | "queryFiltersActive" | "visibleSummaries" | "visibleTotal">,
+  formatters: PhotoImportHistoryCountLabelFormatters = {},
+): string {
+  const visibleCount = state.visibleSummaries.length;
+  if (state.queryFiltersActive) {
+    if (state.matchedTotal > visibleCount) {
+      return `${labelCount(formatters, visibleCount)} ${labelText(formatters, "of")} ${labelCount(formatters, state.matchedTotal)} ${labelText(formatters, "matches")} · ${labelCount(formatters, state.visibleTotal)} ${labelText(formatters, "sessions")}`;
+    }
+    return `${labelCount(formatters, state.matchedTotal)} ${labelText(formatters, state.matchedTotal === 1 ? "match" : "matches")} · ${labelCount(formatters, state.visibleTotal)} ${labelText(formatters, "sessions")}`;
+  }
+  if (state.visibleTotal > visibleCount) {
+    return `${labelCount(formatters, visibleCount)} ${labelText(formatters, "of")} ${labelCount(formatters, state.visibleTotal)} ${labelText(formatters, "sessions")}`;
+  }
+  return `${labelCount(formatters, visibleCount)} ${labelText(formatters, visibleCount === 1 ? "session" : "sessions")}`;
+}
+
+export function photoImportHistoryProvenanceStatusLabel(updatedAssets: unknown, formatters: PhotoImportHistoryCountLabelFormatters = {}): string {
+  const updated = cleanNumber(updatedAssets);
+  return `${labelText(formatters, "Updated import source")} · ${labelCount(formatters, updated)} ${labelText(formatters, updated === 1 ? "item" : "items")}`;
+}
+
+export function photoImportHistoryBulkProvenanceStatusLabel(
+  changed: unknown,
+  updatedAssets: unknown,
+  formatters: PhotoImportHistoryCountLabelFormatters = {},
+): string {
+  const cleanChanged = cleanNumber(changed);
+  const updated = cleanNumber(updatedAssets);
+  return `${labelText(formatters, "Updated import source")} · ${labelCount(formatters, cleanChanged)} · ${labelCount(formatters, updated)} ${labelText(formatters, updated === 1 ? "item" : "items")}`;
+}
+
+export function photoImportHistoryArchiveStatusLabel(
+  archive: boolean,
+  changed: unknown,
+  formatters: PhotoImportHistoryCountLabelFormatters = {},
+): string {
+  return `${labelText(formatters, archive ? "Archived imports" : "Restored imports")} · ${labelCount(formatters, cleanNumber(changed))}`;
 }

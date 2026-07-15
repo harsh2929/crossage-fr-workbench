@@ -1,3 +1,5 @@
+import { parsePhotoNearbyCoordinate, type PhotoNearbyFilterState } from "./photoNearbyFilters";
+
 export interface PhotoPlaceMapSource {
   id?: string;
   name?: string;
@@ -8,8 +10,8 @@ export interface PhotoPlaceMapSource {
   place?: {
     label?: string;
     name?: string;
-    latitude?: string | number;
-    longitude?: string | number;
+    latitude?: string | number | null;
+    longitude?: string | number | null;
     source?: string;
   } | null;
 }
@@ -43,6 +45,17 @@ export interface PhotoPlaceMapCluster {
   coverPreviewUrl: string;
 }
 
+export interface PhotoPlaceMapPinOffset {
+  offsetX: number;
+  offsetY: number;
+}
+
+export interface PhotoPlaceMapPinLayoutOptions {
+  width?: number;
+  height?: number;
+  collisionDistancePx?: number;
+}
+
 export interface PhotoPlaceMapDensityCell {
   cellId: string;
   points: PhotoPlaceMapPoint[];
@@ -57,6 +70,8 @@ export interface PhotoPlaceMapDensityCell {
   coverPreviewUrl: string;
 }
 
+export type PhotoPlaceMapMode = "clusters" | "pins" | "density";
+
 export interface PhotoPlaceMapRadiusOverlay {
   latitude: number;
   longitude: number;
@@ -67,6 +82,19 @@ export interface PhotoPlaceMapRadiusOverlay {
   radiusY: number;
   matchedPlaceCount: number;
   matchedPhotoCount: number;
+}
+
+export interface PhotoPlaceMapRadiusCenter {
+  latitude: number;
+  longitude: number;
+  radiusKm: number;
+}
+
+export const PHOTO_PLACE_MAP_CLUSTER_RADII = [10, 7, 4, 0] as const;
+
+export function placeMapClusterRadius(zoomLevel: number): number {
+  const index = Math.max(0, Math.min(PHOTO_PLACE_MAP_CLUSTER_RADII.length - 1, Math.round(zoomLevel) - 1));
+  return PHOTO_PLACE_MAP_CLUSTER_RADII[index];
 }
 
 export function parsePhotoPlaceCoordinate(value: unknown): number | null {
@@ -190,6 +218,100 @@ export function buildPhotoPlaceMapClusters(points: PhotoPlaceMapPoint[], activeF
   });
 }
 
+export function buildPhotoPlaceMapPinOffsets(
+  clusters: readonly PhotoPlaceMapCluster[],
+  options: PhotoPlaceMapPinLayoutOptions = {},
+): Record<string, PhotoPlaceMapPinOffset> {
+  const offsets: Record<string, PhotoPlaceMapPinOffset> = {};
+  const ordered = [...clusters].sort((left, right) => (
+    left.x - right.x
+    || left.y - right.y
+    || left.clusterId.localeCompare(right.clusterId)
+  ));
+  ordered.forEach((cluster) => {
+    offsets[cluster.clusterId] = { offsetX: 0, offsetY: 0 };
+  });
+  const requestedWidth = Number(options.width);
+  const requestedHeight = Number(options.height);
+  const requestedCollisionDistance = Number(options.collisionDistancePx);
+  const canvasWidth = Number.isFinite(requestedWidth) && requestedWidth > 0 ? requestedWidth : 500;
+  const canvasHeight = Number.isFinite(requestedHeight) && requestedHeight > 0 ? requestedHeight : 200;
+  const collisionDistance = Number.isFinite(requestedCollisionDistance) && requestedCollisionDistance > 0
+    ? requestedCollisionDistance
+    : 44;
+  if (ordered.length < 2) return offsets;
+
+  const groups: Array<{ anchorX: number; anchorY: number; members: PhotoPlaceMapCluster[] }> = [];
+  const buckets = new Map<string, number[]>();
+  ordered.forEach((cluster) => {
+    const screenX = cluster.x * canvasWidth / 100;
+    const screenY = cluster.y * canvasHeight / 100;
+    const bucketX = Math.floor(screenX / collisionDistance);
+    const bucketY = Math.floor(screenY / collisionDistance);
+    let nearestGroup = -1;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    for (let yOffset = -1; yOffset <= 1; yOffset += 1) {
+      for (let xOffset = -1; xOffset <= 1; xOffset += 1) {
+        const candidates = buckets.get(`${bucketX + xOffset}:${bucketY + yOffset}`) || [];
+        candidates.forEach((groupIndex) => {
+          const group = groups[groupIndex];
+          const distance = Math.hypot(screenX - group.anchorX, screenY - group.anchorY);
+          if (distance <= collisionDistance && distance < nearestDistance) {
+            nearestGroup = groupIndex;
+            nearestDistance = distance;
+          }
+        });
+      }
+    }
+    if (nearestGroup >= 0) {
+      groups[nearestGroup].members.push(cluster);
+      return;
+    }
+    const groupIndex = groups.length;
+    groups.push({ anchorX: screenX, anchorY: screenY, members: [cluster] });
+    const bucketKey = `${bucketX}:${bucketY}`;
+    buckets.set(bucketKey, [...(buckets.get(bucketKey) || []), groupIndex]);
+  });
+
+  groups.forEach((group) => {
+    if (group.members.length < 2) return;
+    const members = [...group.members].sort((left, right) => (
+      right.photoCount - left.photoCount
+      || left.representative.name.localeCompare(right.representative.name)
+      || left.clusterId.localeCompare(right.clusterId)
+    ));
+    const radius = Math.min(64, Math.max(34, 20 / Math.sin(Math.PI / members.length)));
+    const startAngle = members.length === 2 ? Math.PI : -Math.PI / 2;
+    const placements = members.map((cluster, index) => {
+      const angle = startAngle + (index * Math.PI * 2) / members.length;
+      return {
+        cluster,
+        offsetX: Math.round(Math.cos(angle) * radius),
+        offsetY: Math.round(Math.sin(angle) * radius),
+      };
+    });
+    const edgeInset = 22;
+    const desiredXs = placements.map(({ cluster, offsetX }) => cluster.x * canvasWidth / 100 + offsetX);
+    const desiredYs = placements.map(({ cluster, offsetY }) => cluster.y * canvasHeight / 100 + offsetY);
+    const fitShift = (values: number[], size: number) => {
+      const minimum = Math.min(...values);
+      const maximum = Math.max(...values);
+      let shift = minimum < edgeInset ? edgeInset - minimum : 0;
+      if (maximum + shift > size - edgeInset) shift += size - edgeInset - maximum - shift;
+      return shift;
+    };
+    const shiftX = fitShift(desiredXs, canvasWidth);
+    const shiftY = fitShift(desiredYs, canvasHeight);
+    placements.forEach(({ cluster, offsetX, offsetY }) => {
+      offsets[cluster.clusterId] = {
+        offsetX: Math.round(offsetX + shiftX),
+        offsetY: Math.round(offsetY + shiftY),
+      };
+    });
+  });
+  return offsets;
+}
+
 export function buildPhotoPlaceMapDensityCells(points: PhotoPlaceMapPoint[], gridSize = 6): PhotoPlaceMapDensityCell[] {
   const size = Math.max(2, Math.min(12, Math.round(Number(gridSize) || 6)));
   const cellWidth = 100 / size;
@@ -238,9 +360,30 @@ export function buildPhotoPlaceMapDensityCells(points: PhotoPlaceMapPoint[], gri
     .sort((left, right) => left.photoCount - right.photoCount || left.representative.name.localeCompare(right.representative.name));
 }
 
+export function photoPlaceMapDensityAreas(
+  cells: readonly PhotoPlaceMapDensityCell[] | null | undefined,
+  pointCount: number,
+  limit = 6,
+): PhotoPlaceMapDensityCell[] {
+  const totalPoints = Math.max(0, Math.round(Number(pointCount) || 0));
+  return [...(cells || [])]
+    .filter((cell) => cell.placeCount > 1 || (cells || []).length < totalPoints)
+    .sort((left, right) => right.photoCount - left.photoCount || right.placeCount - left.placeCount || left.representative.name.localeCompare(right.representative.name))
+    .slice(0, Math.max(0, Math.round(limit)));
+}
+
+export function photoPlaceMapRadiusCenter(filter: PhotoNearbyFilterState | null | undefined): PhotoPlaceMapRadiusCenter | null {
+  if (!filter) return null;
+  const latitude = parsePhotoNearbyCoordinate(filter.latitude, -90, 90);
+  const longitude = parsePhotoNearbyCoordinate(filter.longitude, -180, 180);
+  const radiusKm = Number(filter.radiusKm || 25);
+  if (latitude === null || longitude === null || !Number.isFinite(radiusKm)) return null;
+  return { latitude, longitude, radiusKm };
+}
+
 export function buildPhotoPlaceMapRadiusOverlay(
   points: PhotoPlaceMapPoint[],
-  center: { latitude: number; longitude: number; radiusKm: number } | null,
+  center: PhotoPlaceMapRadiusCenter | null,
 ): PhotoPlaceMapRadiusOverlay | null {
   if (!center || points.length === 0) return null;
   const latitude = Number(center.latitude);
@@ -293,9 +436,17 @@ export function nearbyPhotoPlaces(points: PhotoPlaceMapPoint[], activeFolderId: 
     .slice(0, Math.max(0, limit));
 }
 
+export function photoPlaceMapActiveNearby(
+  points: PhotoPlaceMapPoint[],
+  activeFolderId: string | null | undefined,
+  limit = 4,
+): NearbyPhotoPlace[] {
+  return activeFolderId ? nearbyPhotoPlaces(points, activeFolderId, limit) : [];
+}
+
 export function nearbyPhotoPlacesWithinRadius(
   points: PhotoPlaceMapPoint[],
-  center: { latitude: number; longitude: number; radiusKm: number } | null,
+  center: PhotoPlaceMapRadiusCenter | null,
   limit = 8,
 ): NearbyPhotoPlace[] {
   if (!center || points.length === 0) return [];
@@ -309,4 +460,13 @@ export function nearbyPhotoPlacesWithinRadius(
     .filter((point) => point.distanceKm <= radiusKm)
     .sort((left, right) => left.distanceKm - right.distanceKm || right.count - left.count || left.name.localeCompare(right.name))
     .slice(0, Math.max(0, Math.round(limit)));
+}
+
+export function photoPlaceMapPanelVisible(
+  activeId: unknown,
+  activePlace: unknown,
+  radiusOverlay: PhotoPlaceMapRadiusOverlay | null | undefined,
+  pointCount: number,
+): boolean {
+  return (activeId === "places" || Boolean(activePlace) || Boolean(radiusOverlay)) && Math.max(0, Number(pointCount) || 0) > 0;
 }

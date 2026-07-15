@@ -1,0 +1,89 @@
+.model-lifecycle-panel {
+  gap: 10px;
+}
+
+.model-lifecycle-state {
+  font-weight: 700;
+}
+
+.model-lifecycle-state.ready,
+.model-lifecycle-row.pass .model-lifecycle-icon {
+  color: var(--success-control-text);
+}
+
+.model-lifecycle-state.blocked,
+.model-lifecycle-row.blocked .model-lifecycle-icon,
+.model-lifecycle-row.candidate-rejected .model-lifecycle-icon {
+  color: var(--danger-text);
+}
+
+.model-lifecycle-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-block: 1px solid var(--separator);
+}
+
+.model-lifecycle-summary > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px 8px;
+}
+
+.model-lifecycle-summary strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.model-lifecycle-summary small,
+.model-lifecycle-row small,
+.model-lifecycle-policy {
+  color: var(--secondary);
+  overflow-wrap: anywhere;
+}
+
+.model-lifecycle-list {
+  display: grid;
+}
+
+.model-lifecycle-row {
+  display: grid;
+  grid-template-columns: 22px minmax(140px, 0.8fr) minmax(220px, 1.2fr);
+  gap: 8px;
+  align-items: start;
+  min-width: 0;
+  padding: 9px 2px;
+  border-bottom: 1px solid var(--separator);
+}
+
+.model-lifecycle-row > span:not(.model-lifecycle-icon) {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.model-lifecycle-row.not-installed .model-lifecycle-icon,
+.model-lifecycle-row.unavailable .model-lifecycle-icon {
+  color: var(--secondary);
+}
+
+.model-lifecycle-empty {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 44px;
+  color: var(--secondary);
+}
+
+@media (max-width: 640px) {
+  .model-lifecycle-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .model-lifecycle-row {
+    grid-template-columns: 22px minmax(0, 1fr);
+  }
+
+  .model-lifecycle-row > span:last-child {
+    grid-column: 2;
+  }
+}

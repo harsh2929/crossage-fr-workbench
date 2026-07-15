@@ -1,3 +1,5 @@
+import type { PhotoImportSourceKind } from "../types";
+
 export interface PhotoImportAccessEntry {
   path: string;
   isDir?: boolean;
@@ -70,6 +72,18 @@ const photoImportSourceLabels: Record<PhotoImportInferredSourceKind, string> = {
   downloads: "Downloads",
   app: "Other app",
 };
+
+export const PHOTO_IMPORT_SOURCE_OPTIONS: Array<{ kind: PhotoImportSourceKind; label: string }> = [
+  { kind: "folder", label: "Files/folders" },
+  { kind: "camera", label: "Camera/device" },
+  { kind: "library", label: "Photo library" },
+  { kind: "mail", label: "Mail" },
+  { kind: "safari", label: "Safari" },
+  { kind: "messages", label: "Messages" },
+  { kind: "airdrop", label: "AirDrop" },
+  { kind: "downloads", label: "Downloads" },
+  { kind: "app", label: "Other app" },
+];
 
 const photoImportSystemSourceKindLabels: Record<PhotoImportSystemSourceKind, string> = {
   folder: "Folder",
@@ -165,6 +179,29 @@ function normalizeEntrySourceKind(value: unknown): PhotoImportInferredSourceKind
 function sourceLabelForKind(kind: PhotoImportInferredSourceKind, fallbackLabel = "Imported files") {
   if (kind === "folder") return cleanImportAttributionText(fallbackLabel, 80) || photoImportSourceLabels.folder;
   return photoImportSourceLabels[kind] || cleanImportAttributionText(fallbackLabel, 80) || photoImportSourceLabels.folder;
+}
+
+export function photoImportSourceLabel(kind: PhotoImportSourceKind, fallback: string, preserveFallback = false): string {
+  const cleanFallback = String(fallback || "").trim();
+  if (preserveFallback && cleanFallback) return cleanFallback;
+  if (kind === "folder") return cleanFallback;
+  return PHOTO_IMPORT_SOURCE_OPTIONS.find((option) => option.kind === kind)?.label || cleanFallback;
+}
+
+export function photoImportReviewSourceLabel(kind: PhotoImportSourceKind, fallback: string, preserveFallback = false): string {
+  const label = photoImportSourceLabel(kind, fallback, preserveFallback);
+  if (!preserveFallback || kind === "folder") return label;
+  const kindLabel = PHOTO_IMPORT_SOURCE_OPTIONS.find((option) => option.kind === kind)?.label || "";
+  if (!label || !kindLabel || label.toLowerCase() === kindLabel.toLowerCase()) return label || kindLabel;
+  return `${label} · ${kindLabel}`;
+}
+
+export function photoImportSourceKindFromInference(kind: PhotoImportInferredSourceKind): PhotoImportSourceKind {
+  return PHOTO_IMPORT_SOURCE_OPTIONS.some((option) => option.kind === kind) ? kind : "folder";
+}
+
+export function normalizeExternalPhotoImportSourceKind(kind?: PhotoImportSourceKind | string): PhotoImportSourceKind {
+  return PHOTO_IMPORT_SOURCE_OPTIONS.some((option) => option.kind === kind) ? kind as PhotoImportSourceKind : "folder";
 }
 
 export function photoImportSystemSourceKindLabel(kind: unknown): string {

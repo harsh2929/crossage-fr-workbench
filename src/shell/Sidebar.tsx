@@ -4,6 +4,7 @@
 // was removed; the slim .language-picker keeps the same selector the e2e setup
 // relies on, reachable on first load. Phase 1 added the contextual rail here.
 import { BookOpen, ChevronRight } from "lucide-react";
+import { useEffect, useRef, type KeyboardEvent } from "react";
 import { languageOptions, type LanguageCode, type TranslationKey } from "../i18n";
 import type { NavMeta, NavTab, TabKey } from "./navModel";
 
@@ -25,6 +26,38 @@ interface SidebarProps {
 
 export function Sidebar(props: SidebarProps) {
   const { tabs, activeTab, onSelect, navMeta, t, iconUrl, isDemoMode, engineBadge, engineTitle } = props;
+  const navRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const nav = navRef.current;
+      const active = nav?.querySelector<HTMLElement>(`[data-tab="${activeTab}"]`);
+      if (!nav || !active || nav.scrollWidth <= nav.clientWidth) return;
+      const navRect = nav.getBoundingClientRect();
+      const activeRect = active.getBoundingClientRect();
+      if (activeRect.left < navRect.left || activeRect.right > navRect.right) {
+        active.scrollIntoView({ behavior: "auto", block: "nearest", inline: "nearest" });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeTab]);
+
+  function handleNavigationKey(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    const last = tabs.length - 1;
+    const rtl = window.getComputedStyle(navRef.current || event.currentTarget).direction === "rtl";
+    let next = -1;
+    if (event.key === "ArrowDown") next = index === last ? 0 : index + 1;
+    else if (event.key === "ArrowUp") next = index === 0 ? last : index - 1;
+    else if (event.key === "ArrowRight") next = rtl ? (index === 0 ? last : index - 1) : (index === last ? 0 : index + 1);
+    else if (event.key === "ArrowLeft") next = rtl ? (index === last ? 0 : index + 1) : (index === 0 ? last : index - 1);
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = last;
+    if (next < 0) return;
+    event.preventDefault();
+    onSelect(tabs[next].key);
+    navRef.current?.querySelectorAll<HTMLButtonElement>("button[data-tab]")[next]?.focus();
+  }
+
   return (
     <aside className="sidebar">
       <div className="brand brand--lockup">
@@ -36,8 +69,8 @@ export function Sidebar(props: SidebarProps) {
           <span className="brand-subtitle">{t("app.subtitle")}</span>
         </div>
       </div>
-      <nav className="nav-list" aria-label="Primary navigation">
-        {tabs.map((tab) => {
+      <nav ref={navRef} className="nav-list" aria-label="Primary navigation">
+        {tabs.map((tab, index) => {
           const Icon = tab.icon;
           return (
             <button
@@ -48,6 +81,8 @@ export function Sidebar(props: SidebarProps) {
               aria-current={activeTab === tab.key ? "page" : undefined}
               aria-label={navMeta[tab.key]?.label ? `${t(tab.labelKey)} ${navMeta[tab.key]?.label}` : t(tab.labelKey)}
               title={t(tab.labelKey)}
+              tabIndex={activeTab === tab.key ? 0 : -1}
+              onKeyDown={(event) => handleNavigationKey(event, index)}
             >
               <Icon size={18} />
               <span className="nav-label">{t(tab.labelKey)}</span>
@@ -56,15 +91,14 @@ export function Sidebar(props: SidebarProps) {
           );
         })}
       </nav>
-      <div className="sidebar-card">
-        <span className="subtle">Mode</span>
-        <strong>{isDemoMode ? "Simple engine" : "Full model"}</strong>
-        <span className={isDemoMode ? "pill amber" : "pill green"} title={engineTitle}>{engineBadge}</span>
-        <button type="button" className="sidebar-card-manage" onClick={props.onManageEngine}>
-          <span>Manage engine</span>
-          <ChevronRight size={14} aria-hidden="true" />
-        </button>
-      </div>
+      <button type="button" className="sidebar-engine-summary" onClick={props.onManageEngine} title={engineTitle}>
+        <span className={isDemoMode ? "sidebar-engine-dot amber" : "sidebar-engine-dot green"} aria-hidden="true" />
+        <span className="sidebar-engine-copy">
+          <strong>{isDemoMode ? "Simple engine" : "Full model"}</strong>
+          <small>{engineBadge}</small>
+        </span>
+        <ChevronRight size={14} aria-hidden="true" />
+      </button>
       <div className="sidebar-footer">
         <label className="language-picker" title={t("language.title")}>
           <span>{t("language.label")}</span>

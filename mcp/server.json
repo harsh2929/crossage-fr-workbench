@@ -1,0 +1,14 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.harsh2929/vintrace",
+  "title": "Vintrace",
+  "description": "Private, local-first photo search, review, editing, and face workflows over MCP.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/harsh2929/crossage-fr-workbench",
+    "source": "github",
+    "id": "1264754745"
+  },
+  "websiteUrl": "https://github.com/harsh2929/crossage-fr-workbench",
+  "packages": []
+}

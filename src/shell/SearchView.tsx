@@ -1,23 +1,60 @@
 // Unified Search destination (Phase 1). Combines literal/facet search
 // (search_photo_library) with on-device semantic ranking (semantic_search_photos),
 // homing the previously-orphaned AI search command into a first-class tab.
-import { useRef, useState } from "react";
-import { AlertTriangle, ExternalLink, ImageIcon, Loader2, Search, Sparkles, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { AlertTriangle, AudioLines, Clock3, ExternalLink, ImageIcon, Loader2, Search, Sparkles, Video, X } from "lucide-react";
 import type { TranslationKey } from "../i18n";
-import type { PhotoLibrarySearchResult, SemanticSearchPhotosValue } from "../types";
+import type { PhotoLibrarySearchItem, PhotoLibrarySearchResult, SemanticSearchPhotoItem, SemanticSearchPhotosValue } from "../types";
 import { revealDelayStyle } from "../lib/revealStagger";
+import { semanticSearchUnavailableMessage } from "../lib/semanticSearchStatus";
+import { photoSearchIndexNotice } from "../views/photoIndexingStatus";
 
 interface SearchViewProps {
+  active: boolean;
   searchPhotoLibrary: (params: Record<string, unknown>) => Promise<PhotoLibrarySearchResult>;
   semanticSearchPhotos: (params: Record<string, unknown>) => Promise<SemanticSearchPhotosValue | null>;
+  onOpenResult?: (item: PhotoLibrarySearchItem) => void;
   t: (key: TranslationKey) => string;
   uiText: (source: string) => string;
 }
 
 const SUGGESTION_SEEDS = ["beach", "sunset", "dogs", "birthday", "documents", "mountains", "food", "screenshots"];
+const RECENT_SEARCHES_KEY = "vintrace.search.recent.v1";
+const RECENT_SEARCHES_LIMIT = 6;
+
+function readRecentSearches(): string[] {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(RECENT_SEARCHES_KEY) || "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((value) => String(value || "").trim())
+      .filter((value, index, rows) => value.length >= 2 && rows.findIndex((row) => row.toLocaleLowerCase() === value.toLocaleLowerCase()) === index)
+      .slice(0, RECENT_SEARCHES_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+function writeRecentSearches(values: string[]) {
+  try {
+    window.localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(values.slice(0, RECENT_SEARCHES_LIMIT)));
+  } catch {
+    /* Search remains fully usable when browser storage is unavailable. */
+  }
+}
 
 function basename(path: string): string {
   return path.split(/[\\/]/).pop() || path;
+}
+
+function formatVideoTimestamp(value: number | undefined): string {
+  const totalSeconds = Math.max(0, Math.floor((Number(value) || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+    : `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 function reveal(path: string) {
@@ -28,7 +65,7 @@ function reveal(path: string) {
   }
 }
 
-export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText }: SearchViewProps) {
+export function SearchView({ active, searchPhotoLibrary, semanticSearchPhotos, onOpenResult, t, uiText }: SearchViewProps) {
   const [query, setQuery] = useState("");
   const [aiMode, setAiMode] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -36,10 +73,18 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
   const [textResult, setTextResult] = useState<PhotoLibrarySearchResult | null>(null);
   const [semanticResult, setSemanticResult] = useState<SemanticSearchPhotosValue | null>(null);
   const [submitted, setSubmitted] = useState("");
+  const [recentSearches, setRecentSearches] = useState<string[]>(readRecentSearches);
   // Distinguishes a true failure (announce assertively, AlertTriangle) from a
   // benign empty result (announce politely, neutral icon).
   const [errorIsFailure, setErrorIsFailure] = useState(false);
   const searchRequestSeqRef = useRef(0);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!active) return;
+    const frame = window.requestAnimationFrame(() => searchInputRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [active]);
 
   function invalidateSearchResults() {
     searchRequestSeqRef.current += 1;
@@ -60,20 +105,40 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
     setError("");
     setErrorIsFailure(false);
     setSubmitted(value);
+    setRecentSearches((current) => {
+      const folded = value.toLocaleLowerCase();
+      const next = [value, ...current.filter((item) => item.toLocaleLowerCase() !== folded)].slice(0, RECENT_SEARCHES_LIMIT);
+      writeRecentSearches(next);
+      return next;
+    });
     try {
       if (aiMode) {
         const result = await semanticSearchPhotos({ query: value, limit: 60 });
         if (!isCurrentSearch()) return;
         setSemanticResult(result);
         setTextResult(null);
-        if (result && !result.available) {
-          setError(result.reason || uiText("On-device AI search is not installed."));
-          setErrorIsFailure(true);
-        } else if (result && result.results.length === 0) {
+        const semanticResultCount = result ? Math.max(result.results.length, result.items?.length || 0) : 0;
+        if (!result || !result.available || (semanticResultCount === 0 && (result.missingEmbeddings || 0) > 0)) {
+          const fallback = await searchPhotoLibrary({ query: value, limit: 24, suggestionLimit: 24, previewBudget: 12 });
+          if (!isCurrentSearch()) return;
+          setTextResult(fallback);
+          const availability = result
+            ? semanticSearchUnavailableMessage(result.reason, uiText)
+            : uiText("On-device AI search could not start.");
+          const indexing = result && result.available && (result.missingEmbeddings || 0) > 0
+            ? result.queued
+              ? uiText("Semantic indexing is queued.")
+              : uiText("Semantic indexing has not finished for this library yet.")
+            : availability;
+          setError(`${indexing} ${fallback.total > 0 ? uiText("Showing keyword matches instead.") : uiText("Keyword search found no matches.")}`);
+          setErrorIsFailure(!result || !result.available);
+        } else if ((result.missingEmbeddings || 0) > 0) {
+          setError(uiText("Some photos and video moments are still being indexed. Showing the AI matches available now."));
+        } else if (semanticResultCount === 0) {
           setError(uiText("No semantic matches found."));
         }
       } else {
-        const result = await searchPhotoLibrary({ query: value, limit: 24, suggestionLimit: 24 });
+        const result = await searchPhotoLibrary({ query: value, limit: 24, suggestionLimit: 24, previewBudget: 12 });
         if (!isCurrentSearch()) return;
         setTextResult(result);
         setSemanticResult(null);
@@ -81,7 +146,20 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
       }
     } catch (err) {
       if (!isCurrentSearch()) return;
-      setError(err instanceof Error ? err.message : String(err));
+      if (aiMode) {
+        try {
+          const fallback = await searchPhotoLibrary({ query: value, limit: 24, suggestionLimit: 24, previewBudget: 12 });
+          if (!isCurrentSearch()) return;
+          setTextResult(fallback);
+          setSemanticResult(null);
+          setError(`${uiText("AI search could not finish.")} ${fallback.total > 0 ? uiText("Showing keyword matches instead.") : uiText("Keyword search found no matches.")}`);
+          setErrorIsFailure(true);
+          return;
+        } catch {
+          if (!isCurrentSearch()) return;
+        }
+      }
+      setError(uiText("Search could not finish. Try again."));
       setErrorIsFailure(true);
       setTextResult(null);
       setSemanticResult(null);
@@ -91,7 +169,32 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
   }
 
   const semanticBest = semanticResult?.results[0]?.score || 0;
-  const hasResults = Boolean(textResult || (semanticResult && semanticResult.results.length > 0));
+  const hasResults = Boolean((textResult && textResult.total > 0) || (semanticResult && semanticResult.results.length > 0));
+  const lexicalIndexNotice = photoSearchIndexNotice(textResult?.searchIndex, null, {
+    uiText,
+    formatCount: (value) => value.toLocaleString(),
+  });
+
+  function openPhotoResult(sourcePath: string, title = "", semanticItem?: SemanticSearchPhotoItem) {
+    if (onOpenResult) {
+      onOpenResult({
+        id: semanticItem?.segmentId ? `video-segment:${semanticItem.segmentId}` : `photo:${sourcePath}`,
+        kind: "photo",
+        title: title || basename(sourcePath),
+        sourcePath,
+        searchText: title || basename(sourcePath),
+        mediaKind: semanticItem?.mediaKind,
+        resultKind: semanticItem?.resultKind,
+        segmentId: semanticItem?.segmentId,
+        timestampMs: semanticItem?.timestampMs,
+        startMs: semanticItem?.startMs,
+        endMs: semanticItem?.endMs,
+        durationMs: semanticItem?.durationMs,
+      });
+      return;
+    }
+    reveal(sourcePath);
+  }
 
   return (
     <div className="search-view">
@@ -104,9 +207,9 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
       >
         <Search size={22} className="search-hero-icon" />
         <input
+          ref={searchInputRef}
           className="search-hero-input"
           type="search"
-          autoFocus
           value={query}
           onChange={(event) => setQuery(event.currentTarget.value)}
           placeholder={uiText("Search photos, people, places, things")}
@@ -153,7 +256,7 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
 
       <div className="search-scope-chips" role="note">
         <span className={aiMode ? "search-scope-hint ai" : "search-scope-hint"}>{aiMode ? uiText("On-device AI ranking") : uiText("Keyword & facet search")}</span>
-        <span className="search-mode-help">{aiMode ? uiText("Finds photos by meaning, on your device.") : uiText("Matches names, dates, tags, and text.")}</span>
+        <span className="search-mode-help">{aiMode ? uiText("Finds photos and video moments by meaning, on your device.") : uiText("Matches names, dates, tags, and text.")}</span>
       </div>
 
       {busy && <div className="search-status" role="status" aria-live="polite"><Loader2 size={15} className="spin" /><span>{uiText("Searching")} “{submitted}”…</span></div>}
@@ -162,7 +265,83 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
         <div className="search-status" role={errorIsFailure ? "alert" : "status"}>
           {errorIsFailure ? <AlertTriangle size={15} /> : <Search size={15} />}
           <span>{error}</span>
+          {errorIsFailure && submitted && (
+            <button type="button" className="search-status-retry" onClick={() => void runSearch(submitted)}>
+              {uiText("Try again")}
+            </button>
+          )}
         </div>
+      )}
+
+      {lexicalIndexNotice.pending && !busy && (
+        <div className="search-index-status" role="status" aria-label={uiText("Search indexing status")}>
+          <Clock3 size={15} />
+          <span>
+            <strong>{uiText("Search results may be incomplete")}</strong>
+            <small>{lexicalIndexNotice.detail} {lexicalIndexNotice.queueDetail}</small>
+          </span>
+        </div>
+      )}
+
+      {!hasResults && !busy && !submitted && !error && (
+        <section className="search-start" aria-label={uiText("Search guidance")}>
+          <div className="search-start-intro">
+            <span className="search-start-icon"><Search size={19} /></span>
+            <div>
+              <strong>{uiText("Search your photo library")}</strong>
+              <p>{uiText("Describe a scene or use names, dates, tags, and text. Your library stays on this device.")}</p>
+            </div>
+          </div>
+          <div className="search-start-modes">
+            <div>
+              <Sparkles size={15} />
+              <span>
+                <strong>{uiText("AI search")}</strong>
+                <small>{uiText("Finds ideas and scenes after local indexing is ready.")}</small>
+              </span>
+            </div>
+            <div>
+              <Search size={15} />
+              <span>
+                <strong>{uiText("Keyword search")}</strong>
+                <small>{uiText("Matches library details immediately.")}</small>
+              </span>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {!hasResults && !busy && recentSearches.length > 0 && (
+        <section className="search-recents" aria-label={uiText("Recent searches")}>
+          <header>
+            <span><Clock3 size={14} /><strong>{uiText("Recent searches")}</strong></span>
+            <button
+              type="button"
+              onClick={() => {
+                setRecentSearches([]);
+                writeRecentSearches([]);
+              }}
+            >
+              {uiText("Clear")}
+            </button>
+          </header>
+          <div>
+            {recentSearches.map((recent) => (
+              <button
+                key={recent.toLocaleLowerCase()}
+                type="button"
+                className="search-recent-chip"
+                onClick={() => {
+                  setQuery(recent);
+                  void runSearch(recent);
+                }}
+              >
+                <Clock3 size={13} />
+                <span>{recent}</span>
+              </button>
+            ))}
+          </div>
+        </section>
       )}
 
       {!hasResults && !busy && (
@@ -198,21 +377,25 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
               : semanticResult.results.map((r) => ({ ...r }))
             ).map((item, index) => {
               const pct = semanticBest > 0 ? Math.max(1, Math.round((item.score / semanticBest) * 100)) : 0;
-              const url = "previewUrl" in item ? (item as { previewUrl?: string }).previewUrl || "" : "";
+              const semanticItem = item as SemanticSearchPhotoItem;
+              const url = semanticItem.previewUrl || "";
+              const isVideoSegment = semanticItem.resultKind === "videoSegment";
+              const timestampLabel = isVideoSegment ? formatVideoTimestamp(semanticItem.timestampMs) : "";
               return (
                 <button
-                  key={item.sourcePath}
+                  key={semanticItem.segmentId || semanticItem.sourcePath}
                   type="button"
                   className="search-result-card"
                   style={revealDelayStyle(index)}
-                  onClick={() => reveal(item.sourcePath)}
-                  title={`${basename(item.sourcePath)} · ${pct}%`}
-                  aria-label={`${basename(item.sourcePath)}, ${pct}% ${uiText("match")}`}
+                  onClick={() => openPhotoResult(semanticItem.sourcePath, basename(semanticItem.sourcePath), semanticItem)}
+                  title={`${uiText("Open in Library")}: ${basename(semanticItem.sourcePath)} · ${pct}%${timestampLabel ? ` · ${timestampLabel}` : ""}`}
+                  aria-label={`${uiText("Open in Library")}: ${basename(semanticItem.sourcePath)}, ${pct}% ${uiText("match")}${timestampLabel ? `, ${uiText("video moment")} ${timestampLabel}` : ""}`}
                 >
                   <span className={`search-result-thumb${url ? "" : " placeholder"}`}>
-                    {url ? <img src={url} alt="" loading="lazy" decoding="async" /> : <ImageIcon size={20} />}
+                    {url ? <img src={url} alt="" loading="lazy" decoding="async" /> : isVideoSegment ? <Video size={20} /> : <ImageIcon size={20} />}
                   </span>
-                  <span className="search-result-name">{basename(item.sourcePath)}</span>
+                  <span className="search-result-name">{basename(semanticItem.sourcePath)}</span>
+                  {timestampLabel && <span className="search-result-moment"><Video size={12} />{timestampLabel}</span>}
                   <span className="search-result-score">{pct}%</span>
                 </button>
               );
@@ -230,19 +413,25 @@ export function SearchView({ searchPhotoLibrary, semanticSearchPhotos, t, uiText
           <div className="search-results-grid reveal-stagger">
             {group.items.map((item, index) => {
               const url = item.previewUrl || item.coverPreviewUrl || "";
+              const isAudioSegment = item.resultKind === "audioSegment";
+              const timestampLabel = isAudioSegment ? formatVideoTimestamp(item.timestampMs) : "";
               return (
                 <button
                   key={item.id}
                   type="button"
                   className="search-result-card"
                   style={revealDelayStyle(index)}
-                  onClick={() => item.sourcePath && reveal(item.sourcePath)}
-                  title={item.title}
+                  onClick={() => {
+                    if (onOpenResult) onOpenResult(item);
+                    else if (item.sourcePath) reveal(item.sourcePath);
+                  }}
+                  title={`${item.title}${timestampLabel ? ` · ${timestampLabel}` : ""}`}
                 >
                   <span className="search-result-thumb">
-                    {url ? <img src={url} alt="" loading="lazy" decoding="async" /> : <ImageIcon size={20} />}
+                    {url ? <img src={url} alt="" loading="lazy" decoding="async" /> : isAudioSegment ? <AudioLines size={20} /> : <ImageIcon size={20} />}
                   </span>
                   <span className="search-result-name">{item.title || (item.sourcePath ? basename(item.sourcePath) : item.id)}</span>
+                  {timestampLabel && <span className="search-result-moment"><AudioLines size={12} />{timestampLabel}</span>}
                   {item.sourcePath && <ExternalLink size={13} className="search-result-open" />}
                 </button>
               );

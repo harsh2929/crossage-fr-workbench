@@ -7,12 +7,16 @@
         "-m",
         "crossage_fr.mcp_server",
         "--workspace",
-        "/absolute/path/to/vintrace-workspace"
+        "/absolute/path/to/vintrace-workspace",
+        "--tool-profile",
+        "images"
       ],
       "env": {
         "PYTHONPATH": "/absolute/path/to/face",
         "VINTRACE_WORKSPACE": "/absolute/path/to/vintrace-workspace",
-        "CROSSAGE_WORKSPACE": "/absolute/path/to/vintrace-workspace"
+        "CROSSAGE_WORKSPACE": "/absolute/path/to/vintrace-workspace",
+        "VINTRACE_MCP_ALLOWED_ROOTS": "/absolute/path/to/approved-media-root",
+        "VINTRACE_REQUIRE_DB_ENCRYPTION": "1"
       }
     }
   }

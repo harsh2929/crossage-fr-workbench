@@ -1,11 +1,20 @@
 [mcp_servers.vintrace]
 command = "/absolute/path/to/face/.venv/bin/python"
-args = ["-m", "crossage_fr.mcp_server", "--workspace", "/absolute/path/to/vintrace-workspace"]
+args = ["-m", "crossage_fr.mcp_server", "--workspace", "/absolute/path/to/vintrace-workspace", "--tool-profile", "images"]
 cwd = "/absolute/path/to/face"
 startup_timeout_sec = 20
 tool_timeout_sec = 600
-
+default_tools_approval_mode = "writes"
+enabled = true
 [mcp_servers.vintrace.env]
 PYTHONPATH = "/absolute/path/to/face"
 VINTRACE_WORKSPACE = "/absolute/path/to/vintrace-workspace"
 CROSSAGE_WORKSPACE = "/absolute/path/to/vintrace-workspace"
+VINTRACE_MCP_ALLOWED_ROOTS = "/absolute/path/to/approved-media-root"
+VINTRACE_REQUIRE_DB_ENCRYPTION = "1"
+
+[mcp_servers.vintrace.tools.get_image_preview]
+approval_mode = "prompt"
+
+[mcp_servers.vintrace.tools.run_destructive_image_action]
+approval_mode = "prompt"

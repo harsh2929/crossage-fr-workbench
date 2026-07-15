@@ -68,6 +68,17 @@ run("average quality is the mean across a person's photos", () => {
   assert.ok(Math.abs(p.averageQuality - 0.5) < 1e-9, p.averageQuality);
 });
 
+run("synthetic age references are status, not duplicate photo tiles", () => {
+  const parent = ref("A", "child", 0.8, { referenceKind: "real" });
+  const bridge = ref("A", "adolescent", 0.7, { referenceKind: "synthetic-age-trajectory", parentRefIds: [parent.refId, "adult"] });
+  const adult = ref("A", "adult", 0.9, { referenceKind: "real" });
+  const [person] = mod.groupReferencesByPerson([parent, bridge, adult]);
+  assert.strictEqual(person.count, 2);
+  assert.strictEqual(person.syntheticAgeCount, 1);
+  assert.deepStrictEqual(person.photos.map((photo) => photo.refId).sort(), [parent.refId, adult.refId].sort());
+  assert.deepStrictEqual(person.ageCoverage, ["child", "adult"]);
+});
+
 run("filterPeople matches name case-insensitively", () => {
   const people = mod.groupReferencesByPerson([ref("Jane Doe", "adult", 0.8), ref("John", "adult", 0.8)]);
   assert.deepStrictEqual(mod.filterPeople(people, "ja").map((p) => p.name), ["Jane Doe"]);

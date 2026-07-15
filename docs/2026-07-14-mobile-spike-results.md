@@ -195,6 +195,8 @@ This preserves the bold, maximalist direction while staying on Apple's supported
 >
 > **An Emergency Kit with no backup archive to open is a worthless piece of paper — and a dangerous false sense of safety.**
 
+> **⚠️ CORRECTION (2026-07-14, after tracing the code): "recovery is decorative" was WRONG at the crypto layer.** The scrypt+AES-GCM recovery envelope IS bundled inside the backup ZIP, and it was proven end-to-end that the printed recovery code alone opens the inner SQLCipher DB and decrypts the biometric files. `VINTRACE_BACKUP_PASSPHRASE` is only an optional, off-by-default *outer* wrapper. **But tracing found a worse, real bug:** `restore_workspace_backup()` could not complete a cross-machine restore at all — it verified the archived DB with the *host's* key, which differs on a new machine, raising an uncaught `WorkspaceEncryptionError` that aborted restore before extracting a single file. **A user whose disk died could not restore.** FIXED — see `docs/2026-07-14-p0-fixes.patch` (fix based on distinguishing a genuine key mismatch, via the manifest's `workspaceKeyId`, from corruption).
+
 So we ship **two artifacts**, and **gate onboarding on both**:
 1. A **printed Emergency Kit** containing a **24-word BIP39-encoded 256-bit Recovery Key**.
 2. A **configured backup destination** holding encrypted archives.

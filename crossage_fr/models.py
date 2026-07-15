@@ -49,6 +49,14 @@ class EmbeddingResult:
     # Normalized alignment residual: ~0 = canonical face geometry, high = bad
     # landmarks / extreme pose the recognizer crop cannot trust. 0.0 = unknown.
     align_error: float = 0.0
+    # Alternate-alignment A/B telemetry. The original five-point embedding is
+    # retained unless the selected strategy improves geometry and FIQA without
+    # identity drift; these fields make that decision auditable through caches.
+    alignment_rescued: bool = False
+    alignment_strategy: str = ""
+    alignment_original_error: float = 0.0
+    alignment_quality_gain: float = 0.0
+    alignment_attempts: int = 0
 
 
 @dataclass(slots=True)
@@ -67,6 +75,25 @@ class ReferenceFace:
     # §5.4: provenance of capture_date ("exif"/"mtime"/"none"/"unknown"). Defaulted
     # so references.json rows saved before this field load as "unknown".
     capture_date_provenance: str = "unknown"
+    # Synthetic cross-age references are either embedding-only derivatives between
+    # real, consented age bands or explicitly reviewed AI-generated age portraits.
+    # Provenance and method version keep both distinct from authentic captures.
+    reference_kind: str = "real"
+    synthetic_method_version: str = ""
+    synthetic_target_age_bucket: str = ""
+    parent_ref_ids: list[str] = field(default_factory=list)
+    derivation_provenance: dict[str, Any] = field(default_factory=dict)
+    # Enrollment authenticity triage is review-only. These fields preserve the
+    # exact local screen result and any explicit human override without treating
+    # the score as identity proof, provenance, liveness, or PAD.
+    synthetic_screen_score: float | None = None
+    synthetic_screen_original_score: float | None = None
+    synthetic_screen_recompressed_score: float | None = None
+    synthetic_screen_threshold: float | None = None
+    synthetic_screen_model_id: str = ""
+    synthetic_screen_model_version: str = ""
+    synthetic_screen_reviewed: bool = False
+    synthetic_screen_human_override: bool = False
 
 
 @dataclass(slots=True)
@@ -88,6 +115,13 @@ class ReviewCandidate:
     video_timestamp_ms: int | None = None
     video_frame_index: int | None = None
     video_duration_ms: int | None = None
+    video_track_id: str = ""
+    video_track_version: str = ""
+    video_track_start_ms: int | None = None
+    video_track_end_ms: int | None = None
+    video_track_frame_count: int = 0
+    video_track_keyframe_timestamps_ms: list[int] = field(default_factory=list)
+    video_track_keyframe_indices: list[int] = field(default_factory=list)
     source_hash: str = ""
     pose_bucket: str = "unknown"
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat(timespec="seconds") + "Z")
@@ -113,6 +147,9 @@ class ReviewCandidate:
     # matches first and pushes information-limited faces out of the way.
     review_priority: float = 0.0
     review_lane: str = ""
+    calibrated_probability: float | None = None
+    calibration_source: str = ""
+    calibration_version: str = ""
 
     def __post_init__(self) -> None:
         # §5.4 invariant (enforced at the data-model level so EVERY construction —
@@ -139,6 +176,7 @@ RISK_FLAG_NOTE_MARKERS = {
     "single-reference-hard-pose": ("only one hard-angle signal",),
     "single-reference-match": ("only one saved photo supported",),
     "pose-reranked": ("hard-angle match used pose-aware scoring",),
+    "video-track-template": ("pooled", "face track"),
 }
 
 

@@ -53,6 +53,77 @@ run("omits GPS/model-tags/detected-items rows when absent", () => {
   assert.strictEqual(meta.gpsMetadata, "");
   assert.strictEqual(meta.modelTags, "");
   assert.strictEqual(meta.detectedItems, "");
+  assert.deepStrictEqual(meta.contentCredentials, []);
+});
+
+run("labels workspace-local and global Content Credential trust without conflating them", () => {
+  const meta = buildPhotoTechnicalMetadata({
+    assetMetadata: {
+      editContentCredentials: {
+        present: true,
+        embedded: true,
+        cryptographicallyValid: true,
+        locallyTrusted: true,
+        globallyTrusted: false,
+        containsAiHistory: true,
+        topLevelAiEdit: true,
+        manifestId: "urn:c2pa:local",
+      },
+      contentCredentials: {
+        present: true,
+        embedded: true,
+        cryptographicallyValid: true,
+        locallyTrusted: false,
+        globallyTrusted: true,
+        containsAiHistory: false,
+        topLevelAiEdit: false,
+        manifestId: "urn:c2pa:global",
+      },
+    },
+  });
+  assert.strictEqual(meta.contentCredentials.length, 2);
+  assert.deepStrictEqual(meta.contentCredentials[0], {
+    scope: "active",
+    state: "valid",
+    label: "Active edit",
+    summary: "Embedded · Signature valid",
+    trust: "Workspace-local trust (not global)",
+    aiHistory: "AI edit in this manifest",
+    manifestId: "urn:c2pa:local",
+    error: "",
+    valid: true,
+  });
+  assert.strictEqual(meta.contentCredentials[1].trust, "Global C2PA trust");
+  assert.strictEqual(meta.contentCredentials[1].aiHistory, "No AI action declared");
+});
+
+run("distinguishes an absent Content Credential from a validation failure", () => {
+  const meta = buildPhotoTechnicalMetadata({
+    assetMetadata: {
+      contentCredentials: {
+        present: false,
+        embedded: false,
+        validationState: "absent",
+        cryptographicallyValid: false,
+        locallyTrusted: false,
+        globallyTrusted: false,
+        containsAiHistory: false,
+        topLevelAiEdit: false,
+        error: "",
+      },
+    },
+  });
+  assert.deepStrictEqual(meta.contentCredentials[0], {
+    scope: "original",
+    state: "absent",
+    label: "Original",
+    summary: "No Content Credential",
+    trust: "",
+    aiHistory: "",
+    manifestId: "",
+    error: "",
+    valid: false,
+  });
 });
 
 console.log("photo_info_metadata: all tests passed");

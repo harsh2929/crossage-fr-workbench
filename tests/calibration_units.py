@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import tempfile
 import os
+import sqlite3
 from pathlib import Path
 
 from crossage_fr.match.calibration import (
@@ -78,7 +79,7 @@ def test_calibration_labels_round_trip_with_stratification() -> None:
             {
                 "sourcePath": "/a.jpg", "expectedPerson": "Alice", "actualPerson": "Alice",
                 "matchScore": 0.42, "isMatch": True,
-                "poseBucket": "frontal", "ageGapYears": 12.0, "rawCosine": 0.39,
+                "poseBucket": "frontal", "mediaKind": "video", "ageGapYears": 12.0, "rawCosine": 0.39,
             },
         )
         # A label with no raw cosine captured (pre-1.2 style) -> falls back to matchScore.
@@ -94,11 +95,150 @@ def test_calibration_labels_round_trip_with_stratification() -> None:
         assert len(rows) == 2
         assert by_match[True]["rawCosine"] == 0.39
         assert by_match[True]["poseBucket"] == "frontal"
+        assert by_match[True]["mediaKind"] == "video"
         assert by_match[True]["ageGapYears"] == 12.0
         # raw cosine fallback for the un-stamped negative
         assert by_match[False]["rawCosine"] == 0.30
         assert by_match[False]["poseBucket"] == ""
+        assert by_match[False]["mediaKind"] == ""
         assert by_match[False]["ageGapYears"] is None
+
+
+def test_adaptive_pair_context_round_trip_validation_and_cleanup() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = WorkspaceDb(Path(tmp) / "workspace.sqlite3")
+        center = [1.0] + [0.0] * 511
+        db.upsert_candidate_match_context(
+            "candidate-1",
+            "reference-1",
+            "antelopev2",
+            center,
+            1.25,
+            "fixed-cohort-v1",
+        )
+        stored = db.candidate_match_context(
+            "candidate-1",
+            best_ref_id="reference-1",
+            model_name="antelopev2",
+        )
+        assert stored is not None
+        assert stored["pairCenter"] == center
+        assert stored["cohortZ"] == 1.25
+        assert stored["cohortVersion"] == "fixed-cohort-v1"
+        # Reassigned candidates and model-pack switches must not reuse stale context.
+        assert db.candidate_match_context("candidate-1", best_ref_id="reference-2") is None
+        assert db.candidate_match_context("candidate-1", model_name="buffalo_l") is None
+
+        db.add_calibration_label(
+            "adaptive-label",
+            {
+                "sourcePath": "/adaptive.jpg",
+                "expectedPerson": "Alice",
+                "actualPerson": "Alice",
+                "matchScore": 0.7,
+                "rawCosine": 0.51,
+                "isMatch": True,
+                "modelName": "antelopev2",
+                "bestRefId": "reference-1",
+                "pairCenter": center,
+                "cohortZ": 1.25,
+                "contextVersion": "adaptive-pair-v1|fixed-cohort-v1",
+            },
+        )
+        label = db.calibration_label_rows()[0]
+        assert label["pairCenter"] == center
+        assert label["bestRefId"] == "reference-1"
+        assert label["cohortZ"] == 1.25
+        assert label["contextVersion"] == "adaptive-pair-v1|fixed-cohort-v1"
+
+        for invalid in ([1.0] * 511, [1.0] * 513, [float("nan")] + [0.0] * 511, [0.0] * 512):
+            try:
+                db.upsert_candidate_match_context(
+                    "invalid",
+                    "reference-1",
+                    "antelopev2",
+                    invalid,
+                    0.0,
+                    "fixed-cohort-v1",
+                )
+                raise AssertionError("invalid adaptive context should be rejected")
+            except ValueError:
+                pass
+
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE candidate_match_context SET pair_center = ? WHERE candidate_id = ?",
+                (b"truncated", "candidate-1"),
+            )
+        assert db.candidate_match_context("candidate-1") is None
+        assert db.clear_candidates() == 0
+        with db.connect() as conn:
+            remaining = conn.execute("SELECT COUNT(*) AS n FROM candidate_match_context").fetchone()["n"]
+        assert remaining == 0
+
+
+def test_candidate_replacement_and_correction_undo_preserve_only_valid_pair_context() -> None:
+    from crossage_fr.models import ReviewCandidate
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db = WorkspaceDb(Path(tmp) / "workspace.sqlite3")
+        center = [1.0] + [0.0] * 511
+        candidate = ReviewCandidate(
+            candidate_id="candidate-context",
+            source_path="/candidate.jpg",
+            person_name="Alice",
+            best_ref_id="reference-1",
+            best_ref_path="/reference.jpg",
+            score=0.7,
+            band="confident",
+            quality=0.8,
+            model_name="antelopev2",
+            calibrated_probability=0.91,
+            calibration_source="adaptive-linear",
+            calibration_version="adaptive-linear:test",
+        )
+        db.upsert_candidates([candidate])
+        db.upsert_candidate_match_context(
+            candidate.candidate_id,
+            "reference-1",
+            "antelopev2",
+            center,
+            0.75,
+            "antelopev2:test",
+        )
+        db.replace_candidates([candidate])
+        assert db.candidate_match_context(candidate.candidate_id) is not None
+
+        with db.connect() as conn:
+            snapshot = db.review_candidate_correction_undo_snapshot(candidate=candidate, conn=conn)
+            operation = db.record_review_candidate_correction_operation(
+                operation_type="person_match_reassign",
+                label="Moved match",
+                candidate_id=candidate.candidate_id,
+                snapshot=snapshot,
+                conn=conn,
+            )
+            db.delete_candidate_match_context(candidate.candidate_id, conn=conn)
+        assert db.candidate_match_context(candidate.candidate_id) is None
+        undone = db.undo_photo_operation(operation["operationId"])
+        assert undone["undone"] is True
+        restored = db.candidate_match_context(candidate.candidate_id)
+        assert restored is not None and restored["bestRefId"] == "reference-1"
+        assert restored["pairCenter"] == center
+
+        changed = ReviewCandidate(
+            candidate_id=candidate.candidate_id,
+            source_path=candidate.source_path,
+            person_name="Bob",
+            best_ref_id="reference-2",
+            best_ref_path="/reference-2.jpg",
+            score=0.6,
+            band="likely",
+            quality=0.8,
+            model_name="antelopev2",
+        )
+        db.replace_candidates([changed])
+        assert db.candidate_match_context(candidate.candidate_id) is None
 
 
 def test_platt_calibrator_monotonic_and_separating() -> None:
@@ -338,6 +478,54 @@ def test_ordered_review_candidates_surfaces_matches_abstains_noise() -> None:
         assert names[-1] == "noise"
 
 
+def test_review_queue_reorders_with_personalized_calibration() -> None:
+    from crossage_fr.enroll.manager import ProjectState
+    from crossage_fr.models import ReviewCandidate
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _use_temp_registry(Path(tmp))
+        project = ProjectState(Path(tmp) / "workspace")
+
+        def cand(candidate_id: str, person_name: str) -> ReviewCandidate:
+            return ReviewCandidate(
+                candidate_id=candidate_id,
+                source_path=f"/{candidate_id}.jpg",
+                person_name=person_name,
+                best_ref_id="r",
+                best_ref_path="/r.jpg",
+                score=0.50,
+                band="confident",
+                quality=0.7,
+                model_name="m",
+                status="pending",
+                review_priority=0.01,
+                review_lane="surface",
+                created_at="2026-07-07T00:00:00Z",
+            )
+
+        alice = cand("cand_alice", "Alice")
+        bob = cand("cand_bob", "Bob")
+        project.candidates[alice.candidate_id] = alice
+        project.candidates[bob.candidate_id] = bob
+        calls: list[str | None] = []
+
+        def personalized_probability(score: float, model_name: str | None = None, person_name: str | None = None) -> float:
+            calls.append(person_name)
+            return 0.95 if person_name == "Bob" else 0.15
+
+        project.match_probability = personalized_probability  # type: ignore[method-assign]
+
+        ordered = project.ordered_review_candidates()
+        assert [candidate.person_name for candidate in ordered] == ["Bob", "Alice"]
+        assert calls == ["Alice", "Bob"], calls
+
+        refreshed = project.refresh_review_candidate_priorities(statuses={"pending"})
+        assert refreshed == 2
+        assert project.candidates["cand_bob"].review_priority > project.candidates["cand_alice"].review_priority
+        persisted = project.db.query_candidates(status="pending", sort="score", limit=2)
+        assert [row["candidate_id"] for row in persisted["items"]] == ["cand_bob", "cand_alice"]
+
+
 def test_persisted_review_queue_orders_by_review_priority() -> None:
     from crossage_fr.models import ReviewCandidate
 
@@ -379,15 +567,75 @@ def test_persisted_review_queue_orders_by_review_priority() -> None:
         assert page["items"][0]["review_lane"] == "surface"
 
 
+def test_workspace_db_migrates_legacy_review_candidates_before_priority_indexes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "workspace.sqlite3"
+        with sqlite3.connect(db_path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE review_candidates (
+                    candidate_id TEXT PRIMARY KEY,
+                    source_path TEXT NOT NULL,
+                    person_name TEXT NOT NULL,
+                    person_key TEXT NOT NULL,
+                    score REAL NOT NULL DEFAULT 0,
+                    quality REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+                CREATE INDEX idx_review_candidates_status_score
+                    ON review_candidates(status, score DESC, quality DESC, created_at DESC, candidate_id);
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO review_candidates(
+                    candidate_id, source_path, person_name, person_key, score, quality, status, created_at, payload_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "legacy-candidate",
+                    "/legacy.jpg",
+                    "Legacy",
+                    "legacy",
+                    0.82,
+                    0.7,
+                    "pending",
+                    "2026-07-07T00:00:00Z",
+                    '{"candidate_id":"legacy-candidate","source_path":"/legacy.jpg"}',
+                ),
+            )
+
+        db = WorkspaceDb(db_path)
+        with db.connect() as conn:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(review_candidates)").fetchall()}
+            index_row = conn.execute(
+                """
+                SELECT sql FROM sqlite_master
+                WHERE type = 'index' AND name = 'idx_review_candidates_review_priority'
+                """
+            ).fetchone()
+        for column in {"media_kind", "media_source_path", "media_path", "source_hash", "review_priority", "review_lane"}:
+            assert column in columns, columns
+        assert index_row and "review_priority" in str(index_row["sql"]), index_row
+        page = db.query_candidates(status="pending", sort="score", limit=5)
+        assert [item["candidate_id"] for item in page["items"]] == ["legacy-candidate"], page
+
+
 def main() -> None:
     test_calibration_labels_round_trip_with_stratification()
+    test_adaptive_pair_context_round_trip_validation_and_cleanup()
+    test_candidate_replacement_and_correction_undo_preserve_only_valid_pair_context()
     test_accuracy_det_report_from_labels()
     test_accuracy_det_report_by_age_gap_buckets()
     test_apply_personalized_calibration_per_identity()
     test_calibration_is_model_pack_versioned()
     test_calibration_keeps_untagged_legacy_labels_with_dominant_model()
     test_ordered_review_candidates_surfaces_matches_abstains_noise()
+    test_review_queue_reorders_with_personalized_calibration()
     test_persisted_review_queue_orders_by_review_priority()
+    test_workspace_db_migrates_legacy_review_candidates_before_priority_indexes()
     test_platt_calibrator_monotonic_and_separating()
     test_empirical_fmr_and_threshold_for_fmr()
     test_fit_score_calibrator_guards_insufficient_data()

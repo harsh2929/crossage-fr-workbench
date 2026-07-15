@@ -27,6 +27,7 @@ from crossage_fr.dataset_benchmarks import (
     inspect_identity_dataset,
     materialize_file,
     prepare_cfp_dataset,
+    prepare_fgnet_dataset,
     prepare_lfw_subset,
 )
 from crossage_fr.embed import EmbeddingEngine
@@ -41,6 +42,12 @@ from crossage_fr.ingest.image_io import (
 from crossage_fr.ingest.video_io import VIDEO_EXTENSIONS, VideoLoadError, sample_video_frames
 from crossage_fr.model_manager import MODEL_PACKAGES, model_pack_ready, model_roots_for_engine
 from crossage_fr.models import ReferenceFace, ReviewCandidate, new_id
+from crossage_fr.match.age_trajectory import (
+    AGE_TRAJECTORY_METHOD_VERSION,
+    AGE_TRAJECTORY_REFERENCE_KIND,
+    age_bucket_for_years,
+    is_synthetic_age_reference,
+)
 from crossage_fr.storage import safe_resolve
 from crossage_fr.workspace_registry import write_active_workspace
 
@@ -61,7 +68,8 @@ PROFILE_COMPONENTS = {
 FRONTAL_COMPONENTS = {"center", "centre", "front", "frontal"}
 YOUNG_AGE_COMPONENTS = {"child", "children", "kid", "kids", "teen", "young", "younger", "youth"}
 OLDER_AGE_COMPONENTS = {"adult", "aged", "elder", "older", "old", "senior"}
-CROSS_AGE_DATASETS = {"agedb", "calfw"}
+CROSS_AGE_DATASETS = {"agedb", "calfw", "fgnet"}
+CROSS_AGE_TRAJECTORY_PROTOCOL_VERSION = "cross-age-trajectory-eval-v1"
 CROSS_POSE_DATASETS = {"cfp", "cplfw"}
 LARGE_DISTRACTOR_DATASETS = {"megaface"}
 MIXED_MEDIA_DATASETS = {"ijbc", "ytf"}
@@ -104,6 +112,14 @@ class PublicDatasetBenchmarkMixin:
             dataset_root = Path(str(preparation["folder"]))
         else:
             raise ValueError("Choose a local dataset folder for this benchmark.")
+
+        if dataset_id == "fgnet":
+            preparation = prepare_fgnet_dataset(
+                dataset_root,
+                run_root / "prepared-fgnet",
+                terms_acknowledged=bool(params.get("acknowledgeDatasetTerms", False)),
+            )
+            dataset_root = Path(str(preparation["folder"]))
 
         entry_budget = max(10_000, int(params.get("entryBudget", 500_000) or 500_000))
         inspection = inspect_identity_dataset(
@@ -397,14 +413,25 @@ class PublicDatasetBenchmarkMixin:
                     (positive_person_names[str(identity.folder)], refs_root / positive_folder_names[str(identity.folder)])
                     for identity in positives
                 ],
+                dataset_id=dataset_id,
+                age_trajectory_protocol=bool(params.get("augmentAgeTrajectory", False)),
             )
+            age_trajectory_results: list[dict[str, Any]] = []
+            if bool(params.get("augmentAgeTrajectory", False)):
+                for person_name in sorted(positive_person_names.values(), key=str.casefold):
+                    age_trajectory_results.append(
+                        scratch.build_age_trajectory_references(
+                            person_name,
+                            acknowledge_embedding_derivation=True,
+                            source=f"{CROSS_AGE_TRAJECTORY_PROTOCOL_VERSION}:{dataset_id}",
+                        )
+                    )
             added, scan_errors, scan_metrics = scratch.scan_folder(scan_root, engine, source=f"public-dataset-{dataset_id}", resume=False)
-            scratch.save()
         finally:
             write_active_workspace(self.project.root, actor=self.actor, metadata=self.project.workspace_metadata)
 
         best_by_source: dict[str, ReviewCandidate] = {}
-        for candidate in scratch.candidates.values():
+        for candidate in scratch.ordered_review_candidates(limit=0):
             if not candidate.best_ref_id:
                 continue
             source_text = str(getattr(candidate, "media_source_path", "") or candidate.source_path)
@@ -482,6 +509,17 @@ class PublicDatasetBenchmarkMixin:
                     "validationBucket": validation_bucket,
                     "difficulty": difficulty,
                     "outcome": outcome,
+                    "bestReferenceKind": (
+                        str(scratch.references[best.best_ref_id].reference_kind)
+                        if best is not None and best.best_ref_id in scratch.references
+                        else ""
+                    ),
+                    "bestReferenceAgeBucket": (
+                        str(scratch.references[best.best_ref_id].age_bucket)
+                        if best is not None and best.best_ref_id in scratch.references
+                        else ""
+                    ),
+                    "riskFlags": list(best.risk_flags) if best is not None else [],
                 }
             )
         precision = true_positives / max(1, true_positives + false_positives)
@@ -519,6 +557,16 @@ class PublicDatasetBenchmarkMixin:
                 "enrollErrors": enroll_errors[:20],
                 "scanErrors": scan_errors[:20],
                 "videoDecodeFailures": video_decode_failures[:50],
+                "ageTrajectory": {
+                    "enabled": bool(params.get("augmentAgeTrajectory", False)),
+                    "protocolVersion": CROSS_AGE_TRAJECTORY_PROTOCOL_VERSION,
+                    "methodVersion": AGE_TRAJECTORY_METHOD_VERSION,
+                    "generatedImages": False,
+                    "externalAgingWeights": False,
+                    "added": sum(int(row.get("added", 0) or 0) for row in age_trajectory_results),
+                    "retained": sum(int(row.get("retained", 0) or 0) for row in age_trajectory_results),
+                    "people": len(age_trajectory_results),
+                },
             },
             "metrics": {
                 "evaluated": len(ground_truth),
@@ -594,6 +642,7 @@ class PublicDatasetBenchmarkMixin:
             "safeMode": bool(params.get("safeMode", False)),
             "includeDistractors": bool(params.get("includeDistractors", True)),
             "downloadIfMissing": bool(params.get("downloadIfMissing", False)),
+            "acknowledgeDatasetTerms": bool(params.get("acknowledgeDatasetTerms", False)),
             "importLabels": False,
             "entryBudget": params.get("entryBudget", 500_000),
         }
@@ -731,6 +780,192 @@ class PublicDatasetBenchmarkMixin:
         )
         return payload
 
+    def cross_age_trajectory_benchmark(self, params: dict[str, Any]) -> dict[str, Any]:
+        dataset_id = str(params.get("datasetId", "") or "").strip().casefold()
+        if dataset_id not in CROSS_AGE_DATASETS:
+            raise ValueError("Cross-age trajectory comparison supports AgeDB, CALFW, or FG-NET.")
+        if not bool(params.get("acknowledgeDatasetTerms", False)):
+            raise PermissionError("Acknowledge the selected research dataset terms before running this comparison.")
+        folder = str(params.get("folder", "") or "").strip()
+        if not folder:
+            raise ValueError("Choose an authorized local dataset folder.")
+        started = monotonic()
+        common = {
+            **params,
+            "datasetId": dataset_id,
+            "folder": folder,
+            "referenceImages": max(2, min(5, int(params.get("referenceImages", 2) or 2))),
+            "importLabels": False,
+            "downloadIfMissing": False,
+            "acknowledgeDatasetTerms": True,
+        }
+        baseline = self.public_dataset_benchmark({**common, "augmentAgeTrajectory": False})
+        augmented = self.public_dataset_benchmark({**common, "augmentAgeTrajectory": True})
+        baseline_engine = str(baseline.get("engine", "") or "")
+        augmented_engine = str(augmented.get("engine", "") or "")
+        require_full_recognizer = bool(params.get("requireFullRecognizer", True))
+        full_recognizer = (
+            bool(baseline_engine)
+            and bool(augmented_engine)
+            and not baseline_engine.startswith("local-image-fingerprint")
+            and not augmented_engine.startswith("local-image-fingerprint")
+        )
+
+        def load_labels(payload: dict[str, Any]) -> dict[tuple[str, str, str, int], dict[str, Any]]:
+            raw = json.loads(Path(str(payload["labelsJsonPath"])).read_text(encoding="utf-8"))
+            rows = raw.get("labels", []) if isinstance(raw, dict) else []
+            result: dict[tuple[str, str, str, int], dict[str, Any]] = {}
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                key = (
+                    str(row.get("sourcePerson", "")),
+                    Path(str(row.get("sourceDatasetPath", ""))).name,
+                    str(row.get("mediaKind", "image")),
+                    int(row.get("videoTimestampMs", 0) or 0),
+                )
+                result[key] = row
+            return result
+
+        before_labels = load_labels(baseline)
+        after_labels = load_labels(augmented)
+        common_keys = sorted(set(before_labels) & set(after_labels))
+        improvements: list[dict[str, Any]] = []
+        regressions: list[dict[str, Any]] = []
+        identity_changes = 0
+        synthetic_best = 0
+        synthetic_evidence = 0
+        synthetic_true_positive_evidence = 0
+        genuine_score_deltas: list[float] = []
+        nonmatch_score_deltas: list[float] = []
+        for key in common_keys:
+            before = before_labels[key]
+            after = after_labels[key]
+            expected_match = bool(before.get("isMatch"))
+            before_correct = before.get("outcome") in {"true-positive", "true-negative"}
+            after_correct = after.get("outcome") in {"true-positive", "true-negative"}
+            if before.get("actualPerson") != after.get("actualPerson"):
+                identity_changes += 1
+            if after.get("bestReferenceKind") == AGE_TRAJECTORY_REFERENCE_KIND:
+                synthetic_best += 1
+            after_flags = {
+                str(value)
+                for value in (after.get("riskFlags") if isinstance(after.get("riskFlags"), list) else [])
+            }
+            used_synthetic_evidence = (
+                after.get("bestReferenceKind") == AGE_TRAJECTORY_REFERENCE_KIND
+                or "synthetic-age-evidence" in after_flags
+            )
+            if used_synthetic_evidence:
+                synthetic_evidence += 1
+                if after.get("outcome") == "true-positive":
+                    synthetic_true_positive_evidence += 1
+            score_delta = float(after.get("matchScore", 0.0) or 0.0) - float(before.get("matchScore", 0.0) or 0.0)
+            (genuine_score_deltas if expected_match else nonmatch_score_deltas).append(score_delta)
+            detail = {
+                "sourcePerson": key[0],
+                "sourceName": key[1],
+                "expectedMatch": expected_match,
+                "beforeOutcome": before.get("outcome"),
+                "afterOutcome": after.get("outcome"),
+                "beforePerson": before.get("actualPerson"),
+                "afterPerson": after.get("actualPerson"),
+                "beforeScore": before.get("matchScore"),
+                "afterScore": after.get("matchScore"),
+                "afterReferenceKind": after.get("bestReferenceKind"),
+            }
+            if not before_correct and after_correct:
+                improvements.append(detail)
+            elif before_correct and not after_correct:
+                regressions.append(detail)
+
+        before_metrics = baseline.get("metrics", {})
+        after_metrics = augmented.get("metrics", {})
+        generated = int(augmented.get("pipeline", {}).get("ageTrajectory", {}).get("added", 0) or 0)
+        gates = {
+            "fullFaceRecognizer": full_recognizer or not require_full_recognizer,
+            "sameEvaluationSet": len(before_labels) == len(after_labels) == len(common_keys),
+            "generatedReferences": generated > 0,
+            "derivedEvidenceUsedOnTruePositive": synthetic_true_positive_evidence > 0,
+            "noCorrectnessRegressions": not regressions,
+            "noFalsePositiveIncrease": int(after_metrics.get("falsePositives", 0) or 0) <= int(before_metrics.get("falsePositives", 0) or 0),
+            "noWrongIdentityIncrease": int(after_metrics.get("wrongIdentity", 0) or 0) <= int(before_metrics.get("wrongIdentity", 0) or 0),
+            "precisionNonDecreasing": float(after_metrics.get("precision", 0.0) or 0.0) + 1e-9 >= float(before_metrics.get("precision", 0.0) or 0.0),
+            "recallNonDecreasing": float(after_metrics.get("recall", 0.0) or 0.0) + 1e-9 >= float(before_metrics.get("recall", 0.0) or 0.0),
+        }
+        passed = all(gates.values())
+        source_folder = Path(folder).expanduser().resolve()
+        source_manifest = source_folder.parent / f"{source_folder.name}-manifest.json"
+        dataset_evidence = {
+            "folderName": source_folder.name,
+            "manifestPath": str(source_manifest) if source_manifest.exists() else "",
+            "manifestSha256": sha256_file(source_manifest) if source_manifest.exists() else "",
+            "termsAcknowledged": True,
+            "benchmarkOnly": True,
+        }
+        stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S-%f")
+        report_root = self.project.validation_packs_path / "cross-age-trajectory-runs"
+        report_root.mkdir(parents=True, exist_ok=True)
+        report_path = report_root / f"{dataset_id}-{stamp}.json"
+        payload = {
+            "schemaVersion": 1,
+            "protocolVersion": CROSS_AGE_TRAJECTORY_PROTOCOL_VERSION,
+            "methodVersion": AGE_TRAJECTORY_METHOD_VERSION,
+            "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "datasetId": dataset_id,
+            "status": "pass" if passed else "fail",
+            "durationMs": round((monotonic() - started) * 1000, 2),
+            "datasetEvidence": dataset_evidence,
+            "recognizerEvidence": {
+                "required": require_full_recognizer,
+                "baselineEngine": baseline_engine,
+                "augmentedEngine": augmented_engine,
+                "fullFaceRecognizer": full_recognizer,
+            },
+            "baseline": baseline,
+            "augmented": augmented,
+            "comparison": {
+                "evaluated": len(common_keys),
+                "generatedReferences": generated,
+                "syntheticBestMatches": synthetic_best,
+                "syntheticEvidenceMatches": synthetic_evidence,
+                "syntheticTruePositiveEvidence": synthetic_true_positive_evidence,
+                "identityChanges": identity_changes,
+                "improvements": len(improvements),
+                "regressions": len(regressions),
+                "precisionDelta": round(float(after_metrics.get("precision", 0.0) or 0.0) - float(before_metrics.get("precision", 0.0) or 0.0), 6),
+                "recallDelta": round(float(after_metrics.get("recall", 0.0) or 0.0) - float(before_metrics.get("recall", 0.0) or 0.0), 6),
+                "genuineScoreImproved": sum(1 for value in genuine_score_deltas if value > 1e-6),
+                "genuineScoreRegressed": sum(1 for value in genuine_score_deltas if value < -1e-6),
+                "meanGenuineScoreDelta": round(sum(genuine_score_deltas) / max(1, len(genuine_score_deltas)), 6),
+                "nonmatchScoreIncreased": sum(1 for value in nonmatch_score_deltas if value > 1e-6),
+                "meanNonmatchScoreDelta": round(sum(nonmatch_score_deltas) / max(1, len(nonmatch_score_deltas)), 6),
+                "improvementSamples": improvements[:50],
+                "regressionSamples": regressions[:50],
+            },
+            "gates": gates,
+            "limitations": [
+                "This evaluates embedding-space interpolation, not photorealistic age progression.",
+                "CALFW lacks exact age metadata in the aligned-image export; its two reference images are deterministic cross-age endpoint proxies.",
+                "FG-NET is accepted only as an authorized user-supplied academic-research copy and is never downloaded or redistributed.",
+            ],
+            "reportPath": str(report_path),
+        }
+        report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self.project._append_audit(
+            {
+                "action": "run_cross_age_trajectory_benchmark",
+                "dataset_id": dataset_id,
+                "protocolVersion": CROSS_AGE_TRAJECTORY_PROTOCOL_VERSION,
+                "status": payload["status"],
+                "evaluated": len(common_keys),
+                "generatedReferences": generated,
+                "regressions": len(regressions),
+                "report_path": str(report_path),
+            }
+        )
+        return payload
+
     def _model_pack_recommendation_score(self, row: dict[str, Any]) -> dict[str, Any]:
         metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
         likely = row.get("metricsByThreshold", {}).get("likely", {}) if isinstance(row.get("metricsByThreshold"), dict) else {}
@@ -853,6 +1088,7 @@ class PublicDatasetBenchmarkMixin:
         old_pack = self.project.config.model_pack
         self.project.config.model_pack = pack
         self.project.config.model_root = str(roots[0])
+        invalidated_synthetic = len(self.project._remove_age_trajectory_references()) if old_pack != pack else 0
         self.project.save()
         self._reset_engine()
         backfill_result: dict[str, Any] | None = None
@@ -868,6 +1104,7 @@ class PublicDatasetBenchmarkMixin:
                 "old_pack": old_pack,
                 "new_pack": pack,
                 "backfill_added": int((backfill_result or {}).get("added", 0) or 0),
+                "invalidated_synthetic_age_references": invalidated_synthetic,
             }
         )
         return {
@@ -876,6 +1113,7 @@ class PublicDatasetBenchmarkMixin:
             "modelRoot": str(roots[0]),
             "changed": old_pack != pack,
             "backfill": backfill_result,
+            "invalidatedSyntheticAgeReferences": invalidated_synthetic,
         }
 
     def _batch_enroll_public_dataset_references(
@@ -883,6 +1121,9 @@ class PublicDatasetBenchmarkMixin:
         project: ProjectState,
         engine: EmbeddingEngine,
         identities: list[tuple[str, Path]],
+        *,
+        dataset_id: str = "custom",
+        age_trajectory_protocol: bool = False,
     ) -> tuple[int, list[str]]:
         added = 0
         errors: list[str] = []
@@ -893,7 +1134,8 @@ class PublicDatasetBenchmarkMixin:
                 continue
             folder_added = 0
             folder_errors = 0
-            for path in iter_image_paths(folder):
+            paths = list(iter_image_paths(folder))
+            for path_index, path in enumerate(paths):
                 try:
                     source_hash = sha256_file(path)
                     if source_hash in known_hashes:
@@ -910,7 +1152,13 @@ class PublicDatasetBenchmarkMixin:
                         ref = ReferenceFace(
                             ref_id=new_id("ref"),
                             person_name=person_name,
-                            age_bucket="dataset",
+                            age_bucket=self._public_dataset_reference_age_bucket(
+                                dataset_id,
+                                path,
+                                path_index=path_index,
+                                path_count=len(paths),
+                                endpoint_proxy=age_trajectory_protocol,
+                            ),
                             source_path=str(path),
                             capture_date=record.capture_date,
                             quality=embedding.quality,
@@ -919,6 +1167,11 @@ class PublicDatasetBenchmarkMixin:
                             source_hash=record.sha256,
                             pose_bucket=embedding.pose_bucket,
                             capture_date_provenance=record.capture_date_provenance,
+                            derivation_provenance={
+                                "benchmarkOnly": True,
+                                "datasetId": dataset_id,
+                                "ageBucketProtocol": CROSS_AGE_TRAJECTORY_PROTOCOL_VERSION if age_trajectory_protocol else "dataset-metadata-v1",
+                            },
                         )
                         project.references[ref.ref_id] = ref
                         project.vector_store.add(ref.ref_id, ref.vector)
@@ -933,7 +1186,7 @@ class PublicDatasetBenchmarkMixin:
                 {
                     "action": "enroll_folder",
                     "person_name": person_name,
-                    "age_bucket": "dataset",
+                    "age_bucket": "dataset-derived" if dataset_id in CROSS_AGE_DATASETS else "dataset",
                     "folder": str(folder.expanduser()),
                     "added": folder_added,
                     "errors": folder_errors,
@@ -944,6 +1197,27 @@ class PublicDatasetBenchmarkMixin:
             project._invalidate_reference_indexes()
         project.save()
         return added, errors
+
+    def _public_dataset_reference_age_bucket(
+        self,
+        dataset_id: str,
+        path: Path,
+        *,
+        path_index: int,
+        path_count: int,
+        endpoint_proxy: bool,
+    ) -> str:
+        dataset_key = str(dataset_id or "").casefold()
+        if dataset_key in {"agedb", "fgnet"}:
+            return age_bucket_for_years(self._public_dataset_age_value(path))
+        if dataset_key == "calfw":
+            if self._public_dataset_has_any_component(path, YOUNG_AGE_COMPONENTS):
+                return "adolescent"
+            if self._public_dataset_has_any_component(path, OLDER_AGE_COMPONENTS):
+                return "older-adult"
+            if endpoint_proxy and path_count >= 2:
+                return "adolescent" if path_index < max(1, path_count // 2) else "older-adult"
+        return "dataset"
 
     def _public_dataset_family_key(self, identity: Any) -> str:
         label = str(getattr(identity, "identity", identity) or "").strip()
@@ -988,12 +1262,21 @@ class PublicDatasetBenchmarkMixin:
             stem = Path(str(path_text)).stem
         except (OSError, ValueError):
             stem = str(path_text)
+        stem = re.sub(r"^(?:ref|pos|neg)-\d+-", "", stem, flags=re.IGNORECASE)
+        fgnet_match = re.match(r"^\d{3}A(\d{1,3})", stem, flags=re.IGNORECASE)
+        if fgnet_match:
+            value = int(fgnet_match.group(1))
+            return value if 0 <= value <= 120 else None
+        agedb_match = re.search(r"_(\d{1,3})_[fm]$", stem, flags=re.IGNORECASE)
+        if agedb_match:
+            value = int(agedb_match.group(1))
+            return value if 0 <= value <= 120 else None
         numbers: list[int] = []
         for token in re.split(r"[\s_.-]+", stem):
             if not token.isdigit():
                 continue
             value = int(token)
-            if 1 <= value <= 99:
+            if 0 <= value <= 120:
                 numbers.append(value)
         if len(numbers) >= 2:
             return numbers[-2]
@@ -1003,7 +1286,7 @@ class PublicDatasetBenchmarkMixin:
             match = re.fullmatch(r"age(?:d)?(\d{1,2})", token)
             if match:
                 value = int(match.group(1))
-                if 1 <= value <= 99:
+                if 0 <= value <= 120:
                     return value
         return None
 

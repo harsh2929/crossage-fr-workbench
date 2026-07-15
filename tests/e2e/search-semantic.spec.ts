@@ -62,7 +62,7 @@ test("Search tab: semantic AI ranking renders thumbnails and ranks the match fir
   const app = await electron.launch({ args: [path.join(projectRoot, "desktop/main.cjs")], cwd: projectRoot, env });
   const page = await app.firstWindow();
   page.on("pageerror", (e) => pageErrors.push(e.message));
-  await expect(page.getByText("Backend ready.")).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByText("Backend ready.")).toBeAttached({ timeout: 120_000 });
   await page.locator(".language-picker select").selectOption("en").catch(() => undefined);
   await dismissModals(page);
 
@@ -76,7 +76,18 @@ test("Search tab: semantic AI ranking renders thumbnails and ranks the match fir
   await page.locator(".search-hero-input").fill("a solid red image");
   await page.locator(".search-hero-submit").click();
 
-  const grid = page.locator(".search-results-grid");
+  // First use queues the bounded local embedding job and immediately falls
+  // back to lexical results instead of leaving Search blank.
+  await expect(page.locator('.search-status[role="status"]')).toContainText("Semantic indexing is queued", { timeout: 60_000 });
+  await expect(page.locator('.search-status[role="status"]')).toContainText("Showing keyword matches instead");
+  await expect(page.getByRole("region", { name: "Photos" })).toBeVisible();
+  await page.evaluate(async () => {
+    const crossAge = (window as any).crossAge as { invoke<T>(command: string, params?: Record<string, unknown>): Promise<T> };
+    await crossAge.invoke("run_photo_indexing_queue", { maxJobs: 1, ignoreSettings: true });
+  });
+  await page.locator(".search-hero-submit").click();
+
+  const grid = page.getByRole("region", { name: "Semantic search results" }).locator(".search-results-grid");
   await expect(grid).toBeVisible({ timeout: 60_000 });
   const firstCard = grid.locator(".search-result-card").first();
   await expect(firstCard).toBeVisible();

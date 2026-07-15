@@ -19,10 +19,19 @@ function mcpStdioInvocation({ executable, appRoot, workspace, httpTransport = fa
   const isFrozen = path.basename(command).startsWith("crossage-backend");
   const ws = path.resolve(String(workspace || ""));
   const root = String(appRoot || "");
-  const env = { VINTRACE_WORKSPACE: ws, CROSSAGE_WORKSPACE: ws };
+  const env = {
+    VINTRACE_WORKSPACE: ws,
+    CROSSAGE_WORKSPACE: ws,
+    // Fail closed by default. Operators can edit this explicit value to add
+    // selected import/export roots; the active workspace was already in scope.
+    VINTRACE_MCP_ALLOWED_ROOTS: ws,
+    // The host supplies either a direct key or recovery passphrase through its
+    // own secret environment. Generated config text never contains key bytes.
+    VINTRACE_REQUIRE_DB_ENCRYPTION: "1",
+  };
   let args = isFrozen
-    ? ["--mcp", "--workspace", ws]
-    : ["-m", "crossage_fr.mcp_server", "--workspace", ws];
+    ? ["--mcp", "--workspace", ws, "--mcp-tool-profile", "images"]
+    : ["-m", "crossage_fr.mcp_server", "--workspace", ws, "--tool-profile", "images"];
   if (!isFrozen) {
     env.PYTHONPATH = root;
   }
@@ -74,9 +83,20 @@ function codexMcpConfig(invocation) {
     `cwd = ${tomlString(invocation.cwd)}`,
     "startup_timeout_sec = 20",
     "tool_timeout_sec = 600",
+    // Let Codex auto-run genuinely read-only tools while retaining host
+    // approval for all writes. Pixel disclosure and the destructive lane get
+    // explicit per-tool prompts even when broader defaults change later.
+    'default_tools_approval_mode = "writes"',
+    "enabled = true",
     "",
     `[mcp_servers.${SERVER_KEY}.env]`,
     ...Object.entries(invocation.env).map(([key, val]) => `${key} = ${tomlString(val)}`),
+    "",
+    `[mcp_servers.${SERVER_KEY}.tools.get_image_preview]`,
+    'approval_mode = "prompt"',
+    "",
+    `[mcp_servers.${SERVER_KEY}.tools.run_destructive_image_action]`,
+    'approval_mode = "prompt"',
   ];
   return lines.join("\n");
 }
@@ -92,7 +112,7 @@ function stripCodexVintraceSections(toml) {
     const header = line.match(/^\s*\[([^\]]+)\]\s*$/);
     if (header) {
       const name = header[1].trim();
-      skipping = name === `mcp_servers.${SERVER_KEY}` || name === `mcp_servers.${SERVER_KEY}.env`;
+      skipping = name === `mcp_servers.${SERVER_KEY}` || name.startsWith(`mcp_servers.${SERVER_KEY}.`);
     }
     if (!skipping) {
       out.push(line);
@@ -120,6 +140,7 @@ function buildMcpConnectionInfo({ executable, appRoot, workspace, host = DEFAULT
     args: stdio.args,
     env: stdio.env,
     httpUrl: `http://${host}:${port}/mcp`,
+    agentApiUrl: `http://${host}:${port}/v1`,
     httpHost: host,
     httpPort: port,
     configs: {

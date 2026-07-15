@@ -80,6 +80,28 @@ def _project(tmp: Path) -> ProjectState:
     return project
 
 
+def _assert_public_artifact_payload(artifact: dict[str, object], artifact_id: str, artifact_type: str) -> None:
+    assert artifact["artifactId"] == artifact_id
+    assert artifact["artifactType"] == artifact_type
+    for internal_key in (
+        "artifact_id",
+        "artifact_type",
+        "model_name",
+        "version_key",
+        "training_data_hash",
+        "input_count",
+        "positive_count",
+        "negative_count",
+        "artifact_hash",
+        "parent_artifact_id",
+        "created_at",
+        "promoted_at",
+        "metrics_json",
+        "payload_json",
+    ):
+        assert internal_key not in artifact
+
+
 def test_rename_person_invalidates_person_template_cache() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -216,6 +238,66 @@ def test_bulk_review_learning_examples_share_one_db_transaction() -> None:
         assert len(project.db.training_example_rows()) == 2
 
 
+def test_bulk_person_match_corrections_share_one_save_and_transaction() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        project = _project(tmp)
+        reassign_candidates = [_candidate(project.root, f"cand_reassign_{index}") for index in range(2)]
+        block_candidates = [_candidate(project.root, f"cand_block_{index}") for index in range(2)]
+        for candidate in [*reassign_candidates, *block_candidates]:
+            candidate.source_hash = sha256_file(Path(candidate.source_path))
+            project.candidates[candidate.candidate_id] = candidate
+
+        save_calls = 0
+        operation_conns: list[sqlite3.Connection | None] = []
+        blocked_pair_conns: list[sqlite3.Connection | None] = []
+        training_conns: list[sqlite3.Connection | None] = []
+        original_save = project.save
+        original_record_operation = project.db.record_review_candidate_correction_operation
+        original_add_blocked_pair = project.db.add_blocked_pair
+        original_add_training_example = project.db.add_training_example
+
+        def record_save(*args, **kwargs):
+            nonlocal save_calls
+            save_calls += 1
+            return original_save(*args, **kwargs)
+
+        def record_operation(*args, **kwargs):
+            operation_conns.append(kwargs.get("conn"))
+            return original_record_operation(*args, **kwargs)
+
+        def record_blocked_pair(row: dict[str, object], conn: sqlite3.Connection | None = None) -> None:
+            blocked_pair_conns.append(conn)
+            original_add_blocked_pair(row, conn=conn)
+
+        def record_training_example(example_id: str, row: dict[str, object], conn: sqlite3.Connection | None = None) -> dict[str, object]:
+            training_conns.append(conn)
+            return original_add_training_example(example_id, row, conn=conn)
+
+        project.save = record_save  # type: ignore[method-assign]
+        project.db.record_review_candidate_correction_operation = record_operation  # type: ignore[method-assign]
+        project.db.add_blocked_pair = record_blocked_pair  # type: ignore[method-assign]
+        project.db.add_training_example = record_training_example  # type: ignore[method-assign]
+
+        moved = project.bulk_reassign_candidate_person([candidate.candidate_id for candidate in reassign_candidates], "Alice Prime")
+        assert moved["updated"] == 2
+        assert save_calls == 1
+        assert all(project.candidates[candidate.candidate_id].person_name == "Alice Prime" for candidate in reassign_candidates)
+
+        removed = project.bulk_block_false_matches([candidate.candidate_id for candidate in block_candidates])
+        assert removed["updated"] == 2
+        assert removed["blocked"] == 4
+        assert save_calls == 2
+        assert all(project.candidates[candidate.candidate_id].status == "rejected" for candidate in block_candidates)
+        assert len(operation_conns) == 4
+        assert len(blocked_pair_conns) == 4
+        assert len(training_conns) == 2
+        all_conns = [*operation_conns, *blocked_pair_conns, *training_conns]
+        assert all(conn is not None for conn in all_conns)
+        assert len({id(conn) for conn in operation_conns[:2]}) == 1
+        assert len({id(conn) for conn in [*operation_conns[2:], *blocked_pair_conns, *training_conns]}) == 1
+
+
 def test_accuracy_label_imports_share_one_db_transaction() -> None:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
@@ -270,6 +352,7 @@ def test_reference_suggestion_stage_and_approval_adds_reference() -> None:
         staged = project.stage_reference_suggestions({candidate.candidate_id: _embedding()}, limit=5)
         assert staged["staged"] == 1
         artifact_id = staged["suggestions"][0]["artifactId"]
+        _assert_public_artifact_payload(staged["summary"]["artifacts"][0], artifact_id, "suggested_reference")
         artifact = project.db.learned_artifact_by_id(artifact_id)
         assert artifact["artifact_type"] == "suggested_reference"
         assert artifact["status"] == "staged"
@@ -798,10 +881,20 @@ def test_embedding_adapter_stage_promote_runtime_fallback_and_rollback() -> None
         assert artifact["payload"]["versionKey"] == match_adapters.ADAPTER_VERSION
         assert "sourcePath" not in artifact["payload"]
         assert "vector" not in json.dumps(artifact["payload"]).lower()
+        staged_status = project.embedding_adapter_learning_status()
+        _assert_public_artifact_payload(staged_status["artifacts"][0], artifact_id, "embedding_adapter")
+        assert staged_status["artifacts"][0]["status"] == "staged"
+        assert staged_status["activeArtifact"] is None
 
         promoted = project.promote_embedding_adapter(artifact_id)
         assert promoted["promoted"] is True
         assert project.db.learned_artifact_by_id(artifact_id)["status"] == "promoted"
+        promoted_status = project.embedding_adapter_learning_status()
+        active_artifact = promoted_status["activeArtifact"]
+        assert active_artifact is not None
+        _assert_public_artifact_payload(active_artifact, artifact_id, "embedding_adapter")
+        assert active_artifact["status"] == "promoted"
+        assert active_artifact["promotedAt"]
         positive = _adapter_example_rows()[0]
         negative = _adapter_example_rows()[2]
         assert project.embedding_adapter_score(positive, "modelA") > project.embedding_adapter_score(negative, "modelA")
@@ -1050,8 +1143,10 @@ def test_stage_promote_and_rollback_calibration_artifact() -> None:
         assert staged["payload"]["calibrationModel"] == "modelA"
         assert project.config.thresholds.likely == previous_thresholds["likely"]
         status = project.calibration_learning_status()
-        assert status["artifacts"][0]["artifact_id"] == artifact_id
+        _assert_public_artifact_payload(status["artifacts"][0], artifact_id, "calibration")
         assert status["artifacts"][0]["status"] == "staged"
+        assert status["artifacts"][0]["artifactHash"]
+        assert status["artifacts"][0]["promotedAt"] is None
 
         promoted = project.promote_calibration_artifact(artifact_id)
         assert promoted["promoted"] is True
@@ -1138,6 +1233,7 @@ def main() -> None:
     test_audit_events_tails_recent_rows_without_full_parse()
     test_review_status_persists_current_training_example()
     test_bulk_review_learning_examples_share_one_db_transaction()
+    test_bulk_person_match_corrections_share_one_save_and_transaction()
     test_accuracy_label_imports_share_one_db_transaction()
     test_reference_suggestion_stage_and_approval_adds_reference()
     test_reference_suggestion_rejects_duplicate_outlier_and_model_mismatch()

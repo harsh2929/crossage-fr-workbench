@@ -106,7 +106,7 @@ The defense that works is *Barnett v. Apple*: biometric data **never leaves the 
 │  T1 op-log     signed CRDT metadata (extended: asset, album, person, editStack…)    │
 │  T2 media      hash-addressed blobs, chunked/resumable, byte-range   [NEW]          │
 │  T3 compute    durable job queue — embed / cluster / index / safety  [NEW]          │
-│  T4 changefeed cursor-paged deltas from photo_asset_events           [NEW]          │
+│  T4 changefeed cursor-paged deltas from photo_catalog_changes        [BUILT]        │
 │  ─────────────────────────────────────────────────────────────────────────────     │
 │  THE ORACLE    licensed InsightFace embedding · cross-age matching · clustering     │
 │                SigLIP2 vision tower · depth · NSFW · heavy generative               │
@@ -132,7 +132,7 @@ The defense that works is *Barnett v. Apple*: biometric data **never leaves the 
 
 ## 4. Asset identity — fix this first
 
-**This is the #1 blocker. No schema may be written before it lands.**
+**The canonical cross-device key remains the #1 identity blocker.** The desktop move/rename data-loss half is already fixed by conservative content-hash rehoming; the UUID migration below remains open.
 
 ### 4.1 The problem
 
@@ -159,11 +159,11 @@ asset_uid   TEXT PRIMARY KEY     -- UUIDv7, minted once, never derived, never ch
 
 ⚠️ **It is a live table, not a dead one.** An earlier draft called it "unused" — that was wrong. It is actively upserted (`photo_sources/catalog.py:350`) and state-updated (`photo_sources/service.py:1727, :2150`) for connector-ingested assets. It is merely never exposed over HTTP. **The migration must respect its existing contents.**
 
-### 4.3 This is a live defect, not just a mobile blocker
+### 4.3 Desktop move/rename defect — fixed; canonical identity still open
 
-The upsert (`workspace_db.py:8318-8335`) resolves an existing row by `WHERE asset_id = ? OR source_path = ?` **only** — there is **no `content_hash` rehoming anywhere in the codebase.**
+The original audit correctly found that path-only resolution destroyed identity after a move. That live defect is now closed by `WorkspaceDb._photo_asset_id_for_moved_file()`: one vanished prior path may be rehomed only when content hash, file size, and mtime all match uniquely. Copies, ambiguous duplicates, and unplugged-drive lookalikes do not rehome. `tests/asset_identity_rehome_units.py` verifies association preservation.
 
-> **Move or rename a file today and it becomes a brand-new asset**, orphaning its faces, people, albums, keywords, embeddings, edit stacks, favorite, and rating. This is broken on the desktop right now, independent of mobile. The `asset_uid` migration fixes a real bug; it is not mobile overhead.
+The remaining blocker is cross-device identity: the retained `asset_id` is still initially path-derived, so a phone asset and desktop asset cannot converge through a canonical UUID without the migration below.
 
 ### 4.4 Migration surface
 
@@ -184,9 +184,9 @@ Today there are two non-interoperating channels (audit §2.3). v2 unifies them. 
 | **T1 op-log** | Signed CRDT metadata operations | Existing `local_sync` — **extend**, don't replace |
 | **T2 media** | Originals, thumbnail ladder, video byte-ranges | **Open Photo Catalog** disk layout + verifier, made incremental (§5.6) |
 | **T3 compute** | Job submit / poll / cancel / result | Existing `photo_indexing_jobs` durable queue |
-| **T4 changefeed** | Cursor-paged deltas | **Must be built** — see below |
+| **T4 changefeed** | Cursor-paged catalog deltas | **Built** — unconditional `photo_catalog_changes` journal + authenticated `/v1/changes` |
 
-⚠️ **T4 correction.** An earlier draft claimed the change feed was "~90% built." **It is ~35%.** The 9 SQLite triggers write only to `photo_sync_dirty` — a *coalescing dirty-set*, not a log. `photo_sync_operations` has a single writer that is **gated on SQLCipher**, so the op-log is **empty on any unencrypted workspace**. And `photo_asset_events` **hard-rejects any event type outside `{viewed, shared}`** — it carries zero create/update/delete events. **The feed is a build, not an exposure.** The right substrate is a stream of `photo_sync_operations` rows, with the op-log made to populate unconditionally.
+⚠️ **T4 correction and implementation (2026-07-15).** The original diagnosis was right: `photo_sync_dirty` is a coalescing set, the signed CRDT log is encryption-bound, and `photo_asset_events` is viewed/shared activity. The original prescription was not safe: a valid `photo_sync_operations` row requires an encrypted signing identity, so an "unconditional" unsigned op-log would violate the protocol. T4 is now a separate unconditional append-only `photo_catalog_changes` journal. Its triggers run for local and sync-applied catalog mutations, existing catalogs receive a baseline, and authenticated `/v1/changes` exposes path-free snapshots and tombstones by monotonic cursor. The signed CRDT log remains T1; the catalog journal is T4.
 
 ### 5.2 Reuse verbatim from `local_sync`
 
@@ -450,14 +450,14 @@ The mobile app cannot ship until these land. Each is specified in the backlog.
 
 | # | Change | Blocks | Audit ref |
 | --- | --- | --- | --- |
-| **B1** | Stable `asset_uid` + resolvable axes; expose `assetUid`/`contentHash`/`externalIds` in `_public_asset` | Everything | §9.1 |
-| **B2** | Content-hash-keyed **proxy ladder** (thumb/screen/full) + asset-addressable thumbnail store | Any Photos-grade viewer | §9.2 |
-| **B3** | **Fix Safe Mode cache staleness** — re-read config, not the cached singleton | *Security.* Tightening Safe Mode currently does not reach the phone | §9.3 |
-| **B4** | Move **workspace-lock + Touch ID** enforcement into the backend | *Privacy.* A paired phone bypasses both today | §7 |
+| **B1** | 🟡 Move/rename data loss fixed; stable `asset_uid` + resolvable cross-device axes remain | Everything | §9.1 |
+| **B2** | 🟡 Preview API honesty fixed; content-hash-keyed **proxy ladder** (thumb/screen/full) remains | Any Photos-grade viewer | §9.2 |
+| **B3** | ✅ **DONE** — stat-guarded config refresh at the Safe Mode enforcement boundary | *Security.* | §9.3 |
+| **B4** | ✅ **DONE** — gate **Hidden/Deleted** on the agent surface. (The *workspace-lock* half was a non-bug: `_api()` already fails closed on the lock.) | *Privacy.* Fixed 2026-07-14: `_metadata_restricts_agent_access()` | §7 |
 | **B5** | **Telemetry off by default**; audit `_SAFE_ATTRIBUTE_KEYS` for biometric leakage | *Legal.* Destroys the *Barnett* defense | §9.5 |
 | **B6** | **Blob-ingest RPC** — `embed_face_blobs(images) -> {vectors, model_name, quality}` | Compute offload | §6.1 |
 | **B7** | **Job-queue offload API** — submit/poll/cancel over HTTP, with deferral reasons surfaced | Compute offload | §6.3 |
-| **B8** | **Change feed** — expose `photo_asset_events` as a cursor-paged delta feed | Incremental sync | §9.7 |
+| **B8** | ✅ **DONE** — unconditional `photo_catalog_changes` journal + authenticated cursor-paged `/v1/changes` | Incremental sync | §9.7 |
 | **B9** | **Media tier** — incremental/chunked Open Photo Catalog, byte-range video | Camera roll, video | §9.6 |
 | **B10** | **Serial command loop** → durable submit-and-poll jobs | Offload at usable latency | §10 |
 | **B11** | **LAN bind** — pass `--allow-remote-http`; relax the HTTPS-origin requirement for pinned-cert private IPs | Any LAN connection | §3.5 |
@@ -479,7 +479,7 @@ The mobile app cannot ship until these land. Each is specified in the backlog.
 **Quantization rule, verified against ORT's Core ML op-builder source:**
 > **INT8 is an active trap on iOS.** There is no `ConvInteger`, no `DynamicQuantizeLinear`, no `QuantizeLinear`/`DequantizeLinear` builder. ORT silently falls back to CPU on unsupported nodes, so an INT8 model **fragments the graph and loses the ANE entirely — often slower than FP32.** The ANE is FP16-native. **Use FP16 on iOS; reserve INT8 for Android/XNNPACK.**
 
-**⚠️ `onnxruntime-react-native` has shipped nothing since 2026-03-05** while ORT core moved three minor versions on a monthly cadence. It is *not* in lockstep. Evaluate `react-native-executorch` (Software Mansion, actively maintained, ships CLIP first-class) and treat the ORT RN package as a risk requiring a compatibility test.
+**Runtime decision (updated 2026-07-15).** `onnxruntime-react-native` is not a mobile dependency and must not become the architecture anchor. The executable spike uses `react-native-executorch` 0.9.2 with its Expo resource fetcher and real CLIP image/text modules; TypeScript and Expo Doctor pass. This is a candidate behind `src/semantic.ts`, not yet a permanent SigLIP2 commitment: Software Mansion's published 0.9.x compatibility table currently documents only through RN 0.85 / Expo 55, while this app is Expo 57 / RN 0.86. Promotion requires release-build smoke tests on physical iOS and Android devices, model-output conformance, peak-memory measurement, cancellation/resume, and offline model-cache tests. ORT RN may be reconsidered only through the same runtime contract and gates, never by direct feature imports.
 
 **Delivery mechanism** (see the backlog for the decision): app-size limits make a fat binary Wi-Fi-only to install. **Apple's Background Assets / Apple-hosted asset packs (iOS 26+)** are strictly better than self-hosting — Apple hosts them free, packs upload separately from the build, and `essential` packs can land before first launch. **No RN binding exists** — a small Nitro module.
 

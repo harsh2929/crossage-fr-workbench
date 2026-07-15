@@ -164,9 +164,21 @@ def test_portrait_blur_downscales_before_depth_and_composite() -> None:
         assert manifest["blur"]["blurStrength"] == 8, manifest
 
 
+def test_portrait_blur_composites_without_full_float_rgb_buffers() -> None:
+    source = (Path(__file__).resolve().parents[1] / "crossage_fr" / "api_server.py").read_text(encoding="utf-8")
+    helper = source[source.index("    def _photo_portrait_blur_image("):source.index("    def export_photo_portrait_blur(")]
+    assert "Image.composite(rgb, blurred, mask)" in helper
+    assert "sharp = np.asarray(rgb, dtype=np.float32)" not in helper
+    assert "blurred = np.asarray(rgb.filter" not in helper
+    assert "composited = sharp * weight" not in helper
+    assert "np.mgrid[0:height, 0:width]" not in helper
+    assert "mask_max_dimension = min(max(width, height), 768)" in helper
+
+
 if __name__ == "__main__":
     test_depth_unavailable_without_model_offline()
     test_depth_estimates_normalized_map_offline()
     test_portrait_blur_command_offline()
     test_portrait_blur_downscales_before_depth_and_composite()
+    test_portrait_blur_composites_without_full_float_rgb_buffers()
     print("all photo_depth_units tests passed")

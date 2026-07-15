@@ -58,6 +58,10 @@ export interface PhotoSavedFilterState {
   visibility: string;
 }
 
+export type PhotoMediaFilter = "" | "image" | "video" | "screenshot" | "screen_recording" | "panorama" | "portrait" | "burst" | "time_lapse" | "raw" | "live_photo" | "other";
+export type PhotoStatusFilter = "" | CandidateStatus;
+export type PhotoVisibilityFilter = "" | "all" | "hidden" | "deleted";
+
 export interface PhotoSavedFilter {
   id: string;
   name: string;
@@ -67,10 +71,73 @@ export interface PhotoSavedFilter {
   pinned?: boolean;
   position?: number;
   count?: number;
+  previewPending?: boolean;
   ruleSummary?: string[];
   previewSamples?: string[];
   filters: PhotoSavedFilterState;
   rules: PhotoAlbumRules;
+}
+
+export const SAVED_PHOTO_FILTERS_KEY = "vintrace.photos.savedFilters";
+export const EMPTY_PHOTO_ALBUM_RULES: PhotoAlbumRules = {};
+export const PHOTO_QUALITY_FILTERS = ["0.6", "0.7", "0.8", "0.9"] as const;
+export const PHOTO_FILE_TYPE_FILTERS = ["jpg", "png", "heic", "dng", "mov", "mp4", "tiff", "gif", "webp"] as const;
+
+function isPhotoCandidateStatus(value: unknown): value is CandidateStatus {
+  return value === "pending" || value === "accepted" || value === "uncertain" || value === "rejected";
+}
+
+export function cleanPhotoAlbumRules(rules: PhotoAlbumRules): PhotoAlbumRules {
+  const next: PhotoAlbumRules = {};
+  const statuses = [...new Set(rules.statuses || [])].filter(isPhotoCandidateStatus);
+  if (statuses.length) next.statuses = statuses;
+  if (rules.mediaKind) next.mediaKind = rules.mediaKind;
+  if (rules.query?.trim()) next.query = rules.query.trim().slice(0, 200);
+  if (rules.keyword?.trim()) next.keyword = rules.keyword.trim().slice(0, 80);
+  if (rules.dateFrom) next.dateFrom = rules.dateFrom;
+  if (rules.dateTo) next.dateTo = rules.dateTo;
+  if (rules.folder?.trim()) next.folder = rules.folder.trim();
+  if (typeof rules.minScore === "number" && rules.minScore > 0) next.minScore = Math.max(0, Math.min(1, rules.minScore));
+  if (typeof rules.minQuality === "number" && rules.minQuality > 0) next.minQuality = Math.max(0, Math.min(1, rules.minQuality));
+  if (rules.favoriteOnly) next.favoriteOnly = true;
+  if (rules.editedOnly) next.editedOnly = true;
+  if (rules.hasVideoFrames) next.hasVideoFrames = true;
+  if (rules.unknownOnly) next.unknownOnly = true;
+  if (typeof rules.recentDays === "number" && rules.recentDays > 0) next.recentDays = Math.max(1, Math.min(3650, Math.round(rules.recentDays)));
+  if (rules.queryDsl?.op && Array.isArray(rules.queryDsl.conditions)) next.queryDsl = rules.queryDsl;
+  if (rules.op && Array.isArray(rules.conditions)) {
+    next.op = rules.op;
+    next.conditions = rules.conditions;
+  }
+  return next;
+}
+
+export function photoSavedFilterStatesEqual(a: PhotoSavedFilterState, b: PhotoSavedFilterState): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+export function photoMediaFilterValue(value: string): PhotoMediaFilter {
+  return value === "image"
+    || value === "video"
+    || value === "screenshot"
+    || value === "screen_recording"
+    || value === "panorama"
+    || value === "portrait"
+    || value === "burst"
+    || value === "time_lapse"
+    || value === "raw"
+    || value === "live_photo"
+    || value === "other"
+    ? value
+    : "";
+}
+
+export function photoStatusFilterValue(value: string): PhotoStatusFilter {
+  return value === "pending" || value === "accepted" || value === "uncertain" || value === "rejected" ? value : "";
+}
+
+export function photoVisibilityFilterValue(value: string): PhotoVisibilityFilter {
+  return value === "all" || value === "hidden" || value === "deleted" ? value : "";
 }
 
 export interface PhotoAlbumPeopleQueryOptions {
@@ -338,6 +405,7 @@ export function normalizePhotoSavedFilterRecord(value: unknown): PhotoSavedFilte
     pinned?: unknown;
     position?: unknown;
     count?: unknown;
+    previewPending?: unknown;
     ruleSummary?: unknown;
     previewSamples?: unknown;
     filters?: unknown;
@@ -357,6 +425,7 @@ export function normalizePhotoSavedFilterRecord(value: unknown): PhotoSavedFilte
     pinned: Boolean(item.pinned),
     position: Number.isFinite(position) ? position : undefined,
     count: Number.isFinite(count) ? Math.max(0, count) : undefined,
+    previewPending: Boolean(item.previewPending),
     ruleSummary: Array.isArray(item.ruleSummary) ? item.ruleSummary.map(String).filter(Boolean).slice(0, 8) : [],
     previewSamples: Array.isArray(item.previewSamples) ? item.previewSamples.map(String).filter(Boolean).slice(0, 3) : [],
     filters: normalizePhotoSavedFilterState(item.filters || {}),
@@ -389,6 +458,42 @@ export function normalizePhotoSavedFilterList(
     pinned: Boolean(filter.pinned),
     position: index,
   }));
+}
+
+export function readStoredPhotoSavedFilters(key: string): PhotoSavedFilter[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    return normalizePhotoSavedFilterList(parsed
+      .map((item) => normalizePhotoSavedFilterRecord(item))
+      .filter((item): item is PhotoSavedFilter => Boolean(item))
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function storePhotoSavedFilters(key: string, values: PhotoSavedFilter[]) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(values.slice(0, 30)));
+  } catch {
+    // Local storage can be unavailable in hardened browser contexts.
+  }
+}
+
+export function photoSavedFilterWorkspacePayload(filter: PhotoSavedFilter, position: number): Record<string, unknown> {
+  return {
+    filterId: filter.id,
+    name: filter.name,
+    description: filter.description,
+    filters: filter.filters,
+    rules: filter.rules,
+    pinned: Boolean(filter.pinned),
+    position,
+  };
 }
 
 export function normalizePhotoSavedFilterState(input: PhotoSavedSearchInput): PhotoSavedFilterState {

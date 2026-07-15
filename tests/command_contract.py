@@ -25,6 +25,47 @@ ROOT = Path(__file__).resolve().parents[1]
 INTERNAL_COMMANDS = {
     "ping",          # liveness probe issued by the main process
     "record_audit",  # desktop-side audit writes (main.cjs), not renderer-reachable
+    # Inbound connectors use dedicated trusted Electron IPC handlers. Keeping
+    # them out of generic renderer invoke prevents credentials from crossing
+    # the broad command bridge; MCP/HTTP reach the same backend registry in
+    # their own authenticated processes.
+    "inbound_connector_catalog",
+    "configure_inbound_connector",
+    "forget_inbound_connector",
+    "list_inbound_connector_sources",
+    "preview_inbound_connector",
+    "import_inbound_connector",
+    "sync_inbound_connector",
+    # Workspace key bytes are provisioned and rotated only by Electron main.
+    # The renderer receives dedicated status/rotate IPC methods that never
+    # accept raw key material.
+    "workspace_encryption_status",
+    "rotate_workspace_database_key",
+    # Tether persistence and idempotency are orchestrated by the dedicated
+    # Electron main-process runtime. The renderer only receives the narrow
+    # photo-tether IPC surface and never calls these storage commands directly.
+    "create_photo_tether_session",
+    "photo_tether_status",
+    "update_photo_tether_session_status",
+    "reserve_photo_tether_sequence",
+    "claim_photo_tether_capture",
+    "complete_photo_tether_capture",
+    "fail_photo_tether_capture",
+    "recover_photo_tether_sessions",
+    # Whole-catalog paths are selected and authorized by dedicated Electron
+    # IPC. Keeping these commands main-only prevents arbitrary renderer paths
+    # from reaching the open-format importer/exporter.
+    "photo_catalog_status",
+    "inspect_open_photo_catalog",
+    "export_open_photo_catalog",
+    "import_open_photo_catalog",
+    # Lightroom and Capture One catalog paths and media roots must come from
+    # OS-granted file pickers exposed through dedicated Electron IPC.
+    "dam_catalog_status",
+    "list_dam_catalogs",
+    "preview_dam_catalog",
+    "import_dam_catalog",
+    "sync_dam_catalog",
 }
 
 
@@ -39,7 +80,7 @@ def _python_commands() -> set[str]:
         return set(DesktopApi._COMMAND_HANDLERS)
     except Exception:
         src = (ROOT / "crossage_fr" / "api_server.py").read_text(encoding="utf-8")
-        return set(re.findall(r'"([a-z_]+)":\s*"_cmd_\w+"', src))
+        return set(re.findall(r'"([a-z0-9_]+)":\s*"_cmd_\w+"', src))
 
 
 def _cjs_allowlist(relative: str) -> set[str]:
@@ -49,7 +90,7 @@ def _cjs_allowlist(relative: str) -> set[str]:
     src = (ROOT / "desktop" / relative).read_text(encoding="utf-8")
     match = re.search(r"TRUSTED_BACKEND_COMMANDS = new Set\(\[(.*?)\]\)", src, re.DOTALL)
     assert match, f"could not locate TRUSTED_BACKEND_COMMANDS in {relative}"
-    return set(re.findall(r'"([a-z_]+)"', match.group(1)))
+    return set(re.findall(r'"([a-z0-9_]+)"', match.group(1)))
 
 
 def _preload_allowlist() -> set[str]:
@@ -62,7 +103,7 @@ def _main_allowlist() -> set[str]:
 
 def _mcp_commands() -> set[str]:
     src = (ROOT / "crossage_fr" / "mcp_server.py").read_text(encoding="utf-8")
-    return set(re.findall(r'_call\(\s*"([a-z_]+)"', src))
+    return set(re.findall(r'_call\(\s*"([a-z0-9_]+)"', src))
 
 
 def main() -> None:

@@ -267,12 +267,15 @@ def main() -> None:
     registry = str(root / "registry")
     os.environ["VINTRACE_REGISTRY_HOME"] = registry
     os.environ["CROSSAGE_REGISTRY_HOME"] = registry
+    os.environ["VINTRACE_WORKSPACE_DB_KEY"] = os.environ.get("VINTRACE_WORKSPACE_DB_KEY") or os.urandom(32).hex()
+    os.environ["VINTRACE_REQUIRE_DB_ENCRYPTION"] = "1"
     api = DesktopApi(workspace)
     checks: list[dict[str, Any]] = []
 
     state = capture("state", lambda: api.state(preview_create_budget=0, candidate_limit=25), checks) or {}
     runtime = capture("runtime self-test", api.runtime_self_test, checks) or {}
     database = capture("database integrity", api.project.database_integrity, checks) or {}
+    encryption = capture("workspace encryption", api.project.workspace_encryption_status, checks) or {}
     storage = capture("storage I/O", lambda: api.storage_io_benchmark({"path": str(workspace), "sizeMb": 1}), checks) or {}
     benchmark = capture("runtime benchmark", api.runtime_benchmark, checks) or {}
     installer = capture("installer diagnostics", api.installer_self_diagnostics, checks) or {}
@@ -293,6 +296,7 @@ def main() -> None:
     structural_ok = all(check["ok"] for check in checks)
     runtime_ok = bool(runtime.get("ok", False))
     database_ok = bool(database.get("ok", False))
+    encryption_ok = bool(encryption.get("enabled") and encryption.get("migrationComplete"))
     storage_ok = bool(storage.get("ok", False))
     update_ok = bool(update_feed.get("ok", False))
     package_ok = bool(package_artifacts.get("ok", False))
@@ -302,6 +306,7 @@ def main() -> None:
     no_credential_ok = (
         structural_ok
         and database_ok
+        and encryption_ok
         and storage_ok
         and update_ok
         and package_ok
@@ -332,6 +337,12 @@ def main() -> None:
             "ok": database_ok,
             "pageCount": database.get("pageCount"),
             "tableCounts": database.get("tableCounts", {}),
+        },
+        "workspaceEncryption": {
+            "ok": encryption_ok,
+            "keyId": encryption.get("keyId", ""),
+            "cipherVersion": encryption.get("database", {}).get("cipherVersion", ""),
+            "migrationComplete": encryption.get("migrationComplete", False),
         },
         "storageIo": {
             "ok": storage_ok,
