@@ -94,9 +94,33 @@ export async function getSession(base: string): Promise<DesktopDevice> {
   return j.data.device as DesktopDevice;
 }
 
-export async function getLibrary(base: string): Promise<{ assetCount: number; collectionCount: number }> {
+export interface DesktopCollection {
+  id: string;
+  title: string;
+  count: number | null;
+}
+
+/** Map the loose /v1/library collections array into a stable shape (guarding every field + untrusting names). */
+function mapCollections(raw: unknown): DesktopCollection[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((c: any, i: number): DesktopCollection => {
+      const rawCount = c?.assetCount ?? c?.count ?? c?.size;
+      return {
+        id: String(c?.collectionId ?? c?.id ?? c?.key ?? c?.uid ?? i),
+        title: untrust(c?.title ?? c?.name ?? c?.label) || 'Untitled',
+        count: typeof rawCount === 'number' ? rawCount : null,
+      };
+    })
+    .filter((c) => c.title);
+}
+
+export async function getLibrary(
+  base: string,
+): Promise<{ assetCount: number; collectionCount: number; collections: DesktopCollection[] }> {
   const j = await req(base, '/v1/library?includeHealth=false');
-  return { assetCount: j.data.assetCount ?? 0, collectionCount: (j.data.collections ?? []).length };
+  const collections = mapCollections(j.data.collections);
+  return { assetCount: j.data.assetCount ?? 0, collectionCount: collections.length, collections };
 }
 
 export async function searchDesktop(
@@ -149,4 +173,33 @@ export async function analyzeDesktop(
 /** A desktop-rendered preview URL — expo-image loads it directly (the OS cookie authenticates it). */
 export function desktopPreviewUrl(base: string, assetId: string, maxDimension = 640): string {
   return `${base}/v1/assets/${assetId}/preview?maxDimension=${maxDimension}&maxBytes=786432`;
+}
+
+/**
+ * Interim cross-surface bridge: find the desktop catalog twin of a camera-roll photo by filename (and
+ * confirm with dimensions when available). This is a HEURISTIC — the phone's PHAsset id and the
+ * desktop's assetId are disjoint spaces until the canonical `asset_uid` join (B1) ships, so we match
+ * on the filename stem the desktop indexes as the asset title. Returns the best candidate or null.
+ */
+export async function findDesktopTwin(
+  base: string,
+  photo: { filename?: string | null; width?: number | null; height?: number | null },
+): Promise<DesktopAsset | null> {
+  const stem = (photo.filename ?? '').replace(/\.[a-z0-9]+$/i, '').trim();
+  if (!stem) return null;
+  let candidates: DesktopAsset[] = [];
+  try {
+    candidates = await searchDesktop(base, stem, 'hybrid', 12);
+  } catch {
+    return null;
+  }
+  if (candidates.length === 0) return null;
+  // Prefer an exact dimension match (strong signal), else a title that contains the stem, else the top hit.
+  const byDims =
+    photo.width && photo.height
+      ? candidates.find((c) => c.width === photo.width && c.height === photo.height)
+      : undefined;
+  if (byDims) return byDims;
+  const byName = candidates.find((c) => c.title.toLowerCase().includes(stem.toLowerCase()));
+  return byName ?? candidates[0];
 }

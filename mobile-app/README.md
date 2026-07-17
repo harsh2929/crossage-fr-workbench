@@ -51,10 +51,33 @@ source (`App.tsx` + `src/screens/*` + a custom `src/TabBar.tsx`):
   in the MCP-05 untrusted-text envelope and is unwrapped before display. The desktop catalog is its own
   asset space (kept separate from the camera roll until the desktop's canonical `asset_uid` lands). A
   local demo desktop for testing: `node desktop/scripts/run-python.cjs mobile-app/tools/demo-desktop.py`.
-- **Vivid, alive UI** (`src/theme.ts`, `src/motion.tsx`, `src/Header.tsx`) — a token system + pure
-  React-Native `Animated` motion layer (no native deps, no rebuild): living-gradient headers, springy
-  presses, breathing-orb loaders, a floating search hero with a real progress bar, and an animated
-  4-tab bar with a sliding pill. Living colour is confined to chrome so photos stay legible.
+- **Living-chrome design system** (`src/theme.ts`, `src/motion.tsx`, `src/Icon.tsx`, `src/fields.tsx`,
+  `src/Header.tsx`, `src/ui.tsx`, `src/ViewerChrome.tsx`, `src/Toast.tsx`, `src/insets.ts`) — one enforced
+  system, pure React-Native `Animated` (no native deps, no rebuild). Vivid, glowing, breathing chrome at
+  **every** depth — living-gradient headers (incl. drill-ins, with a scroll parallax/collapse), a
+  `GradientButton`, springy presses, breathing-orb loaders, a hand-drawn `Icon` vocabulary, `SearchField`/
+  `Chip`/`Segmented`, staggered grid entrance, a photo viewer that **zooms open from the tapped cell** with
+  faded scrims, a rolling counter and a heart-pop, a `Toast`/Undo backbone so every mutation confirms, and
+  crafted `EmptyState`/`Skeleton` zero-states — while **photos always sit on neutral cells** so they read
+  cleanly. Design tokens (`glow()`, `tint()`, per-tab hue legend, typography) are consumed everywhere.
+  Accessibility + a responsive fake safe-area (`useInsets`) + Reduce-Motion support are treated as
+  substrate: every icon-only control is labelled, and motion holds static (colour stays) under Reduce Motion.
+  See `docs/2026-07-15-mobile-uiux-living-chrome-spec.md`.
+- **Memories** (`src/Memories.tsx`) — a "For You" carousel on Library (On This Day / Recent Favorites),
+  computed client-side from the roll; tap a card to open that set as a scoped grid.
+- **Get-started coach cards** (`src/CoachCard.tsx`) — a first-run, per-card-dismissible strip pointing at
+  Search and the desktop uplink (dismissal persists in the replica's `prefs`; the desktop card auto-hides
+  once paired).
+- **Real device albums + a date scrubber** — Albums surfaces the phone's own PhotoKit albums (user albums +
+  the Screenshots/Selfies smart albums, via `src/albums.ts` over the media-library OO API, joined to the
+  roll by normalized id), plus a right-edge fast **`DateScrubber`** (core-RN `PanResponder`) for long month
+  timelines.
+- **Add to Album** — the viewer can add the current photo to an existing album or a **New Album…** (iOS
+  `Alert.prompt`), and **recent searches** persist as tap-to-rerun chips.
+- **Cross-surface "Recognize people"** — from a photo's details, when a desktop is paired, the viewer bridges
+  to the desktop oracle (`findDesktopTwin` by filename/dimensions → `analyze`) to show the **people** and the
+  camera/EXIF metadata the on-device `AssetInfo` doesn't expose. Interim until the canonical `asset_uid` join.
+- **Desktop albums** — the Desktop tab surfaces the paired catalog's collections as a tappable chip row.
 - **Duplicates** (`src/screens/DuplicatesView.tsx`, `replica.findDuplicateGroups`) — the offline
   answer to Apple Photos' "Duplicates" (which needs Apple Intelligence). Union-finds the CLIP image
   embeddings into near-identical groups under a tight L2 threshold (0.2 — calibrated on-device: real

@@ -41,7 +41,16 @@
             "deploymentTarget": "17.0"
           }
         }
-      ]
+      ],
+      "expo-video",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Vintrace uses Face ID to unlock your Hidden album."
+        }
+      ],
+      "expo-asset",
+      "expo-status-bar"
     ]
   }
 }
